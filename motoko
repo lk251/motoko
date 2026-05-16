@@ -1,0 +1,1273 @@
+#!/usr/bin/env python3
+"""Small personal Qwen chat client for the HB3 personal realm.
+
+Motoko intentionally uses only the Python standard library and the existing
+llama.cpp OpenAI-compatible endpoint.
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import datetime as _dt
+import hashlib
+import json
+import os
+import pathlib
+import re
+import sys
+import textwrap
+import urllib.error
+import urllib.request
+import uuid
+
+
+APP = "motoko"
+DEFAULT_ENDPOINT = "http://127.0.0.1:8082/v1/chat/completions"
+DEFAULT_MODEL = "qwen3.6-27b-ud-q5-k-xl"
+MAX_CONTEXT_BYTES = 96 * 1024
+MAX_CONTEXT_FILES = 24
+MAX_INDEX_FILES = 80
+MAX_INDEX_FILE_BYTES = 1024 * 1024
+MAX_INDEX_CHUNKS_PER_FILE = 24
+INDEX_CHUNK_CHARS = 12000
+SUMMARY_INPUT_CHARS = 14000
+RETRIEVAL_TOP_CHUNKS = 6
+RETRIEVAL_TOP_FILES = 8
+MAX_RETRIEVAL_CHARS = 56000
+MAX_MEMORY_CHARS = 1800
+MAX_CONVERSATION_SUMMARY_CHARS = 12000
+MAX_RECENT_MESSAGES = 24
+COMPACT_KEEP_MESSAGES = 8
+
+
+def now() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def state_root() -> pathlib.Path:
+    root = os.environ.get("MOTOKO_STATE_HOME")
+    if root:
+        return pathlib.Path(root).expanduser()
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    if xdg_state:
+        return pathlib.Path(xdg_state).expanduser() / APP
+    return pathlib.Path.home() / ".local" / "state" / APP
+
+
+def config_root() -> pathlib.Path:
+    root = os.environ.get("MOTOKO_CONFIG_HOME")
+    if root:
+        return pathlib.Path(root).expanduser()
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        return pathlib.Path(xdg_config).expanduser() / APP
+    return pathlib.Path.home() / ".config" / APP
+
+
+def ensure_private_dir(path: pathlib.Path) -> pathlib.Path:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
+def conversations_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "conversations")
+
+
+def memories_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "memories.jsonl"
+
+
+def indexes_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "indexes")
+
+
+def allowdirs_path() -> pathlib.Path:
+    root = ensure_private_dir(config_root())
+    return root / "allowdirs"
+
+
+def conversation_path(conversation_id: str) -> pathlib.Path:
+    return conversations_dir() / f"{conversation_id}.json"
+
+
+def index_path(index_id: str) -> pathlib.Path:
+    return indexes_dir() / f"{index_id}.json"
+
+
+def atomic_write(path: pathlib.Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
+def slug_title(text: str) -> str:
+    words = re.findall(r"[\w'-]+", text.strip(), re.UNICODE)
+    if not words:
+        return "Untitled"
+    title = " ".join(words[:8])
+    return title[:80]
+
+
+def new_conversation(title: str | None = None) -> dict:
+    cid = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    created = now()
+    return {
+        "id": cid,
+        "title": title or "Untitled",
+        "created": created,
+        "updated": created,
+        "endpoint": endpoint(),
+        "model": model_name(),
+        "messages": [],
+        "context_items": [],
+    }
+
+
+def save_conversation(conv: dict) -> None:
+    conv["updated"] = now()
+    atomic_write(conversation_path(conv["id"]), json.dumps(conv, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_conversation(conversation_id: str) -> dict:
+    matches = sorted(conversations_dir().glob(f"{conversation_id}*.json"))
+    if not matches:
+        matches = sorted(conversations_dir().glob(f"*{conversation_id}*.json"))
+    if len(matches) != 1:
+        raise SystemExit(f"conversation id must match exactly one conversation; matched {len(matches)}")
+    return json.loads(matches[0].read_text(encoding="utf-8"))
+
+
+def list_conversations() -> list[dict]:
+    rows = []
+    for path in sorted(conversations_dir().glob("*.json"), reverse=True):
+        try:
+            conv = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        rows.append(conv)
+    return rows
+
+
+def endpoint() -> str:
+    return os.environ.get("MOTOKO_ENDPOINT", DEFAULT_ENDPOINT)
+
+
+def model_name() -> str:
+    return os.environ.get("MOTOKO_MODEL", DEFAULT_MODEL)
+
+
+def memory_id() -> str:
+    return "mem-" + uuid.uuid4().hex[:10]
+
+
+def read_memory_rows() -> list[dict]:
+    path = memories_path()
+    if not path.exists():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def normalize_memory_row(row: dict, ordinal: int) -> dict:
+    normalized = dict(row)
+    normalized.setdefault("id", f"legacy-{ordinal:04d}")
+    normalized.setdefault("created", "")
+    normalized.setdefault("source", "unknown")
+    normalized.setdefault("text", "")
+    return normalized
+
+
+def load_memories(limit: int = 80) -> list[dict]:
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    return rows[-limit:]
+
+
+def write_memory_rows(rows: list[dict]) -> None:
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    atomic_write(memories_path(), text)
+
+
+def add_memory(
+    text: str,
+    source: str = "manual",
+    *,
+    conversation_id: str | None = None,
+    derived_from: str | None = None,
+) -> None:
+    text = text.strip()
+    if not text:
+        raise SystemExit("empty memory")
+    row = {
+        "id": memory_id(),
+        "created": now(),
+        "source": source,
+        "text": text[:MAX_MEMORY_CHARS],
+    }
+    if conversation_id:
+        row["conversation_id"] = conversation_id
+    if derived_from:
+        row["derived_from"] = derived_from
+    with memories_path().open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    memories_path().chmod(0o600)
+
+
+def resolve_memory(rows: list[dict], selector: str) -> tuple[int, dict]:
+    normalized = [normalize_memory_row(row, idx) for idx, row in enumerate(rows, 1)]
+    if selector.isdigit():
+        idx = int(selector) - 1
+        if 0 <= idx < len(normalized):
+            return idx, normalized[idx]
+    matches = [
+        (idx, row)
+        for idx, row in enumerate(normalized)
+        if row.get("id") == selector or row.get("id", "").startswith(selector)
+    ]
+    if len(matches) != 1:
+        raise SystemExit(f"memory selector must match exactly one memory; matched {len(matches)}")
+    return matches[0]
+
+
+def edit_memory(selector: str, text: str) -> None:
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    idx, row = resolve_memory(rows, selector)
+    row["text"] = text.strip()[:MAX_MEMORY_CHARS]
+    row["updated"] = now()
+    rows[idx] = row
+    write_memory_rows(rows)
+    print(f"memory updated: {row['id']}")
+
+
+def forget_memory(selector: str) -> None:
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    idx, row = resolve_memory(rows, selector)
+    del rows[idx]
+    write_memory_rows(rows)
+    print(f"memory forgotten: {row['id']}")
+
+
+def print_memories(*, verbose: bool = False) -> None:
+    memories = load_memories(limit=500)
+    if not memories:
+        print("No memories yet.")
+        return
+    for idx, row in enumerate(memories, 1):
+        prefix = f"{idx:3d}  {row.get('id', '')}  {row.get('created', '')}"
+        print(f"{prefix}  {row.get('text', '')}")
+        if verbose:
+            print(f"     source: {row.get('source', 'unknown')}")
+            if row.get("conversation_id"):
+                print(f"     conversation: {row.get('conversation_id')}")
+            if row.get("derived_from"):
+                print(f"     derived from: {row.get('derived_from')}")
+
+
+def allowed_dirs() -> list[pathlib.Path]:
+    path = allowdirs_path()
+    if not path.exists():
+        return []
+    dirs = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            dirs.append(pathlib.Path(line).expanduser().resolve())
+    return dirs
+
+
+def add_allowed_dir(path: str) -> None:
+    resolved = pathlib.Path(path).expanduser().resolve()
+    if not resolved.is_dir():
+        raise SystemExit(f"not a directory: {resolved}")
+    existing = allowed_dirs()
+    if resolved not in existing:
+        with allowdirs_path().open("a", encoding="utf-8") as fh:
+            fh.write(str(resolved) + "\n")
+        allowdirs_path().chmod(0o600)
+    print(f"allowed: {resolved}")
+
+
+def is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def require_allowed(path: pathlib.Path) -> None:
+    resolved = path.expanduser().resolve()
+    dirs = allowed_dirs()
+    if not dirs:
+        raise SystemExit(
+            "Motoko has no allowed document directories yet; run 'motoko allow-dir DIR' first"
+        )
+    if any(resolved == directory or is_under(resolved, directory) for directory in dirs):
+        return
+    raise SystemExit(
+        f"{resolved} is outside Motoko's allowed directories; run 'motoko allow-dir DIR' first"
+    )
+
+
+def read_text_file(path: pathlib.Path) -> str:
+    require_allowed(path)
+    data = path.read_bytes()
+    if len(data) > MAX_CONTEXT_BYTES:
+        data = data[:MAX_CONTEXT_BYTES]
+    return data.decode("utf-8", errors="replace")
+
+
+def context_item_from_file(path: str) -> dict:
+    resolved = pathlib.Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise SystemExit(f"not a file: {resolved}")
+    text = read_text_file(resolved)
+    return {
+        "kind": "file",
+        "path": str(resolved),
+        "bytes": len(text.encode("utf-8")),
+        "content": text,
+    }
+
+
+def context_items_from_dir(path: str, pattern: str) -> list[dict]:
+    root = pathlib.Path(path).expanduser().resolve()
+    require_allowed(root)
+    if not root.is_dir():
+        raise SystemExit(f"not a directory: {root}")
+    items = []
+    for candidate in sorted(root.rglob(pattern)):
+        if len(items) >= MAX_CONTEXT_FILES:
+            break
+        if candidate.is_file():
+            try:
+                items.append(context_item_from_file(str(candidate)))
+            except OSError:
+                continue
+    return items
+
+
+def load_index(index_id: str) -> dict:
+    matches = sorted(indexes_dir().glob(f"{index_id}*.json"))
+    if not matches:
+        matches = sorted(indexes_dir().glob(f"*{index_id}*.json"))
+    if len(matches) != 1:
+        raise SystemExit(f"index id must match exactly one document index; matched {len(matches)}")
+    return json.loads(matches[0].read_text(encoding="utf-8"))
+
+
+def list_indexes() -> list[dict]:
+    rows = []
+    for path in sorted(indexes_dir().glob("*.json"), reverse=True):
+        try:
+            rows.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return rows
+
+
+def token_counts(text: str) -> collections.Counter:
+    words = re.findall(r"[A-Za-z0-9_'-]{3,}", text.lower())
+    return collections.Counter(words)
+
+
+def score_text(query_counts: collections.Counter, text: str) -> int:
+    if not query_counts:
+        return 0
+    counts = token_counts(text)
+    return sum(min(counts.get(word, 0), count) for word, count in query_counts.items())
+
+
+def split_text(text: str, size: int = INDEX_CHUNK_CHARS) -> list[str]:
+    chunks = []
+    start = 0
+    while start < len(text) and len(chunks) < MAX_INDEX_CHUNKS_PER_FILE:
+        end = min(len(text), start + size)
+        if end < len(text):
+            boundary = text.rfind("\n\n", start, end)
+            if boundary > start + size // 2:
+                end = boundary
+        chunks.append(text[start:end].strip())
+        start = end
+    return [chunk for chunk in chunks if chunk]
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def source_fingerprint(path: pathlib.Path, data: bytes) -> dict:
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_hex(data),
+    }
+
+
+def file_staleness(file_item: dict) -> tuple[str, list[str]]:
+    path = pathlib.Path(file_item.get("path", "")).expanduser()
+    expected = file_item.get("source_fingerprint") or {}
+    if not expected:
+        return "unknown", [f"{path}: no fingerprint stored; rebuild index to enable stale checks"]
+    if not path.exists():
+        return "stale", [f"{path}: missing"]
+    try:
+        current_stat = path.stat()
+    except OSError as exc:
+        return "stale", [f"{path}: cannot stat file: {exc}"]
+
+    warnings = []
+    if current_stat.st_size != expected.get("size"):
+        warnings.append(
+            f"{path}: size changed from {expected.get('size')} to {current_stat.st_size}"
+        )
+    if current_stat.st_mtime_ns != expected.get("mtime_ns"):
+        warnings.append(f"{path}: mtime changed")
+    if warnings:
+        try:
+            current_hash = sha256_file(path)
+            if current_hash == expected.get("sha256"):
+                return "mtime-only", [f"{path}: metadata changed but content hash still matches"]
+            warnings.append(f"{path}: content hash changed")
+        except OSError as exc:
+            warnings.append(f"{path}: cannot hash current file: {exc}")
+        return "stale", warnings
+    return "fresh", []
+
+
+def index_staleness(index: dict) -> tuple[str, list[str]]:
+    statuses = []
+    warnings = []
+    for file_item in index.get("files", []):
+        status, file_warnings = file_staleness(file_item)
+        statuses.append(status)
+        warnings.extend(file_warnings)
+    if not statuses:
+        return "empty", ["index has no files"]
+    if "stale" in statuses:
+        return "stale", warnings
+    if "unknown" in statuses:
+        return "unknown", warnings
+    if "mtime-only" in statuses:
+        return "metadata-changed", warnings
+    return "fresh", warnings
+
+
+def quiet_model(messages: list[dict], *, temperature: float = 0.2) -> str:
+    return call_model(messages, temperature=temperature, stream=False, echo=False).strip()
+
+
+def summarize_text(label: str, text: str, instruction: str) -> str:
+    clipped = text[:SUMMARY_INPUT_CHARS]
+    prompt = textwrap.dedent(
+        f"""
+        {instruction}
+
+        Label: {label}
+
+        Text:
+        {clipped}
+        """
+    ).strip()
+    return quiet_model(
+        [
+            {
+                "role": "system",
+                "content": "Create compact, faithful summaries for retrieval. Do not invent facts.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+
+
+def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
+    full_data = path.read_bytes()
+    fingerprint = source_fingerprint(path, full_data)
+    data = full_data
+    truncated = len(data) > MAX_INDEX_FILE_BYTES
+    if truncated:
+        data = data[:MAX_INDEX_FILE_BYTES]
+    text = data.decode("utf-8", errors="replace")
+    chunks = split_text(text)
+    indexed_chunks = []
+    for chunk_idx, chunk in enumerate(chunks, 1):
+        label = f"{path} chunk {chunk_idx}/{len(chunks)}"
+        if len(chunks) == 1 and len(chunk) <= SUMMARY_INPUT_CHARS:
+            summary_input = chunk
+        else:
+            summary_input = chunk[:SUMMARY_INPUT_CHARS]
+        print(f"  summarizing {label}", flush=True)
+        summary = summarize_text(
+            label,
+            summary_input,
+            "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
+        )
+        indexed_chunks.append(
+            {
+                "id": f"{ordinal}.{chunk_idx}",
+                "path": str(path),
+                "chunk": chunk_idx,
+                "summary": summary,
+                "content": chunk,
+            }
+        )
+
+    chunk_summaries = "\n\n".join(
+        f"Chunk {chunk['chunk']}:\n{chunk['summary']}" for chunk in indexed_chunks
+    )
+    print(f"  summarizing file {path}", flush=True)
+    file_summary = summarize_text(
+        str(path),
+        chunk_summaries or text,
+        "Create a file-level summary from these chunk summaries. Include what the file is about and when to retrieve it.",
+    )
+    return {
+        "path": str(path),
+        "source_fingerprint": fingerprint,
+        "indexed_sha256": sha256_hex(data),
+        "bytes_indexed": len(data),
+        "truncated": truncated,
+        "summary": file_summary,
+        "chunks": indexed_chunks,
+    }
+
+
+def build_document_index(path: str, pattern: str, name: str | None = None) -> dict:
+    root = pathlib.Path(path).expanduser().resolve()
+    require_allowed(root)
+    if root.is_file():
+        candidates = [root]
+    elif root.is_dir():
+        candidates = [candidate for candidate in sorted(root.rglob(pattern)) if candidate.is_file()]
+    else:
+        raise SystemExit(f"not a file or directory: {root}")
+    candidates = candidates[:MAX_INDEX_FILES]
+    if not candidates:
+        raise SystemExit(f"no files matched {pattern} under {root}")
+
+    index_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    files = []
+    print(f"Building document index {index_id} from {len(candidates)} file(s).")
+    for idx, candidate in enumerate(candidates, 1):
+        try:
+            files.append(index_file(candidate, index_id, idx))
+        except OSError as exc:
+            print(f"  skipped {candidate}: {exc}", file=sys.stderr)
+
+    file_summaries = "\n\n".join(f"{item['path']}:\n{item['summary']}" for item in files)
+    print("  summarizing corpus", flush=True)
+    corpus_summary = summarize_text(
+        str(root),
+        file_summaries,
+        "Create a corpus-level map from these file summaries. Explain the main themes and which files matter for which questions.",
+    )
+    index = {
+        "id": index_id,
+        "name": name or root.name or str(root),
+        "root": str(root),
+        "glob": pattern,
+        "created": now(),
+        "technique": "hierarchical retrieval-augmented generation",
+        "corpus_summary": corpus_summary,
+        "files": files,
+    }
+    atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+    print(f"index saved: {index_id}")
+    return index
+
+
+def context_item_from_index(index: dict) -> dict:
+    status, warnings = index_staleness(index)
+    return {
+        "kind": "index",
+        "id": index["id"],
+        "name": index.get("name", index["id"]),
+        "root": index.get("root", ""),
+        "status": status,
+        "warnings": warnings[:5],
+        "summary": index.get("corpus_summary", ""),
+    }
+
+
+def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
+    query_counts = token_counts(query)
+    index_status, index_warnings = index_staleness(index)
+    file_rows = []
+    chunk_rows = []
+    for file_item in index.get("files", []):
+        file_score = score_text(query_counts, file_item.get("summary", ""))
+        file_rows.append((file_score, file_item))
+        for chunk in file_item.get("chunks", []):
+            haystack = "\n".join(
+                [
+                    file_item.get("summary", ""),
+                    chunk.get("summary", ""),
+                    chunk.get("content", "")[:4000],
+                ]
+            )
+            chunk_rows.append((score_text(query_counts, haystack), file_item, chunk))
+
+    file_rows.sort(key=lambda row: row[0], reverse=True)
+    chunk_rows.sort(key=lambda row: row[0], reverse=True)
+    selected_files = [row[1] for row in file_rows[:RETRIEVAL_TOP_FILES] if row[0] > 0]
+    selected_chunks = [row for row in chunk_rows[:RETRIEVAL_TOP_CHUNKS] if row[0] > 0]
+    if not selected_chunks:
+        selected_chunks = chunk_rows[: min(2, len(chunk_rows))]
+
+    parts = [
+        f"=== Document index: {index.get('name', index.get('id'))} ===",
+        f"Root: {index.get('root', '')}",
+        f"Freshness: {index_status}",
+        "Corpus summary:",
+        index.get("corpus_summary", ""),
+    ]
+    if index_warnings:
+        parts.append("Freshness warnings:\n" + "\n".join(f"- {warning}" for warning in index_warnings[:8]))
+    sources = [
+        {
+            "kind": "index",
+            "id": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "status": index_status,
+            "warnings": index_warnings[:8],
+        }
+    ]
+    if selected_files:
+        parts.append("Relevant file summaries:")
+        for file_item in selected_files:
+            parts.append(
+                f"- [file:{file_item.get('path')}] {file_item.get('path')}:\n"
+                f"{file_item.get('summary', '')}"
+            )
+            sources.append(
+                {
+                    "kind": "file-summary",
+                    "index": index.get("id", ""),
+                    "path": file_item.get("path", ""),
+                    "status": file_staleness(file_item)[0],
+                }
+            )
+    if selected_chunks:
+        parts.append("Retrieved excerpts:")
+        used = 0
+        for _score, file_item, chunk in selected_chunks:
+            content = chunk.get("content", "")
+            remaining = MAX_RETRIEVAL_CHARS - used
+            if remaining <= 0:
+                break
+            excerpt = content[:remaining]
+            used += len(excerpt)
+            parts.append(
+                f"--- [index:{index.get('id')} file:{file_item.get('path')} chunk:{chunk.get('chunk')}] ---\n"
+                f"Chunk summary:\n{chunk.get('summary', '')}\n\n"
+                f"Excerpt:\n{excerpt}"
+            )
+            sources.append(
+                {
+                    "kind": "chunk",
+                    "index": index.get("id", ""),
+                    "path": file_item.get("path", ""),
+                    "chunk": chunk.get("chunk"),
+                }
+            )
+    return "\n\n".join(part for part in parts if part), sources
+
+
+def render_memories_with_sources() -> tuple[str, list[dict]]:
+    memories = load_memories()
+    if not memories:
+        return "No saved memories yet.", []
+    lines = []
+    sources = []
+    for row in memories:
+        memory_ref = row.get("id", "unknown")
+        lines.append(f"- [memory:{memory_ref}] {row.get('text', '')}")
+        sources.append(
+            {
+                "kind": "memory",
+                "id": memory_ref,
+                "source": row.get("source", "unknown"),
+                "conversation_id": row.get("conversation_id", ""),
+                "created": row.get("created", ""),
+            }
+        )
+    return "\n".join(lines), sources
+
+
+def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
+    if not items:
+        return "No explicit documents are attached.", []
+    parts = []
+    sources = []
+    for item in items:
+        if item.get("kind") == "index":
+            index = load_index(item["id"])
+            if query:
+                text, index_sources = retrieve_from_index(index, query)
+                parts.append(text)
+                sources.extend(index_sources)
+            else:
+                status, warnings = index_staleness(index)
+                parts.append(
+                    textwrap.dedent(
+                        f"""
+                        === Document index: {index.get('name', index.get('id'))} ===
+                        Root: {index.get('root', '')}
+                        Freshness: {status}
+                        Corpus summary:
+                        {index.get('corpus_summary', '')}
+                        """
+                    ).strip()
+                )
+                sources.append(
+                    {
+                        "kind": "index",
+                        "id": index.get("id", ""),
+                        "name": index.get("name", ""),
+                        "root": index.get("root", ""),
+                        "status": status,
+                        "warnings": warnings[:8],
+                    }
+                )
+            continue
+        label = item.get("path", "context")
+        content = item.get("content", "")
+        parts.append(f"--- [file:{label}] {label} ---\n{content}")
+        sources.append(
+            {
+                "kind": "file",
+                "path": label,
+                "bytes": item.get("bytes", 0),
+            }
+        )
+    return "\n\n".join(parts), sources
+
+
+def render_conversation_summary(conv: dict) -> str:
+    summary = conv.get("summary", "").strip()
+    if not summary:
+        return "No compacted conversation summary yet."
+    return summary
+
+
+def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+    memory_text, memory_sources = render_memories_with_sources()
+    context_text, context_sources = render_context_with_sources(conv.get("context_items", []), query)
+    sources = []
+    sources.extend(memory_sources)
+    if conv.get("summary", "").strip():
+        sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
+    sources.extend(context_sources)
+    return textwrap.dedent(
+        f"""
+        You are Motoko, Javier's personal local assistant running in the HB3
+        personal realm. You are a conversational assistant, not a system
+        administrator and not an autonomous agent.
+
+        Use the saved memories, compacted conversation summary, and explicitly attached documents as context.
+        Do not claim access to files or directories unless their contents are
+        included in this prompt. If a memory seems stale, say so and ask before
+        relying on it heavily.
+
+        Saved memories:
+        {memory_text}
+
+        Compacted conversation summary:
+        {render_conversation_summary(conv)}
+
+        Attached documents:
+        {context_text}
+        """
+    ).strip(), sources
+
+
+def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]:
+    prompt, sources = build_system_prompt_and_sources(conv, query)
+    messages = [{"role": "system", "content": prompt}]
+    messages.extend(conv.get("messages", [])[-MAX_RECENT_MESSAGES:])
+    return messages, sources
+
+
+def call_model(
+    messages: list[dict],
+    *,
+    temperature: float = 0.7,
+    stream: bool = True,
+    echo: bool = True,
+) -> str:
+    payload = {
+        "model": model_name(),
+        "messages": messages,
+        "temperature": temperature,
+        "stream": stream,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint(),
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            if stream:
+                return read_streaming_response(resp, echo=echo)
+            return read_json_response(resp)
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"model request failed: {exc}") from exc
+
+
+def read_json_response(resp) -> str:
+    event = json.loads(resp.read().decode("utf-8", errors="replace"))
+    choices = event.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return message.get("content") or ""
+
+
+def read_streaming_response(resp, *, echo: bool = True) -> str:
+    collected = []
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        choices = event.get("choices") or []
+        if not choices:
+            continue
+        delta = choices[0].get("delta") or {}
+        content = delta.get("content") or ""
+        if content:
+            if echo:
+                print(content, end="", flush=True)
+            collected.append(content)
+    if echo:
+        print()
+    return "".join(collected)
+
+
+def format_help() -> str:
+    return textwrap.dedent(
+        """
+        Commands:
+          /help                 show this help
+          /exit                 save and exit
+          /title TEXT           rename this conversation
+          /read PATH            attach an allowlisted UTF-8 text file
+          /index PATH           build and attach a hierarchical document index
+          /attach-index ID      attach an existing document index
+          /compact              summarize older messages into compact context
+          /sources              show sources used for the last answer
+          /remember TEXT        save a durable memory manually
+          /memories             list saved memories
+          /memory review        list memories with provenance
+          /memory edit ID TEXT  edit a memory
+          /forget ID            delete a memory
+          /memorize             ask Motoko to propose memories from this chat
+
+        Shell commands:
+          motoko                start a new chat
+          motoko list           list conversations
+          motoko resume ID      resume a conversation
+          motoko show ID        show a transcript
+          motoko index PATH     build a reusable document index
+          motoko indexes        list document indexes
+          motoko memories       list saved memories
+          motoko memory review  list memories with provenance
+          motoko memory edit ID TEXT
+          motoko forget ID      delete a memory
+          motoko allow-dir DIR  allow document reads under a directory
+        """
+    ).strip()
+
+
+def format_sources(sources: list[dict]) -> str:
+    if not sources:
+        return "No recorded sources for the last answer."
+    lines = []
+    for idx, source in enumerate(sources, 1):
+        kind = source.get("kind", "source")
+        if kind == "memory":
+            detail = source.get("source", "unknown")
+            if source.get("conversation_id"):
+                detail += f"; conversation {source.get('conversation_id')}"
+            lines.append(f"{idx:3d}  memory {source.get('id', '')}  {detail}")
+        elif kind == "conversation-summary":
+            lines.append(f"{idx:3d}  compacted conversation summary")
+        elif kind == "file":
+            lines.append(f"{idx:3d}  file  {source.get('path', '')}  {source.get('bytes', 0)} bytes")
+        elif kind == "index":
+            lines.append(
+                f"{idx:3d}  index {source.get('id', '')}  "
+                f"{source.get('status', 'unknown')}  {source.get('name', '')}"
+            )
+            for warning in source.get("warnings", [])[:3]:
+                lines.append(f"     warning: {warning}")
+        elif kind == "file-summary":
+            lines.append(
+                f"{idx:3d}  file summary  {source.get('path', '')}  "
+                f"index {source.get('index', '')}  {source.get('status', 'unknown')}"
+            )
+        elif kind == "chunk":
+            lines.append(
+                f"{idx:3d}  chunk  {source.get('path', '')} "
+                f"chunk {source.get('chunk')}  index {source.get('index', '')}"
+            )
+        else:
+            lines.append(f"{idx:3d}  {json.dumps(source, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
+def print_sources(conv: dict) -> None:
+    print(format_sources(conv.get("last_sources", [])))
+
+
+def maybe_set_title(conv: dict, text: str) -> None:
+    if conv.get("title") == "Untitled":
+        conv["title"] = slug_title(text)
+
+
+def chat_loop(conv: dict) -> None:
+    print(f"Motoko conversation: {conv['title']} [{conv['id']}]")
+    print("Type /help for commands, /exit to save and leave.")
+    while True:
+        try:
+            user_text = input("\nYou> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            save_conversation(conv)
+            return
+        if not user_text:
+            continue
+        if user_text == "/exit":
+            save_conversation(conv)
+            return
+        if user_text == "/help":
+            print(format_help())
+            continue
+        if user_text.startswith("/title "):
+            conv["title"] = user_text[len("/title ") :].strip() or conv["title"]
+            save_conversation(conv)
+            print(f"title: {conv['title']}")
+            continue
+        if user_text.startswith("/read "):
+            item = context_item_from_file(user_text[len("/read ") :].strip())
+            conv.setdefault("context_items", []).append(item)
+            save_conversation(conv)
+            print(f"attached: {item['path']}")
+            continue
+        if user_text.startswith("/index "):
+            index = build_document_index(user_text[len("/index ") :].strip(), "*.txt")
+            conv.setdefault("context_items", []).append(context_item_from_index(index))
+            save_conversation(conv)
+            print(f"attached index: {index['id']}")
+            continue
+        if user_text.startswith("/attach-index "):
+            index = load_index(user_text[len("/attach-index ") :].strip())
+            conv.setdefault("context_items", []).append(context_item_from_index(index))
+            save_conversation(conv)
+            print(f"attached index: {index['id']}")
+            continue
+        if user_text == "/compact":
+            compact_conversation(conv)
+            continue
+        if user_text == "/sources":
+            print_sources(conv)
+            continue
+        if user_text.startswith("/remember "):
+            add_memory(
+                user_text[len("/remember ") :],
+                source="manual-chat",
+                conversation_id=conv["id"],
+            )
+            print("memory saved")
+            continue
+        if user_text == "/memories":
+            print_memories()
+            continue
+        if user_text == "/memory review":
+            print_memories(verbose=True)
+            continue
+        if user_text.startswith("/memory edit "):
+            parts = user_text.split(maxsplit=3)
+            if len(parts) != 4:
+                print("usage: /memory edit ID TEXT")
+                continue
+            edit_memory(parts[2], parts[3])
+            continue
+        if user_text.startswith("/forget "):
+            forget_memory(user_text[len("/forget ") :].strip())
+            continue
+        if user_text == "/memorize":
+            memorize_conversation(conv)
+            continue
+        if user_text.startswith("/"):
+            print("unknown command; type /help")
+            continue
+
+        maybe_set_title(conv, user_text)
+        conv.setdefault("messages", []).append({"role": "user", "content": user_text})
+        print("\nMotoko> ", end="", flush=True)
+        messages, sources = build_messages(conv, user_text)
+        reply = call_model(messages)
+        conv["last_sources"] = sources
+        conv["messages"].append({"role": "assistant", "content": reply})
+        save_conversation(conv)
+
+
+def compact_conversation(conv: dict) -> None:
+    messages = conv.get("messages", [])
+    if len(messages) <= COMPACT_KEEP_MESSAGES:
+        print("conversation is already compact enough")
+        return
+
+    older = messages[:-COMPACT_KEEP_MESSAGES]
+    recent = messages[-COMPACT_KEEP_MESSAGES:]
+    transcript = []
+    for msg in older:
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        transcript.append(f"{role}: {content}")
+    older_text = "\n\n".join(transcript)
+    prompt = textwrap.dedent(
+        f"""
+        Existing compacted summary:
+        {conv.get('summary', '').strip() or '(none)'}
+
+        Older transcript to merge:
+        {older_text}
+
+        Create a dense but readable conversation summary for future turns.
+        Preserve Javier's durable preferences, commitments, open questions,
+        named people/projects/files, and any conclusions already reached.
+        Do not invent facts. Keep it under {MAX_CONVERSATION_SUMMARY_CHARS} characters.
+        """
+    ).strip()
+    print("Compacting older conversation context...")
+    summary = quiet_model(
+        [
+            {
+                "role": "system",
+                "content": "You summarize conversations into faithful compact context for later retrieval.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+    )
+    conv["summary"] = summary[:MAX_CONVERSATION_SUMMARY_CHARS]
+    conv["messages"] = recent
+    save_conversation(conv)
+    print(f"compacted {len(older)} older message(s); kept {len(recent)} recent message(s)")
+
+
+def memorize_conversation(conv: dict) -> None:
+    if not conv.get("messages"):
+        print("nothing to memorize yet")
+        return
+    prompt = textwrap.dedent(
+        """
+        Extract durable personal memories from this conversation.
+        Return only short bullet points. Include only facts/preferences likely
+        useful in future conversations. If there are no durable memories, say
+        exactly: NO_MEMORY
+        """
+    ).strip()
+    messages = [
+        {"role": "system", "content": prompt},
+        *conv.get("messages", [])[-MAX_RECENT_MESSAGES:],
+    ]
+    print("Motoko memory proposal:")
+    proposal = call_model(messages, temperature=0.2).strip()
+    if proposal == "NO_MEMORY":
+        print("no memory saved")
+        return
+    print("\nSave these memories? Type yes to append: ", end="", flush=True)
+    answer = input().strip().lower()
+    if answer == "yes":
+        for line in proposal.splitlines():
+            text = line.strip().lstrip("-*").strip()
+            if text:
+                add_memory(
+                    text,
+                    source="model-proposed",
+                    conversation_id=conv["id"],
+                    derived_from="memorize",
+                )
+        print("memories saved")
+    else:
+        print("not saved")
+
+
+def command_list(_args) -> None:
+    rows = list_conversations()
+    if not rows:
+        print("No conversations yet.")
+        return
+    for conv in rows:
+        print(f"{conv.get('updated', conv.get('created', ''))}  {conv.get('id')}  {conv.get('title', 'Untitled')}")
+
+
+def command_show(args) -> None:
+    conv = load_conversation(args.id)
+    print(f"{conv.get('title', 'Untitled')} [{conv.get('id')}]\n")
+    if conv.get("summary"):
+        print(f"summary> {conv.get('summary')}\n")
+    for msg in conv.get("messages", []):
+        role = msg.get("role", "?")
+        content = msg.get("content", "")
+        print(f"{role}> {content}\n")
+
+
+def command_chat(args) -> None:
+    conv = new_conversation(args.title)
+    for path in args.file or []:
+        conv.setdefault("context_items", []).append(context_item_from_file(path))
+    for directory in args.dir or []:
+        index = build_document_index(directory, args.glob)
+        conv.setdefault("context_items", []).append(context_item_from_index(index))
+    for index_id in args.index or []:
+        index = load_index(index_id)
+        conv.setdefault("context_items", []).append(context_item_from_index(index))
+    save_conversation(conv)
+    chat_loop(conv)
+
+
+def command_resume(args) -> None:
+    conv = load_conversation(args.id)
+    chat_loop(conv)
+
+
+def command_index(args) -> None:
+    index = build_document_index(args.path, args.glob, args.name)
+    print(f"{index['id']}  {index.get('name', '')}  {index.get('root', '')}")
+
+
+def command_indexes(_args) -> None:
+    rows = list_indexes()
+    if not rows:
+        print("No document indexes yet.")
+        return
+    for index in rows:
+        files = len(index.get("files", []))
+        status, warnings = index_staleness(index)
+        print(
+            f"{index.get('created', '')}  {index.get('id')}  "
+            f"{files} file(s)  {status}  {index.get('name', '')}  {index.get('root', '')}"
+        )
+        for warning in warnings[:3]:
+            print(f"  warning: {warning}")
+
+
+def command_memory(args) -> None:
+    if args.memory_command == "review":
+        print_memories(verbose=True)
+    elif args.memory_command == "edit":
+        edit_memory(args.id, " ".join(args.text))
+    elif args.memory_command == "forget":
+        forget_memory(args.id)
+    else:
+        raise SystemExit("unknown memory command")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
+    sub = parser.add_subparsers(dest="command")
+
+    chat = sub.add_parser("chat", help="start a new chat")
+    chat.add_argument("--title")
+    chat.add_argument("--file", action="append")
+    chat.add_argument("--dir", action="append")
+    chat.add_argument("--index", action="append")
+    chat.add_argument("--glob", default="*.txt")
+    chat.set_defaults(func=command_chat)
+
+    resume = sub.add_parser("resume", help="resume a conversation")
+    resume.add_argument("id")
+    resume.set_defaults(func=command_resume)
+
+    show = sub.add_parser("show", help="show a transcript")
+    show.add_argument("id")
+    show.set_defaults(func=command_show)
+
+    compact = sub.add_parser("compact", help="compact a conversation")
+    compact.add_argument("id")
+    compact.set_defaults(func=lambda args: compact_conversation(load_conversation(args.id)))
+
+    listed = sub.add_parser("list", help="list conversations")
+    listed.set_defaults(func=command_list)
+
+    index = sub.add_parser("index", help="build a document index")
+    index.add_argument("path")
+    index.add_argument("--glob", default="*.txt")
+    index.add_argument("--name")
+    index.set_defaults(func=command_index)
+
+    indexes = sub.add_parser("indexes", help="list document indexes")
+    indexes.set_defaults(func=command_indexes)
+
+    memories = sub.add_parser("memories", help="list memories")
+    memories.set_defaults(func=lambda _args: print_memories())
+
+    memory = sub.add_parser("memory", help="review or edit memory provenance")
+    memory_sub = memory.add_subparsers(dest="memory_command", required=True)
+    memory_review = memory_sub.add_parser("review", help="list memories with provenance")
+    memory_review.set_defaults(func=command_memory)
+    memory_edit = memory_sub.add_parser("edit", help="edit a memory")
+    memory_edit.add_argument("id")
+    memory_edit.add_argument("text", nargs="+")
+    memory_edit.set_defaults(func=command_memory)
+    memory_forget = memory_sub.add_parser("forget", help="delete a memory")
+    memory_forget.add_argument("id")
+    memory_forget.set_defaults(func=command_memory)
+
+    forget = sub.add_parser("forget", help="delete a memory")
+    forget.add_argument("id")
+    forget.set_defaults(func=lambda args: forget_memory(args.id))
+
+    remember = sub.add_parser("remember", help="save a memory")
+    remember.add_argument("text", nargs="+")
+    remember.set_defaults(func=lambda args: add_memory(" ".join(args.text)))
+
+    allow_dir = sub.add_parser("allow-dir", help="allow document reads under a directory")
+    allow_dir.add_argument("path")
+    allow_dir.set_defaults(func=lambda args: add_allowed_dir(args.path))
+
+    args = parser.parse_args(argv)
+    if args.command is None:
+        args = parser.parse_args(["chat"])
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
