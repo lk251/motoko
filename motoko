@@ -37,8 +37,8 @@ except ImportError:  # pragma: no cover - readline is platform dependent.
 
 
 APP = "motoko"
-DEFAULT_ENDPOINT = "http://127.0.0.1:8082/v1/chat/completions"
-DEFAULT_MODEL = "qwen3.6-27b-ud-q5-k-xl"
+DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
+DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
 DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
@@ -51,6 +51,11 @@ TOPIC_DEFAULT_CHUNKS = 24
 TOPIC_MAX_CHUNKS = 80
 TOPIC_EXCERPT_CHARS = 6000
 MAX_MEMORY_CHARS = 1800
+MEMORY_RETRIEVAL_LIMIT = 18
+MEMORY_SEARCH_LIMIT = 40
+MEMORY_CONTEXT_RECENT_MESSAGES = 6
+MEMORY_DEFAULT_IMPORTANCE = 3
+MEMORY_MAX_IMPORTANCE = 5
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
 COMPACT_KEEP_MESSAGES = 8
@@ -85,11 +90,16 @@ SLASH_COMMANDS = [
     ("/attach-topic [ID]", "attach an existing topic dossier"),
     ("/compact", "summarize older turns into compact context"),
     ("/sources", "show sources used for the last answer"),
+    ("/status", "show model, memory, and context state"),
     ("/personality", "show the active personality/style file"),
     ("/remember TEXT", "save a durable memory manually"),
     ("/memories", "list saved memories"),
+    ("/memory search TEXT", "search and rank saved memories"),
     ("/memory review", "list memories with provenance"),
     ("/memory edit ID TEXT", "edit a memory"),
+    ("/memory importance ID 1-5", "set memory priority"),
+    ("/memory pin ID", "always include a memory when possible"),
+    ("/memory unpin ID", "remove memory pin"),
     ("/forget ID", "delete a memory"),
     ("/memorize", "ask Motoko to propose memories from this chat"),
 ]
@@ -111,6 +121,7 @@ SHELL_COMMANDS = [
     "forget",
     "personality",
     "remember",
+    "status",
     "allow-dir",
 ]
 
@@ -121,6 +132,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/stop",
     "/compact",
     "/sources",
+    "/status",
     "/personality",
     "/memories",
     "/memory review",
@@ -529,6 +541,19 @@ def normalize_memory_row(row: dict, ordinal: int) -> dict:
     normalized.setdefault("created", "")
     normalized.setdefault("source", "unknown")
     normalized.setdefault("text", "")
+    normalized.setdefault("importance", MEMORY_DEFAULT_IMPORTANCE)
+    normalized.setdefault("pinned", False)
+    normalized.setdefault("tags", [])
+    try:
+        normalized["importance"] = max(
+            1,
+            min(MEMORY_MAX_IMPORTANCE, int(normalized.get("importance", MEMORY_DEFAULT_IMPORTANCE))),
+        )
+    except (TypeError, ValueError):
+        normalized["importance"] = MEMORY_DEFAULT_IMPORTANCE
+    if not isinstance(normalized.get("tags"), list):
+        normalized["tags"] = []
+    normalized["pinned"] = bool(normalized.get("pinned"))
     return normalized
 
 
@@ -548,6 +573,9 @@ def add_memory(
     *,
     conversation_id: str | None = None,
     derived_from: str | None = None,
+    importance: int = MEMORY_DEFAULT_IMPORTANCE,
+    pinned: bool = False,
+    tags: list[str] | None = None,
 ) -> None:
     text = text.strip()
     if not text:
@@ -557,6 +585,9 @@ def add_memory(
         "created": now(),
         "source": source,
         "text": text[:MAX_MEMORY_CHARS],
+        "importance": max(1, min(MEMORY_MAX_IMPORTANCE, int(importance))),
+        "pinned": bool(pinned),
+        "tags": (tags or [])[:8],
     }
     if conversation_id:
         row["conversation_id"] = conversation_id
@@ -593,6 +624,33 @@ def edit_memory(selector: str, text: str) -> None:
     print(f"memory updated: {row['id']}")
 
 
+def set_memory_importance(selector: str, importance: str) -> None:
+    try:
+        value = int(importance)
+    except ValueError as exc:
+        raise SystemExit("importance must be an integer from 1 to 5") from exc
+    if value < 1 or value > MEMORY_MAX_IMPORTANCE:
+        raise SystemExit("importance must be an integer from 1 to 5")
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    idx, row = resolve_memory(rows, selector)
+    row["importance"] = value
+    row["updated"] = now()
+    rows[idx] = row
+    write_memory_rows(rows)
+    print(f"memory importance updated: {row['id']} -> {value}")
+
+
+def set_memory_pinned(selector: str, pinned: bool) -> None:
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    idx, row = resolve_memory(rows, selector)
+    row["pinned"] = pinned
+    row["updated"] = now()
+    rows[idx] = row
+    write_memory_rows(rows)
+    state = "pinned" if pinned else "unpinned"
+    print(f"memory {state}: {row['id']}")
+
+
 def forget_memory(selector: str) -> None:
     rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
     idx, row = resolve_memory(rows, selector)
@@ -607,7 +665,12 @@ def print_memories(*, verbose: bool = False) -> None:
         print("No memories yet.")
         return
     for idx, row in enumerate(memories, 1):
-        prefix = f"{idx:3d}  {row.get('id', '')}  {row.get('created', '')}"
+        pin = "pin" if row.get("pinned") else "   "
+        prefix = (
+            f"{idx:3d}  {row.get('id', '')}  "
+            f"i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)} {pin}  "
+            f"{row.get('created', '')}"
+        )
         print(f"{prefix}  {row.get('text', '')}")
         if verbose:
             print(f"     source: {row.get('source', 'unknown')}")
@@ -615,6 +678,117 @@ def print_memories(*, verbose: bool = False) -> None:
                 print(f"     conversation: {row.get('conversation_id')}")
             if row.get("derived_from"):
                 print(f"     derived from: {row.get('derived_from')}")
+            if row.get("tags"):
+                print(f"     tags: {', '.join(row.get('tags', []))}")
+
+
+def memory_query_text(conv: dict | None, query: str = "") -> str:
+    parts = [query, conv.get("title", "") if conv else ""]
+    if conv:
+        if conv.get("summary"):
+            parts.append(conv.get("summary", "")[-4000:])
+        for msg in conv.get("messages", [])[-MEMORY_CONTEXT_RECENT_MESSAGES:]:
+            if msg.get("role") == "user":
+                parts.append(msg.get("content", ""))
+    return "\n".join(part for part in parts if part)
+
+
+def memory_relevance(row: dict, query_counts: collections.Counter, recency_bonus: int) -> int:
+    text = "\n".join(
+        [
+            row.get("text", ""),
+            " ".join(str(tag) for tag in row.get("tags", [])),
+            row.get("source", ""),
+        ]
+    )
+    lexical = score_text(query_counts, text)
+    importance = int(row.get("importance", MEMORY_DEFAULT_IMPORTANCE))
+    pinned = 40 if row.get("pinned") else 0
+    return lexical * 8 + importance * 3 + recency_bonus + pinned
+
+
+def ranked_memories(
+    *,
+    conv: dict | None = None,
+    query: str = "",
+    limit: int = MEMORY_RETRIEVAL_LIMIT,
+) -> list[dict]:
+    rows = load_memories(limit=500)
+    if not rows:
+        return []
+    combined_query = memory_query_text(conv, query)
+    query_counts = token_counts(combined_query)
+    scored = []
+    total = len(rows)
+    for idx, row in enumerate(rows):
+        recency_bonus = 1 + min(10, idx * 10 // max(1, total - 1)) if total > 1 else 10
+        score = memory_relevance(row, query_counts, recency_bonus)
+        matched = score_text(query_counts, row.get("text", "")) if query_counts else 0
+        enriched = dict(row)
+        enriched["_score"] = score
+        enriched["_matched_terms"] = matched
+        enriched["_recency_bonus"] = recency_bonus
+        scored.append(enriched)
+    scored.sort(
+        key=lambda row: (
+            bool(row.get("pinned")),
+            row.get("_matched_terms", 0),
+            row.get("_score", 0),
+            row.get("importance", MEMORY_DEFAULT_IMPORTANCE),
+            row.get("created", ""),
+        ),
+        reverse=True,
+    )
+
+    selected = []
+    seen: set[str] = set()
+    for row in scored:
+        if len(selected) >= limit:
+            break
+        if not row.get("pinned") and row.get("_matched_terms", 0) <= 0 and query_counts:
+            continue
+        memory_ref = row.get("id", "")
+        if memory_ref in seen:
+            continue
+        seen.add(memory_ref)
+        selected.append(row)
+
+    if len(selected) < min(6, len(rows)):
+        for row in reversed(rows):
+            memory_ref = row.get("id", "")
+            if memory_ref in seen:
+                continue
+            enriched = dict(row)
+            enriched.setdefault("_score", 0)
+            enriched.setdefault("_matched_terms", 0)
+            selected.append(enriched)
+            seen.add(memory_ref)
+            if len(selected) >= min(limit, 6):
+                break
+    return selected[:limit]
+
+
+def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT) -> list[dict]:
+    return ranked_memories(query=query, limit=limit)
+
+
+def print_memory_search(query: str) -> None:
+    query = query.strip()
+    if not query:
+        raise SystemExit("usage: motoko memory search TEXT")
+    rows = search_memories(query)
+    if not rows:
+        print("No matching memories.")
+        return
+    for idx, row in enumerate(rows, 1):
+        pin = "pin" if row.get("pinned") else "   "
+        print(
+            f"{idx:3d}  {row.get('id', '')}  "
+            f"score={row.get('_score', 0):3d}  "
+            f"match={row.get('_matched_terms', 0):2d}  "
+            f"i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)} {pin}  "
+            f"{row.get('text', '')}"
+        )
 
 
 def allowed_dirs() -> list[pathlib.Path]:
@@ -1547,15 +1721,23 @@ def retrieve_from_topic(topic: dict, query: str) -> tuple[str, list[dict]]:
     return "\n\n".join(part for part in parts if part), sources
 
 
-def render_memories_with_sources() -> tuple[str, list[dict]]:
-    memories = load_memories()
+def render_memories_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+    memories = ranked_memories(conv=conv, query=query)
     if not memories:
+        if load_memories(limit=1):
+            return "No saved memories matched this turn strongly.", []
         return "No saved memories yet.", []
     lines = []
     sources = []
     for row in memories:
         memory_ref = row.get("id", "unknown")
-        lines.append(f"- [memory:{memory_ref}] {row.get('text', '')}")
+        markers = []
+        if row.get("pinned"):
+            markers.append("pinned")
+        markers.append(f"importance={row.get('importance', MEMORY_DEFAULT_IMPORTANCE)}")
+        if row.get("_matched_terms", 0):
+            markers.append(f"match={row.get('_matched_terms')}")
+        lines.append(f"- [memory:{memory_ref}; {', '.join(markers)}] {row.get('text', '')}")
         sources.append(
             {
                 "kind": "memory",
@@ -1563,6 +1745,10 @@ def render_memories_with_sources() -> tuple[str, list[dict]]:
                 "source": row.get("source", "unknown"),
                 "conversation_id": row.get("conversation_id", ""),
                 "created": row.get("created", ""),
+                "importance": row.get("importance", MEMORY_DEFAULT_IMPORTANCE),
+                "pinned": bool(row.get("pinned")),
+                "score": row.get("_score", 0),
+                "matched_terms": row.get("_matched_terms", 0),
             }
         )
     return "\n".join(lines), sources
@@ -1631,7 +1817,7 @@ def render_conversation_summary(conv: dict) -> str:
 
 
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
-    memory_text, memory_sources = render_memories_with_sources()
+    memory_text, memory_sources = render_memories_with_sources(conv, query)
     context_text, context_sources = render_context_with_sources(conv.get("context_items", []), query)
     personality_text, personality_file, personality_exists = load_personality()
     sources = []
@@ -1659,12 +1845,12 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         factual accuracy, privacy boundaries, source-grounding, or explicit user
         instructions.
 
-        Use the saved memories, compacted conversation summary, and explicitly attached documents as context.
+        Use the selected saved memories, compacted conversation summary, and explicitly attached documents as context.
         Do not claim access to files or directories unless their contents are
         included in this prompt. If a memory seems stale, say so and ask before
         relying on it heavily.
 
-        Saved memories:
+        Selected saved memories:
         {memory_text}
 
         Compacted conversation summary:
@@ -1824,11 +2010,17 @@ def format_help() -> str:
           /attach-topic [ID]    attach an existing topic dossier; picker if ID omitted
           /compact              summarize older messages into compact context
           /sources              show sources used for the last answer
+          /status               show model, memory, and context state
           /personality          show the active personality/style file
           /remember TEXT        save a durable memory manually
           /memories             list saved memories
+          /memory search TEXT   search and rank saved memories
           /memory review        list memories with provenance
           /memory edit ID TEXT  edit a memory
+          /memory importance ID 1-5
+                                set memory priority
+          /memory pin ID        always include a memory when possible
+          /memory unpin ID      remove a memory pin
           /forget ID            delete a memory
           /memorize             ask Motoko to propose memories from this chat
 
@@ -1848,9 +2040,14 @@ def format_help() -> str:
           motoko topic-show [ID]
           motoko chat --topic TOPIC_ID
           motoko compact [ID]   compact a saved conversation; picker if ID omitted
+          motoko status         show model, memory, and state paths
           motoko memories       list saved memories
+          motoko memory search TEXT
           motoko memory review  list memories with provenance
           motoko memory edit ID TEXT
+          motoko memory importance ID 1-5
+          motoko memory pin ID
+          motoko memory unpin ID
           motoko forget ID      delete a memory
           motoko personality    show personality/style guidance
           motoko personality path
@@ -1859,6 +2056,10 @@ def format_help() -> str:
 
         Indexes store derived chunk files under ~/.local/state/motoko/indexes.
         Topic dossiers store derived summaries and excerpts under ~/.local/state/motoko/topics.
+        Each turn receives a ranked subset of cross-conversation memories based
+        on the current prompt, recent conversation context, memory importance,
+        pins, and recency. Use /sources after an answer to inspect which
+        memories were selected.
         Default derived-text budget: 200 GiB per new index. Override with
         --max-derived-bytes or MOTOKO_MAX_DERIVED_INDEX_BYTES.
         Default indexing mode is auto: Motoko recursively ingests readable
@@ -1885,6 +2086,12 @@ def format_sources(sources: list[dict]) -> str:
             detail = source.get("source", "unknown")
             if source.get("conversation_id"):
                 detail += f"; conversation {source.get('conversation_id')}"
+            detail += (
+                f"; i{source.get('importance', MEMORY_DEFAULT_IMPORTANCE)}"
+                f"; score {source.get('score', 0)}"
+            )
+            if source.get("pinned"):
+                detail += "; pinned"
             lines.append(f"{idx:3d}  memory {source.get('id', '')}  {detail}")
         elif kind == "personality":
             lines.append(
@@ -1929,6 +2136,49 @@ def format_sources(sources: list[dict]) -> str:
 
 def print_sources(conv: dict) -> None:
     print(format_sources(conv.get("last_sources", [])))
+
+
+def format_status(conv: dict | None = None) -> str:
+    memories = load_memories(limit=500)
+    pinned = sum(1 for row in memories if row.get("pinned"))
+    indexes = list_indexes()
+    topics = list_topics()
+    conversations = list_conversations()
+    selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
+    context_items = conv.get("context_items", []) if conv else []
+    index_items = [item for item in context_items if item.get("kind") == "index"]
+    topic_items = [item for item in context_items if item.get("kind") == "topic"]
+    file_items = [item for item in context_items if item.get("kind") == "file"]
+
+    lines = [
+        f"model: {model_name()}",
+        f"endpoint: {endpoint()}",
+        f"state: {state_root()}",
+        f"config: {config_root()}",
+        f"conversations: {len(conversations)}",
+        f"memories: {len(memories)} total, {pinned} pinned",
+        f"indexes: {len(indexes)}",
+        f"topics: {len(topics)}",
+    ]
+    if conv:
+        lines.extend(
+            [
+                f"conversation: {conv.get('title', 'Untitled')} [{conv.get('id', '')}]",
+                f"messages: {len(conv.get('messages', []))}",
+                f"compacted summary: {'yes' if conv.get('summary') else 'no'}",
+                (
+                    "attached context: "
+                    f"{len(file_items)} file(s), {len(index_items)} index(es), "
+                    f"{len(topic_items)} topic dossier(s)"
+                ),
+                f"auto-selected memories for current context: {len(selected_memories)}",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def print_status(conv: dict | None = None) -> None:
+    print(format_status(conv))
 
 
 def maybe_set_title(conv: dict, text: str) -> None:
@@ -2000,6 +2250,13 @@ def setup_readline_completion() -> None:
             parts = stripped.split()
             if len(parts) <= 1 and not stripped.endswith(" "):
                 matches = [name for name in slash_names if name.startswith(text or "/")]
+            elif parts and parts[0] == "/memory" and len(parts) <= 2:
+                subcommands = [
+                    slash_command_value(command).split(maxsplit=1)[1]
+                    for command, _description in SLASH_COMMANDS
+                    if command.startswith("/memory ")
+                ]
+                matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-index", "/topic"}:
@@ -2342,10 +2599,15 @@ class MotokoTui:
                     self.append("system", "Motoko is not currently answering.")
             elif text == "/sources":
                 self.append("system", format_sources(self.conv.get("last_sources", [])))
+            elif text == "/status":
+                self.append("system", format_status(self.conv))
             elif text == "/personality":
                 self.append("system", self.capture_text(print_personality))
             elif text == "/memories":
                 self.append("system", self.capture_text(print_memories))
+            elif text.startswith("/memory search "):
+                query = text[len("/memory search ") :]
+                self.append("system", self.capture_text(lambda: print_memory_search(query)))
             elif text == "/memory review":
                 self.append("system", self.capture_text(lambda: print_memories(verbose=True)))
             elif text.startswith("/title "):
@@ -2386,6 +2648,16 @@ class MotokoTui:
                     self.append("system", "usage: /memory edit ID TEXT")
                 else:
                     self.append("system", self.capture_text(lambda: edit_memory(parts[2], parts[3])))
+            elif text.startswith("/memory importance "):
+                parts = text.split(maxsplit=3)
+                if len(parts) != 4:
+                    self.append("system", "usage: /memory importance ID 1-5")
+                else:
+                    self.append("system", self.capture_text(lambda: set_memory_importance(parts[2], parts[3])))
+            elif text.startswith("/memory pin "):
+                self.append("system", self.capture_text(lambda: set_memory_pinned(text[len("/memory pin ") :].strip(), True)))
+            elif text.startswith("/memory unpin "):
+                self.append("system", self.capture_text(lambda: set_memory_pinned(text[len("/memory unpin ") :].strip(), False)))
             elif text == "/compact":
                 self.run_blocking_command("Compacting conversation...", lambda: compact_conversation(self.conv))
             elif text == "/memorize":
@@ -2582,6 +2854,16 @@ class MotokoTui:
                 for row in list_conversations()
                 if not current or item_matches_selector(row, current)
             ][:20]
+        if first == "/memory" and len(words) <= 2:
+            options = []
+            for command, description in SLASH_COMMANDS:
+                if not command.startswith("/memory "):
+                    continue
+                value = slash_command_value(command)
+                suffix = value.split(maxsplit=1)[1] if " " in value else value
+                if not current or suffix.startswith(current) or value.startswith(stripped):
+                    options.append({"kind": "command", "value": value, "label": command, "description": description})
+            return options
         if first in {"/attach-index", "/topic"} and len(words) <= 2:
             return [
                 {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
@@ -2848,6 +3130,9 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/sources":
             print_sources(conv)
             continue
+        if user_text == "/status":
+            print_status(conv)
+            continue
         if user_text == "/personality":
             print_personality()
             continue
@@ -2862,6 +3147,9 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/memories":
             print_memories()
             continue
+        if user_text.startswith("/memory search "):
+            print_memory_search(user_text[len("/memory search ") :])
+            continue
         if user_text == "/memory review":
             print_memories(verbose=True)
             continue
@@ -2871,6 +3159,19 @@ def chat_loop(conv: dict) -> None:
                 print("usage: /memory edit ID TEXT")
                 continue
             edit_memory(parts[2], parts[3])
+            continue
+        if user_text.startswith("/memory importance "):
+            parts = user_text.split(maxsplit=3)
+            if len(parts) != 4:
+                print("usage: /memory importance ID 1-5")
+                continue
+            set_memory_importance(parts[2], parts[3])
+            continue
+        if user_text.startswith("/memory pin "):
+            set_memory_pinned(user_text[len("/memory pin ") :].strip(), True)
+            continue
+        if user_text.startswith("/memory unpin "):
+            set_memory_pinned(user_text[len("/memory unpin ") :].strip(), False)
             continue
         if user_text.startswith("/forget "):
             forget_memory(user_text[len("/forget ") :].strip())
@@ -3083,8 +3384,16 @@ def command_topic_show(args) -> None:
 def command_memory(args) -> None:
     if args.memory_command == "review":
         print_memories(verbose=True)
+    elif args.memory_command == "search":
+        print_memory_search(" ".join(args.query))
     elif args.memory_command == "edit":
         edit_memory(args.id, " ".join(args.text))
+    elif args.memory_command == "importance":
+        set_memory_importance(args.id, args.value)
+    elif args.memory_command == "pin":
+        set_memory_pinned(args.id, True)
+    elif args.memory_command == "unpin":
+        set_memory_pinned(args.id, False)
     elif args.memory_command == "forget":
         forget_memory(args.id)
     else:
@@ -3100,6 +3409,15 @@ def command_personality(args) -> None:
         init_personality(force=args.force)
     else:
         raise SystemExit("unknown personality command")
+
+
+def command_status(_args) -> None:
+    print_status()
+
+
+def command_remember(args) -> None:
+    add_memory(" ".join(args.text))
+    print("memory saved")
 
 
 def main(argv: list[str]) -> int:
@@ -3131,6 +3449,9 @@ def main(argv: list[str]) -> int:
     compact = sub.add_parser("compact", help="compact a conversation")
     compact.add_argument("id", nargs="?")
     compact.set_defaults(func=lambda args: compact_conversation(load_conversation(args.id)))
+
+    status = sub.add_parser("status", help="show model, memory, and state paths")
+    status.set_defaults(func=command_status)
 
     listed = sub.add_parser("list", help="list conversations")
     listed.set_defaults(func=command_list)
@@ -3170,10 +3491,23 @@ def main(argv: list[str]) -> int:
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)
     memory_review = memory_sub.add_parser("review", help="list memories with provenance")
     memory_review.set_defaults(func=command_memory)
+    memory_search = memory_sub.add_parser("search", help="search and rank memories")
+    memory_search.add_argument("query", nargs="+")
+    memory_search.set_defaults(func=command_memory)
     memory_edit = memory_sub.add_parser("edit", help="edit a memory")
     memory_edit.add_argument("id")
     memory_edit.add_argument("text", nargs="+")
     memory_edit.set_defaults(func=command_memory)
+    memory_importance = memory_sub.add_parser("importance", help="set memory priority from 1 to 5")
+    memory_importance.add_argument("id")
+    memory_importance.add_argument("value")
+    memory_importance.set_defaults(func=command_memory)
+    memory_pin = memory_sub.add_parser("pin", help="always include a memory when possible")
+    memory_pin.add_argument("id")
+    memory_pin.set_defaults(func=command_memory)
+    memory_unpin = memory_sub.add_parser("unpin", help="remove a memory pin")
+    memory_unpin.add_argument("id")
+    memory_unpin.set_defaults(func=command_memory)
     memory_forget = memory_sub.add_parser("forget", help="delete a memory")
     memory_forget.add_argument("id")
     memory_forget.set_defaults(func=command_memory)
@@ -3195,7 +3529,7 @@ def main(argv: list[str]) -> int:
 
     remember = sub.add_parser("remember", help="save a memory")
     remember.add_argument("text", nargs="+")
-    remember.set_defaults(func=lambda args: add_memory(" ".join(args.text)))
+    remember.set_defaults(func=command_remember)
 
     allow_dir = sub.add_parser("allow-dir", help="allow document reads under a directory")
     allow_dir.add_argument("path")

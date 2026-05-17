@@ -135,6 +135,7 @@ motoko resume
 motoko resume CONVERSATION_ID
 motoko show
 motoko show CONVERSATION_ID
+motoko status
 ```
 
 When an ID is omitted in an interactive terminal, Motoko opens a numbered
@@ -144,9 +145,13 @@ Manage memories:
 
 ```bash
 motoko memories
+motoko memory search "query"
 motoko memory review
 motoko remember "short durable memory"
 motoko memory edit MEM_ID "corrected memory text"
+motoko memory importance MEM_ID 1-5
+motoko memory pin MEM_ID
+motoko memory unpin MEM_ID
 motoko forget MEM_ID
 ```
 
@@ -164,10 +169,15 @@ Useful in-chat commands:
 /attach-topic [TOPIC_ID]
 /compact
 /sources
+/status
 /personality
 /remember TEXT
+/memory search TEXT
 /memory review
 /memory edit ID TEXT
+/memory importance ID 1-5
+/memory pin ID
+/memory unpin ID
 /forget ID
 /memorize
 /memories
@@ -198,6 +208,17 @@ memories record the source conversation and that they were created by
 `/memorize`. Use `motoko memory review` or `/memory review` to inspect that
 provenance before trusting a memory.
 
+Each turn receives an automatic ranked subset of cross-conversation memories.
+The ranking uses the current prompt, the conversation title, recent user turns,
+the compacted summary, memory importance, pinned status, and recency. This keeps
+memory useful without injecting every saved memory into every prompt. Use
+`/sources` after an answer to see which memories were selected.
+
+Memories default to importance `3`. `motoko memory importance ID 1-5` changes
+that priority. `motoko memory pin ID` makes a memory eligible for inclusion even
+when lexical matching is weak; use this for stable identity, style, or life
+context that should travel across conversations.
+
 `/compact` summarizes older conversation turns into a compact conversation
 summary, keeps the most recent turns verbatim, and saves both into the
 conversation JSON. This is manual compaction; Motoko does not silently rewrite
@@ -208,6 +229,8 @@ summaries, document chunks, and index freshness state used for the last answer.
 This is meant to make answers inspectable: Motoko should be able to say which
 stored context influenced a response instead of sounding like she has
 unbounded hidden knowledge.
+`/status` prints the current model endpoint, state paths, memory/index/topic
+counts, and the amount of context attached to the active conversation.
 
 ## Document Indexes
 
@@ -349,16 +372,10 @@ ssh hb3-personal
 motoko
 ```
 
-The default endpoint is the non-MTP Qwen3.6 service:
+The default endpoint is the MTP Qwen3.6 service:
 
 ```text
-http://127.0.0.1:8082/v1/chat/completions
-```
-
-Override only for a reviewed experiment:
-
-```bash
-MOTOKO_ENDPOINT=http://127.0.0.1:8083/v1/chat/completions motoko
+http://127.0.0.1:8083/v1/chat/completions
 ```
 
 While waiting for the first streamed response token, Motoko shows a small

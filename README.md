@@ -14,6 +14,9 @@ Design constraints:
 - No database server.
 - Explicit document allowlists.
 - Inspectable memories, sources, and index freshness.
+- Quick `/status` and `motoko status` checks for model, memory, and context
+  state.
+- Automatic ranked memory selection per prompt, with `/sources` provenance.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
 - Reusable indexes default to a 200 GiB derived-text budget and fail closed
