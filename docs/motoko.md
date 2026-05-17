@@ -116,7 +116,16 @@ Start a new chat:
 ```bash
 motoko
 motoko help
+motoko chat --line
 ```
+
+When stdin and stdout are terminals, `motoko` starts in a small stdlib-only TUI:
+the conversation stays above, the composer stays pinned to the bottom, `/`
+opens command suggestions, arrow keys move through suggestions, Enter accepts a
+selection, and typed text remains available while Motoko streams an answer.
+Use `/stop` to stop the current streamed answer.
+If the raw terminal UI is not available or you want the older behavior, use
+`motoko chat --line` or set `MOTOKO_TUI=0`.
 
 List and resume conversations:
 
@@ -146,6 +155,7 @@ Useful in-chat commands:
 ```text
 /help
 /
+/stop
 /resume [CONVERSATION_ID]
 /read PATH
 /index PATH
@@ -169,9 +179,14 @@ Commands with optional IDs open a picker when the ID is omitted. If Python
 `readline` is available, Motoko also enables Tab completion in chat; type `/`
 then Tab to list slash commands, or start `/resume`, `/attach-index`,
 `/attach-topic`, or `/topic` and press Tab to complete stored IDs. This is a
-small stdlib line editor, not a full TUI: Motoko does not add prompt-toolkit,
-rich, curses UI dependencies, or any package outside the Python standard
-library.
+small stdlib line editor fallback. In the default TUI, these same commands use
+an inline dropdown above the bottom composer.
+
+The TUI is implemented with Python standard-library terminal primitives only.
+It does not add prompt-toolkit, rich, textual, urwid, curses UI dependencies,
+or any package outside the Python standard library. It intentionally keeps a
+line-mode fallback because raw terminal control varies across TTYs and SSH
+clients.
 
 `/memorize` asks the local model to propose durable memories from the current
 conversation. Motoko prints the proposal and appends it only after an explicit

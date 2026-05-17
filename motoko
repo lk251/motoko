@@ -17,11 +17,15 @@ import json
 import os
 import pathlib
 import re
+import select
 import shutil
+import signal
 import sys
+import termios
 import threading
 import textwrap
 import time
+import tty
 import urllib.error
 import urllib.request
 import uuid
@@ -71,6 +75,7 @@ SLASH_COMMANDS = [
     ("/help", "show full help"),
     ("/", "show compact command menu"),
     ("/exit", "save and exit"),
+    ("/stop", "stop the current streamed answer"),
     ("/title TEXT", "rename this conversation"),
     ("/resume [ID]", "switch to another saved conversation"),
     ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
@@ -108,6 +113,19 @@ SHELL_COMMANDS = [
     "remember",
     "allow-dir",
 ]
+
+SIMPLE_SLASH_COMMANDS = {
+    "/help",
+    "/",
+    "/exit",
+    "/stop",
+    "/compact",
+    "/sources",
+    "/personality",
+    "/memories",
+    "/memory review",
+    "/memorize",
+}
 
 DEFAULT_PERSONALITY = """
 Motoko should be warm, attentive, and calm. She should sound like a trusted
@@ -152,6 +170,15 @@ def style(text: str, *names: str) -> str:
 def command_label(text: str) -> str:
     command, sep, rest = text.partition(" ")
     return style(command, "cyan", "bold") + (sep + style(rest, "dim") if sep else "")
+
+
+def slash_command_value(command: str) -> str:
+    parts = command.split()
+    if not parts:
+        return command
+    if parts[0] == "/memory" and len(parts) > 1:
+        return " ".join(parts[:2])
+    return parts[0]
 
 
 def now() -> str:
@@ -1690,6 +1717,52 @@ def call_model(
         spinner.stop()
 
 
+def call_model_with_callback(
+    messages: list[dict],
+    *,
+    on_token,
+    temperature: float = 0.7,
+) -> str:
+    payload = {
+        "model": model_name(),
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint(),
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    collected = []
+    try:
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content") or ""
+                if content:
+                    collected.append(content)
+                    on_token(content)
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"model request failed: {exc}") from exc
+    return "".join(collected)
+
+
 def read_json_response(resp) -> str:
     event = json.loads(resp.read().decode("utf-8", errors="replace"))
     choices = event.get("choices") or []
@@ -1740,6 +1813,7 @@ def format_help() -> str:
           /help                 show this help
           /                     show a compact command menu
           /exit                 save and exit
+          /stop                 stop the current streamed answer
           /title TEXT           rename this conversation
           /resume [ID]          switch to another saved conversation; picker if ID omitted
           /read PATH            attach a bounded excerpt from an allowlisted text file
@@ -1761,8 +1835,10 @@ def format_help() -> str:
         Shell commands:
           motoko help           show this full Motoko command reference
           motoko                start a new chat
+          motoko chat --line    use the legacy line-oriented interface
           motoko list           list conversations
           motoko resume [ID]    resume a conversation; picker if ID omitted
+          motoko resume --line  resume with the legacy line-oriented interface
           motoko show [ID]      show a transcript; picker if ID omitted
           motoko index PATH     build a mixed text document index
           motoko index PATH --max-derived-bytes 200GiB
@@ -1790,6 +1866,9 @@ def format_help() -> str:
         files, and extensionless text. Use --glob only to narrow a one-off index.
         In chat, readline completion is enabled when available: type '/' then
         Tab to list slash commands, and omit IDs on picker-aware commands.
+        The default interactive interface is a small stdlib-only TUI when stdin
+        and stdout are terminals. Set MOTOKO_TUI=0 or use --line for legacy
+        line mode.
         Thinking spinner: MOTOKO_SPINNER=auto|ascii|block|braille|off.
         Source documents are never modified.
         """
@@ -1911,7 +1990,7 @@ def setup_readline_completion() -> None:
     if readline is None or not sys.stdin.isatty():
         return
 
-    slash_names = sorted({command.split()[0] for command, _description in SLASH_COMMANDS})
+    slash_names = sorted({slash_command_value(command) for command, _description in SLASH_COMMANDS})
 
     def complete(text: str, state: int):
         buffer = readline.get_line_buffer()
@@ -1945,7 +2024,756 @@ def motoko_input(prompt: str) -> str:
     return input(style(prompt, "green", "bold"))
 
 
+def tui_enabled() -> bool:
+    raw = os.environ.get("MOTOKO_TUI", "1").strip().lower()
+    if raw in {"0", "false", "no", "off", "line"}:
+        return False
+    return sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
+
+
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
+def wrap_display_line(text: str, width: int) -> list[str]:
+    if width <= 4:
+        return [text[:width]]
+    if not text:
+        return [""]
+    ansi_prefix = ""
+    ansi_suffix = ""
+    if text.startswith("\033["):
+        match = re.match(r"(\x1b\[[0-9;?]*[A-Za-z])(.*)(\x1b\[0m)$", text)
+        if match:
+            ansi_prefix, text, ansi_suffix = match.groups()
+    chunks = []
+    for part in str(text).splitlines() or [""]:
+        plain_len = len(strip_ansi(part))
+        if plain_len <= width:
+            chunks.append(ansi_prefix + part + ansi_suffix if ansi_prefix else part)
+            continue
+        wrapped = textwrap.wrap(
+            strip_ansi(part),
+            width=width,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        chunks.extend(ansi_prefix + row + ansi_suffix if ansi_prefix else row for row in wrapped)
+    return chunks or [""]
+
+
+class MotokoTui:
+    def __init__(self, conv: dict) -> None:
+        self.conv = conv
+        self.stdin_fd = sys.stdin.fileno()
+        self.stdout_fd = sys.stdout.fileno()
+        self.old_termios = None
+        self.running = True
+        self.dirty = True
+        self.status = "ready"
+        self.input_buffer = ""
+        self.cursor = 0
+        self.history: list[str] = []
+        self.history_index: int | None = None
+        self.scroll = 0
+        self.dropdown_index = 0
+        self.events: collections.deque[tuple] = collections.deque()
+        self.events_lock = threading.Lock()
+        self.generating = False
+        self.cancel_event = threading.Event()
+        self.pending_prompts: collections.deque[str] = collections.deque()
+        self.answer_entry: dict | None = None
+        self.last_render = 0.0
+        self.messages = self.seed_messages(conv)
+
+    def seed_messages(self, conv: dict) -> list[dict]:
+        rows = [
+            {
+                "role": "system",
+                "content": f"Motoko conversation: {conv.get('title', 'Untitled')} [{conv.get('id', '')}]",
+            },
+            {
+                "role": "system",
+                "content": "Type / for commands. Use arrows to select menu entries. Ctrl+C exits.",
+            },
+        ]
+        if conv.get("summary"):
+            rows.append({"role": "summary", "content": conv.get("summary", "")})
+        for msg in conv.get("messages", [])[-MAX_RECENT_MESSAGES:]:
+            rows.append({"role": msg.get("role", "?"), "content": msg.get("content", "")})
+        return rows
+
+    def append(self, role: str, content: str) -> dict:
+        row = {"role": role, "content": content}
+        self.messages.append(row)
+        self.scroll = 0
+        self.dirty = True
+        return row
+
+    def run(self) -> None:
+        old_winch = signal.getsignal(signal.SIGWINCH)
+
+        def on_winch(_signum, _frame):
+            self.dirty = True
+
+        try:
+            self.old_termios = termios.tcgetattr(self.stdin_fd)
+            tty.setcbreak(self.stdin_fd)
+            signal.signal(signal.SIGWINCH, on_winch)
+            self.write("\033[?25l\033[?7l")
+            self.render(force=True)
+            while self.running:
+                self.drain_events()
+                timeout = 0.04 if self.generating else 0.12
+                readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
+                if readable:
+                    self.handle_key(self.read_key())
+                now_ts = time.monotonic()
+                if self.dirty or (self.generating and now_ts - self.last_render > 0.08):
+                    self.render()
+        finally:
+            signal.signal(signal.SIGWINCH, old_winch)
+            self.restore_terminal()
+
+    def restore_terminal(self) -> None:
+        if self.old_termios is not None:
+            termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_termios)
+            self.old_termios = None
+        self.write("\033[?7h\033[?25h\033[0m\n")
+
+    def write(self, text: str) -> None:
+        os.write(self.stdout_fd, text.encode("utf-8", errors="replace"))
+
+    def read_key(self) -> str:
+        first = os.read(self.stdin_fd, 1)
+        if not first:
+            return ""
+        if first != b"\x1b":
+            return first.decode("utf-8", errors="replace")
+        seq = bytearray(first)
+        while True:
+            readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0.01)
+            if not readable:
+                break
+            nxt = os.read(self.stdin_fd, 1)
+            if not nxt:
+                break
+            seq.extend(nxt)
+            if nxt.isalpha() or nxt == b"~":
+                break
+        text = bytes(seq).decode("utf-8", errors="replace")
+        keymap = {
+            "\x1b[A": "up",
+            "\x1b[B": "down",
+            "\x1b[C": "right",
+            "\x1b[D": "left",
+            "\x1b[H": "home",
+            "\x1b[F": "end",
+            "\x1b[1~": "home",
+            "\x1b[4~": "end",
+            "\x1b[3~": "delete",
+            "\x1b[5~": "pageup",
+            "\x1b[6~": "pagedown",
+        }
+        return keymap.get(text, "escape")
+
+    def handle_key(self, key: str) -> None:
+        if key in {"\x03", "\x04"}:
+            save_conversation(self.conv)
+            self.running = False
+            return
+        if key in {"\r", "\n"}:
+            self.handle_enter()
+            return
+        if key in {"\x7f", "\b"}:
+            if self.cursor > 0:
+                self.input_buffer = self.input_buffer[: self.cursor - 1] + self.input_buffer[self.cursor :]
+                self.cursor -= 1
+                self.dropdown_index = 0
+                self.dirty = True
+            return
+        if key == "\x15":  # Ctrl+U
+            self.input_buffer = self.input_buffer[self.cursor :]
+            self.cursor = 0
+            self.dropdown_index = 0
+            self.dirty = True
+            return
+        if key == "\x17":  # Ctrl+W
+            left = self.input_buffer[: self.cursor].rstrip()
+            cut = left.rfind(" ") + 1
+            self.input_buffer = self.input_buffer[:cut] + self.input_buffer[self.cursor :]
+            self.cursor = cut
+            self.dropdown_index = 0
+            self.dirty = True
+            return
+        if key == "\x01":
+            self.cursor = 0
+            self.dirty = True
+            return
+        if key == "\x05":
+            self.cursor = len(self.input_buffer)
+            self.dirty = True
+            return
+        if key == "\x0c":
+            self.dirty = True
+            return
+        if key == "left":
+            self.cursor = max(0, self.cursor - 1)
+            self.dirty = True
+            return
+        if key == "right":
+            self.cursor = min(len(self.input_buffer), self.cursor + 1)
+            self.dirty = True
+            return
+        if key == "home":
+            self.cursor = 0
+            self.dirty = True
+            return
+        if key == "end":
+            self.cursor = len(self.input_buffer)
+            self.dirty = True
+            return
+        if key == "delete":
+            if self.cursor < len(self.input_buffer):
+                self.input_buffer = self.input_buffer[: self.cursor] + self.input_buffer[self.cursor + 1 :]
+                self.dirty = True
+            return
+        if key == "up":
+            if self.dropdown_options():
+                self.dropdown_index = max(0, self.dropdown_index - 1)
+            else:
+                self.history_up()
+            self.dirty = True
+            return
+        if key == "down":
+            if self.dropdown_options():
+                self.dropdown_index = min(len(self.dropdown_options()) - 1, self.dropdown_index + 1)
+            else:
+                self.history_down()
+            self.dirty = True
+            return
+        if key == "pageup":
+            self.scroll += 8
+            self.dirty = True
+            return
+        if key == "pagedown":
+            self.scroll = max(0, self.scroll - 8)
+            self.dirty = True
+            return
+        if key == "escape":
+            self.dropdown_index = 0
+            self.dirty = True
+            return
+        if key == "\t":
+            options = self.dropdown_options()
+            if options:
+                self.apply_dropdown(options[self.dropdown_index])
+            return
+        if len(key) == 1 and key >= " ":
+            self.input_buffer = self.input_buffer[: self.cursor] + key + self.input_buffer[self.cursor :]
+            self.cursor += 1
+            self.dropdown_index = min(self.dropdown_index, max(0, len(self.dropdown_options()) - 1))
+            self.dirty = True
+
+    def history_up(self) -> None:
+        if not self.history:
+            return
+        if self.history_index is None:
+            self.history_index = len(self.history) - 1
+        else:
+            self.history_index = max(0, self.history_index - 1)
+        self.input_buffer = self.history[self.history_index]
+        self.cursor = len(self.input_buffer)
+
+    def history_down(self) -> None:
+        if self.history_index is None:
+            return
+        self.history_index += 1
+        if self.history_index >= len(self.history):
+            self.history_index = None
+            self.input_buffer = ""
+        else:
+            self.input_buffer = self.history[self.history_index]
+        self.cursor = len(self.input_buffer)
+
+    def handle_enter(self) -> None:
+        options = self.dropdown_options()
+        if options:
+            self.apply_dropdown(options[self.dropdown_index])
+            return
+        text = self.input_buffer.strip()
+        self.input_buffer = ""
+        self.cursor = 0
+        self.history_index = None
+        self.dropdown_index = 0
+        if not text:
+            self.dirty = True
+            return
+        self.history.append(text)
+        self.submit_text(text)
+
+    def submit_text(self, text: str) -> None:
+        if text.startswith("/"):
+            self.handle_command(text)
+            return
+        if self.generating:
+            self.pending_prompts.append(text)
+            self.append("queued", text)
+            self.status = f"queued {len(self.pending_prompts)} prompt(s) while Motoko answers"
+            return
+        self.start_generation(text)
+
+    def handle_command(self, text: str) -> None:
+        try:
+            if text in {"/", "/commands"}:
+                self.append("system", self.compact_command_menu())
+            elif text == "/help":
+                self.append("system", format_help())
+            elif text == "/exit":
+                save_conversation(self.conv)
+                self.running = False
+            elif text == "/stop":
+                if self.generating:
+                    self.cancel_event.set()
+                    self.status = "stopping current answer"
+                else:
+                    self.append("system", "Motoko is not currently answering.")
+            elif text == "/sources":
+                self.append("system", format_sources(self.conv.get("last_sources", [])))
+            elif text == "/personality":
+                self.append("system", self.capture_text(print_personality))
+            elif text == "/memories":
+                self.append("system", self.capture_text(print_memories))
+            elif text == "/memory review":
+                self.append("system", self.capture_text(lambda: print_memories(verbose=True)))
+            elif text.startswith("/title "):
+                self.conv["title"] = text[len("/title ") :].strip() or self.conv["title"]
+                save_conversation(self.conv)
+                self.append("system", f"title: {self.conv['title']}")
+            elif text == "/resume" or text.startswith("/resume "):
+                selector = text[len("/resume") :].strip() or None
+                save_conversation(self.conv)
+                self.conv = load_conversation(selector)
+                self.messages = self.seed_messages(self.conv)
+                self.status = "conversation resumed"
+            elif text.startswith("/read "):
+                item = context_item_from_file(text[len("/read ") :].strip())
+                self.conv.setdefault("context_items", []).append(item)
+                save_conversation(self.conv)
+                self.append("system", f"attached: {item['path']}")
+            elif text == "/attach-index" or text.startswith("/attach-index "):
+                selector = text[len("/attach-index") :].strip() or None
+                index = load_index(selector)
+                self.conv.setdefault("context_items", []).append(context_item_from_index(index))
+                save_conversation(self.conv)
+                self.append("system", f"attached index: {index['id']}")
+            elif text == "/attach-topic" or text.startswith("/attach-topic "):
+                selector = text[len("/attach-topic") :].strip() or None
+                topic = load_topic(selector)
+                self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+                save_conversation(self.conv)
+                self.append("system", f"attached topic: {topic['id']}")
+            elif text.startswith("/remember "):
+                add_memory(text[len("/remember ") :], source="manual-chat", conversation_id=self.conv["id"])
+                self.append("system", "memory saved")
+            elif text.startswith("/forget "):
+                self.append("system", self.capture_text(lambda: forget_memory(text[len("/forget ") :].strip())))
+            elif text.startswith("/memory edit "):
+                parts = text.split(maxsplit=3)
+                if len(parts) != 4:
+                    self.append("system", "usage: /memory edit ID TEXT")
+                else:
+                    self.append("system", self.capture_text(lambda: edit_memory(parts[2], parts[3])))
+            elif text == "/compact":
+                self.run_blocking_command("Compacting conversation...", lambda: compact_conversation(self.conv))
+            elif text == "/memorize":
+                self.run_blocking_command("Running memory proposal...", lambda: memorize_conversation(self.conv))
+            elif text.startswith("/index "):
+                path = text[len("/index ") :].strip()
+                self.run_blocking_command("Building document index...", lambda: self.attach_index_from_path(path))
+            elif text == "/topic" or text.startswith("/topic "):
+                body = text[len("/topic") :].strip()
+                self.run_blocking_command("Building topic dossier...", lambda: self.attach_topic_from_body(body))
+            else:
+                self.append("system", "unknown command; type /help")
+        except SystemExit as exc:
+            self.append("error", str(exc))
+        except Exception as exc:  # Defensive: keep the TUI alive.
+            self.append("error", f"{type(exc).__name__}: {exc}")
+        self.dirty = True
+
+    def attach_index_from_path(self, path: str) -> None:
+        if not path:
+            raise SystemExit("usage: /index PATH")
+        index = build_document_index(path, AUTO_INDEX_GLOB)
+        self.conv.setdefault("context_items", []).append(context_item_from_index(index))
+        save_conversation(self.conv)
+
+    def attach_topic_from_body(self, body: str) -> None:
+        topic = build_topic_from_chat(self.conv, body)
+        self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+        save_conversation(self.conv)
+
+    def capture_text(self, func) -> str:
+        class Capture:
+            def __init__(self) -> None:
+                self.parts: list[str] = []
+
+            def write(self, text: str) -> int:
+                self.parts.append(text)
+                return len(text)
+
+            def flush(self) -> None:
+                return None
+
+            def getvalue(self) -> str:
+                return "".join(self.parts)
+
+        buf = Capture()
+        old_stdout = sys.stdout
+        try:
+            sys.stdout = buf
+            func()
+        finally:
+            sys.stdout = old_stdout
+        return buf.getvalue().strip() or "(no output)"
+
+    def run_blocking_command(self, label: str, func) -> None:
+        if self.generating:
+            self.append("system", "Finish or wait for the current answer before running this blocking command.")
+            return
+        self.restore_for_blocking()
+        try:
+            print()
+            print(style(label, "cyan", "bold"))
+            func()
+            print(style("Done. Returning to Motoko TUI.", "green"))
+        except SystemExit as exc:
+            print(style(str(exc), "red"))
+        finally:
+            self.reenter_after_blocking()
+        self.messages = self.seed_messages(self.conv)
+        self.dirty = True
+
+    def restore_for_blocking(self) -> None:
+        if self.old_termios is not None:
+            termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_termios)
+        self.write("\033[?7h\033[?25h\033[0m\033[2J\033[H")
+
+    def reenter_after_blocking(self) -> None:
+        tty.setcbreak(self.stdin_fd)
+        self.write("\033[?25l\033[?7l")
+
+    def start_generation(self, user_text: str) -> None:
+        maybe_set_title(self.conv, user_text)
+        self.conv.setdefault("messages", []).append({"role": "user", "content": user_text})
+        self.append("user", user_text)
+        self.answer_entry = self.append("assistant", "")
+        self.status = "Motoko is thinking; you can type the next prompt below"
+        self.generating = True
+        self.cancel_event = threading.Event()
+        messages, sources = build_messages(self.conv, user_text)
+        cancel_event = self.cancel_event
+
+        def worker() -> None:
+            try:
+                def on_token(token: str) -> None:
+                    if cancel_event.is_set():
+                        raise RuntimeError("__motoko_stopped__")
+                    self.put_event(("token", token))
+
+                reply = call_model_with_callback(
+                    messages,
+                    temperature=0.7,
+                    on_token=on_token,
+                )
+                self.put_event(("done", reply, sources))
+            except RuntimeError as exc:
+                if str(exc) == "__motoko_stopped__":
+                    self.put_event(("stopped",))
+                else:
+                    self.put_event(("error", f"{type(exc).__name__}: {exc}"))
+            except SystemExit as exc:
+                self.put_event(("error", str(exc)))
+            except Exception as exc:  # Defensive: preserve terminal session.
+                self.put_event(("error", f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def put_event(self, event: tuple) -> None:
+        with self.events_lock:
+            self.events.append(event)
+
+    def drain_events(self) -> None:
+        changed = False
+        while True:
+            with self.events_lock:
+                if not self.events:
+                    break
+                event = self.events.popleft()
+            kind = event[0]
+            if kind == "token":
+                if self.answer_entry is not None:
+                    self.answer_entry["content"] += event[1]
+                    changed = True
+            elif kind == "done":
+                reply, sources = event[1], event[2]
+                self.conv["last_sources"] = sources
+                self.conv["messages"].append({"role": "assistant", "content": reply})
+                save_conversation(self.conv)
+                self.generating = False
+                self.answer_entry = None
+                self.status = "ready"
+                changed = True
+                if self.pending_prompts:
+                    next_prompt = self.pending_prompts.popleft()
+                    self.start_generation(next_prompt)
+            elif kind == "stopped":
+                partial = ""
+                if self.answer_entry is not None:
+                    partial = self.answer_entry.get("content", "")
+                    if partial:
+                        self.answer_entry["content"] = partial.rstrip() + "\n\n[stopped]"
+                if partial:
+                    self.conv["messages"].append(
+                        {"role": "assistant", "content": partial.rstrip() + "\n\n[stopped]"}
+                    )
+                save_conversation(self.conv)
+                self.generating = False
+                self.answer_entry = None
+                self.status = "answer stopped"
+                changed = True
+            elif kind == "error":
+                self.generating = False
+                self.answer_entry = None
+                self.append("error", event[1])
+                self.status = "ready"
+                changed = True
+        if changed:
+            self.dirty = True
+
+    def compact_command_menu(self) -> str:
+        lines = ["Chat commands:"]
+        for command, description in SLASH_COMMANDS:
+            lines.append(f"  {command:<24} {description}")
+        return "\n".join(lines)
+
+    def dropdown_options(self) -> list[dict]:
+        text = self.input_buffer[: self.cursor]
+        stripped = text.lstrip()
+        if not stripped.startswith("/"):
+            return []
+        words = stripped.split()
+        if " " not in stripped:
+            prefix = stripped or "/"
+            options = []
+            for command, description in SLASH_COMMANDS:
+                value = slash_command_value(command)
+                if value.startswith(prefix) or command.startswith(prefix):
+                    options.append({"kind": "command", "value": value, "label": command, "description": description})
+            return options
+        first = words[0] if words else ""
+        current = words[-1] if words and not stripped.endswith(" ") else ""
+        if first == "/resume" and len(words) <= 2:
+            return [
+                {"kind": "conversation", "value": row.get("id", ""), "label": conversation_label(row), "description": row.get("title", "")}
+                for row in list_conversations()
+                if not current or item_matches_selector(row, current)
+            ][:20]
+        if first in {"/attach-index", "/topic"} and len(words) <= 2:
+            return [
+                {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
+                for row in list_indexes()
+                if not current or item_matches_selector(row, current)
+            ][:20]
+        if first == "/attach-topic" and len(words) <= 2:
+            return [
+                {"kind": "topic", "value": row.get("id", ""), "label": topic_label(row), "description": row.get("query", "")}
+                for row in list_topics()
+                if not current or item_matches_selector(row, current)
+            ][:20]
+        return []
+
+    def apply_dropdown(self, option: dict) -> None:
+        kind = option["kind"]
+        value = option["value"]
+        if kind == "command":
+            if value in SIMPLE_SLASH_COMMANDS:
+                self.input_buffer = ""
+                self.cursor = 0
+                self.submit_text(value)
+                return
+            self.input_buffer = value + " "
+            self.cursor = len(self.input_buffer)
+            self.dropdown_index = 0
+            self.dirty = True
+            return
+        first = self.input_buffer.lstrip().split()[0] if self.input_buffer.lstrip().split() else ""
+        if kind == "conversation":
+            self.input_buffer = f"/resume {value}"
+            self.cursor = len(self.input_buffer)
+            self.submit_text(self.input_buffer)
+            self.input_buffer = ""
+            self.cursor = 0
+            return
+        if kind == "index":
+            if first == "/topic":
+                self.input_buffer = f"/topic {value} "
+                self.cursor = len(self.input_buffer)
+            else:
+                self.input_buffer = f"{first} {value}"
+                self.cursor = len(self.input_buffer)
+                self.submit_text(self.input_buffer)
+                self.input_buffer = ""
+                self.cursor = 0
+            self.dropdown_index = 0
+            self.dirty = True
+            return
+        if kind == "topic":
+            self.input_buffer = f"/attach-topic {value}"
+            self.cursor = len(self.input_buffer)
+            self.submit_text(self.input_buffer)
+            self.input_buffer = ""
+            self.cursor = 0
+
+    def render(self, *, force: bool = False) -> None:
+        self.drain_events()
+        width, height = shutil.get_terminal_size((80, 24))
+        width = max(40, width)
+        height = max(12, height)
+        options = self.dropdown_options()
+        if options:
+            self.dropdown_index = min(self.dropdown_index, len(options) - 1)
+        else:
+            self.dropdown_index = 0
+        input_lines, cursor_row_offset, cursor_col = self.input_display(width)
+        dropdown_lines = self.dropdown_display(width, options)
+        reserve = 2 + len(input_lines) + len(dropdown_lines)
+        body_height = max(3, height - reserve)
+        body_lines = self.body_display(width)
+        max_scroll = max(0, len(body_lines) - body_height)
+        self.scroll = min(self.scroll, max_scroll)
+        if self.scroll:
+            start = max(0, len(body_lines) - body_height - self.scroll)
+            visible = body_lines[start : start + body_height]
+        else:
+            visible = body_lines[-body_height:]
+
+        rows = []
+        title = f" Motoko  {self.conv.get('title', 'Untitled')}  {self.status}"
+        if self.generating:
+            title += "  * answering"
+        if self.pending_prompts:
+            title += f"  queued:{len(self.pending_prompts)}"
+        rows.append(style(title[:width], "bold", "cyan"))
+        rows.extend(visible)
+        while len(rows) < 1 + body_height:
+            rows.append("")
+        rows.extend(dropdown_lines)
+        rows.append(style("─" * width, "dim"))
+        rows.extend(input_lines)
+        screen = "\033[H" + "\n".join(f"{row}\033[K" for row in rows[:height])
+        screen += "\033[J"
+        input_start_row = 1 + body_height + len(dropdown_lines) + 2
+        cursor_row = min(height, input_start_row + cursor_row_offset)
+        screen += f"\033[{cursor_row};{min(width, cursor_col)}H\033[?25h"
+        self.write(screen)
+        self.last_render = time.monotonic()
+        self.dirty = False
+
+    def body_display(self, width: int) -> list[str]:
+        lines = []
+        code = False
+        for entry in self.messages:
+            role = entry.get("role", "?")
+            content = entry.get("content", "")
+            if role == "user":
+                prefix = style("You> ", "green", "bold")
+            elif role == "assistant":
+                prefix = style("Motoko> ", "cyan", "bold")
+            elif role == "queued":
+                prefix = style("Queued> ", "yellow", "bold")
+            elif role == "error":
+                prefix = style("Error> ", "red", "bold")
+            elif role == "summary":
+                prefix = style("Summary> ", "magenta", "bold")
+            else:
+                prefix = style("System> ", "yellow", "bold")
+            wrapped = []
+            for raw_line in content.splitlines() or [""]:
+                if raw_line.startswith("```"):
+                    code = not code
+                    wrapped.extend(wrap_display_line(style(raw_line, "magenta"), width - len(strip_ansi(prefix))))
+                    continue
+                if code:
+                    wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix))))
+                elif raw_line.startswith(("/", "motoko ")):
+                    wrapped.extend(wrap_display_line(style(raw_line, "cyan"), width - len(strip_ansi(prefix))))
+                elif raw_line.startswith(("- ", "* ", "  /", "  motoko")):
+                    wrapped.extend(wrap_display_line(style(raw_line, "dim"), width - len(strip_ansi(prefix))))
+                else:
+                    wrapped.extend(wrap_display_line(raw_line, width - len(strip_ansi(prefix))))
+            for idx, line in enumerate(wrapped):
+                lines.append((prefix if idx == 0 else " " * len(strip_ansi(prefix))) + line)
+            lines.append("")
+        return lines or [""]
+
+    def dropdown_display(self, width: int, options: list[dict]) -> list[str]:
+        if not options:
+            return []
+        max_rows = min(8, len(options))
+        rows = [style(" Suggestions", "bold", "yellow")]
+        for idx, option in enumerate(options[:max_rows]):
+            marker = ">" if idx == self.dropdown_index else " "
+            label = strip_ansi(str(option.get("label", "")))
+            description = strip_ansi(str(option.get("description", "")))
+            text = f" {marker} {label}"
+            if description:
+                remaining = max(0, width - len(strip_ansi(text)) - 3)
+                text += "  " + description[:remaining]
+            if idx == self.dropdown_index:
+                rows.append(style(text[:width], "bold", "blue"))
+            else:
+                rows.append(text[:width])
+        if len(options) > max_rows:
+            rows.append(style(f"   ... {len(options) - max_rows} more", "dim"))
+        return rows
+
+    def input_display(self, width: int) -> tuple[list[str], int, int]:
+        prompt = "You> "
+        usable = max(10, width - len(prompt))
+        before = self.input_buffer[: self.cursor]
+        after = self.input_buffer[self.cursor :]
+        all_text = before + after
+        logical_lines = textwrap.wrap(
+            all_text or " ",
+            width=usable,
+            replace_whitespace=False,
+            drop_whitespace=False,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""]
+        cursor_logical = len(before)
+        cursor_row_offset = min(len(logical_lines) - 1, cursor_logical // usable)
+        cursor_col = len(prompt) + (cursor_logical % usable) + 1
+        shown = logical_lines[-4:]
+        if len(logical_lines) > 4:
+            cursor_row_offset = max(0, cursor_row_offset - (len(logical_lines) - 4))
+        rows = []
+        for idx, line in enumerate(shown):
+            rows.append((style(prompt, "green", "bold") if idx == 0 else " " * len(prompt)) + line)
+        return rows, cursor_row_offset, cursor_col
+
+
 def chat_loop(conv: dict) -> None:
+    if tui_enabled():
+        try:
+            MotokoTui(conv).run()
+            return
+        except Exception as exc:
+            print(f"Motoko TUI failed; falling back to line mode: {exc}", file=sys.stderr)
     setup_readline_completion()
     print(f"{style('Motoko conversation:', 'bold')} {conv['title']} [{style(conv['id'], 'yellow')}]")
     print("Type /help for commands, /exit to save and leave.")
@@ -2168,6 +2996,8 @@ def command_show(args) -> None:
 
 
 def command_chat(args) -> None:
+    if getattr(args, "line", False):
+        os.environ["MOTOKO_TUI"] = "0"
     conv = new_conversation(args.title)
     for path in args.file or []:
         conv.setdefault("context_items", []).append(context_item_from_file(path))
@@ -2185,6 +3015,8 @@ def command_chat(args) -> None:
 
 
 def command_resume(args) -> None:
+    if getattr(args, "line", False):
+        os.environ["MOTOKO_TUI"] = "0"
     conv = load_conversation(args.id)
     chat_loop(conv)
 
@@ -2284,10 +3116,12 @@ def main(argv: list[str]) -> int:
     chat.add_argument("--index", action="append")
     chat.add_argument("--topic", action="append")
     chat.add_argument("--glob", default=AUTO_INDEX_GLOB)
+    chat.add_argument("--line", action="store_true", help="use the legacy line-oriented interface")
     chat.set_defaults(func=command_chat)
 
     resume = sub.add_parser("resume", help="resume a conversation")
     resume.add_argument("id", nargs="?")
+    resume.add_argument("--line", action="store_true", help="use the legacy line-oriented interface")
     resume.set_defaults(func=command_resume)
 
     show = sub.add_parser("show", help="show a transcript")
