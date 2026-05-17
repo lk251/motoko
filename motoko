@@ -27,9 +27,7 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:8082/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-ud-q5-k-xl"
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
-MAX_INDEX_FILES = 80
-MAX_INDEX_FILE_BYTES = 1024 * 1024
-MAX_INDEX_CHUNKS_PER_FILE = 24
+MAX_INDEX_FILE_BYTES = 20 * 1024 * 1024
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -39,6 +37,16 @@ MAX_MEMORY_CHARS = 1800
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
 COMPACT_KEEP_MESSAGES = 8
+MAX_PERSONALITY_CHARS = 12000
+
+DEFAULT_PERSONALITY = """
+Motoko should be warm, attentive, and calm. She should sound like a trusted
+personal conversation partner: direct, honest, emotionally present, and
+genuinely interested in Javier's life, projects, memories, and preferences.
+She may show gentle enthusiasm, but should not exaggerate certainty, flatter,
+or pretend to know things that are not in context. She should preserve privacy,
+ask clarifying questions only when useful, and keep a thoughtful, grounded tone.
+""".strip()
 
 
 def now() -> str:
@@ -89,6 +97,11 @@ def indexes_dir() -> pathlib.Path:
 def allowdirs_path() -> pathlib.Path:
     root = ensure_private_dir(config_root())
     return root / "allowdirs"
+
+
+def personality_path() -> pathlib.Path:
+    root = ensure_private_dir(config_root())
+    return root / "personality.md"
 
 
 def conversation_path(conversation_id: str) -> pathlib.Path:
@@ -299,6 +312,52 @@ def add_allowed_dir(path: str) -> None:
     print(f"allowed: {resolved}")
 
 
+def load_personality() -> tuple[str, str, bool]:
+    path = personality_path()
+    if not path.exists():
+        return DEFAULT_PERSONALITY, str(path), False
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise SystemExit(f"cannot read personality file {path}: {exc}") from exc
+    if not text:
+        return DEFAULT_PERSONALITY, str(path), True
+    return text[:MAX_PERSONALITY_CHARS], str(path), True
+
+
+def init_personality(*, force: bool = False) -> None:
+    path = personality_path()
+    if path.exists() and not force:
+        print(f"personality file already exists: {path}")
+        return
+    template = textwrap.dedent(
+        f"""
+        # Motoko Personality
+
+        {DEFAULT_PERSONALITY}
+
+        # Edit this file to define Motoko's style, tone, warmth, enthusiasm,
+        # directness, and conversational personality. Free-form prose is more
+        # likely to work well than numeric sliders.
+        #
+        # This file shapes tone and style. It should not override factual
+        # accuracy, privacy boundaries, source-grounding, or explicit safety
+        # constraints in Motoko's system prompt.
+        """
+    ).strip() + "\n"
+    atomic_write(path, template)
+    print(f"personality file written: {path}")
+
+
+def print_personality() -> None:
+    text, path, exists = load_personality()
+    status = "custom" if exists else "default"
+    print(f"path: {path}")
+    print(f"status: {status}")
+    print()
+    print(text)
+
+
 def is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
     try:
         path.relative_to(root)
@@ -393,7 +452,7 @@ def score_text(query_counts: collections.Counter, text: str) -> int:
 def split_text(text: str, size: int = INDEX_CHUNK_CHARS) -> list[str]:
     chunks = []
     start = 0
-    while start < len(text) and len(chunks) < MAX_INDEX_CHUNKS_PER_FILE:
+    while start < len(text):
         end = min(len(text), start + size)
         if end < len(text):
             boundary = text.rfind("\n\n", start, end)
@@ -416,13 +475,22 @@ def sha256_file(path: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def source_fingerprint(path: pathlib.Path, data: bytes) -> dict:
+def source_fingerprint(path: pathlib.Path) -> dict:
     stat = path.stat()
     return {
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "sha256": sha256_hex(data),
+        "sha256": sha256_file(path),
     }
+
+
+def read_index_bytes(path: pathlib.Path) -> tuple[bytes, bool, int]:
+    limit = MAX_INDEX_FILE_BYTES
+    with path.open("rb") as fh:
+        data = fh.read(limit + 1)
+    if len(data) > limit:
+        return data[:limit], True, path.stat().st_size - limit
+    return data, False, 0
 
 
 def file_staleness(file_item: dict) -> tuple[str, list[str]]:
@@ -502,13 +570,64 @@ def summarize_text(label: str, text: str, instruction: str) -> str:
     )
 
 
+def chunk_blocks_by_chars(blocks: list[str], max_chars: int) -> list[list[str]]:
+    batches = []
+    current = []
+    current_len = 0
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        if len(block) > max_chars:
+            block = block[:max_chars]
+        next_len = current_len + len(block) + (2 if current else 0)
+        if current and next_len > max_chars:
+            batches.append(current)
+            current = []
+            current_len = 0
+        current.append(block)
+        current_len += len(block) + (2 if current_len else 0)
+    if current:
+        batches.append(current)
+    return batches
+
+
+def summarize_blocks(label: str, blocks: list[str], instruction: str) -> str:
+    pending = [block.strip() for block in blocks if block.strip()]
+    if not pending:
+        return summarize_text(label, "", instruction)
+
+    round_no = 1
+    while True:
+        combined = "\n\n".join(pending)
+        if len(combined) <= SUMMARY_INPUT_CHARS or len(pending) == 1 or round_no > 8:
+            return summarize_text(label, combined, instruction)
+
+        batches = chunk_blocks_by_chars(pending, SUMMARY_INPUT_CHARS)
+        reduced = []
+        for idx, batch in enumerate(batches, 1):
+            batch_label = f"{label} summary batch {idx}/{len(batches)} round {round_no}"
+            print(f"  reducing {batch_label}", flush=True)
+            reduced.append(
+                summarize_text(
+                    batch_label,
+                    "\n\n".join(batch),
+                    "Summarize this batch faithfully for a higher-level retrieval summary. Preserve names, dates, decisions, obligations, and unusual details.",
+                )
+            )
+        pending = reduced
+        round_no += 1
+
+
 def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
-    full_data = path.read_bytes()
-    fingerprint = source_fingerprint(path, full_data)
-    data = full_data
-    truncated = len(data) > MAX_INDEX_FILE_BYTES
+    fingerprint = source_fingerprint(path)
+    data, truncated, omitted_bytes = read_index_bytes(path)
     if truncated:
-        data = data[:MAX_INDEX_FILE_BYTES]
+        print(
+            f"  indexing first {MAX_INDEX_FILE_BYTES // (1024 * 1024)} MiB of {path}; "
+            f"omitted {omitted_bytes} byte(s)",
+            flush=True,
+        )
     text = data.decode("utf-8", errors="replace")
     chunks = split_text(text)
     indexed_chunks = []
@@ -534,13 +653,11 @@ def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
             }
         )
 
-    chunk_summaries = "\n\n".join(
-        f"Chunk {chunk['chunk']}:\n{chunk['summary']}" for chunk in indexed_chunks
-    )
     print(f"  summarizing file {path}", flush=True)
-    file_summary = summarize_text(
+    file_summary = summarize_blocks(
         str(path),
-        chunk_summaries or text,
+        [f"Chunk {chunk['chunk']}:\n{chunk['summary']}" for chunk in indexed_chunks]
+        or [text],
         "Create a file-level summary from these chunk summaries. Include what the file is about and when to retrieve it.",
     )
     return {
@@ -548,7 +665,9 @@ def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
         "source_fingerprint": fingerprint,
         "indexed_sha256": sha256_hex(data),
         "bytes_indexed": len(data),
+        "bytes_omitted": omitted_bytes,
         "truncated": truncated,
+        "chunk_count": len(indexed_chunks),
         "summary": file_summary,
         "chunks": indexed_chunks,
     }
@@ -563,7 +682,6 @@ def build_document_index(path: str, pattern: str, name: str | None = None) -> di
         candidates = [candidate for candidate in sorted(root.rglob(pattern)) if candidate.is_file()]
     else:
         raise SystemExit(f"not a file or directory: {root}")
-    candidates = candidates[:MAX_INDEX_FILES]
     if not candidates:
         raise SystemExit(f"no files matched {pattern} under {root}")
 
@@ -576,11 +694,10 @@ def build_document_index(path: str, pattern: str, name: str | None = None) -> di
         except OSError as exc:
             print(f"  skipped {candidate}: {exc}", file=sys.stderr)
 
-    file_summaries = "\n\n".join(f"{item['path']}:\n{item['summary']}" for item in files)
     print("  summarizing corpus", flush=True)
-    corpus_summary = summarize_text(
+    corpus_summary = summarize_blocks(
         str(root),
-        file_summaries,
+        [f"{item['path']}:\n{item['summary']}" for item in files],
         "Create a corpus-level map from these file summaries. Explain the main themes and which files matter for which questions.",
     )
     index = {
@@ -776,7 +893,15 @@ def render_conversation_summary(conv: dict) -> str:
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
     memory_text, memory_sources = render_memories_with_sources()
     context_text, context_sources = render_context_with_sources(conv.get("context_items", []), query)
+    personality_text, personality_file, personality_exists = load_personality()
     sources = []
+    sources.append(
+        {
+            "kind": "personality",
+            "path": personality_file,
+            "status": "custom" if personality_exists else "default",
+        }
+    )
     sources.extend(memory_sources)
     if conv.get("summary", "").strip():
         sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
@@ -786,6 +911,13 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         You are Motoko, Javier's personal local assistant running in the HB3
         personal realm. You are a conversational assistant, not a system
         administrator and not an autonomous agent.
+
+        Conversation style and personality guidance:
+        {personality_text}
+
+        This style guidance shapes tone and personality. It must not override
+        factual accuracy, privacy boundaries, source-grounding, or explicit user
+        instructions.
 
         Use the saved memories, compacted conversation summary, and explicitly attached documents as context.
         Do not claim access to files or directories unless their contents are
@@ -888,6 +1020,7 @@ def format_help() -> str:
           /attach-index ID      attach an existing document index
           /compact              summarize older messages into compact context
           /sources              show sources used for the last answer
+          /personality          show the active personality/style file
           /remember TEXT        save a durable memory manually
           /memories             list saved memories
           /memory review        list memories with provenance
@@ -906,6 +1039,8 @@ def format_help() -> str:
           motoko memory review  list memories with provenance
           motoko memory edit ID TEXT
           motoko forget ID      delete a memory
+          motoko personality    show personality/style guidance
+          motoko personality init
           motoko allow-dir DIR  allow document reads under a directory
         """
     ).strip()
@@ -922,6 +1057,11 @@ def format_sources(sources: list[dict]) -> str:
             if source.get("conversation_id"):
                 detail += f"; conversation {source.get('conversation_id')}"
             lines.append(f"{idx:3d}  memory {source.get('id', '')}  {detail}")
+        elif kind == "personality":
+            lines.append(
+                f"{idx:3d}  personality  {source.get('status', 'unknown')}  "
+                f"{source.get('path', '')}"
+            )
         elif kind == "conversation-summary":
             lines.append(f"{idx:3d}  compacted conversation summary")
         elif kind == "file":
@@ -1003,6 +1143,9 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/sources":
             print_sources(conv)
+            continue
+        if user_text == "/personality":
+            print_personality()
             continue
         if user_text.startswith("/remember "):
             add_memory(
@@ -1199,6 +1342,17 @@ def command_memory(args) -> None:
         raise SystemExit("unknown memory command")
 
 
+def command_personality(args) -> None:
+    if args.personality_command in (None, "show"):
+        print_personality()
+    elif args.personality_command == "path":
+        print(personality_path())
+    elif args.personality_command == "init":
+        init_personality(force=args.force)
+    else:
+        raise SystemExit("unknown personality command")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
     sub = parser.add_subparsers(dest="command")
@@ -1253,6 +1407,17 @@ def main(argv: list[str]) -> int:
     forget = sub.add_parser("forget", help="delete a memory")
     forget.add_argument("id")
     forget.set_defaults(func=lambda args: forget_memory(args.id))
+
+    personality = sub.add_parser("personality", help="show or initialize personality guidance")
+    personality_sub = personality.add_subparsers(dest="personality_command")
+    personality_show = personality_sub.add_parser("show", help="show active personality guidance")
+    personality_show.set_defaults(func=command_personality)
+    personality_path_cmd = personality_sub.add_parser("path", help="print personality file path")
+    personality_path_cmd.set_defaults(func=command_personality)
+    personality_init = personality_sub.add_parser("init", help="write the default personality template")
+    personality_init.add_argument("--force", action="store_true")
+    personality_init.set_defaults(func=command_personality)
+    personality.set_defaults(func=command_personality)
 
     remember = sub.add_parser("remember", help="save a memory")
     remember.add_argument("text", nargs="+")

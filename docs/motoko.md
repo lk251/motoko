@@ -54,9 +54,38 @@ Default config path:
 
 ```text
 ~/.config/motoko/allowdirs
+~/.config/motoko/personality.md
 ```
 
 Conversation files are JSON. Memories are append-only JSONL rows.
+
+## Personality And Style
+
+Motoko loads conversation style guidance from:
+
+```text
+~/.config/motoko/personality.md
+```
+
+If the file does not exist, Motoko uses a small built-in default: warm,
+attentive, calm, direct, honest, privacy-preserving, and grounded. Create the
+editable file with:
+
+```bash
+motoko personality init
+```
+
+Inspect it with:
+
+```bash
+motoko personality
+motoko personality path
+```
+
+The file is free-form Markdown. Prose is preferred over numeric sliders because
+it gives the model richer behavioral guidance. This file shapes tone and style;
+it does not override factual accuracy, source-grounding, privacy boundaries, or
+explicit safety constraints.
 
 ## Document Access
 
@@ -73,6 +102,9 @@ with `motoko index DIR`, `motoko chat --dir DIR`, or `/index DIR`.
 
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
+Motoko never edits, rewrites, annotates, truncates, moves, or deletes source
+documents. It writes only its own config and state files under the Motoko config
+and state directories.
 
 ## Commands
 
@@ -109,6 +141,7 @@ Useful in-chat commands:
 /attach-index INDEX_ID
 /compact
 /sources
+/personality
 /remember TEXT
 /memory review
 /memory edit ID TEXT
@@ -195,10 +228,18 @@ as `unknown`; rebuild them if freshness matters. When an attached index is
 stale, Motoko includes a freshness warning in the prompt and `/sources` output
 so the answer can be reviewed with that caveat.
 
-Current bounds are deliberately conservative: Motoko indexes up to 80 files per
-request, up to 1 MiB per file, and up to 24 chunks per file. If a file exceeds
-those bounds, the index records that it was truncated; Motoko should not be
-treated as having read the omitted part.
+Current indexing bounds favor completeness over early omission. Motoko does not
+cap the number of files matched by a document-index request. For each file, it
+indexes up to 20 MiB and splits all indexed text into summarized chunks. If a
+file exceeds 20 MiB, Motoko does not modify the source file; it indexes a
+truncated in-memory copy, records `truncated = true`, and records how many bytes
+were omitted. This non-destructive source-file rule applies to every indexed or
+attached file, not only files above the size cap. Motoko should not be treated
+as having read bytes beyond a recorded truncation point.
+
+Large directories and large files can take a long time because every indexed
+chunk is summarized through the local model. Use `--glob` to narrow very broad
+indexes when needed.
 
 ## Operational Model
 

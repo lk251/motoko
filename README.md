@@ -14,6 +14,8 @@ Design constraints:
 - No database server.
 - Explicit document allowlists.
 - Inspectable memories, sources, and index freshness.
+- User-owned personality/style guidance in
+  `~/.config/motoko/personality.md`.
 
 See [docs/motoko.md](docs/motoko.md) for usage and operating notes.
 
@@ -36,4 +38,3 @@ Validate:
 ```bash
 nix flake check
 ```
-
