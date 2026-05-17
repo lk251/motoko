@@ -58,6 +58,10 @@ MEMORY_CONTEXT_RECENT_MESSAGES = 6
 MEMORY_DEFAULT_IMPORTANCE = 3
 MEMORY_MAX_IMPORTANCE = 5
 MEMORY_DUPLICATE_THRESHOLD = 0.72
+RECENT_CONVERSATION_LIMIT = 6
+RECENT_CONVERSATION_MESSAGES = 6
+RECENT_CONVERSATION_SNIPPET_CHARS = 900
+RECENT_CONVERSATION_MAX_CHARS = 12000
 AUTO_MEMORY_MIN_MESSAGES = 4
 AUTO_MEMORY_INTERVAL_MESSAGES = 4
 AUTO_MEMORY_MAX_PROPOSALS = 5
@@ -186,9 +190,9 @@ ANSI_STYLES = {
     "green": "32",
     "yellow": "33",
     "blue": "34",
-    "purple": "95",
+    "purple": "35",
     "turquoise": "36",
-    "magenta": "35",
+    "magenta": "95",
     "cyan": "36",
     "white": "37",
 }
@@ -260,6 +264,13 @@ def relative_time(value: str) -> str:
             amount = seconds // unit_seconds
             return "now" if suffix == "s" and amount < 5 else f"{amount}{suffix} ago"
     return "now"
+
+
+def compact_text(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", text.strip())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 def current_git_branch() -> str:
@@ -961,6 +972,101 @@ def ranked_memories(
 
 def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT) -> list[dict]:
     return ranked_memories(query=query, limit=limit)
+
+
+def conversation_recall_text(conv: dict) -> str:
+    parts = [conv.get("title", "")]
+    if conv.get("summary"):
+        parts.append(conv.get("summary", ""))
+    for msg in conv.get("messages", [])[-RECENT_CONVERSATION_MESSAGES:]:
+        if msg.get("role") in {"user", "assistant"}:
+            parts.append(msg.get("content", ""))
+    return "\n".join(part for part in parts if part)
+
+
+def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
+    current_id = conv.get("id", "")
+    rows = [
+        row
+        for row in list_conversations()
+        if row.get("id") != current_id and conversation_recall_text(row).strip()
+    ]
+    if not rows:
+        return []
+    rows.sort(
+        key=lambda row: parse_timestamp(row.get("updated", row.get("created", ""))) or _dt.datetime.min.replace(
+            tzinfo=_dt.timezone.utc
+        ),
+        reverse=True,
+    )
+    query_counts = token_counts(context_query_text(conv, query))
+    scored = []
+    total = len(rows)
+    for idx, row in enumerate(rows):
+        recall_text = conversation_recall_text(row)
+        lexical = score_text(query_counts, recall_text) if query_counts else 0
+        recency_bonus = max(1, min(10, 10 - idx * 10 // max(1, total)))
+        enriched = dict(row)
+        enriched["_recall_text"] = recall_text
+        enriched["_recall_score"] = lexical * 8 + recency_bonus
+        enriched["_matched_terms"] = lexical
+        enriched["_recency_bonus"] = recency_bonus
+        scored.append(enriched)
+    scored.sort(
+        key=lambda row: (
+            row.get("_matched_terms", 0),
+            row.get("_recall_score", 0),
+            row.get("updated", row.get("created", "")),
+        ),
+        reverse=True,
+    )
+    return scored[:RECENT_CONVERSATION_LIMIT]
+
+
+def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+    conversations = ranked_recent_conversations(conv, query)
+    if not conversations:
+        return "No other recent conversations yet.", []
+    lines = []
+    sources = []
+    used = 0
+    for row in conversations:
+        title = row.get("title") or "Untitled"
+        updated = relative_time(row.get("updated", row.get("created", "")))
+        branch = row.get("branch") or "-"
+        header = f"- [conversation:{row.get('id', '')}; updated={updated}; branch={branch}] {title}"
+        body_parts = []
+        if row.get("summary"):
+            body_parts.append("summary: " + compact_text(row.get("summary", ""), RECENT_CONVERSATION_SNIPPET_CHARS))
+        recent_lines = []
+        for msg in row.get("messages", [])[-RECENT_CONVERSATION_MESSAGES:]:
+            role = msg.get("role", "")
+            if role not in {"user", "assistant"}:
+                continue
+            label = "Javier" if role == "user" else "Motoko"
+            recent_lines.append(f"{label}: {compact_text(msg.get('content', ''), RECENT_CONVERSATION_SNIPPET_CHARS)}")
+        if recent_lines:
+            body_parts.append("recent turns:\n  " + "\n  ".join(recent_lines))
+        text = header + ("\n  " + "\n  ".join(body_parts) if body_parts else "")
+        remaining = RECENT_CONVERSATION_MAX_CHARS - used
+        if remaining <= 0:
+            break
+        if len(text) > remaining:
+            text = text[: max(0, remaining - 1)].rstrip() + "…"
+        lines.append(text)
+        used += len(text)
+        sources.append(
+            {
+                "kind": "recent-conversation",
+                "conversation_id": row.get("id", ""),
+                "title": title,
+                "updated": row.get("updated", row.get("created", "")),
+                "branch": branch,
+                "score": row.get("_recall_score", 0),
+                "matched_terms": row.get("_matched_terms", 0),
+            }
+        )
+    return "\n\n".join(lines), sources
 
 
 def print_memory_search(query: str) -> None:
@@ -2151,6 +2257,7 @@ def render_conversation_summary(conv: dict) -> str:
 
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
     memory_text, memory_sources = render_memories_with_sources(conv, query)
+    recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
     retrieval_query = context_query_text(conv, query)
     context_text, context_sources = render_context_with_sources(conv.get("context_items", []), retrieval_query)
     personality_text, personality_file, personality_exists = load_personality()
@@ -2163,6 +2270,7 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         }
     )
     sources.extend(memory_sources)
+    sources.extend(recent_sources)
     if conv.get("summary", "").strip():
         sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
     sources.extend(context_sources)
@@ -2179,13 +2287,17 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         factual accuracy, privacy boundaries, source-grounding, or explicit user
         instructions.
 
-        Use the selected saved memories, compacted conversation summary, and explicitly attached documents as context.
+        Use the selected saved memories, recent saved conversations, compacted
+        conversation summary, and explicitly attached documents as context.
         Do not claim access to files or directories unless their contents are
         included in this prompt. If a memory seems stale, say so and ask before
         relying on it heavily.
 
         Selected saved memories:
         {memory_text}
+
+        Recent saved conversations:
+        {recent_text}
 
         Compacted conversation summary:
         {render_conversation_summary(conv)}
@@ -2397,10 +2509,11 @@ def format_help() -> str:
 
         Indexes store derived chunk files under ~/.local/state/motoko/indexes.
         Topic dossiers store derived summaries and excerpts under ~/.local/state/motoko/topics.
-        Each turn receives a ranked subset of cross-conversation memories based
-        on the current prompt, recent conversation context, memory importance,
-        pins, repeated sightings, thread relevance, and recency. Use /sources
-        after an answer to inspect which memories were selected.
+        Each turn receives a ranked subset of cross-conversation memories and
+        recent saved conversation capsules based on the current prompt, recent
+        conversation context, memory importance, pins, repeated sightings,
+        thread relevance, and recency. Use /sources after an answer to inspect
+        which memories and recent conversations were selected.
         Motoko also performs quiet after-answer maintenance: she periodically
         compacts long conversations and saves high-confidence durable memories,
         using duplicate detection so repeated facts reinforce existing memories
@@ -2448,6 +2561,14 @@ def format_sources(sources: list[dict]) -> str:
             )
         elif kind == "conversation-summary":
             lines.append(f"{idx:3d}  compacted conversation summary")
+        elif kind == "recent-conversation":
+            lines.append(
+                f"{idx:3d}  recent conversation {source.get('conversation_id', '')}  "
+                f"score {source.get('score', 0)}  "
+                f"match {source.get('matched_terms', 0)}  "
+                f"updated {relative_time(source.get('updated', ''))}  "
+                f"{source.get('title', '')}"
+            )
         elif kind == "file":
             lines.append(f"{idx:3d}  file  {source.get('path', '')}  {source.get('bytes', 0)} bytes")
         elif kind == "index":
@@ -2502,6 +2623,7 @@ def format_status(conv: dict | None = None) -> str:
     topics = list_topics()
     conversations = list_conversations()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
+    selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
     context_items = conv.get("context_items", []) if conv else []
     index_items = [item for item in context_items if item.get("kind") == "index"]
     topic_items = [item for item in context_items if item.get("kind") == "topic"]
@@ -2529,6 +2651,7 @@ def format_status(conv: dict | None = None) -> str:
                     f"{len(topic_items)} topic dossier(s)"
                 ),
                 f"auto-selected memories for current context: {len(selected_memories)}",
+                f"auto-selected recent conversations: {len(selected_conversations)}",
             ]
         )
     return "\n".join(lines)
@@ -3472,15 +3595,15 @@ class MotokoTui:
             if role == "user":
                 prefix = style("> ", "turquoise", "bold")
             elif role == "assistant":
-                prefix = style("Motoko> ", "purple", "bold")
+                prefix = style("Motoko ", "purple", "bold")
             elif role == "queued":
-                prefix = style("Queued> ", "yellow", "bold")
+                prefix = style("queued ", "yellow", "bold")
             elif role == "error":
-                prefix = style("Error> ", "red", "bold")
+                prefix = style("error ", "red", "bold")
             elif role == "summary":
-                prefix = style("Summary> ", "magenta", "bold")
+                prefix = style("summary ", "magenta", "bold")
             else:
-                prefix = style("System> ", "yellow", "bold")
+                prefix = style("sys ", "yellow", "bold")
             wrapped = []
             for raw_line in content.splitlines() or [""]:
                 if raw_line.startswith("```"):
@@ -3709,7 +3832,7 @@ def chat_loop(conv: dict) -> None:
 
         maybe_set_title(conv, user_text)
         conv.setdefault("messages", []).append({"role": "user", "content": user_text})
-        print("\n" + style("Motoko> ", "purple", "bold"), end="", flush=True)
+        print("\n" + style("Motoko ", "purple", "bold"), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
         reply = call_model(messages)
         conv["last_sources"] = sources

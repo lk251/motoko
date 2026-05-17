@@ -127,8 +127,9 @@ Use `/stop` to stop the current streamed answer.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.
 
-The TUI uses a compact `>` input prompt. Motoko's assistant label is purple;
-supporting UI such as titles and command text uses turquoise where terminal
+The TUI uses a compact `>` input prompt. Motoko's assistant label is purple and
+shown as `Motoko`, without a `>` suffix. System/status lines use compact `sys`.
+Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.
 
@@ -232,12 +233,14 @@ memories record the source conversation and that they were created by
 `/memorize`. Use `motoko memory review` or `/memory review` to inspect that
 provenance before trusting a memory.
 
-Each turn receives an automatic ranked subset of cross-conversation memories.
-The ranking uses the current prompt, the conversation title, recent user turns,
-the compacted summary, memory importance, pinned status, repeated sightings,
-thread relevance, and recency. This keeps memory useful without injecting every
-saved memory into every prompt. Use `/sources` after an answer to see which
-memories were selected.
+Each turn receives an automatic ranked subset of cross-conversation memories
+plus a bounded set of recent saved conversation capsules. The memory ranking
+uses the current prompt, the conversation title, recent user turns, the
+compacted summary, memory importance, pinned status, repeated sightings, thread
+relevance, and recency. Recent conversation recall is separate: it includes
+compact snippets from other recent conversations so Motoko can remember chats
+that have not yet been promoted into durable memories. Use `/sources` after an
+answer to see which memories and recent conversations were selected.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to
@@ -258,11 +261,11 @@ conversation JSON. Motoko may also perform this compaction automatically after
 long chats so context remains usable without forcing every old turn into the
 model prompt.
 
-`/sources` prints the memories, compacted summary, attached files, file
-summaries, document chunks, and index freshness state used for the last answer.
-This is meant to make answers inspectable: Motoko should be able to say which
-stored context influenced a response instead of sounding like she has
-unbounded hidden knowledge.
+`/sources` prints the memories, recent conversation capsules, compacted summary,
+attached files, file summaries, document chunks, and index freshness state used
+for the last answer. This is meant to make answers inspectable: Motoko should
+be able to say which stored context influenced a response instead of sounding
+like she has unbounded hidden knowledge.
 
 `/status` prints the current model endpoint, state paths, memory/index/topic
 counts, and the amount of context attached to the active conversation.

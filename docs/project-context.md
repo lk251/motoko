@@ -87,6 +87,9 @@ Avoid for now:
 Current UI direction:
 
 - Motoko's name in chat should be purple.
+- Motoko's assistant label is `Motoko`, without a `>` suffix; color carries
+  the role distinction.
+- System/status lines use compact `sys`, not `System>`.
 - User input prompt should be just `>`, not `You>`.
 - Titles, command text, and supporting UI can be turquoise.
 - Raw TTY usability matters as much as graphical terminals.
@@ -104,6 +107,8 @@ Current UI direction:
   timestamps in JSON state.
 - Resume/list columns should be readable and compact:
   `created`, `updated`, `branch`, `conversation`.
+- Recent saved conversations should be available as bounded, inspectable context
+  in new chats. Durable memories remain separate from this recency recall.
 
 ## Near-Term Next Improvement
 
