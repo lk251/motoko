@@ -11,6 +11,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -148,6 +149,63 @@ def test_profile_dossier(m):
             m.quiet_model = old_quiet
 
 
+def test_memory_dossier(m):
+    with isolated_state():
+        conv = m.new_conversation("Dossier source")
+        conv["id"] = "dossier-conv"
+        conv["messages"] = [{"role": "user", "content": "I want careful craftsmanship in Motoko."}]
+        write_conversation(m, conv)
+        m.add_memory("Javier values careful craftsmanship.", source="test", conversation_id=conv["id"])
+
+        old_summarize = m.summarize_blocks
+        try:
+            m.summarize_blocks = lambda _label, blocks, _instruction: "Dossier summary\n" + "\n".join(blocks)[:200]
+            dossier = m.build_memory_dossier("craftsmanship")
+            assert dossier["source_memory_count"] >= 1
+            assert dossier["source_conversation_count"] >= 1
+            assert "craftsmanship" in dossier["summary"]
+            item = m.context_item_from_dossier(dossier)
+            text, sources = m.render_context_with_sources([item], "craftsmanship")
+            assert "Memory dossier" in text
+            assert any(source.get("kind") == "dossier" for source in sources)
+        finally:
+            m.summarize_blocks = old_summarize
+
+
+def test_spinner_and_input_wrapping(m):
+    old_term = os.environ.get("TERM")
+    old_spinner = os.environ.get("MOTOKO_SPINNER")
+    try:
+        os.environ["TERM"] = "linux"
+        os.environ["MOTOKO_SPINNER"] = "auto"
+        assert m.spinner_frames() == ["-", "/", "|", "\\"]
+    finally:
+        if old_term is None:
+            os.environ.pop("TERM", None)
+        else:
+            os.environ["TERM"] = old_term
+        if old_spinner is None:
+            os.environ.pop("MOTOKO_SPINNER", None)
+        else:
+            os.environ["MOTOKO_SPINNER"] = old_spinner
+
+    rows, row_offset, col = m.fixed_prompt_input_display("abcdefghij", 10, 12)
+    assert [m.strip_ansi(row) for row in rows] == ["> abcdefghij", "  "]
+    assert row_offset == 1
+    assert col == 3
+
+
+def test_wall_timeout(m):
+    start = time.monotonic()
+    try:
+        m.run_with_wall_timeout("slow task", 0.02, lambda: time.sleep(0.2))
+    except TimeoutError as exc:
+        assert "slow task timed out" in str(exc)
+    else:
+        raise AssertionError("slow task did not time out")
+    assert time.monotonic() - start < 0.2
+
+
 class FakeHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 - stdlib handler API
         length = int(self.headers.get("Content-Length", "0"))
@@ -207,6 +265,9 @@ def main() -> int:
         test_maintenance_state_and_phases,
         test_interrupted_maintenance_resume,
         test_profile_dossier,
+        test_memory_dossier,
+        test_spinner_and_input_wrapping,
+        test_wall_timeout,
         test_fake_openai_stream,
         test_index_plan,
     ]

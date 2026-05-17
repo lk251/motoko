@@ -15,6 +15,8 @@ Design constraints:
 - Explicit document allowlists.
 - Inspectable memories, sources, and index freshness.
 - Explicit profile dossier built from memories and conversations.
+- Query-focused memory dossiers built from saved memories and prior
+  conversations.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
 - Automatic ranked memory selection and quiet after-answer memory maintenance,

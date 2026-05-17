@@ -100,6 +100,8 @@ Current UI direction:
   - `Ctrl+E` end of line;
   - `Ctrl+B` backward char;
   - `Ctrl+F` forward char;
+  - `Alt+B` backward word;
+  - `Alt+F` forward word;
   - `Ctrl+K` kill to end of line;
   - `Ctrl+Y` yank killed text;
   - `Ctrl+P` previous suggestion/history;
@@ -110,10 +112,14 @@ Current UI direction:
   `created`, `updated`, `branch`, `conversation`.
 - Recent saved conversations should be available as bounded, inspectable context
   in new chats. Durable memories remain separate from this recency recall.
+- Query-focused memory dossiers should be available when Javier wants Motoko to
+  study a subject across saved memories and prior conversations before
+  continuing the chat.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
 - Unicode braille spinners are preferred when the terminal can render them;
-  ASCII remains the fallback.
+  Linux TTYs should use the ASCII spinner because some fonts render braille as
+  square fallback glyphs.
 
 ## Near-Term Next Improvement
 

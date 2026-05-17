@@ -140,6 +140,8 @@ Ctrl+A  beginning of line
 Ctrl+E  end of line
 Ctrl+B  backward char
 Ctrl+F  forward char
+Alt+B   backward word
+Alt+F   forward word
 Ctrl+K  kill to end of line
 Ctrl+Y  yank killed text
 Ctrl+P  previous dropdown item or history entry
@@ -190,9 +192,13 @@ Useful in-chat commands:
 /topic [INDEX_ID] QUERY
 /deepen [INDEX_ID] QUERY
 /attach-topic [TOPIC_ID]
+/dossier QUERY
+/attach-dossier [DOSSIER_ID]
 /indexes
 /topics
 /topic-show [TOPIC_ID]
+/dossiers
+/dossier-show [DOSSIER_ID]
 /compact
 /sources
 /status
@@ -216,9 +222,10 @@ Useful in-chat commands:
 Commands with optional IDs open a picker when the ID is omitted. If Python
 `readline` is available, Motoko also enables Tab completion in chat; type `/`
 then Tab to list slash commands, or start `/resume`, `/attach-index`,
-`/attach-topic`, `/topic-show`, `/topic`, or `/deepen` and press Tab to complete
-stored IDs. This is a small stdlib line editor fallback. In the default TUI,
-these same commands use an inline dropdown above the bottom composer.
+`/attach-topic`, `/topic-show`, `/attach-dossier`, `/dossier-show`, `/topic`,
+or `/deepen` and press Tab to complete stored IDs. This is a small stdlib line
+editor fallback. In the default TUI, these same commands use an inline dropdown
+above the bottom composer.
 
 The TUI is implemented with Python standard-library terminal primitives only.
 It does not add prompt-toolkit, rich, textual, urwid, curses UI dependencies,
@@ -255,7 +262,9 @@ searchable with `motoko memory search`, and removable with `motoko forget`.
 The top bar reports the active maintenance phase, such as `memory: checking`,
 `memory: proposing`, `memory: saving`, or `memory: compacting`. Interrupted
 maintenance writes a small resumable state file and is retried conservatively
-when the same conversation is opened again.
+when the same conversation is opened again. The TUI also shows how long the
+current maintenance phase has been active; memory proposal work is bounded by a
+wall-clock timeout so a stuck proposal returns control to the chat.
 
 Memories default to importance `3`. `motoko memory importance ID 1-5` changes
 that priority. `motoko memory pin ID` makes a memory eligible for inclusion even
@@ -283,6 +292,21 @@ hierarchical retrieval-augmented memory layer for Javier's stable preferences,
 goals, projects, working style, personal context, constraints, sensitivities,
 and open questions. `/profile` or `motoko profile` displays it. The dossier is
 included in future prompts with `/sources` provenance.
+
+`/dossier QUERY` or `motoko dossier QUERY` builds a query-focused memory
+dossier from the profile dossier, ranked durable memories, and relevant/recent
+conversation capsules. This is Motoko's conversation-history HRAG layer: it is
+for deliberately studying one subject from her stored memory before continuing
+the chat. It writes derived private state under:
+
+```text
+~/.local/state/motoko/dossiers/
+```
+
+Use `/attach-dossier`, `/dossiers`, `/dossier-show`, `motoko dossiers`,
+`motoko dossier-show`, or `motoko chat --dossier DOSSIER_ID` to reuse a dossier.
+Memory dossiers may duplicate sensitive personal snippets from memories and
+conversation history, so treat them as private Motoko state.
 
 ## Document Indexes
 
@@ -409,6 +433,11 @@ motoko topics
 motoko topic-show TOPIC_ID
 motoko topic-show TOPIC_ID --evidence
 motoko chat --topic TOPIC_ID
+motoko dossier "why does Javier care about craftsmanship?"
+motoko dossiers
+motoko dossier-show DOSSIER_ID
+motoko dossier-show DOSSIER_ID --evidence
+motoko chat --dossier DOSSIER_ID
 ```
 
 Create or attach one from inside a chat:
