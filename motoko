@@ -18,7 +18,9 @@ import pathlib
 import re
 import shutil
 import sys
+import threading
 import textwrap
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -101,6 +103,60 @@ def max_derived_index_bytes(override: str | None = None) -> int:
         return parse_byte_count(raw)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+
+def spinner_frames() -> list[str]:
+    mode = os.environ.get("MOTOKO_SPINNER", "auto").strip().lower()
+    if mode in {"0", "false", "no", "none", "off"}:
+        return []
+    if mode == "ascii":
+        return ["-", "/", "|", "\\"]
+    if mode == "braille":
+        return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+    custom = os.environ.get("MOTOKO_SPINNER_CHARS", "").strip()
+    if custom:
+        return list(custom)
+
+    encoding = (sys.stdout.encoding or "").lower()
+    if os.environ.get("TERM", "") == "linux" or "utf" not in encoding:
+        return ["-", "/", "|", "\\"]
+    return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+class ThinkingSpinner:
+    def __init__(self, *, enabled: bool) -> None:
+        self.frames = spinner_frames() if enabled and sys.stdout.isatty() else []
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._active = False
+
+    def start(self) -> None:
+        if not self.frames:
+            return
+        self._active = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        if not self._active:
+            return
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.4)
+        sys.stdout.write("\b \b")
+        sys.stdout.flush()
+        self._active = False
+
+    def _run(self) -> None:
+        idx = 0
+        while not self._stop.is_set():
+            sys.stdout.write(self.frames[idx % len(self.frames)])
+            sys.stdout.flush()
+            time.sleep(0.12)
+            sys.stdout.write("\b")
+            sys.stdout.flush()
+            idx += 1
 
 
 def state_root() -> pathlib.Path:
@@ -1172,13 +1228,18 @@ def call_model(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    spinner = ThinkingSpinner(enabled=echo)
     try:
+        spinner.start()
         with urllib.request.urlopen(req, timeout=600) as resp:
             if stream:
-                return read_streaming_response(resp, echo=echo)
+                return read_streaming_response(resp, echo=echo, spinner=spinner)
+            spinner.stop()
             return read_json_response(resp)
     except urllib.error.URLError as exc:
         raise SystemExit(f"model request failed: {exc}") from exc
+    finally:
+        spinner.stop()
 
 
 def read_json_response(resp) -> str:
@@ -1190,7 +1251,12 @@ def read_json_response(resp) -> str:
     return message.get("content") or ""
 
 
-def read_streaming_response(resp, *, echo: bool = True) -> str:
+def read_streaming_response(
+    resp,
+    *,
+    echo: bool = True,
+    spinner: ThinkingSpinner | None = None,
+) -> str:
     collected = []
     for raw in resp:
         line = raw.decode("utf-8", errors="replace").strip()
@@ -1209,6 +1275,8 @@ def read_streaming_response(resp, *, echo: bool = True) -> str:
         delta = choices[0].get("delta") or {}
         content = delta.get("content") or ""
         if content:
+            if spinner is not None:
+                spinner.stop()
             if echo:
                 print(content, end="", flush=True)
             collected.append(content)
@@ -1259,6 +1327,7 @@ def format_help() -> str:
         Indexes store derived chunk files under ~/.local/state/motoko/indexes.
         Default derived-text budget: 200 GiB per new index. Override with
         --max-derived-bytes or MOTOKO_MAX_DERIVED_INDEX_BYTES.
+        Thinking spinner: MOTOKO_SPINNER=auto|ascii|braille|off.
         Source documents are never modified.
         """
     ).strip()
