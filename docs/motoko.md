@@ -283,11 +283,13 @@ MOTOKO_ENDPOINT=http://127.0.0.1:8083/v1/chat/completions motoko
 ```
 
 While waiting for the first streamed response token, Motoko shows a small
-thinking spinner. The default is ASCII on the Linux tty and braille in richer
-UTF-8 terminals. Override it when a font renders poorly:
+thinking spinner. The default is ASCII for reliable raw-tty rendering. Braille
+and blinking-block styles are opt-in because some fonts render braille frames
+as identical black squares:
 
 ```bash
 MOTOKO_SPINNER=ascii motoko
+MOTOKO_SPINNER=block motoko
 MOTOKO_SPINNER=braille motoko
 MOTOKO_SPINNER=off motoko
 ```
