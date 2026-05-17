@@ -48,6 +48,7 @@ Default state paths:
 ```text
 ~/.local/state/motoko/conversations/
 ~/.local/state/motoko/indexes/
+~/.local/state/motoko/topics/
 ~/.local/state/motoko/memories.jsonl
 ```
 
@@ -121,9 +122,14 @@ List and resume conversations:
 
 ```bash
 motoko list
+motoko resume
 motoko resume CONVERSATION_ID
+motoko show
 motoko show CONVERSATION_ID
 ```
+
+When an ID is omitted in an interactive terminal, Motoko opens a numbered
+picker. This avoids typing long conversation IDs for normal use.
 
 Manage memories:
 
@@ -139,9 +145,13 @@ Useful in-chat commands:
 
 ```text
 /help
+/
+/resume [CONVERSATION_ID]
 /read PATH
 /index PATH
-/attach-index INDEX_ID
+/attach-index [INDEX_ID]
+/topic [INDEX_ID] QUERY
+/attach-topic [TOPIC_ID]
 /compact
 /sources
 /personality
@@ -154,6 +164,14 @@ Useful in-chat commands:
 /title TEXT
 /exit
 ```
+
+Commands with optional IDs open a picker when the ID is omitted. If Python
+`readline` is available, Motoko also enables Tab completion in chat; type `/`
+then Tab to list slash commands, or start `/resume`, `/attach-index`,
+`/attach-topic`, or `/topic` and press Tab to complete stored IDs. This is a
+small stdlib line editor, not a full TUI: Motoko does not add prompt-toolkit,
+rich, curses UI dependencies, or any package outside the Python standard
+library.
 
 `/memorize` asks the local model to propose durable memories from the current
 conversation. Motoko prints the proposal and appends it only after an explicit
@@ -178,18 +196,24 @@ unbounded hidden knowledge.
 
 ## Document Indexes
 
-Build a reusable index from an allowed directory:
+Build a reusable mixed-file index from an allowed directory:
 
 ```bash
 motoko allow-dir ~/Documents
-motoko index ~/Documents --glob '*.txt' --name personal-notes
+motoko index ~/Documents --name personal-notes
 ```
+
+The default indexing mode is `auto`: Motoko recursively indexes every file that
+looks like readable UTF-8-ish text, including Org, Markdown, plain text, source
+files, config files, logs, JSON/YAML/TOML, and extensionless text. It skips
+common cache/vendor directories and files that look binary. The goal is one
+corpus index per source tree, not separate indexes by file extension.
 
 By default, a new reusable index may store up to 200 GiB of derived chunk text
 under Motoko state. Override this for a reviewed one-off index with:
 
 ```bash
-motoko index ~/Documents --glob '*.txt' --max-derived-bytes 250GiB
+motoko index ~/Documents --max-derived-bytes 250GiB
 ```
 
 or set:
@@ -201,7 +225,7 @@ MOTOKO_MAX_DERIVED_INDEX_BYTES=250GiB motoko index ~/Documents
 Start a chat while indexing a directory:
 
 ```bash
-motoko chat --dir ~/Documents --glob '*.txt'
+motoko chat --dir ~/Documents
 ```
 
 Attach an existing index:
@@ -215,6 +239,7 @@ Inside a chat:
 
 ```text
 /index ~/Documents
+/attach-index
 /attach-index INDEX_ID
 ```
 
@@ -260,6 +285,45 @@ partially written chunk directory to avoid abandoned derived text.
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad
 indexes when needed.
+
+## Topic Dossiers
+
+Topic dossiers are Motoko's first topic-focused HRAG layer. They are not a
+separate source-document format and they do not modify the source tree. A topic
+dossier starts from one or more existing document indexes, retrieves the chunks
+most relevant to a specific question or subject, and writes a derived private
+dossier under:
+
+```text
+~/.local/state/motoko/topics/
+```
+
+Create one from the shell:
+
+```bash
+motoko topic INDEX_ID "family memories involving Buenos Aires" --name buenos-aires
+motoko topics
+motoko topic-show TOPIC_ID
+motoko topic-show TOPIC_ID --evidence
+motoko chat --topic TOPIC_ID
+```
+
+Create or attach one from inside a chat:
+
+```text
+/topic family memories involving Buenos Aires
+/topic INDEX_ID family memories involving Buenos Aires
+/attach-topic
+/attach-topic TOPIC_ID
+```
+
+If a chat already has a document index attached, `/topic QUERY` uses that
+attached index. Otherwise `/topic` opens an index picker and then asks for the
+topic query. Topic dossiers store summaries and selected excerpts as Motoko
+derived state, so they can duplicate sensitive personal text inside the
+`personal` user's Motoko state directory. They are useful for going deeper into
+a subject without reinjecting the entire corpus on every turn, but they should
+be treated as private assistant memory.
 
 ## Operational Model
 

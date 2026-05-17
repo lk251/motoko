@@ -11,6 +11,7 @@ import argparse
 import codecs
 import collections
 import datetime as _dt
+import fnmatch
 import hashlib
 import json
 import os
@@ -25,6 +26,11 @@ import urllib.error
 import urllib.request
 import uuid
 
+try:
+    import readline
+except ImportError:  # pragma: no cover - readline is platform dependent.
+    readline = None
+
 
 APP = "motoko"
 DEFAULT_ENDPOINT = "http://127.0.0.1:8082/v1/chat/completions"
@@ -37,11 +43,71 @@ SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
 RETRIEVAL_TOP_FILES = 8
 MAX_RETRIEVAL_CHARS = 56000
+TOPIC_DEFAULT_CHUNKS = 24
+TOPIC_MAX_CHUNKS = 80
+TOPIC_EXCERPT_CHARS = 6000
 MAX_MEMORY_CHARS = 1800
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
 COMPACT_KEEP_MESSAGES = 8
 MAX_PERSONALITY_CHARS = 12000
+AUTO_INDEX_GLOB = "auto"
+TEXT_SAMPLE_BYTES = 8192
+
+SKIP_INDEX_DIR_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".cache",
+    "node_modules",
+}
+
+SLASH_COMMANDS = [
+    ("/help", "show full help"),
+    ("/", "show compact command menu"),
+    ("/exit", "save and exit"),
+    ("/title TEXT", "rename this conversation"),
+    ("/resume [ID]", "switch to another saved conversation"),
+    ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
+    ("/index PATH", "build and attach a mixed text document index"),
+    ("/attach-index [ID]", "attach an existing document index"),
+    ("/topic [INDEX_ID] QUERY", "build and attach a topic dossier"),
+    ("/attach-topic [ID]", "attach an existing topic dossier"),
+    ("/compact", "summarize older turns into compact context"),
+    ("/sources", "show sources used for the last answer"),
+    ("/personality", "show the active personality/style file"),
+    ("/remember TEXT", "save a durable memory manually"),
+    ("/memories", "list saved memories"),
+    ("/memory review", "list memories with provenance"),
+    ("/memory edit ID TEXT", "edit a memory"),
+    ("/forget ID", "delete a memory"),
+    ("/memorize", "ask Motoko to propose memories from this chat"),
+]
+
+SHELL_COMMANDS = [
+    "help",
+    "chat",
+    "list",
+    "resume",
+    "show",
+    "compact",
+    "index",
+    "indexes",
+    "topic",
+    "topics",
+    "topic-show",
+    "memories",
+    "memory",
+    "forget",
+    "personality",
+    "remember",
+    "allow-dir",
+]
 
 DEFAULT_PERSONALITY = """
 Motoko should be warm, attentive, and calm. She should sound like a trusted
@@ -51,6 +117,41 @@ She may show gentle enthusiasm, but should not exaggerate certainty, flatter,
 or pretend to know things that are not in context. She should preserve privacy,
 ask clarifying questions only when useful, and keep a thoughtful, grounded tone.
 """.strip()
+
+
+ANSI_STYLES = {
+    "bold": "1",
+    "dim": "2",
+    "red": "31",
+    "green": "32",
+    "yellow": "33",
+    "blue": "34",
+    "magenta": "35",
+    "cyan": "36",
+    "white": "37",
+}
+
+
+def color_enabled() -> bool:
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("NO_COLOR") is None
+        and os.environ.get("TERM", "") != "dumb"
+    )
+
+
+def style(text: str, *names: str) -> str:
+    if not color_enabled():
+        return text
+    codes = [ANSI_STYLES[name] for name in names if name in ANSI_STYLES]
+    if not codes:
+        return text
+    return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+
+def command_label(text: str) -> str:
+    command, sep, rest = text.partition(" ")
+    return style(command, "cyan", "bold") + (sep + style(rest, "dim") if sep else "")
 
 
 def now() -> str:
@@ -198,6 +299,11 @@ def indexes_dir() -> pathlib.Path:
     return ensure_private_dir(root / "indexes")
 
 
+def topics_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "topics")
+
+
 def allowdirs_path() -> pathlib.Path:
     root = ensure_private_dir(config_root())
     return root / "allowdirs"
@@ -214,6 +320,10 @@ def conversation_path(conversation_id: str) -> pathlib.Path:
 
 def index_path(index_id: str) -> pathlib.Path:
     return indexes_dir() / f"{index_id}.json"
+
+
+def topic_path(topic_id: str) -> pathlib.Path:
+    return topics_dir() / f"{topic_id}.json"
 
 
 def index_data_dir(index_id: str) -> pathlib.Path:
@@ -255,15 +365,6 @@ def save_conversation(conv: dict) -> None:
     atomic_write(conversation_path(conv["id"]), json.dumps(conv, ensure_ascii=False, indent=2) + "\n")
 
 
-def load_conversation(conversation_id: str) -> dict:
-    matches = sorted(conversations_dir().glob(f"{conversation_id}*.json"))
-    if not matches:
-        matches = sorted(conversations_dir().glob(f"*{conversation_id}*.json"))
-    if len(matches) != 1:
-        raise SystemExit(f"conversation id must match exactly one conversation; matched {len(matches)}")
-    return json.loads(matches[0].read_text(encoding="utf-8"))
-
-
 def list_conversations() -> list[dict]:
     rows = []
     for path in sorted(conversations_dir().glob("*.json"), reverse=True):
@@ -273,6 +374,99 @@ def list_conversations() -> list[dict]:
             continue
         rows.append(conv)
     return rows
+
+
+def item_matches_selector(item: dict, selector: str) -> bool:
+    fields = [
+        item.get("id", ""),
+        item.get("title", ""),
+        item.get("name", ""),
+        item.get("query", ""),
+        item.get("root", ""),
+    ]
+    selector_lower = selector.lower()
+    return any(
+        field == selector
+        or field.startswith(selector)
+        or selector_lower in field.lower()
+        for field in fields
+        if field
+    )
+
+
+def resolve_stored_item(
+    rows: list[dict],
+    selector: str,
+    *,
+    kind: str,
+) -> dict:
+    selector = selector.strip()
+    if not selector:
+        raise SystemExit(f"{kind} id is required")
+    if selector.isdigit():
+        idx = int(selector) - 1
+        if 0 <= idx < len(rows):
+            return rows[idx]
+    matches = [row for row in rows if item_matches_selector(row, selector)]
+    if len(matches) != 1:
+        raise SystemExit(f"{kind} selector must match exactly one {kind}; matched {len(matches)}")
+    return matches[0]
+
+
+def prompt_for_selection(
+    rows: list[dict],
+    *,
+    kind: str,
+    label_func,
+    selector: str | None = None,
+) -> dict:
+    if selector:
+        return resolve_stored_item(rows, selector, kind=kind)
+    if not sys.stdin.isatty():
+        raise SystemExit(f"{kind} id is required")
+    if not rows:
+        raise SystemExit(f"No {kind}s yet.")
+    print(style(f"Select {kind}:", "bold"))
+    for idx, row in enumerate(rows[:40], 1):
+        print(f"{idx:3d}  {label_func(row)}")
+    if len(rows) > 40:
+        print(f"     ... {len(rows) - 40} older {kind}(s) omitted; type an ID prefix to select one.")
+    answer = input(style(f"{kind} number or ID> ", "green")).strip()
+    return resolve_stored_item(rows, answer, kind=kind)
+
+
+def conversation_label(conv: dict) -> str:
+    return (
+        f"{style(conv.get('id', ''), 'yellow')}  "
+        f"{conv.get('updated', conv.get('created', ''))}  "
+        f"{conv.get('title', 'Untitled')}"
+    )
+
+
+def index_label(index: dict) -> str:
+    status, _warnings = index_staleness(index)
+    return (
+        f"{style(index.get('id', ''), 'yellow')}  "
+        f"{len(index.get('files', []))} file(s)  {status}  "
+        f"{index.get('name', '')}  {index.get('root', '')}"
+    )
+
+
+def topic_label(topic: dict) -> str:
+    return (
+        f"{style(topic.get('id', ''), 'yellow')}  "
+        f"{topic.get('selected_chunk_count', 0)} chunk(s)  "
+        f"{topic.get('name', '')}  {topic.get('query', '')}"
+    )
+
+
+def load_conversation(conversation_id: str | None = None) -> dict:
+    return prompt_for_selection(
+        list_conversations(),
+        kind="conversation",
+        label_func=conversation_label,
+        selector=conversation_id,
+    )
 
 
 def endpoint() -> str:
@@ -496,6 +690,56 @@ def read_text_file(path: pathlib.Path) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def is_probably_text_file(path: pathlib.Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            sample = fh.read(TEXT_SAMPLE_BYTES)
+    except OSError:
+        return False
+    if not sample:
+        return True
+    if b"\x00" in sample:
+        return False
+    decoded = sample.decode("utf-8", errors="replace")
+    if not decoded:
+        return False
+    replacement_ratio = decoded.count("\ufffd") / len(decoded)
+    if replacement_ratio > 0.05:
+        return False
+    control_chars = sum(
+        1
+        for char in decoded
+        if ord(char) < 32 and char not in "\n\r\t\f\b"
+    )
+    return control_chars / len(decoded) <= 0.10
+
+
+def iter_index_candidates(root: pathlib.Path, pattern: str | None) -> list[pathlib.Path]:
+    if root.is_file():
+        return [root] if is_probably_text_file(root) else []
+
+    normalized = (pattern or AUTO_INDEX_GLOB).strip() or AUTO_INDEX_GLOB
+    candidates = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in SKIP_INDEX_DIR_NAMES
+        ]
+        current = pathlib.Path(dirpath)
+        for filename in sorted(filenames):
+            candidate = current / filename
+            rel = candidate.relative_to(root)
+            if normalized != AUTO_INDEX_GLOB and not (
+                fnmatch.fnmatch(filename, normalized)
+                or fnmatch.fnmatch(str(rel), normalized)
+            ):
+                continue
+            if is_probably_text_file(candidate):
+                candidates.append(candidate)
+    return sorted(candidates)
+
+
 def context_item_from_file(path: str) -> dict:
     resolved = pathlib.Path(path).expanduser().resolve()
     if not resolved.is_file():
@@ -515,24 +759,14 @@ def context_items_from_dir(path: str, pattern: str) -> list[dict]:
     if not root.is_dir():
         raise SystemExit(f"not a directory: {root}")
     items = []
-    for candidate in sorted(root.rglob(pattern)):
+    for candidate in iter_index_candidates(root, pattern):
         if len(items) >= MAX_CONTEXT_FILES:
             break
-        if candidate.is_file():
-            try:
-                items.append(context_item_from_file(str(candidate)))
-            except OSError:
-                continue
+        try:
+            items.append(context_item_from_file(str(candidate)))
+        except OSError:
+            continue
     return items
-
-
-def load_index(index_id: str) -> dict:
-    matches = sorted(indexes_dir().glob(f"{index_id}*.json"))
-    if not matches:
-        matches = sorted(indexes_dir().glob(f"*{index_id}*.json"))
-    if len(matches) != 1:
-        raise SystemExit(f"index id must match exactly one document index; matched {len(matches)}")
-    return json.loads(matches[0].read_text(encoding="utf-8"))
 
 
 def list_indexes() -> list[dict]:
@@ -543,6 +777,34 @@ def list_indexes() -> list[dict]:
         except (OSError, json.JSONDecodeError):
             continue
     return rows
+
+
+def load_index(index_id: str | None = None) -> dict:
+    return prompt_for_selection(
+        list_indexes(),
+        kind="index",
+        label_func=index_label,
+        selector=index_id,
+    )
+
+
+def list_topics() -> list[dict]:
+    rows = []
+    for path in sorted(topics_dir().glob("*.json"), reverse=True):
+        try:
+            rows.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return rows
+
+
+def load_topic(topic_id: str | None = None) -> dict:
+    return prompt_for_selection(
+        list_topics(),
+        kind="topic",
+        label_func=topic_label,
+        selector=topic_id,
+    )
 
 
 def token_counts(text: str) -> collections.Counter:
@@ -918,20 +1180,17 @@ def index_file(path: pathlib.Path, index_id: str, ordinal: int, budget: dict) ->
 
 def build_document_index(
     path: str,
-    pattern: str,
+    pattern: str | None = AUTO_INDEX_GLOB,
     name: str | None = None,
     max_derived_bytes: str | None = None,
 ) -> dict:
     root = pathlib.Path(path).expanduser().resolve()
     require_allowed(root)
-    if root.is_file():
-        candidates = [root]
-    elif root.is_dir():
-        candidates = [candidate for candidate in sorted(root.rglob(pattern)) if candidate.is_file()]
-    else:
+    if not root.exists():
         raise SystemExit(f"not a file or directory: {root}")
+    candidates = iter_index_candidates(root, pattern)
     if not candidates:
-        raise SystemExit(f"no files matched {pattern} under {root}")
+        raise SystemExit(f"no ingestible text files matched {pattern or AUTO_INDEX_GLOB} under {root}")
 
     index_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     budget = {
@@ -959,7 +1218,8 @@ def build_document_index(
             "id": index_id,
             "name": name or root.name or str(root),
             "root": str(root),
-            "glob": pattern,
+            "glob": pattern or AUTO_INDEX_GLOB,
+            "selection": "auto-text-v1" if (pattern or AUTO_INDEX_GLOB) == AUTO_INDEX_GLOB else "glob-text-v1",
             "created": now(),
             "technique": "hierarchical retrieval-augmented generation",
             "content_storage": "motoko-state-chunks-v1",
@@ -988,6 +1248,133 @@ def context_item_from_index(index: dict) -> dict:
         "warnings": warnings[:5],
         "summary": index.get("corpus_summary", ""),
     }
+
+
+def context_item_from_topic(topic: dict) -> dict:
+    return {
+        "kind": "topic",
+        "id": topic["id"],
+        "name": topic.get("name", topic["id"]),
+        "query": topic.get("query", ""),
+        "summary": topic.get("summary", ""),
+    }
+
+
+def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, str]]:
+    query_counts = token_counts(query)
+    rows = []
+    for file_item in index.get("files", []):
+        for chunk in file_item.get("chunks", []):
+            content = read_chunk_content(index, chunk)
+            haystack = "\n".join(
+                [
+                    file_item.get("summary", ""),
+                    chunk.get("summary", ""),
+                    content[:4000],
+                ]
+            )
+            rows.append((score_text(query_counts, haystack), file_item, chunk, content))
+    rows.sort(key=lambda row: row[0], reverse=True)
+    return rows
+
+
+def build_topic_dossier(
+    index_ids: list[str],
+    query: str,
+    *,
+    name: str | None = None,
+    max_chunks: int = TOPIC_DEFAULT_CHUNKS,
+) -> dict:
+    query = query.strip()
+    if not query:
+        raise SystemExit("topic query is empty")
+    if not index_ids:
+        raise SystemExit("topic dossier needs at least one document index")
+    max_chunks = max(1, min(max_chunks, TOPIC_MAX_CHUNKS))
+
+    selected_rows = []
+    source_indexes = []
+    for index_id in index_ids:
+        index = load_index(index_id)
+        status, warnings = index_staleness(index)
+        source_indexes.append(
+            {
+                "id": index.get("id", index_id),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "status_at_build": status,
+                "warnings_at_build": warnings[:8],
+            }
+        )
+        for score, file_item, chunk, content in ranked_index_chunks(index, query):
+            selected_rows.append((score, index, file_item, chunk, content))
+
+    selected_rows.sort(key=lambda row: row[0], reverse=True)
+    positive_rows = [row for row in selected_rows if row[0] > 0]
+    selected_rows = (positive_rows or selected_rows)[:max_chunks]
+    if not selected_rows:
+        raise SystemExit("no chunks available in the selected index(es)")
+
+    topic_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    evidence = []
+    blocks = []
+    for score, index, file_item, chunk, content in selected_rows:
+        excerpt = content[:TOPIC_EXCERPT_CHARS]
+        evidence_item = {
+            "index": index.get("id", ""),
+            "index_name": index.get("name", ""),
+            "path": file_item.get("path", ""),
+            "chunk": chunk.get("chunk"),
+            "score": score,
+            "chunk_summary": chunk.get("summary", ""),
+            "file_summary": file_item.get("summary", ""),
+            "excerpt": excerpt,
+            "excerpt_sha256": sha256_hex(excerpt.encode("utf-8")),
+        }
+        evidence.append(evidence_item)
+        blocks.append(
+            textwrap.dedent(
+                f"""
+                Source: index={evidence_item['index']} file={evidence_item['path']} chunk={evidence_item['chunk']} score={score}
+                File summary:
+                {evidence_item['file_summary']}
+
+                Chunk summary:
+                {evidence_item['chunk_summary']}
+
+                Excerpt:
+                {excerpt}
+                """
+            ).strip()
+        )
+
+    print(f"Building topic dossier {topic_id} from {len(evidence)} chunk(s).")
+    summary = summarize_blocks(
+        f"topic dossier: {query}",
+        blocks,
+        textwrap.dedent(
+            """
+            Create a detailed topic dossier from these retrieved source chunks.
+            Use headings: Overview, Detailed Findings, Source Map, Tensions Or
+            Uncertainties, Follow-up Questions. Ground claims in the supplied
+            excerpts and source paths. Do not invent facts.
+            """
+        ).strip(),
+    )
+    topic = {
+        "id": topic_id,
+        "name": name or slug_title(query),
+        "query": query,
+        "created": now(),
+        "technique": "topic-focused hierarchical retrieval-augmented dossier",
+        "source_indexes": source_indexes,
+        "selected_chunk_count": len(evidence),
+        "summary": summary,
+        "evidence": evidence,
+    }
+    atomic_write(topic_path(topic_id), json.dumps(topic, ensure_ascii=False, indent=2) + "\n")
+    print(f"topic saved: {topic_id}")
+    return topic
 
 
 def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
@@ -1076,6 +1463,63 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     return "\n\n".join(part for part in parts if part), sources
 
 
+def retrieve_from_topic(topic: dict, query: str) -> tuple[str, list[dict]]:
+    query_counts = token_counts(query or topic.get("query", ""))
+    evidence = list(topic.get("evidence", []))
+    if query_counts:
+        evidence.sort(
+            key=lambda item: score_text(
+                query_counts,
+                "\n".join(
+                    [
+                        item.get("chunk_summary", ""),
+                        item.get("file_summary", ""),
+                        item.get("excerpt", "")[:4000],
+                    ]
+                ),
+            ),
+            reverse=True,
+        )
+    parts = [
+        f"=== Topic dossier: {topic.get('name', topic.get('id'))} ===",
+        f"Topic query: {topic.get('query', '')}",
+        "Topic summary:",
+        topic.get("summary", ""),
+    ]
+    sources = [
+        {
+            "kind": "topic",
+            "id": topic.get("id", ""),
+            "name": topic.get("name", ""),
+            "query": topic.get("query", ""),
+        }
+    ]
+    used = 0
+    if evidence:
+        parts.append("Topic evidence excerpts:")
+    for item in evidence:
+        remaining = MAX_RETRIEVAL_CHARS - used
+        if remaining <= 0:
+            break
+        excerpt = item.get("excerpt", "")[:remaining]
+        used += len(excerpt)
+        parts.append(
+            f"--- [topic:{topic.get('id')} index:{item.get('index')} file:{item.get('path')} chunk:{item.get('chunk')}] ---\n"
+            f"Chunk summary:\n{item.get('chunk_summary', '')}\n\n"
+            f"Excerpt:\n{excerpt}"
+        )
+        sources.append(
+            {
+                "kind": "topic-evidence",
+                "topic": topic.get("id", ""),
+                "index": item.get("index", ""),
+                "path": item.get("path", ""),
+                "chunk": item.get("chunk"),
+            }
+        )
+    return "\n\n".join(part for part in parts if part), sources
+
+
 def render_memories_with_sources() -> tuple[str, list[dict]]:
     memories = load_memories()
     if not memories:
@@ -1131,7 +1575,13 @@ def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str
                         "status": status,
                         "warnings": warnings[:8],
                     }
-                )
+            )
+            continue
+        if item.get("kind") == "topic":
+            topic = load_topic(item["id"])
+            text, topic_sources = retrieve_from_topic(topic, query)
+            parts.append(text)
+            sources.extend(topic_sources)
             continue
         label = item.get("path", "context")
         content = item.get("content", "")
@@ -1288,11 +1738,16 @@ def format_help() -> str:
         """
         Commands:
           /help                 show this help
+          /                     show a compact command menu
           /exit                 save and exit
           /title TEXT           rename this conversation
+          /resume [ID]          switch to another saved conversation; picker if ID omitted
           /read PATH            attach a bounded excerpt from an allowlisted text file
-          /index PATH           build and attach a reusable hierarchical document index
-          /attach-index ID      attach an existing document index
+          /index PATH           build and attach a mixed text document index
+          /attach-index [ID]    attach an existing document index; picker if ID omitted
+          /topic [INDEX_ID] QUERY
+                                build and attach a topic-focused dossier
+          /attach-topic [ID]    attach an existing topic dossier; picker if ID omitted
           /compact              summarize older messages into compact context
           /sources              show sources used for the last answer
           /personality          show the active personality/style file
@@ -1307,12 +1762,16 @@ def format_help() -> str:
           motoko help           show this full Motoko command reference
           motoko                start a new chat
           motoko list           list conversations
-          motoko resume ID      resume a conversation
-          motoko show ID        show a transcript
-          motoko index PATH     build a reusable document index
+          motoko resume [ID]    resume a conversation; picker if ID omitted
+          motoko show [ID]      show a transcript; picker if ID omitted
+          motoko index PATH     build a mixed text document index
           motoko index PATH --max-derived-bytes 200GiB
           motoko indexes        list document indexes
-          motoko compact ID     compact a saved conversation
+          motoko topic INDEX_ID QUERY
+          motoko topics         list topic dossiers
+          motoko topic-show [ID]
+          motoko chat --topic TOPIC_ID
+          motoko compact [ID]   compact a saved conversation; picker if ID omitted
           motoko memories       list saved memories
           motoko memory review  list memories with provenance
           motoko memory edit ID TEXT
@@ -1323,8 +1782,14 @@ def format_help() -> str:
           motoko allow-dir DIR  allow document reads under a directory
 
         Indexes store derived chunk files under ~/.local/state/motoko/indexes.
+        Topic dossiers store derived summaries and excerpts under ~/.local/state/motoko/topics.
         Default derived-text budget: 200 GiB per new index. Override with
         --max-derived-bytes or MOTOKO_MAX_DERIVED_INDEX_BYTES.
+        Default indexing mode is auto: Motoko recursively ingests readable
+        UTF-8-ish text files, including .txt, .md, .org, source files, config
+        files, and extensionless text. Use --glob only to narrow a one-off index.
+        In chat, readline completion is enabled when available: type '/' then
+        Tab to list slash commands, and omit IDs on picker-aware commands.
         Thinking spinner: MOTOKO_SPINNER=auto|ascii|block|braille|off.
         Source documents are never modified.
         """
@@ -1358,6 +1823,16 @@ def format_sources(sources: list[dict]) -> str:
             )
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
+        elif kind == "topic":
+            lines.append(
+                f"{idx:3d}  topic {source.get('id', '')}  "
+                f"{source.get('name', '')}  query: {source.get('query', '')}"
+            )
+        elif kind == "topic-evidence":
+            lines.append(
+                f"{idx:3d}  topic evidence  {source.get('path', '')} "
+                f"chunk {source.get('chunk')}  topic {source.get('topic', '')}"
+            )
         elif kind == "file-summary":
             lines.append(
                 f"{idx:3d}  file summary  {source.get('path', '')}  "
@@ -1382,23 +1857,121 @@ def maybe_set_title(conv: dict, text: str) -> None:
         conv["title"] = slug_title(text)
 
 
+def attached_index_ids(conv: dict) -> list[str]:
+    ids = []
+    for item in conv.get("context_items", []):
+        if item.get("kind") == "index" and item.get("id"):
+            ids.append(item["id"])
+    return ids
+
+
+def build_topic_from_chat(conv: dict, text: str) -> dict:
+    body = text.strip()
+    if not body and sys.stdin.isatty():
+        index = load_index(None)
+        query = input(style("topic query> ", "green")).strip()
+        return build_topic_dossier([index["id"]], query)
+    if not body:
+        raise SystemExit("usage: /topic [INDEX_ID] QUERY")
+    parts = body.split(maxsplit=1)
+    if len(parts) == 2:
+        try:
+            load_index(parts[0])
+        except SystemExit:
+            pass
+        else:
+            return build_topic_dossier([parts[0]], parts[1])
+
+    index_ids = attached_index_ids(conv)
+    if not index_ids:
+        raise SystemExit("attach an index first or use: /topic INDEX_ID QUERY")
+    return build_topic_dossier(index_ids, body)
+
+
+def print_command_menu() -> None:
+    print(style("Chat commands:", "bold"))
+    for command, description in SLASH_COMMANDS:
+        print(f"  {command_label(command):28s} {description}")
+    print()
+    print(style("Tip:", "bold") + " type '/' then Tab for readline completion when available.")
+    print("Commands that take IDs, such as /resume, /attach-index, and /attach-topic, open a picker if the ID is omitted.")
+
+
+def completion_ids(kind: str) -> list[str]:
+    if kind == "conversation":
+        return [row.get("id", "") for row in list_conversations()]
+    if kind == "index":
+        return [row.get("id", "") for row in list_indexes()]
+    if kind == "topic":
+        return [row.get("id", "") for row in list_topics()]
+    return []
+
+
+def setup_readline_completion() -> None:
+    if readline is None or not sys.stdin.isatty():
+        return
+
+    slash_names = sorted({command.split()[0] for command, _description in SLASH_COMMANDS})
+
+    def complete(text: str, state: int):
+        buffer = readline.get_line_buffer()
+        stripped = buffer.lstrip()
+        matches: list[str] = []
+        if stripped.startswith("/"):
+            parts = stripped.split()
+            if len(parts) <= 1 and not stripped.endswith(" "):
+                matches = [name for name in slash_names if name.startswith(text or "/")]
+            elif parts and parts[0] in {"/resume"}:
+                matches = [item for item in completion_ids("conversation") if item.startswith(text)]
+            elif parts and parts[0] in {"/attach-index", "/topic"}:
+                matches = [item for item in completion_ids("index") if item.startswith(text)]
+            elif parts and parts[0] == "/attach-topic":
+                matches = [item for item in completion_ids("topic") if item.startswith(text)]
+        else:
+            matches = [name for name in SHELL_COMMANDS if name.startswith(text)]
+        try:
+            return matches[state]
+        except IndexError:
+            return None
+
+    readline.set_completer(complete)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+    readline.parse_and_bind("set show-all-if-ambiguous on")
+    readline.parse_and_bind("set completion-ignore-case on")
+
+
+def motoko_input(prompt: str) -> str:
+    return input(style(prompt, "green", "bold"))
+
+
 def chat_loop(conv: dict) -> None:
-    print(f"Motoko conversation: {conv['title']} [{conv['id']}]")
+    setup_readline_completion()
+    print(f"{style('Motoko conversation:', 'bold')} {conv['title']} [{style(conv['id'], 'yellow')}]")
     print("Type /help for commands, /exit to save and leave.")
     while True:
         try:
-            user_text = input("\nYou> ").strip()
+            user_text = motoko_input("\nYou> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             save_conversation(conv)
             return
         if not user_text:
             continue
+        if user_text in {"/", "/commands"}:
+            print_command_menu()
+            continue
         if user_text == "/exit":
             save_conversation(conv)
             return
         if user_text == "/help":
             print(format_help())
+            continue
+        if user_text == "/resume" or user_text.startswith("/resume "):
+            save_conversation(conv)
+            selector = user_text[len("/resume") :].strip() or None
+            conv = load_conversation(selector)
+            print(f"{style('Motoko conversation:', 'bold')} {conv['title']} [{style(conv['id'], 'yellow')}]")
             continue
         if user_text.startswith("/title "):
             conv["title"] = user_text[len("/title ") :].strip() or conv["title"]
@@ -1412,16 +1985,34 @@ def chat_loop(conv: dict) -> None:
             print(f"attached: {item['path']}")
             continue
         if user_text.startswith("/index "):
-            index = build_document_index(user_text[len("/index ") :].strip(), "*.txt")
+            index = build_document_index(user_text[len("/index ") :].strip(), AUTO_INDEX_GLOB)
             conv.setdefault("context_items", []).append(context_item_from_index(index))
             save_conversation(conv)
             print(f"attached index: {index['id']}")
             continue
-        if user_text.startswith("/attach-index "):
-            index = load_index(user_text[len("/attach-index ") :].strip())
+        if user_text == "/attach-index" or user_text.startswith("/attach-index "):
+            selector = user_text[len("/attach-index") :].strip() or None
+            index = load_index(selector)
             conv.setdefault("context_items", []).append(context_item_from_index(index))
             save_conversation(conv)
             print(f"attached index: {index['id']}")
+            continue
+        if user_text == "/topic" or user_text.startswith("/topic "):
+            try:
+                topic = build_topic_from_chat(conv, user_text[len("/topic") :])
+            except SystemExit as exc:
+                print(exc)
+                continue
+            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+            save_conversation(conv)
+            print(f"attached topic: {topic['id']}")
+            continue
+        if user_text == "/attach-topic" or user_text.startswith("/attach-topic "):
+            selector = user_text[len("/attach-topic") :].strip() or None
+            topic = load_topic(selector)
+            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+            save_conversation(conv)
+            print(f"attached topic: {topic['id']}")
             continue
         if user_text == "/compact":
             compact_conversation(conv)
@@ -1465,7 +2056,7 @@ def chat_loop(conv: dict) -> None:
 
         maybe_set_title(conv, user_text)
         conv.setdefault("messages", []).append({"role": "user", "content": user_text})
-        print("\nMotoko> ", end="", flush=True)
+        print("\n" + style("Motoko> ", "cyan", "bold"), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
         reply = call_model(messages)
         conv["last_sources"] = sources
@@ -1586,6 +2177,9 @@ def command_chat(args) -> None:
     for index_id in args.index or []:
         index = load_index(index_id)
         conv.setdefault("context_items", []).append(context_item_from_index(index))
+    for topic_id in args.topic or []:
+        topic = load_topic(topic_id)
+        conv.setdefault("context_items", []).append(context_item_from_topic(topic))
     save_conversation(conv)
     chat_loop(conv)
 
@@ -1614,6 +2208,44 @@ def command_indexes(_args) -> None:
         )
         for warning in warnings[:3]:
             print(f"  warning: {warning}")
+
+
+def command_topic(args) -> None:
+    topic = build_topic_dossier(
+        [args.index],
+        " ".join(args.query),
+        name=args.name,
+        max_chunks=args.chunks,
+    )
+    print(f"{topic['id']}  {topic.get('name', '')}  {topic.get('query', '')}")
+
+
+def command_topics(_args) -> None:
+    rows = list_topics()
+    if not rows:
+        print("No topic dossiers yet.")
+        return
+    for topic in rows:
+        print(
+            f"{topic.get('created', '')}  {topic.get('id')}  "
+            f"{topic.get('selected_chunk_count', 0)} chunk(s)  "
+            f"{topic.get('name', '')}  {topic.get('query', '')}"
+        )
+
+
+def command_topic_show(args) -> None:
+    topic = load_topic(args.id)
+    print(f"{topic.get('name', 'Untitled')} [{topic.get('id')}]\n")
+    print(f"query> {topic.get('query', '')}\n")
+    print(topic.get("summary", ""))
+    if args.evidence:
+        print("\nEvidence:")
+        for item in topic.get("evidence", []):
+            print(
+                f"\n--- index:{item.get('index')} file:{item.get('path')} "
+                f"chunk:{item.get('chunk')} score:{item.get('score')} ---"
+            )
+            print(item.get("excerpt", ""))
 
 
 def command_memory(args) -> None:
@@ -1650,19 +2282,20 @@ def main(argv: list[str]) -> int:
     chat.add_argument("--file", action="append")
     chat.add_argument("--dir", action="append")
     chat.add_argument("--index", action="append")
-    chat.add_argument("--glob", default="*.txt")
+    chat.add_argument("--topic", action="append")
+    chat.add_argument("--glob", default=AUTO_INDEX_GLOB)
     chat.set_defaults(func=command_chat)
 
     resume = sub.add_parser("resume", help="resume a conversation")
-    resume.add_argument("id")
+    resume.add_argument("id", nargs="?")
     resume.set_defaults(func=command_resume)
 
     show = sub.add_parser("show", help="show a transcript")
-    show.add_argument("id")
+    show.add_argument("id", nargs="?")
     show.set_defaults(func=command_show)
 
     compact = sub.add_parser("compact", help="compact a conversation")
-    compact.add_argument("id")
+    compact.add_argument("id", nargs="?")
     compact.set_defaults(func=lambda args: compact_conversation(load_conversation(args.id)))
 
     listed = sub.add_parser("list", help="list conversations")
@@ -1670,7 +2303,7 @@ def main(argv: list[str]) -> int:
 
     index = sub.add_parser("index", help="build a document index")
     index.add_argument("path")
-    index.add_argument("--glob", default="*.txt")
+    index.add_argument("--glob", default=AUTO_INDEX_GLOB)
     index.add_argument("--name")
     index.add_argument(
         "--max-derived-bytes",
@@ -1680,6 +2313,21 @@ def main(argv: list[str]) -> int:
 
     indexes = sub.add_parser("indexes", help="list document indexes")
     indexes.set_defaults(func=command_indexes)
+
+    topic = sub.add_parser("topic", help="build a topic dossier from a document index")
+    topic.add_argument("index")
+    topic.add_argument("query", nargs="+")
+    topic.add_argument("--name")
+    topic.add_argument("--chunks", type=int, default=TOPIC_DEFAULT_CHUNKS)
+    topic.set_defaults(func=command_topic)
+
+    topics = sub.add_parser("topics", help="list topic dossiers")
+    topics.set_defaults(func=command_topics)
+
+    topic_show = sub.add_parser("topic-show", help="show a topic dossier")
+    topic_show.add_argument("id", nargs="?")
+    topic_show.add_argument("--evidence", action="store_true")
+    topic_show.set_defaults(func=command_topic_show)
 
     memories = sub.add_parser("memories", help="list memories")
     memories.set_defaults(func=lambda _args: print_memories())
