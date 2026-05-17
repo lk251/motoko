@@ -16,6 +16,8 @@ Design constraints:
 - Inspectable memories, sources, and index freshness.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
+- Reusable indexes default to a 200 GiB derived-text budget and fail closed
+  before writing beyond it.
 - User-owned personality/style guidance in
   `~/.config/motoko/personality.md`.
 

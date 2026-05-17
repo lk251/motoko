@@ -29,6 +29,7 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:8082/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-ud-q5-k-xl"
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
+DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -52,6 +53,54 @@ ask clarifying questions only when useful, and keep a thoughtful, grounded tone.
 
 def now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def human_bytes(count: int) -> str:
+    value = float(count)
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{count} B"
+
+
+def parse_byte_count(value: str) -> int:
+    text = value.strip().lower().replace("_", "")
+    match = re.fullmatch(r"(\d+)([kmgt]?i?b?|)", text)
+    if not match:
+        raise ValueError(f"invalid byte count: {value}")
+    amount = int(match.group(1))
+    suffix = match.group(2)
+    multipliers = {
+        "": 1,
+        "b": 1,
+        "k": 1024,
+        "kb": 1024,
+        "kib": 1024,
+        "m": 1024**2,
+        "mb": 1024**2,
+        "mib": 1024**2,
+        "g": 1024**3,
+        "gb": 1024**3,
+        "gib": 1024**3,
+        "t": 1024**4,
+        "tb": 1024**4,
+        "tib": 1024**4,
+    }
+    return amount * multipliers[suffix]
+
+
+def max_derived_index_bytes(override: str | None = None) -> int:
+    raw = override or os.environ.get("MOTOKO_MAX_DERIVED_INDEX_BYTES")
+    if not raw:
+        return DEFAULT_MAX_DERIVED_INDEX_BYTES
+    try:
+        return parse_byte_count(raw)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def state_root() -> pathlib.Path:
@@ -621,12 +670,41 @@ def index_artifact_warnings(index: dict) -> list[str]:
     return warnings
 
 
-def write_index_chunk(index_id: str, ordinal: int, chunk_idx: int, content: str) -> tuple[str, int]:
+def reserve_index_bytes(
+    budget: dict,
+    next_bytes: int,
+    *,
+    path: pathlib.Path,
+    chunk_idx: int,
+) -> None:
+    max_bytes = budget["max_bytes"]
+    used = budget["used_bytes"]
+    if used + next_bytes > max_bytes:
+        raise SystemExit(
+            "Motoko stopped before writing more derived index text: "
+            f"budget {human_bytes(max_bytes)}, already written {human_bytes(used)}, "
+            f"next chunk {human_bytes(next_bytes)} from {path} chunk {chunk_idx}. "
+            "Narrow the index with --glob or set MOTOKO_MAX_DERIVED_INDEX_BYTES "
+            "to a reviewed larger value."
+        )
+    budget["used_bytes"] = used + next_bytes
+
+
+def write_index_chunk(
+    index_id: str,
+    ordinal: int,
+    chunk_idx: int,
+    content: str,
+    budget: dict,
+    source_path: pathlib.Path,
+) -> tuple[str, int]:
     relpath = chunk_content_relpath(index_id, ordinal, chunk_idx)
     path = indexes_dir() / relpath
+    content_bytes = len(content.encode("utf-8"))
+    reserve_index_bytes(budget, content_bytes, path=source_path, chunk_idx=chunk_idx)
     ensure_private_dir(path.parent)
     atomic_write(path, content)
-    return relpath, len(content.encode("utf-8"))
+    return relpath, content_bytes
 
 
 def summarize_and_store_chunk(
@@ -635,6 +713,7 @@ def summarize_and_store_chunk(
     ordinal: int,
     chunk_idx: int,
     content: str,
+    budget: dict,
 ) -> dict | None:
     content = content.strip()
     if not content:
@@ -646,7 +725,7 @@ def summarize_and_store_chunk(
         content[:SUMMARY_INPUT_CHARS],
         "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
     )
-    relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content)
+    relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content, budget, path)
     return {
         "id": f"{ordinal}.{chunk_idx}",
         "path": str(path),
@@ -658,7 +737,12 @@ def summarize_and_store_chunk(
     }
 
 
-def stream_index_file(path: pathlib.Path, index_id: str, ordinal: int) -> tuple[dict, list[dict], int]:
+def stream_index_file(
+    path: pathlib.Path,
+    index_id: str,
+    ordinal: int,
+    budget: dict,
+) -> tuple[dict, list[dict], int]:
     stat = path.stat()
     digest = hashlib.sha256()
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -673,7 +757,7 @@ def stream_index_file(path: pathlib.Path, index_id: str, ordinal: int) -> tuple[
         if not chunk:
             return
         chunk_idx += 1
-        item = summarize_and_store_chunk(path, index_id, ordinal, chunk_idx, chunk)
+        item = summarize_and_store_chunk(path, index_id, ordinal, chunk_idx, chunk, budget)
         if item is not None:
             derived_content_bytes += item.get("content_bytes", 0)
             indexed_chunks.append(item)
@@ -753,8 +837,8 @@ def summarize_blocks(label: str, blocks: list[str], instruction: str) -> str:
         round_no += 1
 
 
-def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
-    fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(path, index_id, ordinal)
+def index_file(path: pathlib.Path, index_id: str, ordinal: int, budget: dict) -> dict:
+    fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(path, index_id, ordinal, budget)
 
     print(f"  summarizing file {path}", flush=True)
     file_summary = summarize_blocks(
@@ -778,7 +862,12 @@ def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
     }
 
 
-def build_document_index(path: str, pattern: str, name: str | None = None) -> dict:
+def build_document_index(
+    path: str,
+    pattern: str,
+    name: str | None = None,
+    max_derived_bytes: str | None = None,
+) -> dict:
     root = pathlib.Path(path).expanduser().resolve()
     require_allowed(root)
     if root.is_file():
@@ -791,13 +880,18 @@ def build_document_index(path: str, pattern: str, name: str | None = None) -> di
         raise SystemExit(f"no files matched {pattern} under {root}")
 
     index_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    budget = {
+        "max_bytes": max_derived_index_bytes(max_derived_bytes),
+        "used_bytes": 0,
+    }
     files = []
     print(f"Building document index {index_id} from {len(candidates)} file(s).")
+    print(f"Derived index text budget: {human_bytes(budget['max_bytes'])}.")
     saved = False
     try:
         for idx, candidate in enumerate(candidates, 1):
             try:
-                files.append(index_file(candidate, index_id, idx))
+                files.append(index_file(candidate, index_id, idx, budget))
             except OSError as exc:
                 print(f"  skipped {candidate}: {exc}", file=sys.stderr)
 
@@ -815,6 +909,7 @@ def build_document_index(path: str, pattern: str, name: str | None = None) -> di
             "created": now(),
             "technique": "hierarchical retrieval-augmented generation",
             "content_storage": "motoko-state-chunks-v1",
+            "derived_content_budget_bytes": budget["max_bytes"],
             "derived_content_bytes": sum(item.get("derived_content_bytes", 0) for item in files),
             "corpus_summary": corpus_summary,
             "files": files,
@@ -1149,6 +1244,7 @@ def format_help() -> str:
           motoko resume ID      resume a conversation
           motoko show ID        show a transcript
           motoko index PATH     build a reusable document index
+          motoko index PATH --max-derived-bytes 200GiB
           motoko indexes        list document indexes
           motoko compact ID     compact a saved conversation
           motoko memories       list saved memories
@@ -1161,6 +1257,8 @@ def format_help() -> str:
           motoko allow-dir DIR  allow document reads under a directory
 
         Indexes store derived chunk files under ~/.local/state/motoko/indexes.
+        Default derived-text budget: 200 GiB per new index. Override with
+        --max-derived-bytes or MOTOKO_MAX_DERIVED_INDEX_BYTES.
         Source documents are never modified.
         """
     ).strip()
@@ -1431,7 +1529,7 @@ def command_resume(args) -> None:
 
 
 def command_index(args) -> None:
-    index = build_document_index(args.path, args.glob, args.name)
+    index = build_document_index(args.path, args.glob, args.name, args.max_derived_bytes)
     print(f"{index['id']}  {index.get('name', '')}  {index.get('root', '')}")
 
 
@@ -1507,6 +1605,10 @@ def main(argv: list[str]) -> int:
     index.add_argument("path")
     index.add_argument("--glob", default="*.txt")
     index.add_argument("--name")
+    index.add_argument(
+        "--max-derived-bytes",
+        help="maximum derived chunk text to store for this index, e.g. 200GiB",
+    )
     index.set_defaults(func=command_index)
 
     indexes = sub.add_parser("indexes", help="list document indexes")

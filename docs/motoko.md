@@ -185,6 +185,19 @@ motoko allow-dir ~/Documents
 motoko index ~/Documents --glob '*.txt' --name personal-notes
 ```
 
+By default, a new reusable index may store up to 200 GiB of derived chunk text
+under Motoko state. Override this for a reviewed one-off index with:
+
+```bash
+motoko index ~/Documents --glob '*.txt' --max-derived-bytes 250GiB
+```
+
+or set:
+
+```bash
+MOTOKO_MAX_DERIVED_INDEX_BYTES=250GiB motoko index ~/Documents
+```
+
 Start a chat while indexing a directory:
 
 ```bash
@@ -241,8 +254,8 @@ summaries, fingerprints, and paths to those derived chunk files.
 This means Motoko may duplicate the indexed text inside her own private state so
 that later retrieval can answer from the whole indexed corpus. The source files
 themselves are not modified. If an index build fails before the index JSON is
-saved, Motoko removes the partially written chunk directory to avoid abandoned
-derived text.
+saved, or if the derived-text budget would be exceeded, Motoko removes the
+partially written chunk directory to avoid abandoned derived text.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad
