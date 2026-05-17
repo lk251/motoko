@@ -8,6 +8,7 @@ llama.cpp OpenAI-compatible endpoint.
 from __future__ import annotations
 
 import argparse
+import codecs
 import collections
 import datetime as _dt
 import hashlib
@@ -15,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import sys
 import textwrap
 import urllib.error
@@ -27,7 +29,6 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:8082/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-ud-q5-k-xl"
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
-MAX_INDEX_FILE_BYTES = 20 * 1024 * 1024
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -110,6 +111,10 @@ def conversation_path(conversation_id: str) -> pathlib.Path:
 
 def index_path(index_id: str) -> pathlib.Path:
     return indexes_dir() / f"{index_id}.json"
+
+
+def index_data_dir(index_id: str) -> pathlib.Path:
+    return ensure_private_dir(indexes_dir() / f"{index_id}.chunks")
 
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
@@ -484,15 +489,6 @@ def source_fingerprint(path: pathlib.Path) -> dict:
     }
 
 
-def read_index_bytes(path: pathlib.Path) -> tuple[bytes, bool, int]:
-    limit = MAX_INDEX_FILE_BYTES
-    with path.open("rb") as fh:
-        data = fh.read(limit + 1)
-    if len(data) > limit:
-        return data[:limit], True, path.stat().st_size - limit
-    return data, False, 0
-
-
 def file_staleness(file_item: dict) -> tuple[str, list[str]]:
     path = pathlib.Path(file_item.get("path", "")).expanduser()
     expected = file_item.get("source_fingerprint") or {}
@@ -539,6 +535,9 @@ def index_staleness(index: dict) -> tuple[str, list[str]]:
         return "unknown", warnings
     if "mtime-only" in statuses:
         return "metadata-changed", warnings
+    artifact_warnings = index_artifact_warnings(index)
+    if artifact_warnings:
+        return "stale", warnings + artifact_warnings
     return "fresh", warnings
 
 
@@ -568,6 +567,139 @@ def summarize_text(label: str, text: str, instruction: str) -> str:
         ],
         temperature=0.2,
     )
+
+
+def chunk_content_relpath(index_id: str, ordinal: int, chunk_idx: int) -> str:
+    return f"{index_id}.chunks/{ordinal:06d}-{chunk_idx:06d}.txt"
+
+
+def chunk_content_path(index: dict, chunk: dict) -> pathlib.Path | None:
+    relpath = chunk.get("content_path")
+    if not relpath:
+        return None
+    base = indexes_dir().resolve()
+    candidate = (base / relpath).resolve()
+    if candidate != base and not is_under(candidate, base):
+        raise ValueError(f"chunk content path escapes Motoko index state: {relpath}")
+    return candidate
+
+
+def read_chunk_content(index: dict, chunk: dict) -> str:
+    if "content" in chunk:
+        return chunk.get("content", "")
+    try:
+        path = chunk_content_path(index, chunk)
+    except ValueError:
+        return ""
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def index_artifact_warnings(index: dict) -> list[str]:
+    warnings = []
+    for file_item in index.get("files", []):
+        for chunk in file_item.get("chunks", []):
+            if "content" in chunk:
+                continue
+            try:
+                path = chunk_content_path(index, chunk)
+            except ValueError as exc:
+                warnings.append(str(exc))
+                continue
+            if path is None:
+                warnings.append(
+                    f"{file_item.get('path', '')}: chunk {chunk.get('chunk')} has no stored content"
+                )
+            elif not path.exists():
+                warnings.append(
+                    f"{file_item.get('path', '')}: missing stored chunk {chunk.get('chunk')}"
+                )
+    return warnings
+
+
+def write_index_chunk(index_id: str, ordinal: int, chunk_idx: int, content: str) -> tuple[str, int]:
+    relpath = chunk_content_relpath(index_id, ordinal, chunk_idx)
+    path = indexes_dir() / relpath
+    ensure_private_dir(path.parent)
+    atomic_write(path, content)
+    return relpath, len(content.encode("utf-8"))
+
+
+def summarize_and_store_chunk(
+    path: pathlib.Path,
+    index_id: str,
+    ordinal: int,
+    chunk_idx: int,
+    content: str,
+) -> dict | None:
+    content = content.strip()
+    if not content:
+        return None
+    label = f"{path} chunk {chunk_idx}"
+    print(f"  summarizing {label}", flush=True)
+    summary = summarize_text(
+        label,
+        content[:SUMMARY_INPUT_CHARS],
+        "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
+    )
+    relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content)
+    return {
+        "id": f"{ordinal}.{chunk_idx}",
+        "path": str(path),
+        "chunk": chunk_idx,
+        "summary": summary,
+        "content_path": relpath,
+        "content_bytes": content_bytes,
+        "content_sha256": sha256_hex(content.encode("utf-8")),
+    }
+
+
+def stream_index_file(path: pathlib.Path, index_id: str, ordinal: int) -> tuple[dict, list[dict], int]:
+    stat = path.stat()
+    digest = hashlib.sha256()
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    buffer = ""
+    indexed_chunks = []
+    chunk_idx = 0
+    derived_content_bytes = 0
+
+    def emit(text: str) -> None:
+        nonlocal chunk_idx, derived_content_bytes
+        chunk = text.strip()
+        if not chunk:
+            return
+        chunk_idx += 1
+        item = summarize_and_store_chunk(path, index_id, ordinal, chunk_idx, chunk)
+        if item is not None:
+            derived_content_bytes += item.get("content_bytes", 0)
+            indexed_chunks.append(item)
+
+    with path.open("rb") as fh:
+        for raw in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(raw)
+            buffer += decoder.decode(raw)
+            while len(buffer) >= INDEX_CHUNK_CHARS:
+                end = INDEX_CHUNK_CHARS
+                boundary = buffer.rfind("\n\n", 0, end)
+                if boundary > INDEX_CHUNK_CHARS // 2:
+                    end = boundary + 2
+                if end <= 0:
+                    end = INDEX_CHUNK_CHARS
+                emit(buffer[:end])
+                buffer = buffer[end:]
+    buffer += decoder.decode(b"", final=True)
+    emit(buffer)
+
+    fingerprint = {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": digest.hexdigest(),
+    }
+    return fingerprint, indexed_chunks, derived_content_bytes
 
 
 def chunk_blocks_by_chars(blocks: list[str], max_chars: int) -> list[list[str]]:
@@ -615,59 +747,32 @@ def summarize_blocks(label: str, blocks: list[str], instruction: str) -> str:
                     "Summarize this batch faithfully for a higher-level retrieval summary. Preserve names, dates, decisions, obligations, and unusual details.",
                 )
             )
+        if len(reduced) >= len(pending):
+            return summarize_text(label, "\n\n".join(reduced), instruction)
         pending = reduced
         round_no += 1
 
 
 def index_file(path: pathlib.Path, index_id: str, ordinal: int) -> dict:
-    fingerprint = source_fingerprint(path)
-    data, truncated, omitted_bytes = read_index_bytes(path)
-    if truncated:
-        print(
-            f"  indexing first {MAX_INDEX_FILE_BYTES // (1024 * 1024)} MiB of {path}; "
-            f"omitted {omitted_bytes} byte(s)",
-            flush=True,
-        )
-    text = data.decode("utf-8", errors="replace")
-    chunks = split_text(text)
-    indexed_chunks = []
-    for chunk_idx, chunk in enumerate(chunks, 1):
-        label = f"{path} chunk {chunk_idx}/{len(chunks)}"
-        if len(chunks) == 1 and len(chunk) <= SUMMARY_INPUT_CHARS:
-            summary_input = chunk
-        else:
-            summary_input = chunk[:SUMMARY_INPUT_CHARS]
-        print(f"  summarizing {label}", flush=True)
-        summary = summarize_text(
-            label,
-            summary_input,
-            "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
-        )
-        indexed_chunks.append(
-            {
-                "id": f"{ordinal}.{chunk_idx}",
-                "path": str(path),
-                "chunk": chunk_idx,
-                "summary": summary,
-                "content": chunk,
-            }
-        )
+    fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(path, index_id, ordinal)
 
     print(f"  summarizing file {path}", flush=True)
     file_summary = summarize_blocks(
         str(path),
         [f"Chunk {chunk['chunk']}:\n{chunk['summary']}" for chunk in indexed_chunks]
-        or [text],
+        or [""],
         "Create a file-level summary from these chunk summaries. Include what the file is about and when to retrieve it.",
     )
     return {
         "path": str(path),
         "source_fingerprint": fingerprint,
-        "indexed_sha256": sha256_hex(data),
-        "bytes_indexed": len(data),
-        "bytes_omitted": omitted_bytes,
-        "truncated": truncated,
+        "indexed_sha256": fingerprint["sha256"],
+        "bytes_indexed": fingerprint["size"],
+        "bytes_omitted": 0,
+        "truncated": False,
         "chunk_count": len(indexed_chunks),
+        "content_storage": "motoko-state-chunks-v1",
+        "derived_content_bytes": derived_content_bytes,
         "summary": file_summary,
         "chunks": indexed_chunks,
     }
@@ -688,31 +793,39 @@ def build_document_index(path: str, pattern: str, name: str | None = None) -> di
     index_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     files = []
     print(f"Building document index {index_id} from {len(candidates)} file(s).")
-    for idx, candidate in enumerate(candidates, 1):
-        try:
-            files.append(index_file(candidate, index_id, idx))
-        except OSError as exc:
-            print(f"  skipped {candidate}: {exc}", file=sys.stderr)
+    saved = False
+    try:
+        for idx, candidate in enumerate(candidates, 1):
+            try:
+                files.append(index_file(candidate, index_id, idx))
+            except OSError as exc:
+                print(f"  skipped {candidate}: {exc}", file=sys.stderr)
 
-    print("  summarizing corpus", flush=True)
-    corpus_summary = summarize_blocks(
-        str(root),
-        [f"{item['path']}:\n{item['summary']}" for item in files],
-        "Create a corpus-level map from these file summaries. Explain the main themes and which files matter for which questions.",
-    )
-    index = {
-        "id": index_id,
-        "name": name or root.name or str(root),
-        "root": str(root),
-        "glob": pattern,
-        "created": now(),
-        "technique": "hierarchical retrieval-augmented generation",
-        "corpus_summary": corpus_summary,
-        "files": files,
-    }
-    atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-    print(f"index saved: {index_id}")
-    return index
+        print("  summarizing corpus", flush=True)
+        corpus_summary = summarize_blocks(
+            str(root),
+            [f"{item['path']}:\n{item['summary']}" for item in files],
+            "Create a corpus-level map from these file summaries. Explain the main themes and which files matter for which questions.",
+        )
+        index = {
+            "id": index_id,
+            "name": name or root.name or str(root),
+            "root": str(root),
+            "glob": pattern,
+            "created": now(),
+            "technique": "hierarchical retrieval-augmented generation",
+            "content_storage": "motoko-state-chunks-v1",
+            "derived_content_bytes": sum(item.get("derived_content_bytes", 0) for item in files),
+            "corpus_summary": corpus_summary,
+            "files": files,
+        }
+        atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        saved = True
+        print(f"index saved: {index_id}")
+        return index
+    finally:
+        if not saved:
+            shutil.rmtree(index_data_dir(index_id), ignore_errors=True)
 
 
 def context_item_from_index(index: dict) -> dict:
@@ -737,11 +850,12 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         file_score = score_text(query_counts, file_item.get("summary", ""))
         file_rows.append((file_score, file_item))
         for chunk in file_item.get("chunks", []):
+            content = read_chunk_content(index, chunk)
             haystack = "\n".join(
                 [
                     file_item.get("summary", ""),
                     chunk.get("summary", ""),
-                    chunk.get("content", "")[:4000],
+                    content[:4000],
                 ]
             )
             chunk_rows.append((score_text(query_counts, haystack), file_item, chunk))
@@ -791,7 +905,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         parts.append("Retrieved excerpts:")
         used = 0
         for _score, file_item, chunk in selected_chunks:
-            content = chunk.get("content", "")
+            content = read_chunk_content(index, chunk)
             remaining = MAX_RETRIEVAL_CHARS - used
             if remaining <= 0:
                 break
@@ -1015,8 +1129,8 @@ def format_help() -> str:
           /help                 show this help
           /exit                 save and exit
           /title TEXT           rename this conversation
-          /read PATH            attach an allowlisted UTF-8 text file
-          /index PATH           build and attach a hierarchical document index
+          /read PATH            attach a bounded excerpt from an allowlisted text file
+          /index PATH           build and attach a reusable hierarchical document index
           /attach-index ID      attach an existing document index
           /compact              summarize older messages into compact context
           /sources              show sources used for the last answer
@@ -1029,19 +1143,25 @@ def format_help() -> str:
           /memorize             ask Motoko to propose memories from this chat
 
         Shell commands:
+          motoko help           show this full Motoko command reference
           motoko                start a new chat
           motoko list           list conversations
           motoko resume ID      resume a conversation
           motoko show ID        show a transcript
           motoko index PATH     build a reusable document index
           motoko indexes        list document indexes
+          motoko compact ID     compact a saved conversation
           motoko memories       list saved memories
           motoko memory review  list memories with provenance
           motoko memory edit ID TEXT
           motoko forget ID      delete a memory
           motoko personality    show personality/style guidance
+          motoko personality path
           motoko personality init
           motoko allow-dir DIR  allow document reads under a directory
+
+        Indexes store derived chunk files under ~/.local/state/motoko/indexes.
+        Source documents are never modified.
         """
     ).strip()
 
@@ -1356,6 +1476,9 @@ def command_personality(args) -> None:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
     sub = parser.add_subparsers(dest="command")
+
+    help_cmd = sub.add_parser("help", help="show the full Motoko command reference")
+    help_cmd.set_defaults(func=lambda _args: print(format_help()))
 
     chat = sub.add_parser("chat", help="start a new chat")
     chat.add_argument("--title")

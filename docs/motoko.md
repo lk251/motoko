@@ -47,6 +47,7 @@ Default state paths:
 
 ```text
 ~/.local/state/motoko/conversations/
+~/.local/state/motoko/indexes/
 ~/.local/state/motoko/memories.jsonl
 ```
 
@@ -104,7 +105,8 @@ Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
 Motoko never edits, rewrites, annotates, truncates, moves, or deletes source
 documents. It writes only its own config and state files under the Motoko config
-and state directories.
+and state directories. Reusable document indexes are derived Motoko state, not
+source-document edits.
 
 ## Commands
 
@@ -112,6 +114,7 @@ Start a new chat:
 
 ```bash
 motoko
+motoko help
 ```
 
 List and resume conversations:
@@ -213,7 +216,7 @@ Each index stores:
 - a corpus-level summary;
 - one summary per file;
 - one summary per chunk;
-- bounded raw chunk text for later retrieval.
+- raw chunk text for later retrieval, stored as Motoko-owned derived files;
 - source fingerprints: file size, mtime, and SHA-256 at index time.
 
 On each question, Motoko scores the indexed summaries and chunks with a small
@@ -229,13 +232,17 @@ stale, Motoko includes a freshness warning in the prompt and `/sources` output
 so the answer can be reviewed with that caveat.
 
 Current indexing bounds favor completeness over early omission. Motoko does not
-cap the number of files matched by a document-index request. For each file, it
-indexes up to 20 MiB and splits all indexed text into summarized chunks. If a
-file exceeds 20 MiB, Motoko does not modify the source file; it indexes a
-truncated in-memory copy, records `truncated = true`, and records how many bytes
-were omitted. This non-destructive source-file rule applies to every indexed or
-attached file, not only files above the size cap. Motoko should not be treated
-as having read bytes beyond a recorded truncation point.
+cap the number of files matched by a document-index request and does not impose
+a fixed per-file byte cap during reusable indexing. It streams each source file,
+splits the decoded text into summarized chunks, and stores those chunks under
+`~/.local/state/motoko/indexes/INDEX_ID.chunks/`. The index JSON stores metadata,
+summaries, fingerprints, and paths to those derived chunk files.
+
+This means Motoko may duplicate the indexed text inside her own private state so
+that later retrieval can answer from the whole indexed corpus. The source files
+themselves are not modified. If an index build fails before the index JSON is
+saved, Motoko removes the partially written chunk directory to avoid abandoned
+derived text.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad
