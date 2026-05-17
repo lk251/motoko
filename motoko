@@ -56,12 +56,34 @@ MEMORY_SEARCH_LIMIT = 40
 MEMORY_CONTEXT_RECENT_MESSAGES = 6
 MEMORY_DEFAULT_IMPORTANCE = 3
 MEMORY_MAX_IMPORTANCE = 5
+MEMORY_DUPLICATE_THRESHOLD = 0.72
+AUTO_MEMORY_MIN_MESSAGES = 4
+AUTO_MEMORY_INTERVAL_MESSAGES = 4
+AUTO_MEMORY_MAX_PROPOSALS = 5
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
 COMPACT_KEEP_MESSAGES = 8
+AUTO_SUMMARY_MIN_MESSAGES = 24
+AUTO_SUMMARY_INTERVAL_MESSAGES = 10
 MAX_PERSONALITY_CHARS = 12000
 AUTO_INDEX_GLOB = "auto"
 TEXT_SAMPLE_BYTES = 8192
+DEEP_RETRIEVAL_TERMS = {
+    "all",
+    "analyze",
+    "compare",
+    "comprehensive",
+    "deep",
+    "detail",
+    "detailed",
+    "evidence",
+    "explain",
+    "full",
+    "quote",
+    "specific",
+    "timeline",
+    "thorough",
+}
 
 SKIP_INDEX_DIR_NAMES = {
     ".git",
@@ -87,7 +109,11 @@ SLASH_COMMANDS = [
     ("/index PATH", "build and attach a mixed text document index"),
     ("/attach-index [ID]", "attach an existing document index"),
     ("/topic [INDEX_ID] QUERY", "build and attach a topic dossier"),
+    ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier"),
     ("/attach-topic [ID]", "attach an existing topic dossier"),
+    ("/indexes", "list document indexes"),
+    ("/topics", "list topic dossiers"),
+    ("/topic-show [ID]", "show a topic dossier"),
     ("/compact", "summarize older turns into compact context"),
     ("/sources", "show sources used for the last answer"),
     ("/status", "show model, memory, and context state"),
@@ -114,6 +140,7 @@ SHELL_COMMANDS = [
     "index",
     "indexes",
     "topic",
+    "deepen",
     "topics",
     "topic-show",
     "memories",
@@ -135,6 +162,8 @@ SIMPLE_SLASH_COMMANDS = {
     "/status",
     "/personality",
     "/memories",
+    "/indexes",
+    "/topics",
     "/memory review",
     "/memorize",
 }
@@ -567,6 +596,60 @@ def write_memory_rows(rows: list[dict]) -> None:
     atomic_write(memories_path(), text)
 
 
+def text_similarity(left: str, right: str) -> float:
+    left_terms = set(token_counts(left))
+    right_terms = set(token_counts(right))
+    if not left_terms or not right_terms:
+        return 0.0
+    overlap = left_terms & right_terms
+    return len(overlap) / max(1, min(len(left_terms), len(right_terms)))
+
+
+def memory_tags(text: str) -> list[str]:
+    counts = token_counts(text)
+    stop = {
+        "about",
+        "after",
+        "also",
+        "because",
+        "before",
+        "could",
+        "from",
+        "have",
+        "into",
+        "javier",
+        "motoko",
+        "should",
+        "that",
+        "their",
+        "there",
+        "this",
+        "with",
+        "would",
+    }
+    tags = []
+    for word, _count in counts.most_common(20):
+        if word in stop:
+            continue
+        tags.append(word)
+        if len(tags) >= 8:
+            break
+    return tags
+
+
+def find_similar_memory(text: str, rows: list[dict]) -> dict | None:
+    best = None
+    best_score = 0.0
+    for row in rows:
+        score = text_similarity(text, row.get("text", ""))
+        if score > best_score:
+            best = row
+            best_score = score
+    if best is not None and best_score >= MEMORY_DUPLICATE_THRESHOLD:
+        return best
+    return None
+
+
 def add_memory(
     text: str,
     source: str = "manual",
@@ -580,6 +663,26 @@ def add_memory(
     text = text.strip()
     if not text:
         raise SystemExit("empty memory")
+    existing_rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    duplicate = find_similar_memory(text, existing_rows)
+    if duplicate is not None:
+        duplicate["updated"] = now()
+        duplicate["last_seen"] = now()
+        duplicate["seen_count"] = int(duplicate.get("seen_count", 1)) + 1
+        if source:
+            duplicate["source"] = duplicate.get("source", source)
+        if conversation_id:
+            duplicate["conversation_id"] = duplicate.get("conversation_id") or conversation_id
+        if derived_from:
+            duplicate["derived_from"] = duplicate.get("derived_from") or derived_from
+        duplicate["importance"] = max(
+            int(duplicate.get("importance", MEMORY_DEFAULT_IMPORTANCE)),
+            max(1, min(MEMORY_MAX_IMPORTANCE, int(importance))),
+        )
+        merged_tags = list(dict.fromkeys([*duplicate.get("tags", []), *(tags or memory_tags(text))]))
+        duplicate["tags"] = merged_tags[:8]
+        write_memory_rows(existing_rows)
+        return
     row = {
         "id": memory_id(),
         "created": now(),
@@ -587,7 +690,8 @@ def add_memory(
         "text": text[:MAX_MEMORY_CHARS],
         "importance": max(1, min(MEMORY_MAX_IMPORTANCE, int(importance))),
         "pinned": bool(pinned),
-        "tags": (tags or [])[:8],
+        "tags": (tags or memory_tags(text))[:8],
+        "seen_count": 1,
     }
     if conversation_id:
         row["conversation_id"] = conversation_id
@@ -680,6 +784,8 @@ def print_memories(*, verbose: bool = False) -> None:
                 print(f"     derived from: {row.get('derived_from')}")
             if row.get("tags"):
                 print(f"     tags: {', '.join(row.get('tags', []))}")
+            if row.get("seen_count"):
+                print(f"     seen: {row.get('seen_count')} time(s)")
 
 
 def memory_query_text(conv: dict | None, query: str = "") -> str:
@@ -693,7 +799,23 @@ def memory_query_text(conv: dict | None, query: str = "") -> str:
     return "\n".join(part for part in parts if part)
 
 
-def memory_relevance(row: dict, query_counts: collections.Counter, recency_bonus: int) -> int:
+def context_query_text(conv: dict | None, query: str = "") -> str:
+    parts = [query, conv.get("title", "") if conv else ""]
+    if conv:
+        if conv.get("summary"):
+            parts.append(conv.get("summary", "")[-5000:])
+        for msg in conv.get("messages", [])[-8:]:
+            if msg.get("role") in {"user", "assistant"}:
+                parts.append(msg.get("content", ""))
+    return "\n".join(part for part in parts if part)
+
+
+def memory_relevance(
+    row: dict,
+    query_counts: collections.Counter,
+    recency_bonus: int,
+    conversation_terms: collections.Counter | None = None,
+) -> int:
     text = "\n".join(
         [
             row.get("text", ""),
@@ -702,9 +824,11 @@ def memory_relevance(row: dict, query_counts: collections.Counter, recency_bonus
         ]
     )
     lexical = score_text(query_counts, text)
+    thread_match = score_text(conversation_terms or collections.Counter(), text)
     importance = int(row.get("importance", MEMORY_DEFAULT_IMPORTANCE))
     pinned = 40 if row.get("pinned") else 0
-    return lexical * 8 + importance * 3 + recency_bonus + pinned
+    seen = min(8, int(row.get("seen_count", 1)))
+    return lexical * 8 + thread_match * 3 + importance * 4 + recency_bonus + pinned + seen
 
 
 def ranked_memories(
@@ -718,15 +842,18 @@ def ranked_memories(
         return []
     combined_query = memory_query_text(conv, query)
     query_counts = token_counts(combined_query)
+    conversation_terms = token_counts(memory_query_text(conv, ""))
     scored = []
     total = len(rows)
     for idx, row in enumerate(rows):
         recency_bonus = 1 + min(10, idx * 10 // max(1, total - 1)) if total > 1 else 10
-        score = memory_relevance(row, query_counts, recency_bonus)
+        score = memory_relevance(row, query_counts, recency_bonus, conversation_terms)
         matched = score_text(query_counts, row.get("text", "")) if query_counts else 0
+        thread_matched = score_text(conversation_terms, row.get("text", "")) if conversation_terms else 0
         enriched = dict(row)
         enriched["_score"] = score
         enriched["_matched_terms"] = matched
+        enriched["_thread_matched_terms"] = thread_matched
         enriched["_recency_bonus"] = recency_bonus
         scored.append(enriched)
     scored.sort(
@@ -745,7 +872,12 @@ def ranked_memories(
     for row in scored:
         if len(selected) >= limit:
             break
-        if not row.get("pinned") and row.get("_matched_terms", 0) <= 0 and query_counts:
+        if (
+            not row.get("pinned")
+            and row.get("_matched_terms", 0) <= 0
+            and row.get("_thread_matched_terms", 0) <= 0
+            and query_counts
+        ):
             continue
         memory_ref = row.get("id", "")
         if memory_ref in seen:
@@ -1158,11 +1290,71 @@ def read_chunk_content(index: dict, chunk: dict) -> str:
     except ValueError:
         return ""
     if path is None:
+        if chunk.get("duplicate_of_existing_index") and chunk.get("content_sha256"):
+            return find_existing_chunk_content(chunk.get("content_sha256", ""), skip_index_id=index.get("id", ""))
         return ""
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def direct_chunk_content(index: dict, chunk: dict) -> str:
+    if "content" in chunk and not chunk.get("duplicate_of_existing_index"):
+        return chunk.get("content", "")
+    try:
+        path = chunk_content_path(index, chunk)
+    except ValueError:
+        return ""
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def find_existing_chunk_content(digest: str, *, skip_index_id: str = "") -> str:
+    if not digest:
+        return ""
+    for index in list_indexes():
+        if skip_index_id and index.get("id") == skip_index_id:
+            continue
+        for file_item in index.get("files", []):
+            for chunk in file_item.get("chunks", []):
+                if chunk.get("content_sha256") != digest:
+                    continue
+                text = direct_chunk_content(index, chunk)
+                if text:
+                    return text
+    return ""
+
+
+def existing_index_chunk_cache(root: pathlib.Path | None = None) -> dict[str, str]:
+    cache = {}
+    for index in list_indexes():
+        if root is not None:
+            try:
+                index_root = pathlib.Path(index.get("root", "")).expanduser().resolve()
+            except OSError:
+                index_root = None
+            if index_root is not None and index_root != root:
+                continue
+        cache.update(chunk_index_cache(index))
+    return cache
+
+
+def chunk_index_cache(index: dict) -> dict[str, str]:
+    cache = {}
+    for file_item in index.get("files", []):
+        for chunk in file_item.get("chunks", []):
+            digest = chunk.get("content_sha256")
+            if not digest or digest in cache:
+                continue
+            text = direct_chunk_content(index, chunk)
+            if text:
+                cache[digest] = text
+    return cache
 
 
 def index_artifact_warnings(index: dict) -> list[str]:
@@ -1177,6 +1369,11 @@ def index_artifact_warnings(index: dict) -> list[str]:
                 warnings.append(str(exc))
                 continue
             if path is None:
+                if chunk.get("duplicate_of_existing_index") and find_existing_chunk_content(
+                    chunk.get("content_sha256", ""),
+                    skip_index_id=index.get("id", ""),
+                ):
+                    continue
                 warnings.append(
                     f"{file_item.get('path', '')}: chunk {chunk.get('chunk')} has no stored content"
                 )
@@ -1224,6 +1421,30 @@ def write_index_chunk(
     return relpath, content_bytes
 
 
+def dedup_chunk_from_existing(
+    path: pathlib.Path,
+    ordinal: int,
+    chunk_idx: int,
+    content: str,
+    existing_chunks: dict[str, str],
+) -> dict | None:
+    digest = sha256_hex(content.encode("utf-8"))
+    existing_content = existing_chunks.get(digest)
+    if existing_content is None:
+        return None
+    print(f"  reusing duplicate chunk {path} chunk {chunk_idx}", flush=True)
+    return {
+        "id": f"{ordinal}.{chunk_idx}",
+        "path": str(path),
+        "chunk": chunk_idx,
+        "summary": "Duplicate chunk already seen in a previous Motoko index; retrieval reuses the existing stored chunk text.",
+        "duplicate_of_existing_index": True,
+        "content_sha256": digest,
+        "content_bytes": len(content.encode("utf-8")),
+        "stored_content_bytes": 0,
+    }
+
+
 def summarize_and_store_chunk(
     path: pathlib.Path,
     index_id: str,
@@ -1231,10 +1452,21 @@ def summarize_and_store_chunk(
     chunk_idx: int,
     content: str,
     budget: dict,
+    existing_chunks: dict[str, str] | None = None,
 ) -> dict | None:
     content = content.strip()
     if not content:
         return None
+    if existing_chunks:
+        duplicate = dedup_chunk_from_existing(
+            path,
+            ordinal,
+            chunk_idx,
+            content,
+            existing_chunks,
+        )
+        if duplicate is not None:
+            return duplicate
     label = f"{path} chunk {chunk_idx}"
     print(f"  summarizing {label}", flush=True)
     summary = summarize_text(
@@ -1250,6 +1482,7 @@ def summarize_and_store_chunk(
         "summary": summary,
         "content_path": relpath,
         "content_bytes": content_bytes,
+        "stored_content_bytes": content_bytes,
         "content_sha256": sha256_hex(content.encode("utf-8")),
     }
 
@@ -1259,6 +1492,7 @@ def stream_index_file(
     index_id: str,
     ordinal: int,
     budget: dict,
+    existing_chunks: dict[str, str] | None = None,
 ) -> tuple[dict, list[dict], int]:
     stat = path.stat()
     digest = hashlib.sha256()
@@ -1274,9 +1508,9 @@ def stream_index_file(
         if not chunk:
             return
         chunk_idx += 1
-        item = summarize_and_store_chunk(path, index_id, ordinal, chunk_idx, chunk, budget)
+        item = summarize_and_store_chunk(path, index_id, ordinal, chunk_idx, chunk, budget, existing_chunks)
         if item is not None:
-            derived_content_bytes += item.get("content_bytes", 0)
+            derived_content_bytes += item.get("stored_content_bytes", item.get("content_bytes", 0))
             indexed_chunks.append(item)
 
     with path.open("rb") as fh:
@@ -1354,8 +1588,20 @@ def summarize_blocks(label: str, blocks: list[str], instruction: str) -> str:
         round_no += 1
 
 
-def index_file(path: pathlib.Path, index_id: str, ordinal: int, budget: dict) -> dict:
-    fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(path, index_id, ordinal, budget)
+def index_file(
+    path: pathlib.Path,
+    index_id: str,
+    ordinal: int,
+    budget: dict,
+    existing_chunks: dict[str, str] | None = None,
+) -> dict:
+    fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(
+        path,
+        index_id,
+        ordinal,
+        budget,
+        existing_chunks,
+    )
 
     print(f"  summarizing file {path}", flush=True)
     file_summary = summarize_blocks(
@@ -1372,6 +1618,9 @@ def index_file(path: pathlib.Path, index_id: str, ordinal: int, budget: dict) ->
         "bytes_omitted": 0,
         "truncated": False,
         "chunk_count": len(indexed_chunks),
+        "duplicate_chunk_count": sum(
+            1 for chunk in indexed_chunks if chunk.get("duplicate_of_existing_index")
+        ),
         "content_storage": "motoko-state-chunks-v1",
         "derived_content_bytes": derived_content_bytes,
         "summary": file_summary,
@@ -1401,11 +1650,15 @@ def build_document_index(
     files = []
     print(f"Building document index {index_id} from {len(candidates)} file(s).")
     print(f"Derived index text budget: {human_bytes(budget['max_bytes'])}.")
+    existing_chunks = existing_index_chunk_cache(root)
+    if existing_chunks:
+        print(f"Duplicate-aware indexing: {len(existing_chunks)} existing chunk(s) available for reuse.")
     saved = False
     try:
         for idx, candidate in enumerate(candidates, 1):
             try:
-                files.append(index_file(candidate, index_id, idx, budget))
+                print(f"[{idx}/{len(candidates)}] indexing {candidate}", flush=True)
+                files.append(index_file(candidate, index_id, idx, budget, existing_chunks))
             except OSError as exc:
                 print(f"  skipped {candidate}: {exc}", file=sys.stderr)
 
@@ -1426,6 +1679,7 @@ def build_document_index(
             "content_storage": "motoko-state-chunks-v1",
             "derived_content_budget_bytes": budget["max_bytes"],
             "derived_content_bytes": sum(item.get("derived_content_bytes", 0) for item in files),
+            "duplicate_chunk_count": sum(item.get("duplicate_chunk_count", 0) for item in files),
             "corpus_summary": corpus_summary,
             "files": files,
         }
@@ -1469,6 +1723,7 @@ def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, 
             content = read_chunk_content(index, chunk)
             haystack = "\n".join(
                 [
+                    file_item.get("path", ""),
                     file_item.get("summary", ""),
                     chunk.get("summary", ""),
                     content[:4000],
@@ -1477,6 +1732,17 @@ def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, 
             rows.append((score_text(query_counts, haystack), file_item, chunk, content))
     rows.sort(key=lambda row: row[0], reverse=True)
     return rows
+
+
+def wants_deep_context(query: str) -> bool:
+    terms = set(token_counts(query))
+    return bool(terms & DEEP_RETRIEVAL_TERMS)
+
+
+def retrieval_limits(query: str) -> tuple[int, int, int]:
+    if wants_deep_context(query):
+        return RETRIEVAL_TOP_FILES * 2, RETRIEVAL_TOP_CHUNKS * 3, MAX_RETRIEVAL_CHARS * 2
+    return RETRIEVAL_TOP_FILES, RETRIEVAL_TOP_CHUNKS, MAX_RETRIEVAL_CHARS
 
 
 def build_topic_dossier(
@@ -1580,16 +1846,21 @@ def build_topic_dossier(
 
 def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     query_counts = token_counts(query)
+    top_files, top_chunks, max_retrieval_chars = retrieval_limits(query)
     index_status, index_warnings = index_staleness(index)
     file_rows = []
     chunk_rows = []
     for file_item in index.get("files", []):
-        file_score = score_text(query_counts, file_item.get("summary", ""))
+        file_score = score_text(
+            query_counts,
+            "\n".join([file_item.get("path", ""), file_item.get("summary", "")]),
+        )
         file_rows.append((file_score, file_item))
         for chunk in file_item.get("chunks", []):
             content = read_chunk_content(index, chunk)
             haystack = "\n".join(
                 [
+                    file_item.get("path", ""),
                     file_item.get("summary", ""),
                     chunk.get("summary", ""),
                     content[:4000],
@@ -1599,8 +1870,8 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
 
     file_rows.sort(key=lambda row: row[0], reverse=True)
     chunk_rows.sort(key=lambda row: row[0], reverse=True)
-    selected_files = [row[1] for row in file_rows[:RETRIEVAL_TOP_FILES] if row[0] > 0]
-    selected_chunks = [row for row in chunk_rows[:RETRIEVAL_TOP_CHUNKS] if row[0] > 0]
+    selected_files = [row[1] for row in file_rows[:top_files] if row[0] > 0]
+    selected_chunks = [row for row in chunk_rows[:top_chunks] if row[0] > 0]
     if not selected_chunks:
         selected_chunks = chunk_rows[: min(2, len(chunk_rows))]
 
@@ -1621,6 +1892,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             "root": index.get("root", ""),
             "status": index_status,
             "warnings": index_warnings[:8],
+            "retrieval": "deep" if wants_deep_context(query) else "normal",
         }
     ]
     if selected_files:
@@ -1643,7 +1915,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         used = 0
         for _score, file_item, chunk in selected_chunks:
             content = read_chunk_content(index, chunk)
-            remaining = MAX_RETRIEVAL_CHARS - used
+            remaining = max_retrieval_chars - used
             if remaining <= 0:
                 break
             excerpt = content[:remaining]
@@ -1737,6 +2009,8 @@ def render_memories_with_sources(conv: dict, query: str = "") -> tuple[str, list
         markers.append(f"importance={row.get('importance', MEMORY_DEFAULT_IMPORTANCE)}")
         if row.get("_matched_terms", 0):
             markers.append(f"match={row.get('_matched_terms')}")
+        if row.get("_thread_matched_terms", 0):
+            markers.append(f"thread={row.get('_thread_matched_terms')}")
         lines.append(f"- [memory:{memory_ref}; {', '.join(markers)}] {row.get('text', '')}")
         sources.append(
             {
@@ -1818,7 +2092,8 @@ def render_conversation_summary(conv: dict) -> str:
 
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
     memory_text, memory_sources = render_memories_with_sources(conv, query)
-    context_text, context_sources = render_context_with_sources(conv.get("context_items", []), query)
+    retrieval_query = context_query_text(conv, query)
+    context_text, context_sources = render_context_with_sources(conv.get("context_items", []), retrieval_query)
     personality_text, personality_file, personality_exists = load_personality()
     sources = []
     sources.append(
@@ -2007,7 +2282,12 @@ def format_help() -> str:
           /attach-index [ID]    attach an existing document index; picker if ID omitted
           /topic [INDEX_ID] QUERY
                                 build and attach a topic-focused dossier
+          /deepen [INDEX_ID] QUERY
+                                build a larger topic dossier for deep work
           /attach-topic [ID]    attach an existing topic dossier; picker if ID omitted
+          /indexes              list document indexes
+          /topics               list topic dossiers
+          /topic-show [ID]      show a topic dossier; picker if ID omitted
           /compact              summarize older messages into compact context
           /sources              show sources used for the last answer
           /status               show model, memory, and context state
@@ -2036,6 +2316,8 @@ def format_help() -> str:
           motoko index PATH --max-derived-bytes 200GiB
           motoko indexes        list document indexes
           motoko topic INDEX_ID QUERY
+          motoko topic INDEX_ID QUERY --chunks 80
+          motoko deepen INDEX_ID QUERY
           motoko topics         list topic dossiers
           motoko topic-show [ID]
           motoko chat --topic TOPIC_ID
@@ -2058,8 +2340,15 @@ def format_help() -> str:
         Topic dossiers store derived summaries and excerpts under ~/.local/state/motoko/topics.
         Each turn receives a ranked subset of cross-conversation memories based
         on the current prompt, recent conversation context, memory importance,
-        pins, and recency. Use /sources after an answer to inspect which
-        memories were selected.
+        pins, repeated sightings, thread relevance, and recency. Use /sources
+        after an answer to inspect which memories were selected.
+        Motoko also performs quiet after-answer maintenance: she periodically
+        compacts long conversations and saves high-confidence durable memories,
+        using duplicate detection so repeated facts reinforce existing memories
+        instead of creating endless copies.
+        Retrieval adapts to the question. Deep/detail/evidence-style prompts
+        receive a wider slice of attached indexes; use /deepen to build a
+        larger reusable topic dossier when a subject needs sustained attention.
         Default derived-text budget: 200 GiB per new index. Override with
         --max-derived-bytes or MOTOKO_MAX_DERIVED_INDEX_BYTES.
         Default indexing mode is auto: Motoko recursively ingests readable
@@ -2105,7 +2394,8 @@ def format_sources(sources: list[dict]) -> str:
         elif kind == "index":
             lines.append(
                 f"{idx:3d}  index {source.get('id', '')}  "
-                f"{source.get('status', 'unknown')}  {source.get('name', '')}"
+                f"{source.get('status', 'unknown')}  "
+                f"{source.get('retrieval', 'summary')} retrieval  {source.get('name', '')}"
             )
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
@@ -2142,6 +2432,14 @@ def format_status(conv: dict | None = None) -> str:
     memories = load_memories(limit=500)
     pinned = sum(1 for row in memories if row.get("pinned"))
     indexes = list_indexes()
+    index_files = sum(len(index.get("files", [])) for index in indexes)
+    index_chunks = sum(
+        len(file_item.get("chunks", []))
+        for index in indexes
+        for file_item in index.get("files", [])
+    )
+    duplicate_chunks = sum(int(index.get("duplicate_chunk_count", 0) or 0) for index in indexes)
+    derived_bytes = sum(int(index.get("derived_content_bytes", 0) or 0) for index in indexes)
     topics = list_topics()
     conversations = list_conversations()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
@@ -2157,7 +2455,7 @@ def format_status(conv: dict | None = None) -> str:
         f"config: {config_root()}",
         f"conversations: {len(conversations)}",
         f"memories: {len(memories)} total, {pinned} pinned",
-        f"indexes: {len(indexes)}",
+        f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
     ]
     if conv:
@@ -2217,6 +2515,24 @@ def build_topic_from_chat(conv: dict, text: str) -> dict:
     return build_topic_dossier(index_ids, body)
 
 
+def deepen_topic_from_chat(conv: dict, text: str) -> dict:
+    body = text.strip()
+    if not body:
+        raise SystemExit("usage: /deepen [INDEX_ID] QUERY")
+    parts = body.split(maxsplit=1)
+    if len(parts) == 2:
+        try:
+            load_index(parts[0])
+        except SystemExit:
+            pass
+        else:
+            return build_topic_dossier([parts[0]], parts[1], max_chunks=TOPIC_MAX_CHUNKS)
+    index_ids = attached_index_ids(conv)
+    if not index_ids:
+        raise SystemExit("attach an index first or use: /deepen INDEX_ID QUERY")
+    return build_topic_dossier(index_ids, body, max_chunks=TOPIC_MAX_CHUNKS)
+
+
 def print_command_menu() -> None:
     print(style("Chat commands:", "bold"))
     for command, description in SLASH_COMMANDS:
@@ -2259,9 +2575,9 @@ def setup_readline_completion() -> None:
                 matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
-            elif parts and parts[0] in {"/attach-index", "/topic"}:
+            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen"}:
                 matches = [item for item in completion_ids("index") if item.startswith(text)]
-            elif parts and parts[0] == "/attach-topic":
+            elif parts and parts[0] in {"/attach-topic", "/topic-show"}:
                 matches = [item for item in completion_ids("topic") if item.startswith(text)]
         else:
             matches = [name for name in SHELL_COMMANDS if name.startswith(text)]
@@ -2339,10 +2655,13 @@ class MotokoTui:
         self.events: collections.deque[tuple] = collections.deque()
         self.events_lock = threading.Lock()
         self.generating = False
+        self.maintaining = False
         self.cancel_event = threading.Event()
         self.pending_prompts: collections.deque[str] = collections.deque()
         self.answer_entry: dict | None = None
         self.last_render = 0.0
+        self.tui_spinner_frames = spinner_frames() or ["*"]
+        self.tui_spinner_index = 0
         self.messages = self.seed_messages(conv)
 
     def seed_messages(self, conv: dict) -> list[dict]:
@@ -2383,12 +2702,12 @@ class MotokoTui:
             self.render(force=True)
             while self.running:
                 self.drain_events()
-                timeout = 0.04 if self.generating else 0.12
+                timeout = 0.04 if self.generating or self.maintaining else 0.12
                 readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
                 if readable:
                     self.handle_key(self.read_key())
                 now_ts = time.monotonic()
-                if self.dirty or (self.generating and now_ts - self.last_render > 0.08):
+                if self.dirty or ((self.generating or self.maintaining) and now_ts - self.last_render > 0.08):
                     self.render()
         finally:
             signal.signal(signal.SIGWINCH, old_winch)
@@ -2605,6 +2924,13 @@ class MotokoTui:
                 self.append("system", self.capture_text(print_personality))
             elif text == "/memories":
                 self.append("system", self.capture_text(print_memories))
+            elif text == "/indexes":
+                self.append("system", self.capture_text(command_indexes_text))
+            elif text == "/topics":
+                self.append("system", self.capture_text(command_topics_text))
+            elif text == "/topic-show" or text.startswith("/topic-show "):
+                selector = text[len("/topic-show") :].strip() or None
+                self.append("system", self.capture_text(lambda: print_topic(load_topic(selector), evidence=False)))
             elif text.startswith("/memory search "):
                 query = text[len("/memory search ") :]
                 self.append("system", self.capture_text(lambda: print_memory_search(query)))
@@ -2668,6 +2994,9 @@ class MotokoTui:
             elif text == "/topic" or text.startswith("/topic "):
                 body = text[len("/topic") :].strip()
                 self.run_blocking_command("Building topic dossier...", lambda: self.attach_topic_from_body(body))
+            elif text == "/deepen" or text.startswith("/deepen "):
+                body = text[len("/deepen") :].strip()
+                self.run_blocking_command("Building deep topic dossier...", lambda: self.attach_deep_topic_from_body(body))
             else:
                 self.append("system", "unknown command; type /help")
         except SystemExit as exc:
@@ -2685,6 +3014,11 @@ class MotokoTui:
 
     def attach_topic_from_body(self, body: str) -> None:
         topic = build_topic_from_chat(self.conv, body)
+        self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+        save_conversation(self.conv)
+
+    def attach_deep_topic_from_body(self, body: str) -> None:
+        topic = deepen_topic_from_chat(self.conv, body)
         self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
         save_conversation(self.conv)
 
@@ -2802,6 +3136,8 @@ class MotokoTui:
                 if self.pending_prompts:
                     next_prompt = self.pending_prompts.popleft()
                     self.start_generation(next_prompt)
+                else:
+                    self.start_maintenance()
             elif kind == "stopped":
                 partial = ""
                 if self.answer_entry is not None:
@@ -2823,8 +3159,34 @@ class MotokoTui:
                 self.append("error", event[1])
                 self.status = "ready"
                 changed = True
+            elif kind == "maintenance_done":
+                self.maintaining = False
+                notes = event[1]
+                self.status = "ready"
+                if notes:
+                    self.messages = self.seed_messages(self.conv)
+                changed = True
+            elif kind == "maintenance_error":
+                self.maintaining = False
+                self.status = "ready"
+                changed = True
         if changed:
             self.dirty = True
+
+    def start_maintenance(self) -> None:
+        if self.maintaining or self.generating:
+            return
+        self.maintaining = True
+        self.status = "organizing memory"
+
+        def worker() -> None:
+            try:
+                notes = auto_maintain_conversation(self.conv)
+                self.put_event(("maintenance_done", notes))
+            except Exception as exc:  # Keep hidden maintenance from breaking chat.
+                self.put_event(("maintenance_error", f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def compact_command_menu(self) -> str:
         lines = ["Chat commands:"]
@@ -2864,13 +3226,13 @@ class MotokoTui:
                 if not current or suffix.startswith(current) or value.startswith(stripped):
                     options.append({"kind": "command", "value": value, "label": command, "description": description})
             return options
-        if first in {"/attach-index", "/topic"} and len(words) <= 2:
+        if first in {"/attach-index", "/topic", "/deepen"} and len(words) <= 2:
             return [
                 {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
                 for row in list_indexes()
                 if not current or item_matches_selector(row, current)
             ][:20]
-        if first == "/attach-topic" and len(words) <= 2:
+        if first in {"/attach-topic", "/topic-show"} and len(words) <= 2:
             return [
                 {"kind": "topic", "value": row.get("id", ""), "label": topic_label(row), "description": row.get("query", "")}
                 for row in list_topics()
@@ -2901,8 +3263,10 @@ class MotokoTui:
             self.cursor = 0
             return
         if kind == "index":
-            if first == "/topic":
+            if first in {"/topic", "/deepen"}:
                 self.input_buffer = f"/topic {value} "
+                if first == "/deepen":
+                    self.input_buffer = f"/deepen {value} "
                 self.cursor = len(self.input_buffer)
             else:
                 self.input_buffer = f"{first} {value}"
@@ -2914,7 +3278,10 @@ class MotokoTui:
             self.dirty = True
             return
         if kind == "topic":
-            self.input_buffer = f"/attach-topic {value}"
+            if first == "/topic-show":
+                self.input_buffer = f"/topic-show {value}"
+            else:
+                self.input_buffer = f"/attach-topic {value}"
             self.cursor = len(self.input_buffer)
             self.submit_text(self.input_buffer)
             self.input_buffer = ""
@@ -2946,7 +3313,9 @@ class MotokoTui:
         rows = []
         title = f" Motoko  {self.conv.get('title', 'Untitled')}  {self.status}"
         if self.generating:
-            title += "  * answering"
+            title += f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} answering"
+        if self.maintaining:
+            title += f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} memory"
         if self.pending_prompts:
             title += f"  queued:{len(self.pending_prompts)}"
         rows.append(style(title[:width], "bold", "cyan"))
@@ -2962,6 +3331,8 @@ class MotokoTui:
         cursor_row = min(height, input_start_row + cursor_row_offset)
         screen += f"\033[{cursor_row};{min(width, cursor_col)}H\033[?25h"
         self.write(screen)
+        if self.generating or self.maintaining:
+            self.tui_spinner_index += 1
         self.last_render = time.monotonic()
         self.dirty = False
 
@@ -3124,6 +3495,26 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             print(f"attached topic: {topic['id']}")
             continue
+        if user_text == "/deepen" or user_text.startswith("/deepen "):
+            try:
+                topic = deepen_topic_from_chat(conv, user_text[len("/deepen") :])
+            except SystemExit as exc:
+                print(exc)
+                continue
+            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+            save_conversation(conv)
+            print(f"attached deep topic: {topic['id']}")
+            continue
+        if user_text == "/indexes":
+            command_indexes_text()
+            continue
+        if user_text == "/topics":
+            command_topics_text()
+            continue
+        if user_text == "/topic-show" or user_text.startswith("/topic-show "):
+            selector = user_text[len("/topic-show") :].strip() or None
+            print_topic(load_topic(selector), evidence=False)
+            continue
         if user_text == "/compact":
             compact_conversation(conv)
             continue
@@ -3191,13 +3582,18 @@ def chat_loop(conv: dict) -> None:
         conv["last_sources"] = sources
         conv["messages"].append({"role": "assistant", "content": reply})
         save_conversation(conv)
+        try:
+            auto_maintain_conversation(conv)
+        except Exception:
+            pass
 
 
-def compact_conversation(conv: dict) -> None:
+def compact_conversation(conv: dict, *, quiet: bool = False) -> bool:
     messages = conv.get("messages", [])
     if len(messages) <= COMPACT_KEEP_MESSAGES:
-        print("conversation is already compact enough")
-        return
+        if not quiet:
+            print("conversation is already compact enough")
+        return False
 
     older = messages[:-COMPACT_KEEP_MESSAGES]
     recent = messages[-COMPACT_KEEP_MESSAGES:]
@@ -3221,7 +3617,8 @@ def compact_conversation(conv: dict) -> None:
         Do not invent facts. Keep it under {MAX_CONVERSATION_SUMMARY_CHARS} characters.
         """
     ).strip()
-    print("Compacting older conversation context...")
+    if not quiet:
+        print("Compacting older conversation context...")
     summary = quiet_model(
         [
             {
@@ -3234,46 +3631,113 @@ def compact_conversation(conv: dict) -> None:
     )
     conv["summary"] = summary[:MAX_CONVERSATION_SUMMARY_CHARS]
     conv["messages"] = recent
+    conv["last_auto_compact_message_count"] = len(recent)
     save_conversation(conv)
-    print(f"compacted {len(older)} older message(s); kept {len(recent)} recent message(s)")
+    if not quiet:
+        print(f"compacted {len(older)} older message(s); kept {len(recent)} recent message(s)")
+    return True
 
 
-def memorize_conversation(conv: dict) -> None:
+def propose_memories(conv: dict) -> list[str]:
     if not conv.get("messages"):
-        print("nothing to memorize yet")
-        return
+        return []
     prompt = textwrap.dedent(
         """
         Extract durable personal memories from this conversation.
-        Return only short bullet points. Include only facts/preferences likely
-        useful in future conversations. If there are no durable memories, say
-        exactly: NO_MEMORY
+        Return only lines in this exact form:
+
+        MEMORY: short durable fact
+
+        Include only
+        stable facts, preferences, commitments, recurring projects, named
+        relationships, or long-lived goals likely useful in future
+        conversations. Avoid transient task state, guesses, and anything
+        already contradicted later in the conversation. If there are no durable
+        memories, say exactly: NO_MEMORY
         """
     ).strip()
     messages = [
         {"role": "system", "content": prompt},
         *conv.get("messages", [])[-MAX_RECENT_MESSAGES:],
     ]
-    print("Motoko memory proposal:")
     proposal = call_model(messages, temperature=0.2).strip()
     if proposal == "NO_MEMORY":
+        return []
+    memories = []
+    for line in proposal.splitlines():
+        text = line.strip()
+        if text.upper() == "NO_MEMORY":
+            continue
+        if text.upper().startswith("MEMORY:"):
+            text = text.split(":", 1)[1].strip()
+        else:
+            if not re.match(r"^([-*]|\d+[.)])\s+", text):
+                continue
+            text = text.lstrip("-*0123456789.) ").strip()
+        if text:
+            memories.append(text)
+        if len(memories) >= AUTO_MEMORY_MAX_PROPOSALS:
+            break
+    return memories
+
+
+def memorize_conversation(conv: dict) -> None:
+    if not conv.get("messages"):
+        print("nothing to memorize yet")
+        return
+    print("Motoko memory proposal:")
+    proposals = propose_memories(conv)
+    if not proposals:
         print("no memory saved")
         return
+    proposal = "\n".join(f"- {item}" for item in proposals)
+    print(proposal)
     print("\nSave these memories? Type yes to append: ", end="", flush=True)
     answer = input().strip().lower()
     if answer == "yes":
-        for line in proposal.splitlines():
-            text = line.strip().lstrip("-*").strip()
-            if text:
-                add_memory(
-                    text,
-                    source="model-proposed",
-                    conversation_id=conv["id"],
-                    derived_from="memorize",
-                )
+        for text in proposals:
+            add_memory(
+                text,
+                source="model-proposed",
+                conversation_id=conv["id"],
+                derived_from="memorize",
+            )
         print("memories saved")
     else:
         print("not saved")
+
+
+def auto_maintain_conversation(conv: dict) -> list[str]:
+    notes = []
+    messages = conv.get("messages", [])
+    message_count = len(messages)
+    last_memory = int(conv.get("last_auto_memory_message_count", 0) or 0)
+    if (
+        message_count >= AUTO_MEMORY_MIN_MESSAGES
+        and message_count - last_memory >= AUTO_MEMORY_INTERVAL_MESSAGES
+    ):
+        saved = 0
+        for text in propose_memories(conv):
+            add_memory(
+                text,
+                source="auto-model-proposed",
+                conversation_id=conv["id"],
+                derived_from="auto-memory",
+            )
+            saved += 1
+        conv["last_auto_memory_message_count"] = message_count
+        if saved:
+            notes.append(f"saved {saved} durable memor{'y' if saved == 1 else 'ies'}")
+
+    last_compact = int(conv.get("last_auto_compact_message_count", 0) or 0)
+    if (
+        message_count >= AUTO_SUMMARY_MIN_MESSAGES
+        and message_count - last_compact >= AUTO_SUMMARY_INTERVAL_MESSAGES
+    ):
+        if compact_conversation(conv, quiet=True):
+            notes.append("compacted older conversation context")
+    save_conversation(conv)
+    return notes
 
 
 def command_list(_args) -> None:
@@ -3328,6 +3792,10 @@ def command_index(args) -> None:
 
 
 def command_indexes(_args) -> None:
+    command_indexes_text()
+
+
+def command_indexes_text() -> None:
     rows = list_indexes()
     if not rows:
         print("No document indexes yet.")
@@ -3353,7 +3821,21 @@ def command_topic(args) -> None:
     print(f"{topic['id']}  {topic.get('name', '')}  {topic.get('query', '')}")
 
 
+def command_deepen(args) -> None:
+    topic = build_topic_dossier(
+        [args.index],
+        " ".join(args.query),
+        name=args.name,
+        max_chunks=TOPIC_MAX_CHUNKS,
+    )
+    print(f"{topic['id']}  {topic.get('name', '')}  {topic.get('query', '')}")
+
+
 def command_topics(_args) -> None:
+    command_topics_text()
+
+
+def command_topics_text() -> None:
     rows = list_topics()
     if not rows:
         print("No topic dossiers yet.")
@@ -3366,12 +3848,11 @@ def command_topics(_args) -> None:
         )
 
 
-def command_topic_show(args) -> None:
-    topic = load_topic(args.id)
+def print_topic(topic: dict, *, evidence: bool = False) -> None:
     print(f"{topic.get('name', 'Untitled')} [{topic.get('id')}]\n")
     print(f"query> {topic.get('query', '')}\n")
     print(topic.get("summary", ""))
-    if args.evidence:
+    if evidence:
         print("\nEvidence:")
         for item in topic.get("evidence", []):
             print(
@@ -3379,6 +3860,10 @@ def command_topic_show(args) -> None:
                 f"chunk:{item.get('chunk')} score:{item.get('score')} ---"
             )
             print(item.get("excerpt", ""))
+
+
+def command_topic_show(args) -> None:
+    print_topic(load_topic(args.id), evidence=args.evidence)
 
 
 def command_memory(args) -> None:
@@ -3475,6 +3960,12 @@ def main(argv: list[str]) -> int:
     topic.add_argument("--name")
     topic.add_argument("--chunks", type=int, default=TOPIC_DEFAULT_CHUNKS)
     topic.set_defaults(func=command_topic)
+
+    deepen = sub.add_parser("deepen", help="build a larger topic dossier from a document index")
+    deepen.add_argument("index")
+    deepen.add_argument("query", nargs="+")
+    deepen.add_argument("--name")
+    deepen.set_defaults(func=command_deepen)
 
     topics = sub.add_parser("topics", help="list topic dossiers")
     topics.set_defaults(func=command_topics)

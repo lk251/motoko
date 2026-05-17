@@ -1,6 +1,6 @@
 # Motoko Personal Assistant
 
-Date: 2026-05-16
+Date: 2026-05-17
 
 Motoko is the first terminal chat interface for the HB3 `personal` realm. It is
 intentionally small: a Python standard-library script that talks to the existing
@@ -35,7 +35,7 @@ Motoko uses:
 
 - `/nix/store/.../python3` from the NixOS system closure;
 - the Python standard library only;
-- the existing loopback model endpoint at `127.0.0.1:8082`;
+- the existing loopback MTP model endpoint at `127.0.0.1:8083`;
 - files in the `personal` account's own home directory.
 
 On `.#hb3-headless`, the default Qwen3.6 service starts at boot. The
@@ -166,7 +166,11 @@ Useful in-chat commands:
 /index PATH
 /attach-index [INDEX_ID]
 /topic [INDEX_ID] QUERY
+/deepen [INDEX_ID] QUERY
 /attach-topic [TOPIC_ID]
+/indexes
+/topics
+/topic-show [TOPIC_ID]
 /compact
 /sources
 /status
@@ -188,9 +192,9 @@ Useful in-chat commands:
 Commands with optional IDs open a picker when the ID is omitted. If Python
 `readline` is available, Motoko also enables Tab completion in chat; type `/`
 then Tab to list slash commands, or start `/resume`, `/attach-index`,
-`/attach-topic`, or `/topic` and press Tab to complete stored IDs. This is a
-small stdlib line editor fallback. In the default TUI, these same commands use
-an inline dropdown above the bottom composer.
+`/attach-topic`, `/topic-show`, `/topic`, or `/deepen` and press Tab to complete
+stored IDs. This is a small stdlib line editor fallback. In the default TUI,
+these same commands use an inline dropdown above the bottom composer.
 
 The TUI is implemented with Python standard-library terminal primitives only.
 It does not add prompt-toolkit, rich, textual, urwid, curses UI dependencies,
@@ -210,9 +214,18 @@ provenance before trusting a memory.
 
 Each turn receives an automatic ranked subset of cross-conversation memories.
 The ranking uses the current prompt, the conversation title, recent user turns,
-the compacted summary, memory importance, pinned status, and recency. This keeps
-memory useful without injecting every saved memory into every prompt. Use
-`/sources` after an answer to see which memories were selected.
+the compacted summary, memory importance, pinned status, repeated sightings,
+thread relevance, and recency. This keeps memory useful without injecting every
+saved memory into every prompt. Use `/sources` after an answer to see which
+memories were selected.
+
+Motoko also runs quiet after-answer maintenance. Periodically, after enough
+messages have accumulated, she proposes high-confidence durable memories to
+herself and saves them automatically with provenance `auto-model-proposed`.
+Duplicate detection reinforces existing similar memories by updating their
+`seen_count`, tags, and last-seen metadata instead of creating many copies of
+the same fact. Stored memories remain inspectable with `motoko memory review`,
+searchable with `motoko memory search`, and removable with `motoko forget`.
 
 Memories default to importance `3`. `motoko memory importance ID 1-5` changes
 that priority. `motoko memory pin ID` makes a memory eligible for inclusion even
@@ -221,14 +234,16 @@ context that should travel across conversations.
 
 `/compact` summarizes older conversation turns into a compact conversation
 summary, keeps the most recent turns verbatim, and saves both into the
-conversation JSON. This is manual compaction; Motoko does not silently rewrite
-conversation history in the background.
+conversation JSON. Motoko may also perform this compaction automatically after
+long chats so context remains usable without forcing every old turn into the
+model prompt.
 
 `/sources` prints the memories, compacted summary, attached files, file
 summaries, document chunks, and index freshness state used for the last answer.
 This is meant to make answers inspectable: Motoko should be able to say which
 stored context influenced a response instead of sounding like she has
 unbounded hidden knowledge.
+
 `/status` prints the current model endpoint, state paths, memory/index/topic
 counts, and the amount of context attached to the active conversation.
 
@@ -297,7 +312,10 @@ Each index stores:
 
 On each question, Motoko scores the indexed summaries and chunks with a small
 local lexical retriever, then injects the corpus summary, relevant file
-summaries, and top matching excerpts into the prompt. This avoids sending every
+summaries, and top matching excerpts into the prompt. The retrieval window
+uses the current prompt plus recent conversation context and adapts to the
+question: broad evidence/detail/deep-analysis prompts receive a wider slice of
+attached indexes than ordinary conversational prompts. This avoids sending every
 file on every turn while still letting the model answer from relevant source
 text.
 
@@ -314,11 +332,13 @@ splits the decoded text into summarized chunks, and stores those chunks under
 `~/.local/state/motoko/indexes/INDEX_ID.chunks/`. The index JSON stores metadata,
 summaries, fingerprints, and paths to those derived chunk files.
 
-This means Motoko may duplicate the indexed text inside her own private state so
+This means Motoko may duplicate indexed text inside her own private state so
 that later retrieval can answer from the whole indexed corpus. The source files
-themselves are not modified. If an index build fails before the index JSON is
-saved, or if the derived-text budget would be exceeded, Motoko removes the
-partially written chunk directory to avoid abandoned derived text.
+themselves are not modified. To avoid needless growth, new indexes reuse exact
+duplicate chunks already present in previous indexes instead of writing the same
+chunk text again. If an index build fails before the index JSON is saved, or if
+the derived-text budget would be exceeded, Motoko removes the partially written
+chunk directory to avoid abandoned derived text.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad
@@ -340,6 +360,7 @@ Create one from the shell:
 
 ```bash
 motoko topic INDEX_ID "family memories involving Buenos Aires" --name buenos-aires
+motoko deepen INDEX_ID "family memories involving Buenos Aires"
 motoko topics
 motoko topic-show TOPIC_ID
 motoko topic-show TOPIC_ID --evidence
@@ -351,6 +372,8 @@ Create or attach one from inside a chat:
 ```text
 /topic family memories involving Buenos Aires
 /topic INDEX_ID family memories involving Buenos Aires
+/deepen family memories involving Buenos Aires
+/deepen INDEX_ID family memories involving Buenos Aires
 /attach-topic
 /attach-topic TOPIC_ID
 ```
@@ -362,6 +385,10 @@ derived state, so they can duplicate sensitive personal text inside the
 `personal` user's Motoko state directory. They are useful for going deeper into
 a subject without reinjecting the entire corpus on every turn, but they should
 be treated as private assistant memory.
+
+`/deepen` and `motoko deepen` use the same mechanism with the larger topic
+budget. Use them when a conversation has narrowed to a subject and Motoko needs
+a more detailed private dossier before answering follow-up questions.
 
 ## Operational Model
 
@@ -397,7 +424,8 @@ from not granting `personal` sudo, provider keys, SSH/GitHub credentials, or
 service-control authority.
 
 Motoko has explicit attached documents, hierarchical document indexes,
-conversation history, manual compaction, and simple durable memories. If
+conversation history, automatic compaction, ranked durable memories, and
+topic-focused dossiers. If
 personal memory/RAG becomes sensitive enough to require stronger isolation, move
 the assistant state and process into a reviewed NixOS container or KVM VM while
 keeping GPU inference on the HB3 host unless a later review justifies GPU

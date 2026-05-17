@@ -16,9 +16,14 @@ Design constraints:
 - Inspectable memories, sources, and index freshness.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
-- Automatic ranked memory selection per prompt, with `/sources` provenance.
+- Automatic ranked memory selection and quiet after-answer memory maintenance,
+  with `/sources` provenance.
+- Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers
+  for sustained attention on a subject.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
+- Duplicate-aware indexing reuses exact chunks already present in Motoko state
+  instead of writing the same source text repeatedly.
 - Reusable indexes default to a 200 GiB derived-text budget and fail closed
   before writing beyond it.
 - User-owned personality/style guidance in
