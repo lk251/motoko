@@ -30,6 +30,8 @@ Design constraints:
   `~/.config/motoko/personality.md`.
 
 See [docs/motoko.md](docs/motoko.md) for usage and operating notes.
+See [docs/project-context.md](docs/project-context.md) for the HB3/NixOS,
+security, and interface context that should guide future changes.
 
 ## Nix
 

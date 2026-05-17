@@ -16,6 +16,8 @@ to stay simple, inspectable, and dependency-light.
 - Prefer small, testable improvements that make the assistant more trustworthy
   before making it more agentic.
 - Do not store secrets in this repository.
+- Read `docs/project-context.md` before making architectural, security-boundary,
+  or terminal-interface changes.
 
 ## Validation
 
@@ -30,4 +32,3 @@ For quick syntax-only validation:
 ```bash
 nix develop --command python3 -m py_compile motoko
 ```
-

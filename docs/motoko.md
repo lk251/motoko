@@ -127,6 +127,24 @@ Use `/stop` to stop the current streamed answer.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.
 
+The TUI uses a compact `>` input prompt. Motoko's assistant label is purple;
+supporting UI such as titles and command text uses turquoise where terminal
+color support is available. The slash-command dropdown scrolls with the active
+selection so entries past the first visible page remain visible.
+
+Emacs-style editing keys in the TUI:
+
+```text
+Ctrl+A  beginning of line
+Ctrl+E  end of line
+Ctrl+B  backward char
+Ctrl+F  forward char
+Ctrl+K  kill to end of line
+Ctrl+Y  yank killed text
+Ctrl+P  previous dropdown item or history entry
+Ctrl+N  next dropdown item or history entry
+```
+
 List and resume conversations:
 
 ```bash
@@ -140,6 +158,8 @@ motoko status
 
 When an ID is omitted in an interactive terminal, Motoko opens a numbered
 picker. This avoids typing long conversation IDs for normal use.
+`motoko list` displays compact `created`, `updated`, `branch`, and
+`conversation` columns. Full timestamps remain stored in the conversation JSON.
 
 Manage memories:
 

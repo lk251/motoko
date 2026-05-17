@@ -20,6 +20,7 @@ import re
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import termios
 import threading
@@ -185,6 +186,8 @@ ANSI_STYLES = {
     "green": "32",
     "yellow": "33",
     "blue": "34",
+    "purple": "95",
+    "turquoise": "36",
     "magenta": "35",
     "cyan": "36",
     "white": "37",
@@ -210,7 +213,7 @@ def style(text: str, *names: str) -> str:
 
 def command_label(text: str) -> str:
     command, sep, rest = text.partition(" ")
-    return style(command, "cyan", "bold") + (sep + style(rest, "dim") if sep else "")
+    return style(command, "turquoise", "bold") + (sep + style(rest, "dim") if sep else "")
 
 
 def slash_command_value(command: str) -> str:
@@ -224,6 +227,55 @@ def slash_command_value(command: str) -> str:
 
 def now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def parse_timestamp(value: str) -> _dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = _dt.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=_dt.timezone.utc)
+    return parsed
+
+
+def relative_time(value: str) -> str:
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return "-"
+    delta = _dt.datetime.now(_dt.timezone.utc).astimezone() - parsed.astimezone()
+    seconds = max(0, int(delta.total_seconds()))
+    units = [
+        ("y", 365 * 24 * 60 * 60),
+        ("mo", 30 * 24 * 60 * 60),
+        ("d", 24 * 60 * 60),
+        ("h", 60 * 60),
+        ("m", 60),
+        ("s", 1),
+    ]
+    for suffix, unit_seconds in units:
+        if seconds >= unit_seconds or suffix == "s":
+            amount = seconds // unit_seconds
+            return "now" if suffix == "s" and amount < 5 else f"{amount}{suffix} ago"
+    return "now"
+
+
+def current_git_branch() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "-"
+    branch = result.stdout.strip()
+    return branch or "-"
 
 
 def human_bytes(count: int) -> str:
@@ -419,6 +471,7 @@ def new_conversation(title: str | None = None) -> dict:
     return {
         "id": cid,
         "title": title or "Untitled",
+        "branch": current_git_branch(),
         "created": created,
         "updated": created,
         "endpoint": endpoint(),
@@ -499,15 +552,21 @@ def prompt_for_selection(
         print(f"{idx:3d}  {label_func(row)}")
     if len(rows) > 40:
         print(f"     ... {len(rows) - 40} older {kind}(s) omitted; type an ID prefix to select one.")
-    answer = input(style(f"{kind} number or ID> ", "green")).strip()
+    answer = input(style(f"{kind} number or ID> ", "turquoise")).strip()
     return resolve_stored_item(rows, answer, kind=kind)
 
 
 def conversation_label(conv: dict) -> str:
+    title = conv.get("title") or "Untitled"
+    created = f"{relative_time(conv.get('created', '')):>10}"
+    updated = f"{relative_time(conv.get('updated', conv.get('created', ''))):>10}"
+    branch = f"{(conv.get('branch') or '-')[:14]:<14}"
     return (
-        f"{style(conv.get('id', ''), 'yellow')}  "
-        f"{conv.get('updated', conv.get('created', ''))}  "
-        f"{conv.get('title', 'Untitled')}"
+        f"{style(created, 'turquoise')}  "
+        f"{style(updated, 'turquoise')}  "
+        f"{style(branch, 'dim')}  "
+        f"{style(title, 'turquoise', 'bold')}  "
+        f"{style(conv.get('id', ''), 'dim')}"
     )
 
 
@@ -2496,7 +2555,7 @@ def build_topic_from_chat(conv: dict, text: str) -> dict:
     body = text.strip()
     if not body and sys.stdin.isatty():
         index = load_index(None)
-        query = input(style("topic query> ", "green")).strip()
+        query = input(style("topic query> ", "turquoise")).strip()
         return build_topic_dossier([index["id"]], query)
     if not body:
         raise SystemExit("usage: /topic [INDEX_ID] QUERY")
@@ -2588,13 +2647,26 @@ def setup_readline_completion() -> None:
 
     readline.set_completer(complete)
     readline.set_completer_delims(" \t\n")
-    readline.parse_and_bind("tab: complete")
-    readline.parse_and_bind("set show-all-if-ambiguous on")
-    readline.parse_and_bind("set completion-ignore-case on")
+    for binding in [
+        "set editing-mode emacs",
+        "tab: complete",
+        '"\\C-a": beginning-of-line',
+        '"\\C-e": end-of-line',
+        '"\\C-b": backward-char',
+        '"\\C-f": forward-char',
+        '"\\C-k": kill-line',
+        '"\\C-y": yank',
+        "set show-all-if-ambiguous on",
+        "set completion-ignore-case on",
+    ]:
+        try:
+            readline.parse_and_bind(binding)
+        except Exception:
+            pass
 
 
 def motoko_input(prompt: str) -> str:
-    return input(style(prompt, "green", "bold"))
+    return input(style(prompt, "turquoise", "bold"))
 
 
 def tui_enabled() -> bool:
@@ -2648,6 +2720,7 @@ class MotokoTui:
         self.status = "ready"
         self.input_buffer = ""
         self.cursor = 0
+        self.kill_ring = ""
         self.history: list[str] = []
         self.history_index: int | None = None
         self.scroll = 0
@@ -2756,9 +2829,18 @@ class MotokoTui:
         return keymap.get(text, "escape")
 
     def handle_key(self, key: str) -> None:
-        if key in {"\x03", "\x04"}:
+        if key == "\x03":
             save_conversation(self.conv)
             self.running = False
+            return
+        if key == "\x04":  # Ctrl+D
+            if self.input_buffer and self.cursor < len(self.input_buffer):
+                self.input_buffer = self.input_buffer[: self.cursor] + self.input_buffer[self.cursor + 1 :]
+                self.dropdown_index = 0
+                self.dirty = True
+            elif not self.input_buffer:
+                save_conversation(self.conv)
+                self.running = False
             return
         if key in {"\r", "\n"}:
             self.handle_enter()
@@ -2771,6 +2853,7 @@ class MotokoTui:
                 self.dirty = True
             return
         if key == "\x15":  # Ctrl+U
+            self.kill_ring = self.input_buffer[: self.cursor]
             self.input_buffer = self.input_buffer[self.cursor :]
             self.cursor = 0
             self.dropdown_index = 0
@@ -2779,17 +2862,57 @@ class MotokoTui:
         if key == "\x17":  # Ctrl+W
             left = self.input_buffer[: self.cursor].rstrip()
             cut = left.rfind(" ") + 1
+            self.kill_ring = self.input_buffer[cut : self.cursor]
             self.input_buffer = self.input_buffer[:cut] + self.input_buffer[self.cursor :]
             self.cursor = cut
             self.dropdown_index = 0
             self.dirty = True
             return
-        if key == "\x01":
+        if key == "\x0b":  # Ctrl+K
+            self.kill_ring = self.input_buffer[self.cursor :]
+            self.input_buffer = self.input_buffer[: self.cursor]
+            self.dropdown_index = 0
+            self.dirty = True
+            return
+        if key == "\x19":  # Ctrl+Y
+            if self.kill_ring:
+                self.input_buffer = (
+                    self.input_buffer[: self.cursor]
+                    + self.kill_ring
+                    + self.input_buffer[self.cursor :]
+                )
+                self.cursor += len(self.kill_ring)
+                self.dropdown_index = 0
+                self.dirty = True
+            return
+        if key == "\x01":  # Ctrl+A
             self.cursor = 0
             self.dirty = True
             return
-        if key == "\x05":
+        if key == "\x05":  # Ctrl+E
             self.cursor = len(self.input_buffer)
+            self.dirty = True
+            return
+        if key == "\x02":  # Ctrl+B
+            self.cursor = max(0, self.cursor - 1)
+            self.dirty = True
+            return
+        if key == "\x06":  # Ctrl+F
+            self.cursor = min(len(self.input_buffer), self.cursor + 1)
+            self.dirty = True
+            return
+        if key == "\x10":  # Ctrl+P
+            if self.dropdown_options():
+                self.dropdown_index = max(0, self.dropdown_index - 1)
+            else:
+                self.history_up()
+            self.dirty = True
+            return
+        if key == "\x0e":  # Ctrl+N
+            if self.dropdown_options():
+                self.dropdown_index = min(len(self.dropdown_options()) - 1, self.dropdown_index + 1)
+            else:
+                self.history_down()
             self.dirty = True
             return
         if key == "\x0c":
@@ -3053,7 +3176,7 @@ class MotokoTui:
         self.restore_for_blocking()
         try:
             print()
-            print(style(label, "cyan", "bold"))
+            print(style(label, "turquoise", "bold"))
             func()
             print(style("Done. Returning to Motoko TUI.", "green"))
         except SystemExit as exc:
@@ -3212,7 +3335,7 @@ class MotokoTui:
         current = words[-1] if words and not stripped.endswith(" ") else ""
         if first == "/resume" and len(words) <= 2:
             return [
-                {"kind": "conversation", "value": row.get("id", ""), "label": conversation_label(row), "description": row.get("title", "")}
+                {"kind": "conversation", "value": row.get("id", ""), "label": conversation_label(row), "description": ""}
                 for row in list_conversations()
                 if not current or item_matches_selector(row, current)
             ][:20]
@@ -3311,14 +3434,18 @@ class MotokoTui:
             visible = body_lines[-body_height:]
 
         rows = []
-        title = f" Motoko  {self.conv.get('title', 'Untitled')}  {self.status}"
+        title = (
+            f" {style('Motoko', 'purple', 'bold')}  "
+            f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
+            f"{style(self.status, 'turquoise')}"
+        )
         if self.generating:
             title += f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} answering"
         if self.maintaining:
             title += f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} memory"
         if self.pending_prompts:
             title += f"  queued:{len(self.pending_prompts)}"
-        rows.append(style(title[:width], "bold", "cyan"))
+        rows.append(title)
         rows.extend(visible)
         while len(rows) < 1 + body_height:
             rows.append("")
@@ -3343,9 +3470,9 @@ class MotokoTui:
             role = entry.get("role", "?")
             content = entry.get("content", "")
             if role == "user":
-                prefix = style("You> ", "green", "bold")
+                prefix = style("> ", "turquoise", "bold")
             elif role == "assistant":
-                prefix = style("Motoko> ", "cyan", "bold")
+                prefix = style("Motoko> ", "purple", "bold")
             elif role == "queued":
                 prefix = style("Queued> ", "yellow", "bold")
             elif role == "error":
@@ -3363,7 +3490,7 @@ class MotokoTui:
                 if code:
                     wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix))))
                 elif raw_line.startswith(("/", "motoko ")):
-                    wrapped.extend(wrap_display_line(style(raw_line, "cyan"), width - len(strip_ansi(prefix))))
+                    wrapped.extend(wrap_display_line(style(raw_line, "turquoise"), width - len(strip_ansi(prefix))))
                 elif raw_line.startswith(("- ", "* ", "  /", "  motoko")):
                     wrapped.extend(wrap_display_line(style(raw_line, "dim"), width - len(strip_ansi(prefix))))
                 else:
@@ -3377,8 +3504,14 @@ class MotokoTui:
         if not options:
             return []
         max_rows = min(8, len(options))
-        rows = [style(" Suggestions", "bold", "yellow")]
-        for idx, option in enumerate(options[:max_rows]):
+        start = min(
+            max(0, self.dropdown_index - max_rows + 1),
+            max(0, len(options) - max_rows),
+        )
+        visible_options = options[start : start + max_rows]
+        rows = [style(f" Suggestions {start + 1}-{start + len(visible_options)}/{len(options)}", "bold", "turquoise")]
+        for offset, option in enumerate(visible_options):
+            idx = start + offset
             marker = ">" if idx == self.dropdown_index else " "
             label = strip_ansi(str(option.get("label", "")))
             description = strip_ansi(str(option.get("description", "")))
@@ -3387,15 +3520,15 @@ class MotokoTui:
                 remaining = max(0, width - len(strip_ansi(text)) - 3)
                 text += "  " + description[:remaining]
             if idx == self.dropdown_index:
-                rows.append(style(text[:width], "bold", "blue"))
+                rows.append(style(text[:width], "bold", "purple"))
             else:
                 rows.append(text[:width])
-        if len(options) > max_rows:
-            rows.append(style(f"   ... {len(options) - max_rows} more", "dim"))
+        if start + max_rows < len(options):
+            rows.append(style("   more below", "dim"))
         return rows
 
     def input_display(self, width: int) -> tuple[list[str], int, int]:
-        prompt = "You> "
+        prompt = "> "
         usable = max(10, width - len(prompt))
         before = self.input_buffer[: self.cursor]
         after = self.input_buffer[self.cursor :]
@@ -3416,7 +3549,7 @@ class MotokoTui:
             cursor_row_offset = max(0, cursor_row_offset - (len(logical_lines) - 4))
         rows = []
         for idx, line in enumerate(shown):
-            rows.append((style(prompt, "green", "bold") if idx == 0 else " " * len(prompt)) + line)
+            rows.append((style(prompt, "turquoise", "bold") if idx == 0 else " " * len(prompt)) + line)
         return rows, cursor_row_offset, cursor_col
 
 
@@ -3428,11 +3561,11 @@ def chat_loop(conv: dict) -> None:
         except Exception as exc:
             print(f"Motoko TUI failed; falling back to line mode: {exc}", file=sys.stderr)
     setup_readline_completion()
-    print(f"{style('Motoko conversation:', 'bold')} {conv['title']} [{style(conv['id'], 'yellow')}]")
+    print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
     print("Type /help for commands, /exit to save and leave.")
     while True:
         try:
-            user_text = motoko_input("\nYou> ").strip()
+            user_text = motoko_input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             save_conversation(conv)
@@ -3452,7 +3585,7 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             selector = user_text[len("/resume") :].strip() or None
             conv = load_conversation(selector)
-            print(f"{style('Motoko conversation:', 'bold')} {conv['title']} [{style(conv['id'], 'yellow')}]")
+            print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
             continue
         if user_text.startswith("/title "):
             conv["title"] = user_text[len("/title ") :].strip() or conv["title"]
@@ -3576,7 +3709,7 @@ def chat_loop(conv: dict) -> None:
 
         maybe_set_title(conv, user_text)
         conv.setdefault("messages", []).append({"role": "user", "content": user_text})
-        print("\n" + style("Motoko> ", "cyan", "bold"), end="", flush=True)
+        print("\n" + style("Motoko> ", "purple", "bold"), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
         reply = call_model(messages)
         conv["last_sources"] = sources
@@ -3745,8 +3878,14 @@ def command_list(_args) -> None:
     if not rows:
         print("No conversations yet.")
         return
+    print(
+        f"{style('   created', 'turquoise', 'bold')}  "
+        f"{style('   updated', 'turquoise', 'bold')}  "
+        f"{style('branch        ', 'turquoise', 'bold')}  "
+        f"{style('conversation', 'turquoise', 'bold')}"
+    )
     for conv in rows:
-        print(f"{conv.get('updated', conv.get('created', ''))}  {conv.get('id')}  {conv.get('title', 'Untitled')}")
+        print(conversation_label(conv))
 
 
 def command_show(args) -> None:
