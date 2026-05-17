@@ -62,15 +62,23 @@ RECENT_CONVERSATION_LIMIT = 6
 RECENT_CONVERSATION_MESSAGES = 6
 RECENT_CONVERSATION_SNIPPET_CHARS = 900
 RECENT_CONVERSATION_MAX_CHARS = 12000
+RECENT_CONVERSATION_RECENCY_LANE = 2
+RECENT_CONVERSATION_RELEVANCE_LANE = 4
 AUTO_MEMORY_MIN_MESSAGES = 4
 AUTO_MEMORY_INTERVAL_MESSAGES = 4
 AUTO_MEMORY_MAX_PROPOSALS = 5
+MODEL_TIMEOUT_SECONDS = 600
+MAINTENANCE_MODEL_TIMEOUT_SECONDS = 180
+MAINTENANCE_MAX_RETRIES = 2
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
 COMPACT_KEEP_MESSAGES = 8
 AUTO_SUMMARY_MIN_MESSAGES = 24
 AUTO_SUMMARY_INTERVAL_MESSAGES = 10
 MAX_PERSONALITY_CHARS = 12000
+MAX_PROFILE_DOSSIER_CHARS = 12000
+PROFILE_SOURCE_CONVERSATIONS = 12
+PROFILE_SOURCE_MEMORIES = 80
 AUTO_INDEX_GLOB = "auto"
 TEXT_SAMPLE_BYTES = 8192
 DEEP_RETRIEVAL_TERMS = {
@@ -111,6 +119,7 @@ SLASH_COMMANDS = [
     ("/title TEXT", "rename this conversation"),
     ("/resume [ID]", "switch to another saved conversation"),
     ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
+    ("/index-plan PATH", "preview a document index without writing derived text"),
     ("/index PATH", "build and attach a mixed text document index"),
     ("/attach-index [ID]", "attach an existing document index"),
     ("/topic [INDEX_ID] QUERY", "build and attach a topic dossier"),
@@ -123,6 +132,8 @@ SLASH_COMMANDS = [
     ("/sources", "show sources used for the last answer"),
     ("/status", "show model, memory, and context state"),
     ("/personality", "show the active personality/style file"),
+    ("/profile", "show Motoko's profile dossier about Javier"),
+    ("/profile-refresh", "rebuild the profile dossier from memories and conversations"),
     ("/remember TEXT", "save a durable memory manually"),
     ("/memories", "list saved memories"),
     ("/memory search TEXT", "search and rank saved memories"),
@@ -152,6 +163,7 @@ SHELL_COMMANDS = [
     "memory",
     "forget",
     "personality",
+    "profile",
     "remember",
     "status",
     "allow-dir",
@@ -166,6 +178,8 @@ SIMPLE_SLASH_COMMANDS = {
     "/sources",
     "/status",
     "/personality",
+    "/profile",
+    "/profile-refresh",
     "/memories",
     "/indexes",
     "/topics",
@@ -337,11 +351,26 @@ def max_derived_index_bytes(override: str | None = None) -> int:
         raise SystemExit(str(exc)) from exc
 
 
+def terminal_prefers_unicode() -> bool:
+    encoding = (getattr(sys.stdout, "encoding", None) or "").lower()
+    lang = " ".join(
+        os.environ.get(name, "")
+        for name in ("LC_ALL", "LC_CTYPE", "LANG")
+    ).lower()
+    return "utf" in encoding or "utf" in lang
+
+
 def spinner_frames() -> list[str]:
     mode = os.environ.get("MOTOKO_SPINNER", "auto").strip().lower()
     if mode in {"0", "false", "no", "none", "off"}:
         return []
-    if mode in {"auto", "ascii"}:
+    if mode == "auto":
+        return (
+            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+            if terminal_prefers_unicode()
+            else ["-", "/", "|", "\\"]
+        )
+    if mode == "ascii":
         return ["-", "/", "|", "\\"]
     if mode in {"block", "blink", "square"}:
         return ["■", " "]
@@ -443,6 +472,16 @@ def allowdirs_path() -> pathlib.Path:
 def personality_path() -> pathlib.Path:
     root = ensure_private_dir(config_root())
     return root / "personality.md"
+
+
+def maintenance_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "maintenance.json"
+
+
+def profile_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "profile.json"
 
 
 def conversation_path(conversation_id: str) -> pathlib.Path:
@@ -664,6 +703,101 @@ def load_memories(limit: int = 80) -> list[dict]:
 def write_memory_rows(rows: list[dict]) -> None:
     text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
     atomic_write(memories_path(), text)
+
+
+def read_maintenance_state() -> dict | None:
+    path = maintenance_path()
+    if not path.exists():
+        return None
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return state if isinstance(state, dict) else None
+
+
+def write_maintenance_state(state: dict) -> None:
+    state["updated"] = now()
+    atomic_write(maintenance_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    maintenance_path().chmod(0o600)
+
+
+def clear_maintenance_state(job_id: str | None = None) -> None:
+    state = read_maintenance_state()
+    if job_id and state and state.get("job_id") != job_id:
+        return
+    try:
+        maintenance_path().unlink()
+    except FileNotFoundError:
+        pass
+
+
+def maintenance_incomplete(state: dict | None) -> bool:
+    if not state:
+        return False
+    return state.get("status") in {"running", "resuming"}
+
+
+def begin_maintenance_state(conv: dict, *, resumed: bool = False) -> dict:
+    previous = read_maintenance_state()
+    retry_count = 0
+    if resumed and previous and previous.get("conversation_id") == conv.get("id"):
+        retry_count = int(previous.get("retry_count", 0) or 0)
+    state = {
+        "job_id": "maint-" + uuid.uuid4().hex[:10],
+        "kind": "auto-maintenance",
+        "conversation_id": conv.get("id", ""),
+        "conversation_title": conv.get("title", "Untitled"),
+        "started": now(),
+        "updated": now(),
+        "phase": "memory: checking",
+        "status": "resuming" if resumed else "running",
+        "retry_count": retry_count,
+    }
+    write_maintenance_state(state)
+    return state
+
+
+def update_maintenance_state(
+    state: dict,
+    phase: str,
+    *,
+    status: str = "running",
+    note: str | None = None,
+    error: str | None = None,
+) -> None:
+    state["phase"] = phase
+    state["status"] = status
+    if note is not None:
+        state["note"] = note
+    if error is not None:
+        state["error"] = error
+    write_maintenance_state(state)
+
+
+def resume_interrupted_maintenance(conv: dict) -> tuple[bool, str | None]:
+    state = read_maintenance_state()
+    if not maintenance_incomplete(state):
+        return False, None
+    if state.get("conversation_id") != conv.get("id"):
+        state["status"] = "abandoned"
+        state["abandoned"] = now()
+        write_maintenance_state(state)
+        return (
+            False,
+            f"abandoned interrupted maintenance for another conversation: {state.get('conversation_id', '')}",
+        )
+    retry_count = int(state.get("retry_count", 0) or 0)
+    if retry_count >= MAINTENANCE_MAX_RETRIES:
+        state["status"] = "abandoned"
+        state["abandoned"] = now()
+        write_maintenance_state(state)
+        return False, "abandoned interrupted maintenance after repeated retries"
+    state["retry_count"] = retry_count + 1
+    state["status"] = "resuming"
+    state["phase"] = "memory: queued"
+    write_maintenance_state(state)
+    return True, "resuming interrupted memory maintenance"
 
 
 def text_similarity(left: str, right: str) -> float:
@@ -1000,19 +1134,31 @@ def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
         reverse=True,
     )
     query_counts = token_counts(context_query_text(conv, query))
-    scored = []
-    total = len(rows)
+    scored_by_id = {}
     for idx, row in enumerate(rows):
         recall_text = conversation_recall_text(row)
         lexical = score_text(query_counts, recall_text) if query_counts else 0
-        recency_bonus = max(1, min(10, 10 - idx * 10 // max(1, total)))
+        recency_bonus = max(1, 10 - idx)
         enriched = dict(row)
         enriched["_recall_text"] = recall_text
         enriched["_recall_score"] = lexical * 8 + recency_bonus
         enriched["_matched_terms"] = lexical
         enriched["_recency_bonus"] = recency_bonus
-        scored.append(enriched)
-    scored.sort(
+        enriched["_selection_reasons"] = []
+        scored_by_id[enriched.get("id", "")] = enriched
+
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for row in rows[:RECENT_CONVERSATION_RECENCY_LANE]:
+        enriched = scored_by_id.get(row.get("id", ""))
+        if not enriched:
+            continue
+        enriched["_selection_reasons"].append("recent")
+        selected.append(enriched)
+        seen.add(enriched.get("id", ""))
+
+    relevance_ranked = sorted(
+        scored_by_id.values(),
         key=lambda row: (
             row.get("_matched_terms", 0),
             row.get("_recall_score", 0),
@@ -1020,7 +1166,28 @@ def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
         ),
         reverse=True,
     )
-    return scored[:RECENT_CONVERSATION_LIMIT]
+    for row in relevance_ranked:
+        if row.get("_matched_terms", 0) <= 0 and query_counts:
+            continue
+        if row.get("id", "") in seen:
+            if "relevant" not in row["_selection_reasons"] and row.get("_matched_terms", 0) > 0:
+                row["_selection_reasons"].append("relevant")
+            continue
+        row["_selection_reasons"].append("relevant")
+        selected.append(row)
+        seen.add(row.get("id", ""))
+        if len([item for item in selected if "relevant" in item.get("_selection_reasons", [])]) >= RECENT_CONVERSATION_RELEVANCE_LANE:
+            break
+
+    selected.sort(
+        key=lambda row: (
+            "recent" in row.get("_selection_reasons", []),
+            row.get("_matched_terms", 0),
+            row.get("_recall_score", 0),
+        ),
+        reverse=True,
+    )
+    return selected[:RECENT_CONVERSATION_LIMIT]
 
 
 def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
@@ -1064,6 +1231,7 @@ def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tup
                 "branch": branch,
                 "score": row.get("_recall_score", 0),
                 "matched_terms": row.get("_matched_terms", 0),
+                "selection": row.get("_selection_reasons", []),
             }
         )
     return "\n\n".join(lines), sources
@@ -1158,6 +1326,125 @@ def print_personality() -> None:
     print(text)
 
 
+def load_profile_dossier() -> dict | None:
+    path = profile_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def profile_source_material() -> tuple[str, list[str], list[str]]:
+    memories = load_memories(limit=PROFILE_SOURCE_MEMORIES)
+    conversations = [
+        conv
+        for conv in list_conversations()[:PROFILE_SOURCE_CONVERSATIONS]
+        if conversation_recall_text(conv).strip()
+    ]
+    memory_lines = [
+        f"- [{row.get('id', '')}; i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)}] {row.get('text', '')}"
+        for row in memories
+    ]
+    conversation_blocks = []
+    for conv in conversations:
+        title = conv.get("title") or "Untitled"
+        conversation_blocks.append(
+            f"--- conversation:{conv.get('id', '')} title:{title} updated:{conv.get('updated', '')} ---\n"
+            f"{compact_text(conversation_recall_text(conv), 2500)}"
+        )
+    text = textwrap.dedent(
+        f"""
+        Durable memories:
+        {chr(10).join(memory_lines) if memory_lines else "(none)"}
+
+        Recent conversation material:
+        {chr(10).join(conversation_blocks) if conversation_blocks else "(none)"}
+        """
+    ).strip()
+    return (
+        text,
+        [row.get("id", "") for row in memories if row.get("id")],
+        [conv.get("id", "") for conv in conversations if conv.get("id")],
+    )
+
+
+def refresh_profile_dossier() -> dict:
+    source_text, memory_ids, conversation_ids = profile_source_material()
+    if not memory_ids and not conversation_ids:
+        raise SystemExit("no memories or conversations available for a profile dossier yet")
+    prompt = textwrap.dedent(
+        f"""
+        Build a compact profile dossier for future private conversations with Javier.
+
+        Use only the source material below. Do not invent facts.
+        Prefer stable, recurring, useful context over transient task details.
+        Preserve uncertainty when the sources are ambiguous.
+
+        Organize the dossier with these headings:
+        - Stable preferences
+        - Goals and projects
+        - Working style
+        - Personal context
+        - Constraints and sensitivities
+        - Open questions
+
+        Keep it under {MAX_PROFILE_DOSSIER_CHARS} characters.
+
+        Source material:
+        {source_text}
+        """
+    ).strip()
+    text = quiet_model(
+        [
+            {
+                "role": "system",
+                "content": "Create faithful personal context dossiers from supplied sources only.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+    )[:MAX_PROFILE_DOSSIER_CHARS]
+    data = {
+        "updated": now(),
+        "memory_ids": memory_ids,
+        "conversation_ids": conversation_ids,
+        "text": text,
+    }
+    atomic_write(profile_path(), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    profile_path().chmod(0o600)
+    return data
+
+
+def render_profile_with_sources() -> tuple[str, list[dict]]:
+    profile = load_profile_dossier()
+    if not profile or not profile.get("text", "").strip():
+        return "No profile dossier yet. Run /profile-refresh to build one.", []
+    return profile.get("text", ""), [
+        {
+            "kind": "profile",
+            "updated": profile.get("updated", ""),
+            "memory_count": len(profile.get("memory_ids", [])),
+            "conversation_count": len(profile.get("conversation_ids", [])),
+        }
+    ]
+
+
+def print_profile() -> None:
+    profile = load_profile_dossier()
+    if not profile:
+        print("No profile dossier yet. Run 'motoko profile refresh' or /profile-refresh.")
+        return
+    print(f"updated: {profile.get('updated', '')}")
+    print(f"memories: {len(profile.get('memory_ids', []))}")
+    print(f"conversations: {len(profile.get('conversation_ids', []))}")
+    print()
+    print(profile.get("text", ""))
+
+
 def is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
     try:
         path.relative_to(root)
@@ -1236,6 +1523,43 @@ def iter_index_candidates(root: pathlib.Path, pattern: str | None) -> list[pathl
             if is_probably_text_file(candidate):
                 candidates.append(candidate)
     return sorted(candidates)
+
+
+def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dict:
+    root = pathlib.Path(path).expanduser().resolve()
+    require_allowed(root)
+    if not root.exists():
+        raise SystemExit(f"not found: {root}")
+    candidates = iter_index_candidates(root, pattern)
+    total_bytes = 0
+    largest: list[tuple[int, pathlib.Path]] = []
+    for candidate in candidates:
+        try:
+            size = candidate.stat().st_size
+        except OSError:
+            continue
+        total_bytes += size
+        largest.append((size, candidate))
+    largest.sort(reverse=True)
+    return {
+        "root": str(root),
+        "glob": pattern or AUTO_INDEX_GLOB,
+        "files": len(candidates),
+        "bytes": total_bytes,
+        "largest": largest[:5],
+    }
+
+
+def print_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> None:
+    plan = plan_document_index(path, pattern)
+    print(f"root: {plan['root']}")
+    print(f"glob: {plan['glob']}")
+    print(f"candidate files: {plan['files']}")
+    print(f"source bytes: {human_bytes(plan['bytes'])}")
+    if plan["largest"]:
+        print("largest files:")
+        for size, candidate in plan["largest"]:
+            print(f"  {human_bytes(size):>10}  {candidate}")
 
 
 def context_item_from_file(path: str) -> dict:
@@ -1404,8 +1728,19 @@ def index_staleness(index: dict) -> tuple[str, list[str]]:
     return "fresh", warnings
 
 
-def quiet_model(messages: list[dict], *, temperature: float = 0.2) -> str:
-    return call_model(messages, temperature=temperature, stream=False, echo=False).strip()
+def quiet_model(
+    messages: list[dict],
+    *,
+    temperature: float = 0.2,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> str:
+    return call_model(
+        messages,
+        temperature=temperature,
+        stream=False,
+        echo=False,
+        timeout=timeout,
+    ).strip()
 
 
 def summarize_text(label: str, text: str, instruction: str) -> str:
@@ -2258,6 +2593,7 @@ def render_conversation_summary(conv: dict) -> str:
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
+    profile_text, profile_sources = render_profile_with_sources()
     retrieval_query = context_query_text(conv, query)
     context_text, context_sources = render_context_with_sources(conv.get("context_items", []), retrieval_query)
     personality_text, personality_file, personality_exists = load_personality()
@@ -2269,6 +2605,7 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
             "status": "custom" if personality_exists else "default",
         }
     )
+    sources.extend(profile_sources)
     sources.extend(memory_sources)
     sources.extend(recent_sources)
     if conv.get("summary", "").strip():
@@ -2287,11 +2624,15 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         factual accuracy, privacy boundaries, source-grounding, or explicit user
         instructions.
 
-        Use the selected saved memories, recent saved conversations, compacted
-        conversation summary, and explicitly attached documents as context.
+        Use the profile dossier, selected saved memories, recent saved
+        conversations, compacted conversation summary, and explicitly attached
+        documents as context.
         Do not claim access to files or directories unless their contents are
         included in this prompt. If a memory seems stale, say so and ask before
         relying on it heavily.
+
+        Profile dossier:
+        {profile_text}
 
         Selected saved memories:
         {memory_text}
@@ -2321,6 +2662,7 @@ def call_model(
     temperature: float = 0.7,
     stream: bool = True,
     echo: bool = True,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> str:
     payload = {
         "model": model_name(),
@@ -2338,12 +2680,12 @@ def call_model(
     spinner = ThinkingSpinner(enabled=echo)
     try:
         spinner.start()
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             if stream:
                 return read_streaming_response(resp, echo=echo, spinner=spinner)
             spinner.stop()
             return read_json_response(resp)
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise SystemExit(f"model request failed: {exc}") from exc
     finally:
         spinner.stop()
@@ -2354,6 +2696,7 @@ def call_model_with_callback(
     *,
     on_token,
     temperature: float = 0.7,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> str:
     payload = {
         "model": model_name(),
@@ -2370,7 +2713,7 @@ def call_model_with_callback(
     )
     collected = []
     try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
@@ -2390,7 +2733,7 @@ def call_model_with_callback(
                 if content:
                     collected.append(content)
                     on_token(content)
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise SystemExit(f"model request failed: {exc}") from exc
     return "".join(collected)
 
@@ -2449,6 +2792,7 @@ def format_help() -> str:
           /title TEXT           rename this conversation
           /resume [ID]          switch to another saved conversation; picker if ID omitted
           /read PATH            attach a bounded excerpt from an allowlisted text file
+          /index-plan PATH      preview an index without writing derived text
           /index PATH           build and attach a mixed text document index
           /attach-index [ID]    attach an existing document index; picker if ID omitted
           /topic [INDEX_ID] QUERY
@@ -2463,6 +2807,8 @@ def format_help() -> str:
           /sources              show sources used for the last answer
           /status               show model, memory, and context state
           /personality          show the active personality/style file
+          /profile              show Motoko's profile dossier about Javier
+          /profile-refresh      rebuild the profile dossier
           /remember TEXT        save a durable memory manually
           /memories             list saved memories
           /memory search TEXT   search and rank saved memories
@@ -2484,6 +2830,8 @@ def format_help() -> str:
           motoko resume --line  resume with the legacy line-oriented interface
           motoko show [ID]      show a transcript; picker if ID omitted
           motoko index PATH     build a mixed text document index
+          motoko index PATH --plan
+                                preview an index without writing derived text
           motoko index PATH --max-derived-bytes 200GiB
           motoko indexes        list document indexes
           motoko topic INDEX_ID QUERY
@@ -2494,6 +2842,9 @@ def format_help() -> str:
           motoko chat --topic TOPIC_ID
           motoko compact [ID]   compact a saved conversation; picker if ID omitted
           motoko status         show model, memory, and state paths
+          motoko profile        show Motoko's profile dossier about Javier
+          motoko profile refresh
+                                rebuild the profile dossier
           motoko memories       list saved memories
           motoko memory search TEXT
           motoko memory review  list memories with provenance
@@ -2559,11 +2910,19 @@ def format_sources(sources: list[dict]) -> str:
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "
                 f"{source.get('path', '')}"
             )
+        elif kind == "profile":
+            lines.append(
+                f"{idx:3d}  profile dossier  updated {relative_time(source.get('updated', ''))}  "
+                f"{source.get('memory_count', 0)} memories  "
+                f"{source.get('conversation_count', 0)} conversations"
+            )
         elif kind == "conversation-summary":
             lines.append(f"{idx:3d}  compacted conversation summary")
         elif kind == "recent-conversation":
+            selection = ",".join(source.get("selection", [])) or "-"
             lines.append(
                 f"{idx:3d}  recent conversation {source.get('conversation_id', '')}  "
+                f"{selection}  "
                 f"score {source.get('score', 0)}  "
                 f"match {source.get('matched_terms', 0)}  "
                 f"updated {relative_time(source.get('updated', ''))}  "
@@ -2622,6 +2981,8 @@ def format_status(conv: dict | None = None) -> str:
     derived_bytes = sum(int(index.get("derived_content_bytes", 0) or 0) for index in indexes)
     topics = list_topics()
     conversations = list_conversations()
+    profile = load_profile_dossier()
+    maintenance = read_maintenance_state()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
     context_items = conv.get("context_items", []) if conv else []
@@ -2636,6 +2997,8 @@ def format_status(conv: dict | None = None) -> str:
         f"config: {config_root()}",
         f"conversations: {len(conversations)}",
         f"memories: {len(memories)} total, {pinned} pinned",
+        f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",
+        f"maintenance: {maintenance.get('phase', maintenance.get('status', 'unknown')) if maintenance else 'idle'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
     ]
@@ -2841,6 +3204,7 @@ class MotokoTui:
         self.running = True
         self.dirty = True
         self.status = "ready"
+        self.maintenance_status = ""
         self.input_buffer = ""
         self.cursor = 0
         self.kill_ring = ""
@@ -2859,6 +3223,9 @@ class MotokoTui:
         self.tui_spinner_frames = spinner_frames() or ["*"]
         self.tui_spinner_index = 0
         self.messages = self.seed_messages(conv)
+        self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
+        if resume_note:
+            self.append("system", resume_note)
 
     def seed_messages(self, conv: dict) -> list[dict]:
         rows = [
@@ -2896,6 +3263,9 @@ class MotokoTui:
             signal.signal(signal.SIGWINCH, on_winch)
             self.write("\033[?25l\033[?7l")
             self.render(force=True)
+            if self.resume_maintenance_on_start:
+                self.resume_maintenance_on_start = False
+                self.start_maintenance(resumed=True)
             while self.running:
                 self.drain_events()
                 timeout = 0.04 if self.generating or self.maintaining else 0.12
@@ -3168,6 +3538,11 @@ class MotokoTui:
                 self.append("system", format_status(self.conv))
             elif text == "/personality":
                 self.append("system", self.capture_text(print_personality))
+            elif text == "/profile":
+                self.append("system", self.capture_text(print_profile))
+            elif text == "/profile-refresh":
+                self.run_blocking_command("Refreshing profile dossier...", refresh_profile_dossier)
+                self.append("system", self.capture_text(print_profile))
             elif text == "/memories":
                 self.append("system", self.capture_text(print_memories))
             elif text == "/indexes":
@@ -3197,6 +3572,8 @@ class MotokoTui:
                 self.conv.setdefault("context_items", []).append(item)
                 save_conversation(self.conv)
                 self.append("system", f"attached: {item['path']}")
+            elif text.startswith("/index-plan "):
+                self.append("system", self.capture_text(lambda: print_index_plan(text[len("/index-plan ") :].strip())))
             elif text == "/attach-index" or text.startswith("/attach-index "):
                 selector = text[len("/attach-index") :].strip() or None
                 index = load_index(selector)
@@ -3409,27 +3786,51 @@ class MotokoTui:
                 self.maintaining = False
                 notes = event[1]
                 self.status = "ready"
+                self.maintenance_status = ""
                 if notes:
                     self.messages = self.seed_messages(self.conv)
+                    self.append("system", "; ".join(notes))
                 changed = True
             elif kind == "maintenance_error":
                 self.maintaining = False
+                self.maintenance_status = ""
                 self.status = "ready"
+                self.append("system", f"memory maintenance failed: {event[1]}")
+                changed = True
+            elif kind == "maintenance_phase":
+                self.maintenance_status = event[1]
+                self.status = event[1]
                 changed = True
         if changed:
             self.dirty = True
 
-    def start_maintenance(self) -> None:
+    def start_maintenance(self, *, resumed: bool = False) -> None:
         if self.maintaining or self.generating:
             return
         self.maintaining = True
-        self.status = "organizing memory"
+        self.maintenance_status = "memory: checking"
+        self.status = self.maintenance_status
+        state = begin_maintenance_state(self.conv, resumed=resumed)
 
         def worker() -> None:
             try:
-                notes = auto_maintain_conversation(self.conv)
+                def on_phase(phase: str) -> None:
+                    self.put_event(("maintenance_phase", phase))
+
+                notes = auto_maintain_conversation(
+                    self.conv,
+                    phase_callback=on_phase,
+                    state=state,
+                )
+                clear_maintenance_state(state.get("job_id"))
                 self.put_event(("maintenance_done", notes))
             except Exception as exc:  # Keep hidden maintenance from breaking chat.
+                update_maintenance_state(
+                    state,
+                    "memory: failed",
+                    status="failed",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 self.put_event(("maintenance_error", f"{type(exc).__name__}: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -3557,15 +3958,19 @@ class MotokoTui:
             visible = body_lines[-body_height:]
 
         rows = []
+        display_status = "ready" if self.maintaining and not self.generating else self.status
         title = (
             f" {style('Motoko', 'purple', 'bold')}  "
             f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
-            f"{style(self.status, 'turquoise')}"
+            f"{style(display_status, 'turquoise')}"
         )
         if self.generating:
             title += f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} answering"
         if self.maintaining:
-            title += f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} memory"
+            title += (
+                f"  {self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)]} "
+                f"{self.maintenance_status or self.status}"
+            )
         if self.pending_prompts:
             title += f"  queued:{len(self.pending_prompts)}"
         rows.append(title)
@@ -3686,6 +4091,29 @@ def chat_loop(conv: dict) -> None:
     setup_readline_completion()
     print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
     print("Type /help for commands, /exit to save and leave.")
+    resume_maintenance, resume_note = resume_interrupted_maintenance(conv)
+    if resume_note:
+        print(f"sys {resume_note}")
+    if resume_maintenance:
+        print("sys resuming memory maintenance")
+        state = begin_maintenance_state(conv, resumed=True)
+        try:
+            notes = auto_maintain_conversation(
+                conv,
+                phase_callback=lambda phase: print(f"sys {phase}"),
+                state=state,
+            )
+            clear_maintenance_state(state.get("job_id"))
+            if notes:
+                print(f"sys {'; '.join(notes)}")
+        except Exception as exc:
+            update_maintenance_state(
+                state,
+                "memory: failed",
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            print(f"sys memory maintenance failed: {type(exc).__name__}: {exc}")
     while True:
         try:
             user_text = motoko_input("\n> ").strip()
@@ -3720,6 +4148,9 @@ def chat_loop(conv: dict) -> None:
             conv.setdefault("context_items", []).append(item)
             save_conversation(conv)
             print(f"attached: {item['path']}")
+            continue
+        if user_text.startswith("/index-plan "):
+            print_index_plan(user_text[len("/index-plan ") :].strip())
             continue
         if user_text.startswith("/index "):
             index = build_document_index(user_text[len("/index ") :].strip(), AUTO_INDEX_GLOB)
@@ -3783,6 +4214,13 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/personality":
             print_personality()
             continue
+        if user_text == "/profile":
+            print_profile()
+            continue
+        if user_text == "/profile-refresh":
+            profile = refresh_profile_dossier()
+            print(f"profile refreshed: {profile.get('updated', '')}")
+            continue
         if user_text.startswith("/remember "):
             add_memory(
                 user_text[len("/remember ") :],
@@ -3838,13 +4276,26 @@ def chat_loop(conv: dict) -> None:
         conv["last_sources"] = sources
         conv["messages"].append({"role": "assistant", "content": reply})
         save_conversation(conv)
+        state = begin_maintenance_state(conv)
         try:
-            auto_maintain_conversation(conv)
-        except Exception:
-            pass
+            auto_maintain_conversation(conv, state=state)
+            clear_maintenance_state(state.get("job_id"))
+        except Exception as exc:
+            update_maintenance_state(
+                state,
+                "memory: failed",
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            print(f"sys memory maintenance failed: {type(exc).__name__}: {exc}")
 
 
-def compact_conversation(conv: dict, *, quiet: bool = False) -> bool:
+def compact_conversation(
+    conv: dict,
+    *,
+    quiet: bool = False,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> bool:
     messages = conv.get("messages", [])
     if len(messages) <= COMPACT_KEEP_MESSAGES:
         if not quiet:
@@ -3884,6 +4335,7 @@ def compact_conversation(conv: dict, *, quiet: bool = False) -> bool:
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
+        timeout=timeout,
     )
     conv["summary"] = summary[:MAX_CONVERSATION_SUMMARY_CHARS]
     conv["messages"] = recent
@@ -3894,7 +4346,11 @@ def compact_conversation(conv: dict, *, quiet: bool = False) -> bool:
     return True
 
 
-def propose_memories(conv: dict) -> list[str]:
+def propose_memories(
+    conv: dict,
+    *,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> list[str]:
     if not conv.get("messages"):
         return []
     prompt = textwrap.dedent(
@@ -3916,7 +4372,13 @@ def propose_memories(conv: dict) -> list[str]:
         {"role": "system", "content": prompt},
         *conv.get("messages", [])[-MAX_RECENT_MESSAGES:],
     ]
-    proposal = call_model(messages, temperature=0.2).strip()
+    proposal = call_model(
+        messages,
+        temperature=0.2,
+        stream=False,
+        echo=False,
+        timeout=timeout,
+    ).strip()
     if proposal == "NO_MEMORY":
         return []
     memories = []
@@ -3963,8 +4425,20 @@ def memorize_conversation(conv: dict) -> None:
         print("not saved")
 
 
-def auto_maintain_conversation(conv: dict) -> list[str]:
+def auto_maintain_conversation(
+    conv: dict,
+    *,
+    phase_callback=None,
+    state: dict | None = None,
+) -> list[str]:
+    def set_phase(phase: str, *, note: str | None = None) -> None:
+        if state is not None:
+            update_maintenance_state(state, phase, note=note)
+        if phase_callback is not None:
+            phase_callback(phase)
+
     notes = []
+    set_phase("memory: checking")
     messages = conv.get("messages", [])
     message_count = len(messages)
     last_memory = int(conv.get("last_auto_memory_message_count", 0) or 0)
@@ -3972,8 +4446,10 @@ def auto_maintain_conversation(conv: dict) -> list[str]:
         message_count >= AUTO_MEMORY_MIN_MESSAGES
         and message_count - last_memory >= AUTO_MEMORY_INTERVAL_MESSAGES
     ):
+        set_phase("memory: proposing")
         saved = 0
-        for text in propose_memories(conv):
+        for text in propose_memories(conv, timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS):
+            set_phase("memory: saving")
             add_memory(
                 text,
                 source="auto-model-proposed",
@@ -3990,9 +4466,11 @@ def auto_maintain_conversation(conv: dict) -> list[str]:
         message_count >= AUTO_SUMMARY_MIN_MESSAGES
         and message_count - last_compact >= AUTO_SUMMARY_INTERVAL_MESSAGES
     ):
-        if compact_conversation(conv, quiet=True):
+        set_phase("memory: compacting")
+        if compact_conversation(conv, quiet=True, timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS):
             notes.append("compacted older conversation context")
     save_conversation(conv)
+    set_phase("memory: done", note="; ".join(notes) if notes else "no changes")
     return notes
 
 
@@ -4049,6 +4527,9 @@ def command_resume(args) -> None:
 
 
 def command_index(args) -> None:
+    if args.plan:
+        print_index_plan(args.path, args.glob)
+        return
     index = build_document_index(args.path, args.glob, args.name, args.max_derived_bytes)
     print(f"{index['id']}  {index.get('name', '')}  {index.get('root', '')}")
 
@@ -4064,10 +4545,13 @@ def command_indexes_text() -> None:
         return
     for index in rows:
         files = len(index.get("files", []))
+        chunks = sum(len(file_item.get("chunks", [])) for file_item in index.get("files", []))
+        derived_bytes = int(index.get("derived_content_bytes", 0) or 0)
         status, warnings = index_staleness(index)
         print(
             f"{index.get('created', '')}  {index.get('id')}  "
-            f"{files} file(s)  {status}  {index.get('name', '')}  {index.get('root', '')}"
+            f"{files} file(s)  {chunks} chunk(s)  {human_bytes(derived_bytes)}  "
+            f"{status}  {index.get('name', '')}  {index.get('root', '')}"
         )
         for warning in warnings[:3]:
             print(f"  warning: {warning}")
@@ -4158,6 +4642,18 @@ def command_personality(args) -> None:
         raise SystemExit("unknown personality command")
 
 
+def command_profile(args) -> None:
+    if args.profile_command in (None, "show"):
+        print_profile()
+    elif args.profile_command == "refresh":
+        profile = refresh_profile_dossier()
+        print(f"profile refreshed: {profile.get('updated', '')}")
+    elif args.profile_command == "path":
+        print(profile_path())
+    else:
+        raise SystemExit("unknown profile command")
+
+
 def command_status(_args) -> None:
     print_status()
 
@@ -4207,6 +4703,7 @@ def main(argv: list[str]) -> int:
     index.add_argument("path")
     index.add_argument("--glob", default=AUTO_INDEX_GLOB)
     index.add_argument("--name")
+    index.add_argument("--plan", action="store_true", help="preview matched files without writing derived text")
     index.add_argument(
         "--max-derived-bytes",
         help="maximum derived chunk text to store for this index, e.g. 200GiB",
@@ -4279,6 +4776,16 @@ def main(argv: list[str]) -> int:
     personality_init.add_argument("--force", action="store_true")
     personality_init.set_defaults(func=command_personality)
     personality.set_defaults(func=command_personality)
+
+    profile = sub.add_parser("profile", help="show or refresh Motoko's profile dossier")
+    profile_sub = profile.add_subparsers(dest="profile_command")
+    profile_show = profile_sub.add_parser("show", help="show the profile dossier")
+    profile_show.set_defaults(func=command_profile)
+    profile_refresh = profile_sub.add_parser("refresh", help="rebuild the profile dossier")
+    profile_refresh.set_defaults(func=command_profile)
+    profile_path_cmd = profile_sub.add_parser("path", help="print profile dossier path")
+    profile_path_cmd.set_defaults(func=command_profile)
+    profile.set_defaults(func=command_profile)
 
     remember = sub.add_parser("remember", help="save a memory")
     remember.add_argument("text", nargs="+")

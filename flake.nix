@@ -48,6 +48,10 @@
             python3 -m py_compile ${./motoko}
             touch "$out"
           '';
+          regression = pkgs.runCommand "motoko-regression-tests" { nativeBuildInputs = [ pkgs.python312 ]; } ''
+            MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_regression.py}
+            touch "$out"
+          '';
         }
       );
 

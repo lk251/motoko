@@ -67,6 +67,7 @@ Accepted directions:
 - memory review, edit, delete, importance, pinning, and duplicate handling;
 - automatic but inspectable memory maintenance;
 - compacted conversations;
+- explicit profile dossiers from memories and conversations;
 - hierarchical document indexes;
 - topic dossiers and deeper dossiers over already indexed material;
 - TTY-friendly terminal ergonomics;
@@ -109,10 +110,15 @@ Current UI direction:
   `created`, `updated`, `branch`, `conversation`.
 - Recent saved conversations should be available as bounded, inspectable context
   in new chats. Durable memories remain separate from this recency recall.
+- Background memory work should report the actual phase and recover cleanly
+  from interruption instead of leaving an indefinite spinner.
+- Unicode braille spinners are preferred when the terminal can render them;
+  ASCII remains the fallback.
 
 ## Near-Term Next Improvement
 
-The highest-ROI next engineering improvement is a small fake
-OpenAI-compatible test server and regression tests. That would let Motoko test
-chat, streaming, `/compact`, `/sources`, memory proposal, and failure behavior
-without requiring Qwen or llama.cpp to be running.
+The highest-ROI next engineering improvement is improving the quality of
+profile dossiers and document-derived dossiers after real personal documents
+are added. The regression suite now includes a small fake OpenAI-compatible
+test server so Motoko can test streaming, maintenance, recall, and profile
+behavior without requiring Qwen or llama.cpp to be running.

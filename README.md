@@ -14,10 +14,11 @@ Design constraints:
 - No database server.
 - Explicit document allowlists.
 - Inspectable memories, sources, and index freshness.
+- Explicit profile dossier built from memories and conversations.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
 - Automatic ranked memory selection and quiet after-answer memory maintenance,
-  with `/sources` provenance.
+  with visible phases, resumable state, and `/sources` provenance.
 - Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers
   for sustained attention on a subject.
 - Source documents are read-only; reusable indexes store derived chunks under

@@ -184,6 +184,7 @@ Useful in-chat commands:
 /stop
 /resume [CONVERSATION_ID]
 /read PATH
+/index-plan PATH
 /index PATH
 /attach-index [INDEX_ID]
 /topic [INDEX_ID] QUERY
@@ -196,6 +197,8 @@ Useful in-chat commands:
 /sources
 /status
 /personality
+/profile
+/profile-refresh
 /remember TEXT
 /memory search TEXT
 /memory review
@@ -234,13 +237,13 @@ memories record the source conversation and that they were created by
 provenance before trusting a memory.
 
 Each turn receives an automatic ranked subset of cross-conversation memories
-plus a bounded set of recent saved conversation capsules. The memory ranking
-uses the current prompt, the conversation title, recent user turns, the
-compacted summary, memory importance, pinned status, repeated sightings, thread
-relevance, and recency. Recent conversation recall is separate: it includes
-compact snippets from other recent conversations so Motoko can remember chats
-that have not yet been promoted into durable memories. Use `/sources` after an
-answer to see which memories and recent conversations were selected.
+plus a bounded set of recent saved conversation capsules. Recent conversation
+recall uses two lanes: a tiny recency lane for the newest useful conversations
+and a relevance lane scored against the current prompt and thread. Durable
+memory ranking remains separate and uses the current prompt, the conversation
+title, recent user turns, the compacted summary, memory importance, pinned
+status, repeated sightings, thread relevance, and recency. Use `/sources` after
+an answer to see which memories and recent conversations were selected and why.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to
@@ -249,6 +252,10 @@ Duplicate detection reinforces existing similar memories by updating their
 `seen_count`, tags, and last-seen metadata instead of creating many copies of
 the same fact. Stored memories remain inspectable with `motoko memory review`,
 searchable with `motoko memory search`, and removable with `motoko forget`.
+The top bar reports the active maintenance phase, such as `memory: checking`,
+`memory: proposing`, `memory: saving`, or `memory: compacting`. Interrupted
+maintenance writes a small resumable state file and is retried conservatively
+when the same conversation is opened again.
 
 Memories default to importance `3`. `motoko memory importance ID 1-5` changes
 that priority. `motoko memory pin ID` makes a memory eligible for inclusion even
@@ -270,6 +277,13 @@ like she has unbounded hidden knowledge.
 `/status` prints the current model endpoint, state paths, memory/index/topic
 counts, and the amount of context attached to the active conversation.
 
+`/profile-refresh` or `motoko profile refresh` builds a compact profile dossier
+from durable memories and recent conversation material. This is an explicit
+hierarchical retrieval-augmented memory layer for Javier's stable preferences,
+goals, projects, working style, personal context, constraints, sensitivities,
+and open questions. `/profile` or `motoko profile` displays it. The dossier is
+included in future prompts with `/sources` provenance.
+
 ## Document Indexes
 
 Build a reusable mixed-file index from an allowed directory:
@@ -277,6 +291,12 @@ Build a reusable mixed-file index from an allowed directory:
 ```bash
 motoko allow-dir ~/Documents
 motoko index ~/Documents --name personal-notes
+```
+
+Preview what would be indexed without writing derived text:
+
+```bash
+motoko index ~/Documents --plan
 ```
 
 The default indexing mode is `auto`: Motoko recursively indexes every file that
@@ -314,6 +334,7 @@ motoko chat --index INDEX_ID
 Inside a chat:
 
 ```text
+/index-plan ~/Documents
 /index ~/Documents
 /attach-index
 /attach-index INDEX_ID
@@ -428,12 +449,13 @@ The default endpoint is the MTP Qwen3.6 service:
 http://127.0.0.1:8083/v1/chat/completions
 ```
 
-While waiting for the first streamed response token, Motoko shows a small
-thinking spinner. The default is ASCII for reliable raw-tty rendering. Braille
-and blinking-block styles are opt-in because some fonts render braille frames
-as identical black squares:
+While waiting for the first streamed response token or while background
+maintenance runs, Motoko shows a small thinking spinner. The default `auto`
+mode uses a single-character braille spinner on UTF-8 terminals and falls back
+to ASCII otherwise:
 
 ```bash
+MOTOKO_SPINNER=auto motoko
 MOTOKO_SPINNER=ascii motoko
 MOTOKO_SPINNER=block motoko
 MOTOKO_SPINNER=braille motoko
