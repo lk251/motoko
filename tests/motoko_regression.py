@@ -530,6 +530,25 @@ def test_index_progress_state(m):
             m.quiet_model = old_quiet_model
 
 
+def test_list_indexes_ignores_progress_files(m):
+    with isolated_state():
+        index = {
+            "id": "idx",
+            "name": "docs",
+            "root": "/tmp/docs",
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": m.now(),
+            "corpus_summary": "",
+            "files": [],
+        }
+        m.atomic_write(m.index_path("idx"), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        m.write_index_progress({"id": "idx", "status": "running", "phase": "summarizing chunk"})
+        rows = m.list_indexes()
+        assert len(rows) == 1
+        assert rows[0]["id"] == "idx"
+        assert "phase" not in rows[0]
+
+
 def test_org_task_signals_drive_retrieval(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -600,6 +619,68 @@ def test_index_health_reports_new_files(m):
             assert len(summary["new_files"]) == 1
             assert summary["coverage_score"] == 50
             assert "new 1" in m.format_index_health(summary)
+        finally:
+            m.quiet_model = old_quiet_model
+
+
+def test_index_signal_enrichment_upgrades_legacy_index(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "tasks.org").write_text("* TODO [#A] Enrich legacy task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+            legacy = dict(index)
+            legacy.pop("signals", None)
+            legacy.pop("signal_summary", None)
+            legacy.pop("signal_schema", None)
+            legacy["files"] = []
+            for file_item in index["files"]:
+                legacy_file = dict(file_item)
+                legacy_file.pop("signals", None)
+                legacy_file["chunks"] = []
+                for chunk in file_item["chunks"]:
+                    legacy_chunk = dict(chunk)
+                    legacy_chunk.pop("signals", None)
+                    legacy_file["chunks"].append(legacy_chunk)
+                legacy["files"].append(legacy_file)
+            m.atomic_write(m.index_path(index["id"]), json.dumps(legacy, ensure_ascii=False, indent=2) + "\n")
+
+            loaded = m.load_index_exact(index["id"])
+            assert m.index_needs_signal_enrichment(loaded)
+            enriched, changed, note = m.enrich_index_signals(loaded)
+            assert changed
+            assert "enriched" in note
+            assert enriched["signal_schema"] == m.SIGNAL_SCHEMA_VERSION
+            assert enriched["signals"]["priorities"]["A"] == 1
+            assert "Enrich legacy task" in enriched["signal_summary"]
+            assert not m.index_needs_signal_enrichment(enriched)
+        finally:
+            m.quiet_model = old_quiet_model
+
+
+def test_index_signal_enrichment_skips_active_index(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "tasks.org").write_text("* TODO Active task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+            m.write_index_progress({"id": index["id"], "status": "running", "phase": "summarizing chunk"})
+            try:
+                m.enrich_index_signals(index)
+            except SystemExit as exc:
+                assert "still being built" in str(exc)
+            else:
+                raise AssertionError("active index enrichment should be refused")
         finally:
             m.quiet_model = old_quiet_model
 
@@ -698,8 +779,11 @@ def main() -> int:
         test_identity_config,
         test_index_limits,
         test_index_progress_state,
+        test_list_indexes_ignores_progress_files,
         test_org_task_signals_drive_retrieval,
         test_index_health_reports_new_files,
+        test_index_signal_enrichment_upgrades_legacy_index,
+        test_index_signal_enrichment_skips_active_index,
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,

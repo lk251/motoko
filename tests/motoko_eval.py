@@ -126,6 +126,36 @@ def test_background_study_state(m):
     assert jobs[-1]["event"] == "completed"
 
 
+def test_background_study_enriches_legacy_index(m):
+    docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
+    docs.mkdir()
+    (docs / "tasks.org").write_text("* TODO [#A] Background enrich task\n", encoding="utf-8")
+    m.add_allowed_dir(str(docs))
+    old_quiet_model = m.quiet_model
+    try:
+        m.quiet_model = lambda *args, **kwargs: "summary"
+        index = m.build_document_index(str(docs))
+    finally:
+        m.quiet_model = old_quiet_model
+
+    index.pop("signal_schema", None)
+    index.pop("signals", None)
+    index.pop("signal_summary", None)
+    for file_item in index["files"]:
+        file_item.pop("signals", None)
+        for chunk in file_item["chunks"]:
+            chunk.pop("signals", None)
+    write_json(m.index_path(index["id"]), index)
+
+    conv = m.new_conversation("Background enrich")
+    conv["id"] = "background-enrich"
+    notes = m.background_study_step(conv)
+    enriched = m.load_index_exact(index["id"])
+    assert any("index signals enriched" in note for note in notes)
+    assert enriched["signal_schema"] == m.SIGNAL_SCHEMA_VERSION
+    assert "Background enrich task" in enriched["signal_summary"]
+
+
 def test_interrupted_background_study_resume_note(m):
     conv = m.new_conversation("Interrupted")
     conv["id"] = "interrupted"
@@ -219,6 +249,8 @@ def main() -> int:
         test_context_plan_and_source_reasons(m)
     with isolated_state():
         test_background_study_state(m)
+    with isolated_state():
+        test_background_study_enriches_legacy_index(m)
     with isolated_state():
         test_interrupted_background_study_resume_note(m)
     with isolated_state():

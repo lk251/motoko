@@ -44,6 +44,9 @@ Design constraints:
 - Org-mode corpus artifacts include deterministic heading, TODO, priority,
   deadline, and schedule signals so task-planning questions can retrieve the
   right source chunks even when model summaries are too generic.
+- Existing completed indexes can be enriched with current structured signals
+  without rerunning model summaries; idle background study performs bounded
+  CPU-only enrichment when it is safe to do so.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
 - Duplicate-aware indexing reuses exact chunks already present in Motoko state

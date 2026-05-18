@@ -278,6 +278,12 @@ metadata under Motoko state; source Org files remain untouched. For task and
 priority questions, Motoko also gives the model a ranked task-candidate list
 using TODO state, priority cookies, and Org dates before asking it to answer.
 Use `/tasks [QUERY]` to inspect that ranked task-candidate list directly.
+Older completed indexes that predate the current structured-signal schema can
+be upgraded with `motoko index-enrich INDEX_ID` or `motoko index-enrich --all`.
+This enrichment is CPU-only: it reads existing stored chunks, updates index
+metadata, and does not rerun model summaries. The light background study loop
+also enriches a small number of old completed indexes automatically when idle;
+it refuses to touch an index that still has an active progress job.
 
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
@@ -342,6 +348,8 @@ motoko resume CONVERSATION_ID
 motoko show
 motoko show CONVERSATION_ID
 motoko status
+motoko index-enrich INDEX_ID
+motoko index-enrich --all
 motoko tasks "priority tasks tomorrow"
 motoko permissions
 ```
@@ -650,6 +658,8 @@ Each index stores:
 - one summary per file;
 - one summary per chunk;
 - raw chunk text for later retrieval, stored as Motoko-owned derived files;
+- optional structured signals for formats Motoko understands, currently
+  Org-mode headings, TODO state, priorities, deadlines, and schedules;
 - source fingerprints: file size, mtime, and SHA-256 at index time.
 
 On each question, Motoko scores the indexed summaries and chunks with a small
@@ -684,7 +694,9 @@ chunk directory to avoid abandoned derived text.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad
-indexes when needed.
+indexes when needed. If only structured signals need to be added to an old
+completed index, prefer `motoko index-enrich INDEX_ID`; it is a metadata upgrade
+and should be much faster than rebuilding the HRAG summaries.
 
 ## Topic Dossiers
 

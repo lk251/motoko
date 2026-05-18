@@ -56,6 +56,14 @@ not the easiest place to review what changed after a long work session.
 - Added `/tasks [QUERY]` and `motoko tasks QUERY` to inspect ranked Org task
   candidates from attached or relevant corpus indexes without waiting for a
   model answer.
+- Added `motoko index-enrich INDEX_ID` and `motoko index-enrich --all` to add
+  current structured signals to completed legacy indexes without rerunning
+  expensive model summaries.
+- Made the light background study loop perform bounded CPU-only signal
+  enrichment automatically when old completed indexes need it, while refusing
+  active indexes that are still being built.
+- Fixed index listing so `INDEX.progress.json` job files are never treated as
+  completed document indexes.
 
 ## 2026-05-18
 

@@ -73,7 +73,9 @@ BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
 BACKGROUND_HEAVY_INDEX_COOLDOWN_SECONDS = 30 * 60
 BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES = 3
 BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES = 64 * 1024
+BACKGROUND_INDEX_ENRICH_LIMIT = 1
 CWD_LEARN_DECLINE_COOLDOWN_SECONDS = 24 * 60 * 60
+SIGNAL_SCHEMA_VERSION = "org-signals-v1"
 ORG_TODO_KEYWORDS = {
     "TODO",
     "NEXT",
@@ -250,6 +252,7 @@ SHELL_COMMANDS = [
     "memories",
     "memory",
     "tasks",
+    "index-enrich",
     "forget",
     "personality",
     "profile",
@@ -2333,6 +2336,8 @@ def context_items_from_dir(path: str, pattern: str) -> list[dict]:
 def list_indexes() -> list[dict]:
     rows = []
     for path in sorted(indexes_dir().glob("*.json"), reverse=True):
+        if path.name.endswith(".progress.json"):
+            continue
         try:
             rows.append(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
@@ -2930,6 +2935,94 @@ def format_ranked_task_items(index: dict, query: str, *, limit: int = 16) -> str
     for _score, item in rows:
         lines.append(f"- {format_task_item(item)}")
     return "\n".join(lines)
+
+
+def index_progress_running(index_id: str) -> bool:
+    progress = read_index_progress(index_id)
+    if not progress:
+        return False
+    return progress.get("status") not in {"completed", "failed"}
+
+
+def index_needs_signal_enrichment(index: dict) -> bool:
+    if index.get("signal_schema") != SIGNAL_SCHEMA_VERSION:
+        return True
+    for file_item in index.get("files", []):
+        if "signals" not in file_item:
+            return True
+        for chunk in file_item.get("chunks", []):
+            if "signals" not in chunk and read_chunk_content(index, chunk).strip():
+                return True
+    return False
+
+
+def enrich_index_signals(index: dict) -> tuple[dict, bool, str]:
+    index_id = index.get("id", "")
+    if not index_id:
+        raise SystemExit("index has no id")
+    if index_progress_running(index_id):
+        raise SystemExit(f"index {index_id} is still being built; wait for the active job to finish")
+    if not index_needs_signal_enrichment(index):
+        return index, False, f"index signals already current: {index_id}"
+
+    enriched = dict(index)
+    enriched_files = []
+    for file_item in index.get("files", []):
+        path = pathlib.Path(file_item.get("path", ""))
+        enriched_file = dict(file_item)
+        enriched_chunks = []
+        for chunk in file_item.get("chunks", []):
+            enriched_chunk = dict(chunk)
+            content = read_chunk_content(index, chunk)
+            signals = extract_document_signals(path, content)
+            if signals:
+                enriched_chunk["signals"] = signals
+            else:
+                enriched_chunk.pop("signals", None)
+            enriched_chunks.append(enriched_chunk)
+        enriched_file["chunks"] = enriched_chunks
+        file_signals = file_signals_from_chunks(enriched_chunks)
+        if file_signals:
+            enriched_file["signals"] = file_signals
+        else:
+            enriched_file.pop("signals", None)
+        enriched_files.append(enriched_file)
+
+    enriched["files"] = enriched_files
+    corpus_signals = corpus_signals_from_files(enriched_files)
+    if corpus_signals:
+        enriched["signals"] = corpus_signals
+        enriched["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
+    else:
+        enriched.pop("signals", None)
+        enriched.pop("signal_summary", None)
+    enriched["signal_schema"] = SIGNAL_SCHEMA_VERSION
+    enriched["signal_enriched"] = now()
+    atomic_write(index_path(index_id), json.dumps(enriched, ensure_ascii=False, indent=2) + "\n")
+    return enriched, True, f"index signals enriched: {index_id}"
+
+
+def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
+    notes = []
+    changed = 0
+    for index in list_indexes():
+        if limit is not None and changed >= limit:
+            break
+        if not index_needs_signal_enrichment(index):
+            continue
+        index_id = index.get("id", "")
+        if index_progress_running(index_id):
+            notes.append(f"index signal enrichment skipped active job {index_id}")
+            continue
+        try:
+            _enriched, did_change, note = enrich_index_signals(index)
+        except Exception as exc:
+            notes.append(f"index signal enrichment failed for {index_id}: {type(exc).__name__}: {exc}")
+            continue
+        if did_change:
+            changed += 1
+            notes.append(note)
+    return notes
 
 
 def split_text(text: str, size: int = INDEX_CHUNK_CHARS) -> list[str]:
@@ -3540,6 +3633,8 @@ def build_document_index(
             "derived_content_bytes": sum(item.get("derived_content_bytes", 0) for item in files),
             "duplicate_chunk_count": sum(item.get("duplicate_chunk_count", 0) for item in files),
             "corpus_summary": corpus_summary,
+            "signal_schema": SIGNAL_SCHEMA_VERSION,
+            "signal_enriched": now(),
             "files": files,
         }
         if corpus_signals:
@@ -4015,6 +4110,15 @@ def format_index_health(summary: dict) -> str:
     return " ".join(parts)
 
 
+def format_index_signal_state(index: dict) -> str:
+    schema = index.get("signal_schema")
+    if schema == SIGNAL_SCHEMA_VERSION:
+        return "signals current"
+    if schema:
+        return "signals old"
+    return "signals missing"
+
+
 def heavy_index_refresh_reason(summary: dict) -> str | None:
     if summary.get("status") == "stale":
         return "stale indexed source content"
@@ -4325,6 +4429,17 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     ]
     if stale_indexes:
         notes.append(f"{len(stale_indexes)} index(es) need review or rebuild")
+    enrich_limit = env_int("MOTOKO_BACKGROUND_INDEX_ENRICH_LIMIT", BACKGROUND_INDEX_ENRICH_LIMIT)
+    if env_flag("MOTOKO_BACKGROUND_INDEX_ENRICH", True) and enrich_limit:
+        enrichment_candidates = [
+            index
+            for index in list_indexes()
+            if index_needs_signal_enrichment(index)
+        ]
+        if enrichment_candidates:
+            set_phase("study: enriching indexes", notes=notes)
+            notes.extend(enrich_indexes_needing_signals(limit=max(1, enrich_limit)))
+            catalog = write_context_catalog()
     heavy_notes = refresh_heavy_attached_indexes(
         conv,
         phase_callback=lambda phase: set_phase(phase, notes=notes),
@@ -7900,6 +8015,20 @@ def command_indexes(_args) -> None:
     command_indexes_text()
 
 
+def command_index_enrich(args) -> None:
+    if args.all:
+        limit = None if args.limit is None else max(0, args.limit)
+        notes = enrich_indexes_needing_signals(limit=limit)
+        if notes:
+            print("\n".join(notes))
+        else:
+            print("no indexes needed signal enrichment")
+        return
+    index = load_index(args.index)
+    _enriched, changed, note = enrich_index_signals(index)
+    print(note if changed else note)
+
+
 def command_tasks(args) -> None:
     conv = {"title": "Task candidates", "messages": [], "context_items": []}
     for index_id in args.index or []:
@@ -7922,10 +8051,11 @@ def command_indexes_text() -> None:
         derived_bytes = int(index.get("derived_content_bytes", 0) or 0)
         status, warnings = index_staleness(index)
         health = format_index_health(index_change_summary(index))
+        signals = format_index_signal_state(index)
         print(
             f"{index.get('created', '')}  {index.get('id')}  "
             f"{files} file(s)  {chunks} chunk(s)  {human_bytes(derived_bytes)}  "
-            f"{status}  {health}  {index.get('name', '')}  {index.get('root', '')}"
+            f"{status}  {health}  {signals}  {index.get('name', '')}  {index.get('root', '')}"
         )
         for warning in warnings[:3]:
             print(f"  warning: {warning}")
@@ -8221,6 +8351,12 @@ def main(argv: list[str]) -> int:
 
     indexes = sub.add_parser("indexes", help="list document indexes")
     indexes.set_defaults(func=command_indexes)
+
+    index_enrich = sub.add_parser("index-enrich", help="add current structured signals to existing indexes")
+    index_enrich.add_argument("index", nargs="?")
+    index_enrich.add_argument("--all", action="store_true", help="enrich every index that needs it")
+    index_enrich.add_argument("--limit", type=int, help="maximum indexes to enrich with --all")
+    index_enrich.set_defaults(func=command_index_enrich)
 
     tasks = sub.add_parser("tasks", help="show ranked Org task candidates from indexes")
     tasks.add_argument("query", nargs="*")
