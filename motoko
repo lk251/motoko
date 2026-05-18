@@ -176,6 +176,7 @@ SLASH_COMMANDS = [
     ("/compact", "summarize older turns into compact context"),
     ("/sources", "show sources used for the last answer"),
     ("/status", "show model, memory, and context state"),
+    ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
     ("/repo status [PATH]", "show read-only Git status for an allowlisted repo"),
@@ -223,6 +224,7 @@ SHELL_COMMANDS = [
     "profile",
     "remember",
     "status",
+    "identity",
     "permissions",
     "repo",
     "allow-dir",
@@ -238,6 +240,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/compact",
     "/sources",
     "/status",
+    "/identity",
     "/permissions",
     "/personality",
     "/profile",
@@ -614,6 +617,11 @@ def config_path() -> pathlib.Path:
 
 def default_config() -> dict:
     return {
+        "identity": {
+            "name": "Motoko",
+            "realm": "personal",
+            "description": "Private local assistant for Javier's personal realm.",
+        },
         "permissions": {
             "mode": DEFAULT_PERMISSION_MODE,
         },
@@ -629,6 +637,12 @@ def merged_config(data: dict | None) -> dict:
     merged = default_config()
     if not isinstance(data, dict):
         return merged
+    identity = data.get("identity")
+    if isinstance(identity, dict):
+        for key in ("name", "realm", "description"):
+            value = identity.get(key)
+            if isinstance(value, str) and value.strip():
+                merged["identity"][key] = value.strip()[:1000]
     permissions = data.get("permissions")
     if isinstance(permissions, dict):
         mode = permissions.get("mode")
@@ -664,6 +678,34 @@ def save_config(config: dict) -> None:
 
 def config_index_value(key: str):
     return load_config().get("index", {}).get(key)
+
+
+def identity_config() -> dict:
+    return load_config().get("identity", default_config()["identity"])
+
+
+def identity_name() -> str:
+    return identity_config().get("name") or "Motoko"
+
+
+def identity_realm() -> str:
+    return identity_config().get("realm") or "personal"
+
+
+def identity_description() -> str:
+    return identity_config().get("description") or ""
+
+
+def format_identity() -> str:
+    identity = identity_config()
+    return "\n".join(
+        [
+            f"name: {identity.get('name', 'Motoko')}",
+            f"realm: {identity.get('realm', 'personal')}",
+            f"description: {identity.get('description', '')}",
+            f"config: {config_path()}",
+        ]
+    )
 
 
 def parse_config_byte_count(raw, field: str) -> int:
@@ -3954,6 +3996,7 @@ def format_context_plan(plan: dict) -> str:
 
 
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+    identity = identity_config()
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
     profile_text, profile_sources = render_profile_with_sources()
@@ -3963,6 +4006,14 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     catalog_text = format_context_catalog(catalog)
     personality_text, personality_file, personality_exists = load_personality()
     sources = []
+    sources.append(
+        {
+            "kind": "identity",
+            "name": identity.get("name", "Motoko"),
+            "realm": identity.get("realm", "personal"),
+            "description": identity.get("description", ""),
+        }
+    )
     sources.append(
         {
             "kind": "personality",
@@ -3979,6 +4030,12 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     sources.append({"kind": "context-catalog", "updated": catalog.get("updated", "")})
     context_plan = context_plan_from_lanes(
         [
+            {
+                "lane": "identity",
+                "chars": len(format_identity()),
+                "sources": 1,
+                "purpose": "assistant name and account realm",
+            },
             {
                 "lane": "personality",
                 "chars": len(personality_text),
@@ -4027,9 +4084,14 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     sufficiency = context_sufficiency_note(conv, query, sources)
     return textwrap.dedent(
         f"""
-        You are Motoko, Javier's personal local assistant running in the HB3
-        personal realm. You are a conversational assistant, not a system
-        administrator and not an autonomous agent.
+        You are {identity.get('name', 'Motoko')}, Javier's local assistant
+        running in the {identity.get('realm', 'personal')} realm.
+
+        Realm identity:
+        {identity.get('description', '')}
+
+        You are a conversational assistant, not a system administrator and not
+        an autonomous agent.
 
         Conversation style and personality guidance:
         {personality_text}
@@ -4307,6 +4369,7 @@ HELP_SECTIONS = [
             ("/title TEXT", "rename this conversation"),
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
             ("/status", "show model, memory, and context state"),
+            ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
         ],
@@ -4384,6 +4447,7 @@ HELP_SECTIONS = [
             ("motoko study QUERY", "run a bounded study action in a new conversation"),
             ("motoko compact [ID]", "compact a saved conversation"),
             ("motoko status", "show model, memory, and state paths"),
+            ("motoko identity", "show active account/realm identity"),
             ("motoko permissions", "show feature permissions and index defaults"),
             ("motoko permissions set MODE", "set default feature permission mode"),
             ("motoko repo status [PATH]", "show Git status for an allowlisted repo"),
@@ -4429,6 +4493,8 @@ def format_about() -> str:
         [
             f"Motoko {APP_VERSION}",
             f"revision: {app_revision()}",
+            f"identity: {identity_name()}",
+            f"realm: {identity_realm()}",
             f"model: {model_name()}",
             f"model badge: {model_badge()}",
             f"endpoint: {endpoint()}",
@@ -4446,7 +4512,13 @@ def format_sources(sources: list[dict]) -> str:
     lines = []
     for idx, source in enumerate(sources, 1):
         kind = source.get("kind", "source")
-        if kind == "memory":
+        if kind == "identity":
+            lines.append(
+                f"{idx:3d}  identity  {source.get('name', 'Motoko')}  "
+                f"realm {source.get('realm', 'personal')}"
+            )
+            lines.append("     why: assistant identity and account realm")
+        elif kind == "memory":
             reasons = []
             if source.get("pinned"):
                 reasons.append("pinned")
@@ -4604,6 +4676,8 @@ def format_status(conv: dict | None = None) -> str:
     index_config = config.get("index", {})
 
     lines = [
+        f"identity: {identity_name()}",
+        f"realm: {identity_realm()}",
         f"model: {model_name()}",
         f"model badge: {model_badge()}",
         f"endpoint: {endpoint()}",
@@ -5526,6 +5600,8 @@ class MotokoTui:
                 self.append("system", format_sources(self.conv.get("last_sources", [])))
             elif text == "/status":
                 self.append("system", format_status(self.conv))
+            elif text == "/identity":
+                self.append("system", format_identity())
             elif text == "/permissions":
                 self.append("system", format_permissions())
             elif text.startswith("/permissions set "):
@@ -6481,6 +6557,9 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/status":
             print_status(conv)
             continue
+        if user_text == "/identity":
+            print(format_identity())
+            continue
         if user_text == "/permissions":
             print(format_permissions())
             continue
@@ -7158,6 +7237,15 @@ def command_status(_args) -> None:
     print_status()
 
 
+def command_identity(args) -> None:
+    if args.identity_command in (None, "show"):
+        print(format_identity())
+    elif args.identity_command == "path":
+        print(config_path())
+    else:
+        raise SystemExit("unknown identity command")
+
+
 def command_permissions(args) -> None:
     if args.permissions_command in (None, "show"):
         print(format_permissions())
@@ -7228,6 +7316,14 @@ def main(argv: list[str]) -> int:
 
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
+
+    identity = sub.add_parser("identity", help="show account/realm identity")
+    identity_sub = identity.add_subparsers(dest="identity_command")
+    identity_show = identity_sub.add_parser("show", help="show active account/realm identity")
+    identity_show.set_defaults(func=command_identity)
+    identity_path_cmd = identity_sub.add_parser("path", help="print config file path")
+    identity_path_cmd.set_defaults(func=command_identity)
+    identity.set_defaults(func=command_identity)
 
     permissions = sub.add_parser("permissions", help="show or set Motoko feature permissions")
     permissions_sub = permissions.add_subparsers(dest="permissions_command")

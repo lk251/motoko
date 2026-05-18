@@ -66,6 +66,41 @@ Default config path:
 
 Conversation files are JSON. Memories are append-only JSONL rows.
 
+## Identity And Personality
+
+Motoko separates structured identity from conversational style:
+
+- `~/.config/motoko/config.json` says who she is in this Unix account: name,
+  realm, and role.
+- `~/.config/motoko/personality.md` says how she should speak: tone, warmth,
+  directness, enthusiasm, and style.
+
+This keeps one codebase and one executable while allowing each account to have a
+different identity and separate memories. The repo stays named `motoko`; the
+instance identity is per user.
+
+Example identity config:
+
+```json
+{
+  "identity": {
+    "name": "Motoko",
+    "realm": "admin",
+    "description": "NixOS and repository review assistant for Javier's admin account."
+  }
+}
+```
+
+Motoko shows identity in:
+
+```bash
+motoko identity
+motoko about
+motoko status
+```
+
+and includes it in the system prompt and `/sources` provenance for each answer.
+
 ## Permissions
 
 Motoko has a small per-user feature gate stored in:
@@ -108,6 +143,11 @@ Per-user index defaults can also live in `config.json`:
 
 ```json
 {
+  "identity": {
+    "name": "Motoko",
+    "realm": "admin",
+    "description": "NixOS and repository review assistant for Javier's admin account."
+  },
   "permissions": {
     "mode": "repo-review"
   },
@@ -130,8 +170,36 @@ MOTOKO_INDEX_MAX_FILE_BYTES=20MiB motoko index ~/Documents
 
 To set defaults manually for `personal` or `mares`, log into that account and
 run `motoko permissions set MODE`, then edit `~/.config/motoko/config.json` if
-that account needs different index limits. State and config remain under that
-account's own home directory.
+that account needs different index limits or identity text. State and config
+remain under that account's own home directory.
+
+Suggested realm identities:
+
+```json
+{
+  "identity": {
+    "name": "Motoko",
+    "realm": "mares",
+    "description": "Mares Engineering work assistant for Texere, RaceFocus, Motoko, and source-repo analysis. Keep work context separate from Javier's personal memories and from admin-only host-apply authority."
+  },
+  "permissions": {
+    "mode": "repo-review"
+  }
+}
+```
+
+```json
+{
+  "identity": {
+    "name": "Motoko",
+    "realm": "admin",
+    "description": "Admin-side NixOS and repository review assistant for Javier. Help inspect diffs, explain system policy, and prepare safe changes, but do not imply sudo, switching, pushing, or live mutation authority."
+  },
+  "permissions": {
+    "mode": "repo-review"
+  }
+}
+```
 
 ## Personality And Style
 
@@ -298,6 +366,7 @@ Useful in-chat commands:
 /compact
 /sources
 /status
+/identity
 /permissions
 /permissions set MODE
 /repo status [PATH]
