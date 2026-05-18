@@ -269,7 +269,9 @@ For Org-mode files, Motoko also extracts deterministic structured signals:
 headings, TODO states, priorities, deadlines, and schedules. These signals are
 stored alongside HRAG summaries and boost retrieval for task-planning questions
 such as "what are the highest priority tasks for tomorrow?" They are derived
-metadata under Motoko state; source Org files remain untouched.
+metadata under Motoko state; source Org files remain untouched. For task and
+priority questions, Motoko also gives the model a ranked task-candidate list
+using TODO state, priority cookies, and Org dates before asking it to answer.
 
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.

@@ -47,6 +47,8 @@ not the easiest place to review what changed after a long work session.
 - Added Org-mode structured signals for headings, TODO states, priorities,
   deadlines, and schedules, and used them to improve task-priority retrieval
   from corpus indexes.
+- Added ranked task candidates for priority/date/task questions so Motoko can
+  show the model the most relevant Org tasks before answering.
 
 ## 2026-05-18
 

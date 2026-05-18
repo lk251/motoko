@@ -557,9 +557,11 @@ def test_org_task_signals_drive_retrieval(m):
             assert index["signals"]["active_task_count"] == 1
             assert index["signals"]["done_task_count"] == 1
             assert index["signals"]["priorities"]["A"] == 1
+            assert index["signals"]["task_items"][0]["deadline_date"] == "2026-05-19"
             assert "Prepare tomorrow plan" in index["signal_summary"]
 
-            text, sources = m.retrieve_from_index(index, "highest priority tasks for tomorrow")
+            text, sources = m.retrieve_from_index(index, "highest priority tasks for 2026-05-19")
+            assert "Ranked task candidates:" in text
             assert "Structured task signals:" in text
             assert "Prepare tomorrow plan" in text
             assert any(source.get("kind") == "chunk" for source in sources)
