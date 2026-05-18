@@ -3947,23 +3947,59 @@ def index_change_summary(index: dict) -> dict:
             "warnings": warnings + [str(exc)],
             "new_files": [],
             "new_bytes": 0,
+            "candidate_files": 0,
+            "indexed_files": len(known_paths),
+            "covered_files": 0,
+            "missing_files": [],
+            "coverage_score": 0,
         }
     current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
     new_files = sorted(
         path for path_text, path in current_paths.items() if path_text not in known_paths
     )
+    missing_paths = sorted(path_text for path_text in known_paths if path_text not in current_paths)
+    covered_files = len(known_paths & set(current_paths))
     new_bytes = 0
     for path in new_files:
         try:
             new_bytes += path.stat().st_size
         except OSError:
             pass
+    candidate_count = len(current_paths)
+    indexed_count = len(known_paths)
+    denominator = max(candidate_count, indexed_count, 1)
+    coverage_score = int((covered_files / denominator) * 100)
+    if status == "stale":
+        coverage_score = min(coverage_score, 70)
+    elif status in {"unknown", "empty"}:
+        coverage_score = min(coverage_score, 40)
     return {
         "status": status,
         "warnings": warnings,
         "new_files": new_files,
         "new_bytes": new_bytes,
+        "candidate_files": candidate_count,
+        "indexed_files": indexed_count,
+        "covered_files": covered_files,
+        "missing_files": missing_paths,
+        "coverage_score": coverage_score,
     }
+
+
+def format_index_health(summary: dict) -> str:
+    score = summary.get("coverage_score")
+    if score is None:
+        return "health ?"
+    parts = [f"health {score}%"]
+    new_files = len(summary.get("new_files", []) or [])
+    missing_files = len(summary.get("missing_files", []) or [])
+    if new_files:
+        parts.append(f"new {new_files}")
+    if missing_files:
+        parts.append(f"missing {missing_files}")
+    if summary.get("status") == "stale":
+        parts.append("stale")
+    return " ".join(parts)
 
 
 def heavy_index_refresh_reason(summary: dict) -> str | None:
@@ -7824,10 +7860,11 @@ def command_indexes_text() -> None:
         chunks = sum(len(file_item.get("chunks", [])) for file_item in index.get("files", []))
         derived_bytes = int(index.get("derived_content_bytes", 0) or 0)
         status, warnings = index_staleness(index)
+        health = format_index_health(index_change_summary(index))
         print(
             f"{index.get('created', '')}  {index.get('id')}  "
             f"{files} file(s)  {chunks} chunk(s)  {human_bytes(derived_bytes)}  "
-            f"{status}  {index.get('name', '')}  {index.get('root', '')}"
+            f"{status}  {health}  {index.get('name', '')}  {index.get('root', '')}"
         )
         for warning in warnings[:3]:
             print(f"  warning: {warning}")

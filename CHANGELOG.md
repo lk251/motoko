@@ -49,6 +49,8 @@ not the easiest place to review what changed after a long work session.
   from corpus indexes.
 - Added ranked task candidates for priority/date/task questions so Motoko can
   show the model the most relevant Org tasks before answering.
+- Added corpus health reporting in `/indexes`, including coverage percentage
+  and counts of newly discovered or missing files.
 
 ## 2026-05-18
 

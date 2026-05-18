@@ -569,6 +569,30 @@ def test_org_task_signals_drive_retrieval(m):
             m.quiet_model = old_quiet_model
 
 
+def test_index_health_reports_new_files(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.org").write_text("* TODO [#A] Alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+            summary = m.index_change_summary(index)
+            assert summary["coverage_score"] == 100
+            assert m.format_index_health(summary) == "health 100%"
+
+            (docs / "b.org").write_text("* TODO [#B] Bravo\n", encoding="utf-8")
+            summary = m.index_change_summary(index)
+            assert len(summary["new_files"]) == 1
+            assert summary["coverage_score"] == 50
+            assert "new 1" in m.format_index_health(summary)
+        finally:
+            m.quiet_model = old_quiet_model
+
+
 def test_repo_context_item(m):
     with isolated_state() as tmp:
         item = m.context_item_from_repo_report("status", tmp, "repo: fake\nclean")
@@ -664,6 +688,7 @@ def main() -> int:
         test_index_limits,
         test_index_progress_state,
         test_org_task_signals_drive_retrieval,
+        test_index_health_reports_new_files,
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,

@@ -264,6 +264,10 @@ model calls so long jobs are easier to anticipate. While the TUI is learning a
 corpus, the top status reports file/chunk/model-call progress, elapsed time,
 and ETA; `/indexes` and `/status` also show active durable index jobs from
 Motoko state.
+`/indexes` reports a corpus health percentage computed from current readable
+files under the indexed root, newly discovered files, missing old files, and
+stale source fingerprints. This is the cheap CPU-side signal Motoko uses before
+deciding whether heavier model reprocessing is useful.
 
 For Org-mode files, Motoko also extracts deterministic structured signals:
 headings, TODO states, priorities, deadlines, and schedules. These signals are
