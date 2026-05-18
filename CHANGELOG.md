@@ -51,6 +51,8 @@ not the easiest place to review what changed after a long work session.
   show the model the most relevant Org tasks before answering.
 - Added corpus health reporting in `/indexes`, including coverage percentage
   and counts of newly discovered or missing files.
+- Reused the same progress/ETA status for heavy background refreshes of stale
+  attached indexes, not only first-run corpus learning.
 
 ## 2026-05-18
 

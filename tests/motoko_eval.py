@@ -182,14 +182,29 @@ def test_heavy_index_refresh_replaces_attached_index(m):
     old_build = m.build_document_index
     phases = []
     try:
-        m.build_document_index = (
-            lambda path, pattern, name=None, max_derived_bytes=None, progress_callback=None: new_index
-        )
+        def fake_build(path, pattern, name=None, max_derived_bytes=None, progress_callback=None):
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "status": "running",
+                        "phase": "summarizing chunk",
+                        "current_file_index": 1,
+                        "total_files": 2,
+                        "completed_chunks": 1,
+                        "estimated_chunks": 2,
+                        "percent": 50,
+                        "eta_seconds": 12,
+                    }
+                )
+            return new_index
+
+        m.build_document_index = fake_build
         notes = m.refresh_heavy_attached_indexes(conv, phase_callback=phases.append)
     finally:
         m.build_document_index = old_build
 
     assert "bg-heavy: indexing(model)" in phases
+    assert any("file 1/2" in phase for phase in phases)
     assert any("heavy index refreshed old-index -> new-index" in note for note in notes)
     assert conv["context_items"][0]["id"] == "new-index"
 

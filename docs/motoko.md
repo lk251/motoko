@@ -263,7 +263,8 @@ Index plans and first-run learning prompts include estimated chunks and HRAG
 model calls so long jobs are easier to anticipate. While the TUI is learning a
 corpus, the top status reports file/chunk/model-call progress, elapsed time,
 and ETA; `/indexes` and `/status` also show active durable index jobs from
-Motoko state.
+Motoko state. The same progress display is used later if an attached stale
+index needs a heavy background refresh.
 `/indexes` reports a corpus health percentage computed from current readable
 files under the indexed root, newly discovered files, missing old files, and
 stale source fingerprints. This is the cheap CPU-side signal Motoko uses before

@@ -4049,11 +4049,16 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
         mark_heavy_index_attempt(index, state, result=f"started: {reason}")
         if phase_callback is not None:
             phase_callback("bg-heavy: indexing(model)")
+        def on_progress(progress: dict) -> None:
+            if phase_callback is not None:
+                phase_callback(format_index_progress_status(progress))
+
         try:
             refreshed = build_document_index_quiet(
                 index.get("root", ""),
                 index.get("glob") or AUTO_INDEX_GLOB,
                 index.get("name", ""),
+                progress_callback=on_progress,
             )
             replace_attached_index(conv, index.get("id", ""), refreshed)
         except SystemExit as exc:
