@@ -19,6 +19,15 @@ to stay simple, inspectable, and dependency-light.
 - Read `docs/project-context.md` before making architectural, security-boundary,
   or terminal-interface changes.
 
+## Mares Account Handoff
+
+When running as the non-admin `mares` account, or when changing Motoko workflow,
+packaging, NixOS integration, account boundaries, memory/document behavior, or
+handoff process, read `docs/mares-motoko-handoff.md` before editing. That file
+is the repo-local context bridge from Javier's admin session to
+`/home/mares/repos/motoko`; do not rely on raw Codex session history or copied
+account state.
+
 ## Validation
 
 Before committing code changes, run:

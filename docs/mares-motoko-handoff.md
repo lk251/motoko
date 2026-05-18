@@ -75,9 +75,10 @@ cd /home/mares/repos/motoko
 git remote -v
 ```
 
-Do not assume GitHub or Codeberg authorization exists for `mares`. If no
-reviewed push remote is configured, export a patch and hand it to Javier
-instead of trying to broaden credentials.
+Do not assume GitHub or Codeberg authorization exists for `mares`. Push only
+when Javier explicitly asks and only after verifying the intended remote. Do not
+broaden credentials, copy Javier's SSH keys, or add new account authorization to
+make a push work.
 
 ## Current Architecture
 
@@ -147,9 +148,10 @@ HB3 then installs `motokoPackages.default` for the non-admin `mares` and
 system package until Javier updates the `motoko` flake input in
 `nixos-configs`, reviews the resulting diff, and rebuilds from the admin path.
 
-`mares` may develop and test Motoko, but should not update the deployed
-`nixos-configs` flake lock as part of a proposal unless Javier explicitly asks
-for that phase.
+`mares` has normal development authority for Motoko source work in this
+repository. NixOS deployment is separate: `mares` should not update the deployed
+`nixos-configs` flake lock or rebuild HB3 unless Javier explicitly asks for
+that deployment phase.
 
 ## HB3 Realm Model
 
@@ -157,7 +159,7 @@ HB3 currently has three relevant Unix accounts:
 
 - `javier`: administrator account. This is the sudo and NixOS apply path.
 - `mares`: Mares Engineering work realm. No sudo. Normal Codex development,
-  analysis, and proposal work should happen here.
+  analysis, and Motoko source work can happen here.
 - `personal`: personal assistant realm. No sudo. Private Motoko memory and
   personal document context belong here.
 
@@ -336,7 +338,6 @@ checks, `git add` it before relying on `nix flake check`.
    ```bash
    cd /home/mares/repos/motoko
    git status --short --branch
-   git switch -c mares/short-topic
    # edit files
    nix develop --command python3 -m py_compile motoko
    nix develop --command python3 tests/motoko_regression.py
@@ -345,49 +346,30 @@ checks, `git add` it before relying on `nix flake check`.
    git diff --check
    ```
 
-2. Commit a proposal branch locally.
+   Work directly on `master` for small, approved changes. Create feature
+   branches only when they are technically useful, such as for larger or
+   interruptible work.
+
+2. Commit accepted Motoko changes locally.
 
    ```bash
    git status --short
    git diff --stat
    git add FILES
-   git commit -m "Clear Motoko proposal message"
+   git commit -m "Clear Motoko change message"
    ```
 
-3. Export a patch or push to a reviewed remote only if configured.
-
-   Patch path:
-
-   ```bash
-   git format-patch --stdout master..HEAD > /tmp/mares-motoko-proposal.patch
-   ```
-
-   Remote path, only after confirming the remote is intended for `mares`:
+3. Push only when Javier explicitly asks.
 
    ```bash
    git remote -v
-   git push origin HEAD:refs/heads/mares/short-topic
+   git push origin master
    ```
 
-   Do not add credentials, copy Javier's SSH keys, or push to a canonical remote
-   if the push path has not been reviewed.
+   Do not add credentials, copy Javier's SSH keys, or push to a remote that has
+   not been confirmed for `mares`.
 
-4. Have Javier review and apply from `/home/javier/repos/motoko`.
-
-   Javier can fetch the proposal branch or apply the patch in the admin clone:
-
-   ```bash
-   cd /home/javier/repos/motoko
-   git status --short --branch
-   git fetch origin mares/short-topic
-   git show --stat FETCH_HEAD
-   git diff master...FETCH_HEAD
-   ```
-
-   Javier then decides whether to merge, amend, rebuild, or reject. For patch
-   review, Javier should inspect the patch before applying it.
-
-5. Update `nixos-configs` only from the Javier/admin path when a deployed
+4. Update `nixos-configs` only from the Javier/admin path when a deployed
    Motoko package change is accepted.
 
    ```bash
@@ -431,8 +413,8 @@ not from private personal corpora.
 
 Javier remains responsible for:
 
-- applying accepted Motoko changes to the canonical branch;
-- pushing canonical remotes when required;
+- deploying accepted Motoko package revisions through `nixos-configs`;
+- pushing deployment or admin-owned remotes when required;
 - updating the `motoko` flake input in `nixos-configs`;
 - running NixOS review/dry-build/switch workflows;
 - starting, stopping, or debugging systemd model services;
