@@ -530,6 +530,34 @@ def test_cwd_indexing_ignores_light_study_done(m):
     assert ui.study_last_note == ""
 
 
+def test_color_survives_quiet_index_redirect(m):
+    class FakeTty:
+        def isatty(self):
+            return True
+
+    old_stdout = m.sys.stdout
+    old_real_stdout = m.sys.__stdout__
+    old_term = os.environ.get("TERM")
+    old_no_color = os.environ.get("NO_COLOR")
+    try:
+        os.environ["TERM"] = "xterm-256color"
+        os.environ.pop("NO_COLOR", None)
+        m.sys.stdout = m.io.StringIO()
+        m.sys.__stdout__ = FakeTty()
+        assert "\033[" in m.style("Motoko", "purple")
+    finally:
+        m.sys.stdout = old_stdout
+        m.sys.__stdout__ = old_real_stdout
+        if old_term is None:
+            os.environ.pop("TERM", None)
+        else:
+            os.environ["TERM"] = old_term
+        if old_no_color is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = old_no_color
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -554,6 +582,7 @@ def main() -> int:
         test_index_limits,
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,
+        test_color_survives_quiet_index_redirect,
     ]
     for test in tests:
         test(m)
