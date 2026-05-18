@@ -52,6 +52,10 @@
             MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_regression.py}
             touch "$out"
           '';
+          evaluation = pkgs.runCommand "motoko-evaluation-harness" { nativeBuildInputs = [ pkgs.python312 ]; } ''
+            MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_eval.py}
+            touch "$out"
+          '';
         }
       );
 

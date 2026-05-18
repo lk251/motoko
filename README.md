@@ -17,8 +17,15 @@ Design constraints:
 - Explicit profile dossier built from memories and conversations.
 - Query-focused memory dossiers built from saved memories and prior
   conversations.
+- Explicit `/study QUERY` and `motoko study QUERY` passes that reuse existing
+  dossiers before building new derived context.
+- A low-intensity idle background study loop that refreshes the private context
+  catalog without silently crawling new directories or competing with chat.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
+- TTY-safe ASCII spinner by default, with braille as explicit opt-in.
+- TUI model badge showing the active local model/endpoint, such as
+  `qwen3.6-27b-mtp:8083`.
 - Automatic ranked memory selection and quiet after-answer memory maintenance,
   with visible phases, resumable state, and `/sources` provenance.
 - Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers
@@ -54,4 +61,10 @@ Validate:
 
 ```bash
 nix flake check
+```
+
+Run only the stdlib evaluation harness:
+
+```bash
+nix build .#checks.x86_64-linux.evaluation
 ```

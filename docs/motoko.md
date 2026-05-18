@@ -115,6 +115,7 @@ Start a new chat:
 
 ```bash
 motoko
+motoko new
 motoko help
 motoko chat --line
 ```
@@ -132,6 +133,11 @@ shown as `Motoko`, without a `>` suffix. System/status lines use compact `sys`.
 Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.
+The default spinner is the plain ASCII `-/|\` cycle so Linux TTYs with Terminus
+do not show square fallback glyphs. Set `MOTOKO_SPINNER=braille` only in a
+terminal/font combination known to render braille cells correctly. The top
+status line includes the model badge, for example `qwen3.6-27b-mtp:8083`, so
+the local MTP endpoint is visible while chatting.
 
 Emacs-style editing keys in the TUI:
 
@@ -184,6 +190,7 @@ Useful in-chat commands:
 /help
 /
 /stop
+/new [TITLE]
 /resume [CONVERSATION_ID]
 /read PATH
 /index-plan PATH
@@ -199,6 +206,7 @@ Useful in-chat commands:
 /topic-show [TOPIC_ID]
 /dossiers
 /dossier-show [DOSSIER_ID]
+/study QUERY
 /compact
 /sources
 /status
@@ -265,6 +273,9 @@ maintenance writes a small resumable state file and is retried conservatively
 when the same conversation is opened again. The TUI also shows how long the
 current maintenance phase has been active; memory proposal work is bounded by a
 wall-clock timeout so a stuck proposal returns control to the chat.
+After the first few messages, maintenance may also ask the local model for a
+short conversation title. First-message titles are provisional unless Javier
+set a title manually with `/title` or `motoko new --title`.
 
 Memories default to importance `3`. `motoko memory importance ID 1-5` changes
 that priority. `motoko memory pin ID` makes a memory eligible for inclusion even
@@ -285,6 +296,16 @@ like she has unbounded hidden knowledge.
 
 `/status` prints the current model endpoint, state paths, memory/index/topic
 counts, and the amount of context attached to the active conversation.
+
+While the TUI is open, Motoko also runs a low-intensity background study loop
+only when she is idle. The loop refreshes a private context catalog, checks
+index freshness, and records study suggestions. By default it avoids heavy
+model calls so it does not compete with chat; set `MOTOKO_BACKGROUND_PROFILE=1`
+to allow idle profile-dossier refreshes. It does not silently crawl new
+directories or create large document indexes; document access still starts from
+explicit allowlists and `/index`. Use `/study QUERY` for a deliberate bounded
+study pass that either reuses an existing dossier, builds a topic dossier from
+an attached or relevant index, or builds a memory/conversation dossier.
 
 `/profile-refresh` or `motoko profile refresh` builds a compact profile dossier
 from durable memories and recent conversation material. This is an explicit

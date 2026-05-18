@@ -115,16 +115,27 @@ Current UI direction:
 - Query-focused memory dossiers should be available when Javier wants Motoko to
   study a subject across saved memories and prior conversations before
   continuing the chat.
+- `/study QUERY` is the explicit bounded study command. It should prefer
+  reusing existing topic or memory dossiers, then build a topic dossier from
+  attached/relevant indexes, then fall back to a memory/conversation dossier.
+- The TUI should show the active model badge, including MTP/port information
+  such as `qwen3.6-27b-mtp:8083`.
+- Background study may refresh the private context catalog, note stale indexes,
+  and suggest relevant existing dossiers. Heavy background model work should be
+  opt-in, such as `MOTOKO_BACKGROUND_PROFILE=1` for idle profile refreshes, so
+  the background loop does not compete with active chat. It must not silently
+  crawl broad new directories or build large document indexes.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
-- Unicode braille spinners are preferred when the terminal can render them;
-  Linux TTYs should use the ASCII spinner because some fonts render braille as
-  square fallback glyphs.
+- The default spinner should be ASCII everywhere. Braille is an explicit opt-in
+  because the Linux TTY/Terminus path can render braille as square fallback
+  glyphs.
 
 ## Near-Term Next Improvement
 
 The highest-ROI next engineering improvement is improving the quality of
 profile dossiers and document-derived dossiers after real personal documents
 are added. The regression suite now includes a small fake OpenAI-compatible
-test server so Motoko can test streaming, maintenance, recall, and profile
-behavior without requiring Qwen or llama.cpp to be running.
+test server plus an evaluation harness for study reuse, context sufficiency,
+and background study state, so Motoko can test streaming, maintenance, recall,
+profile, and study behavior without requiring Qwen or llama.cpp to be running.

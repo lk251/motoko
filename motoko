@@ -27,6 +27,7 @@ import threading
 import textwrap
 import time
 import tty
+import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -55,6 +56,14 @@ MEMORY_DOSSIER_SOURCE_MEMORIES = 24
 MEMORY_DOSSIER_SOURCE_CONVERSATIONS = 12
 MEMORY_DOSSIER_EXCERPT_CHARS = 2400
 MEMORY_DOSSIER_MAX_SOURCE_CHARS = 72000
+STUDY_REUSE_MIN_SCORE = 2
+STUDY_INDEX_MIN_SCORE = 1
+CONTEXT_CATALOG_INDEX_LIMIT = 10
+CONTEXT_CATALOG_DOSSIER_LIMIT = 12
+CONTEXT_CATALOG_SUMMARY_CHARS = 900
+BACKGROUND_STUDY_INTERVAL_SECONDS = 60
+BACKGROUND_STUDY_IDLE_GRACE_SECONDS = 8
+BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
 MAX_MEMORY_CHARS = 1800
 MEMORY_RETRIEVAL_LIMIT = 18
 MEMORY_SEARCH_LIMIT = 40
@@ -72,13 +81,16 @@ AUTO_MEMORY_MIN_MESSAGES = 4
 AUTO_MEMORY_INTERVAL_MESSAGES = 4
 AUTO_MEMORY_MAX_PROPOSALS = 5
 MODEL_TIMEOUT_SECONDS = 600
-MAINTENANCE_MODEL_TIMEOUT_SECONDS = 180
+MAINTENANCE_MODEL_TIMEOUT_SECONDS = 90
 MAINTENANCE_MAX_RETRIES = 2
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
 COMPACT_KEEP_MESSAGES = 8
 AUTO_SUMMARY_MIN_MESSAGES = 24
 AUTO_SUMMARY_INTERVAL_MESSAGES = 10
+TITLE_MIN_MESSAGES = 4
+TITLE_MODEL_TIMEOUT_SECONDS = 45
+TITLE_MAX_CHARS = 60
 MAX_PERSONALITY_CHARS = 12000
 MAX_PROFILE_DOSSIER_CHARS = 12000
 PROFILE_SOURCE_CONVERSATIONS = 12
@@ -120,6 +132,7 @@ SLASH_COMMANDS = [
     ("/", "show compact command menu"),
     ("/exit", "save and exit"),
     ("/stop", "stop the current streamed answer"),
+    ("/new [TITLE]", "start a new conversation"),
     ("/title TEXT", "rename this conversation"),
     ("/resume [ID]", "switch to another saved conversation"),
     ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
@@ -133,6 +146,7 @@ SLASH_COMMANDS = [
     ("/attach-dossier [ID]", "attach an existing memory dossier"),
     ("/dossiers", "list memory dossiers"),
     ("/dossier-show [ID]", "show a memory dossier"),
+    ("/study QUERY", "choose and run the best bounded study action"),
     ("/indexes", "list document indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
@@ -158,6 +172,7 @@ SHELL_COMMANDS = [
     "help",
     "chat",
     "list",
+    "new",
     "resume",
     "show",
     "compact",
@@ -170,6 +185,7 @@ SHELL_COMMANDS = [
     "dossier",
     "dossiers",
     "dossier-show",
+    "study",
     "memories",
     "memory",
     "forget",
@@ -185,6 +201,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/",
     "/exit",
     "/stop",
+    "/new",
     "/compact",
     "/sources",
     "/status",
@@ -363,28 +380,12 @@ def max_derived_index_bytes(override: str | None = None) -> int:
         raise SystemExit(str(exc)) from exc
 
 
-def terminal_prefers_unicode() -> bool:
-    term = os.environ.get("TERM", "").strip().lower()
-    if term == "linux" or term.startswith("linux-"):
-        return False
-    encoding = (getattr(sys.stdout, "encoding", None) or "").lower()
-    lang = " ".join(
-        os.environ.get(name, "")
-        for name in ("LC_ALL", "LC_CTYPE", "LANG")
-    ).lower()
-    return "utf" in encoding or "utf" in lang
-
-
 def spinner_frames() -> list[str]:
     mode = os.environ.get("MOTOKO_SPINNER", "auto").strip().lower()
     if mode in {"0", "false", "no", "none", "off"}:
         return []
     if mode == "auto":
-        return (
-            ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-            if terminal_prefers_unicode()
-            else ["-", "/", "|", "\\"]
-        )
+        return ["-", "/", "|", "\\"]
     if mode == "ascii":
         return ["-", "/", "|", "\\"]
     if mode in {"block", "blink", "square"}:
@@ -504,6 +505,16 @@ def profile_path() -> pathlib.Path:
     return root / "profile.json"
 
 
+def context_catalog_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "context-catalog.json"
+
+
+def study_state_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "study-state.json"
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -545,6 +556,7 @@ def new_conversation(title: str | None = None) -> dict:
     return {
         "id": cid,
         "title": title or "Untitled",
+        "title_kind": "manual" if title else "unset",
         "branch": current_git_branch(),
         "created": created,
         "updated": created,
@@ -685,6 +697,44 @@ def endpoint() -> str:
 
 def model_name() -> str:
     return os.environ.get("MOTOKO_MODEL", DEFAULT_MODEL)
+
+
+def model_badge() -> str:
+    raw = model_name()
+    lower = raw.lower()
+    pieces = []
+    if "qwen" in lower:
+        match = re.search(r"qwen[0-9.]*", lower)
+        pieces.append(match.group(0) if match else "qwen")
+    if "27b" in lower:
+        pieces.append("27b")
+    if "mtp" in lower:
+        pieces.append("mtp")
+    if not pieces:
+        pieces.append(raw[:28])
+    endpoint_text = endpoint()
+    port = ""
+    match = re.search(r":(\d+)(?:/|$)", endpoint_text)
+    if match:
+        port = f":{match.group(1)}"
+    return "-".join(pieces) + port
+
+
+def env_flag(name: str, default: bool = True) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def env_seconds(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(1, int(float(raw)))
+    except ValueError:
+        return default
 
 
 def memory_id() -> str:
@@ -1681,6 +1731,145 @@ def load_dossier(dossier_id: str | None = None) -> dict:
     )
 
 
+def safe_load_json(path: pathlib.Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def build_context_catalog() -> dict:
+    indexes = []
+    for index in list_indexes()[:CONTEXT_CATALOG_INDEX_LIMIT]:
+        status, warnings = index_staleness(index)
+        indexes.append(
+            {
+                "id": index.get("id", ""),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "status": status,
+                "warnings": warnings[:4],
+                "summary": compact_text(index.get("corpus_summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
+            }
+        )
+    topics = []
+    for topic in list_topics()[:CONTEXT_CATALOG_DOSSIER_LIMIT]:
+        topics.append(
+            {
+                "id": topic.get("id", ""),
+                "name": topic.get("name", ""),
+                "query": topic.get("query", ""),
+                "summary": compact_text(topic.get("summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
+            }
+        )
+    dossiers = []
+    for dossier in list_dossiers()[:CONTEXT_CATALOG_DOSSIER_LIMIT]:
+        dossiers.append(
+            {
+                "id": dossier.get("id", ""),
+                "name": dossier.get("name", ""),
+                "query": dossier.get("query", ""),
+                "summary": compact_text(dossier.get("summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
+            }
+        )
+    memories = load_memories(limit=1000)
+    profile = load_profile_dossier()
+    return {
+        "updated": now(),
+        "model": model_name(),
+        "endpoint": endpoint(),
+        "memory_count": len(memories),
+        "pinned_memory_count": sum(1 for row in memories if row.get("pinned")),
+        "conversation_count": len(list_conversations()),
+        "profile_updated": profile.get("updated", "") if profile else "",
+        "indexes": indexes,
+        "topics": topics,
+        "dossiers": dossiers,
+    }
+
+
+def write_context_catalog(catalog: dict | None = None) -> dict:
+    catalog = catalog or build_context_catalog()
+    atomic_write(context_catalog_path(), json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
+    return catalog
+
+
+def read_context_catalog() -> dict | None:
+    return safe_load_json(context_catalog_path())
+
+
+def format_context_catalog(catalog: dict | None = None) -> str:
+    catalog = catalog or read_context_catalog() or build_context_catalog()
+    lines = [
+        f"model={catalog.get('model', '')}",
+        f"endpoint={catalog.get('endpoint', '')}",
+        f"memories={catalog.get('memory_count', 0)} pinned={catalog.get('pinned_memory_count', 0)}",
+        f"conversations={catalog.get('conversation_count', 0)}",
+    ]
+    if catalog.get("profile_updated"):
+        lines.append(f"profile updated={catalog.get('profile_updated')}")
+    if catalog.get("dossiers"):
+        lines.append("available memory dossiers:")
+        for item in catalog.get("dossiers", [])[:6]:
+            lines.append(f"- dossier:{item.get('id')} {item.get('name')} query={item.get('query')} summary={item.get('summary')}")
+    if catalog.get("topics"):
+        lines.append("available topic dossiers:")
+        for item in catalog.get("topics", [])[:6]:
+            lines.append(f"- topic:{item.get('id')} {item.get('name')} query={item.get('query')} summary={item.get('summary')}")
+    if catalog.get("indexes"):
+        lines.append("available document indexes:")
+        for item in catalog.get("indexes", [])[:6]:
+            warning = f" warnings={'; '.join(item.get('warnings', []))}" if item.get("warnings") else ""
+            lines.append(
+                f"- index:{item.get('id')} {item.get('name')} root={item.get('root')} "
+                f"status={item.get('status')}{warning} summary={item.get('summary')}"
+            )
+    return "\n".join(lines)
+
+
+def read_study_state() -> dict | None:
+    return safe_load_json(study_state_path())
+
+
+def write_study_state(state: dict) -> None:
+    atomic_write(study_state_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_study_phase(phase: str, *, notes: list[str] | None = None, mode: str = "background") -> None:
+    write_study_state(
+        {
+            "updated": now(),
+            "phase": phase,
+            "mode": mode,
+            "notes": notes or [],
+        }
+    )
+
+
+def rank_items_by_query(items: list[dict], query: str, fields: list[str]) -> list[dict]:
+    query_counts = token_counts(query)
+    ranked = []
+    for item in items:
+        haystack = "\n".join(str(item.get(field, "")) for field in fields)
+        row = dict(item)
+        row["_score"] = score_text(query_counts, haystack)
+        ranked.append(row)
+    ranked.sort(key=lambda row: row.get("_score", 0), reverse=True)
+    return ranked
+
+
+def ranked_dossiers_for_query(query: str) -> list[dict]:
+    return rank_items_by_query(list_dossiers(), query, ["name", "query", "summary"])
+
+
+def ranked_topics_for_query(query: str) -> list[dict]:
+    return rank_items_by_query(list_topics(), query, ["name", "query", "summary"])
+
+
+def ranked_indexes_for_query(query: str) -> list[dict]:
+    return rank_items_by_query(list_indexes(), query, ["name", "root", "corpus_summary"])
+
+
 def token_counts(text: str) -> collections.Counter:
     words = re.findall(r"[A-Za-z0-9_'-]{3,}", text.lower())
     return collections.Counter(words)
@@ -2522,6 +2711,193 @@ def build_memory_dossier(query: str, *, name: str | None = None) -> dict:
     return dossier
 
 
+def attached_item_ids(conv: dict, kind: str) -> set[str]:
+    return {
+        item.get("id", "")
+        for item in conv.get("context_items", [])
+        if item.get("kind") == kind and item.get("id")
+    }
+
+
+def attach_context_item(conv: dict, item: dict) -> bool:
+    existing = attached_item_ids(conv, item.get("kind", ""))
+    if item.get("id") in existing:
+        return False
+    conv.setdefault("context_items", []).append(item)
+    save_conversation(conv)
+    return True
+
+
+def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | None:
+    attached = attached_item_ids(conv, "dossier")
+    for dossier in ranked_dossiers_for_query(query):
+        if dossier.get("id", "") in attached:
+            continue
+        if dossier.get("_score", 0) < STUDY_REUSE_MIN_SCORE:
+            break
+        attach_context_item(conv, context_item_from_dossier(dossier))
+        return dossier
+    return None
+
+
+def maybe_attach_relevant_existing_topic(conv: dict, query: str) -> dict | None:
+    attached = attached_item_ids(conv, "topic")
+    for topic in ranked_topics_for_query(query):
+        if topic.get("id", "") in attached:
+            continue
+        if topic.get("_score", 0) < STUDY_REUSE_MIN_SCORE:
+            break
+        attach_context_item(conv, context_item_from_topic(topic))
+        return topic
+    return None
+
+
+def best_relevant_index(query: str) -> dict | None:
+    for index in ranked_indexes_for_query(query):
+        if index.get("_score", 0) >= STUDY_INDEX_MIN_SCORE:
+            return index
+        break
+    return None
+
+
+def profile_refresh_due(catalog: dict | None = None) -> bool:
+    catalog = catalog or read_context_catalog() or build_context_catalog()
+    if not catalog.get("memory_count", 0) and not catalog.get("conversation_count", 0):
+        return False
+    _source_text, memory_ids, conversation_ids = profile_source_material()
+    if not memory_ids and not conversation_ids:
+        return False
+    profile = load_profile_dossier()
+    if not profile or not profile.get("text", "").strip():
+        return True
+    updated = parse_timestamp(profile.get("updated", ""))
+    if updated is None:
+        return True
+    age = (_dt.datetime.now(_dt.timezone.utc).astimezone() - updated.astimezone()).total_seconds()
+    if age < BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS:
+        return False
+    known_memories = set(profile.get("memory_ids", []))
+    known_conversations = set(profile.get("conversation_ids", []))
+    return bool(set(memory_ids) - known_memories or set(conversation_ids) - known_conversations)
+
+
+def study_query(conv: dict, query: str) -> str:
+    query = query.strip()
+    if not query:
+        raise SystemExit("usage: /study QUERY")
+
+    topic = maybe_attach_relevant_existing_topic(conv, query)
+    if topic:
+        return f"attached existing topic dossier: {topic.get('id')} ({topic.get('name', '')})"
+
+    dossier = maybe_attach_relevant_existing_dossier(conv, query)
+    if dossier:
+        return f"attached existing memory dossier: {dossier.get('id')} ({dossier.get('name', '')})"
+
+    index_ids = attached_index_ids(conv)
+    if index_ids:
+        topic = build_topic_dossier(index_ids, query)
+        attach_context_item(conv, context_item_from_topic(topic))
+        return f"built topic dossier from attached index(es): {topic.get('id')}"
+
+    index = best_relevant_index(query)
+    if index:
+        topic = build_topic_dossier([index["id"]], query)
+        attach_context_item(conv, context_item_from_topic(topic))
+        return f"built topic dossier from index {index.get('id')}: {topic.get('id')}"
+
+    dossier = build_memory_dossier(query)
+    attach_context_item(conv, context_item_from_dossier(dossier))
+    return f"built memory dossier: {dossier.get('id')}"
+
+
+def context_sufficiency_note(conv: dict, query: str, sources: list[dict]) -> str:
+    kinds = collections.Counter(source.get("kind", "unknown") for source in sources)
+    has_deep_context = any(
+        kind in kinds
+        for kind in (
+            "dossier",
+            "dossier-memory",
+            "dossier-conversation",
+            "topic",
+            "topic-evidence",
+            "chunk",
+            "index",
+        )
+    )
+    if has_deep_context:
+        status = "likely enough for a grounded answer if the selected sources match the question"
+    elif kinds.get("memory", 0) or kinds.get("recent-conversation", 0) or conv.get("summary"):
+        status = "partial; answer from available memory, but suggest /study if details matter"
+    else:
+        status = "thin; say what is missing and suggest /study or attaching/indexing documents"
+
+    reusable = []
+    topic = next((row for row in ranked_topics_for_query(query) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
+    dossier = next((row for row in ranked_dossiers_for_query(query) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
+    index = best_relevant_index(query)
+    if topic and topic.get("id") not in attached_item_ids(conv, "topic"):
+        reusable.append(f"existing topic dossier {topic.get('id')}")
+    if dossier and dossier.get("id") not in attached_item_ids(conv, "dossier"):
+        reusable.append(f"existing memory dossier {dossier.get('id')}")
+    if index:
+        reusable.append(f"document index {index.get('id')}")
+    action = "; relevant stored context: " + ", ".join(reusable) if reusable else ""
+    return f"Context sufficiency: {status}.{action}"
+
+
+def background_study_step(conv: dict, phase_callback=None) -> list[str]:
+    def set_phase(phase: str, *, notes: list[str] | None = None) -> None:
+        write_study_phase(phase, notes=notes)
+        if phase_callback is not None:
+            phase_callback(phase)
+
+    set_phase("study: catalog")
+    catalog = write_context_catalog()
+    notes = []
+    stale_indexes = [
+        item
+        for item in catalog.get("indexes", [])
+        if item.get("status") not in {"fresh", "empty"}
+    ]
+    if stale_indexes:
+        notes.append(f"{len(stale_indexes)} index(es) need review or rebuild")
+    if env_flag("MOTOKO_BACKGROUND_PROFILE", False) and profile_refresh_due(catalog):
+        set_phase("study: profile", notes=notes)
+        try:
+            refresh_profile_dossier()
+        except SystemExit as exc:
+            notes.append(f"profile refresh skipped: {exc}")
+        except Exception as exc:
+            notes.append(f"profile refresh failed: {type(exc).__name__}: {exc}")
+        else:
+            notes.append("profile dossier refreshed")
+            catalog = write_context_catalog()
+    elif catalog.get("memory_count", 0) and not catalog.get("profile_updated"):
+        notes.append("profile dossier is not built yet")
+    set_phase("study: planning", notes=notes)
+    if conv.get("messages"):
+        query = context_query_text(conv, conv.get("title", ""))
+        if query.strip():
+            topic = next((row for row in ranked_topics_for_query(query) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
+            dossier = next((row for row in ranked_dossiers_for_query(query) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
+            if topic and topic.get("id") not in attached_item_ids(conv, "topic"):
+                notes.append(f"existing topic dossier may fit this chat: {topic.get('id')}")
+            if dossier and dossier.get("id") not in attached_item_ids(conv, "dossier"):
+                notes.append(f"existing memory dossier may fit this chat: {dossier.get('id')}")
+            if not topic and not dossier and (catalog.get("memory_count", 0) or catalog.get("indexes")):
+                notes.append("current chat may benefit from /study")
+    state = {
+        "updated": now(),
+        "phase": "study: idle",
+        "mode": "catalog-and-planning",
+        "notes": notes[:8],
+        "catalog_updated": catalog.get("updated", ""),
+    }
+    write_study_state(state)
+    return notes[:3]
+
+
 def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     query_counts = token_counts(query)
     top_files, top_chunks, max_retrieval_chars = retrieval_limits(query)
@@ -2861,6 +3237,8 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     profile_text, profile_sources = render_profile_with_sources()
     retrieval_query = context_query_text(conv, query)
     context_text, context_sources = render_context_with_sources(conv.get("context_items", []), retrieval_query)
+    catalog = read_context_catalog() or build_context_catalog()
+    catalog_text = format_context_catalog(catalog)
     personality_text, personality_file, personality_exists = load_personality()
     sources = []
     sources.append(
@@ -2876,6 +3254,8 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     if conv.get("summary", "").strip():
         sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
     sources.extend(context_sources)
+    sources.append({"kind": "context-catalog", "updated": catalog.get("updated", "")})
+    sufficiency = context_sufficiency_note(conv, query, sources)
     return textwrap.dedent(
         f"""
         You are Motoko, Javier's personal local assistant running in the HB3
@@ -2895,6 +3275,8 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         Do not claim access to files or directories unless their contents are
         included in this prompt. If a memory seems stale, say so and ask before
         relying on it heavily.
+        Use the context sufficiency note to decide whether to answer directly,
+        mention uncertainty, or suggest /study for a deeper bounded study pass.
 
         Profile dossier:
         {profile_text}
@@ -2910,6 +3292,11 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
 
         Attached documents and dossiers:
         {context_text}
+
+        Available private context catalog:
+        {catalog_text}
+
+        {sufficiency}
         """
     ).strip(), sources
 
@@ -3074,6 +3461,7 @@ def format_help() -> str:
           /                     show a compact command menu
           /exit                 save and exit
           /stop                 stop the current streamed answer
+          /new [TITLE]          save this chat and start a new conversation
           /title TEXT           rename this conversation
           /resume [ID]          switch to another saved conversation; picker if ID omitted
           /read PATH            attach a bounded excerpt from an allowlisted text file
@@ -3092,6 +3480,7 @@ def format_help() -> str:
           /topic-show [ID]      show a topic dossier; picker if ID omitted
           /dossiers             list memory dossiers
           /dossier-show [ID]    show a memory dossier; picker if ID omitted
+          /study QUERY          choose and run the best bounded study action
           /compact              summarize older messages into compact context
           /sources              show sources used for the last answer
           /status               show model, memory, and context state
@@ -3113,6 +3502,7 @@ def format_help() -> str:
         Shell commands:
           motoko help           show this full Motoko command reference
           motoko                start a new chat
+          motoko new            start a new chat
           motoko chat --line    use the legacy line-oriented interface
           motoko list           list conversations
           motoko resume [ID]    resume a conversation; picker if ID omitted
@@ -3133,6 +3523,7 @@ def format_help() -> str:
           motoko dossiers       list memory dossiers
           motoko dossier-show [ID]
           motoko chat --dossier DOSSIER_ID
+          motoko study QUERY    run a bounded study action in a new conversation
           motoko compact [ID]   compact a saved conversation; picker if ID omitted
           motoko status         show model, memory, and state paths
           motoko profile        show Motoko's profile dossier about Javier
@@ -3163,6 +3554,12 @@ def format_help() -> str:
         compacts long conversations and saves high-confidence durable memories,
         using duplicate detection so repeated facts reinforce existing memories
         instead of creating endless copies.
+        While the TUI is open, a low-intensity background study loop refreshes
+        the private context catalog and records study suggestions while Motoko
+        is idle. It does not silently index new directories or run heavy model
+        study passes; use /study for explicit deeper work. Set
+        MOTOKO_BACKGROUND_PROFILE=1 only if idle profile refreshes should also
+        run in the background.
         Retrieval adapts to the question. Deep/detail/evidence-style prompts
         receive a wider slice of attached indexes; use /deepen to build a
         larger reusable topic dossier when a subject needs sustained attention.
@@ -3212,6 +3609,8 @@ def format_sources(sources: list[dict]) -> str:
             )
         elif kind == "conversation-summary":
             lines.append(f"{idx:3d}  compacted conversation summary")
+        elif kind == "context-catalog":
+            lines.append(f"{idx:3d}  context catalog  updated {relative_time(source.get('updated', ''))}")
         elif kind == "recent-conversation":
             selection = ",".join(source.get("selection", [])) or "-"
             lines.append(
@@ -3294,6 +3693,8 @@ def format_status(conv: dict | None = None) -> str:
     conversations = list_conversations()
     profile = load_profile_dossier()
     maintenance = read_maintenance_state()
+    study_state = read_study_state()
+    catalog = read_context_catalog()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
     context_items = conv.get("context_items", []) if conv else []
@@ -3311,6 +3712,8 @@ def format_status(conv: dict | None = None) -> str:
         f"memories: {len(memories)} total, {pinned} pinned",
         f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",
         f"maintenance: {maintenance.get('phase', maintenance.get('status', 'unknown')) if maintenance else 'idle'}",
+        f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
+        f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
         f"memory dossiers: {len(dossiers)}",
@@ -3341,6 +3744,7 @@ def print_status(conv: dict | None = None) -> None:
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
+        conv["title_kind"] = "provisional"
 
 
 def attached_index_ids(conv: dict) -> list[str]:
@@ -3491,6 +3895,55 @@ def strip_ansi(text: str) -> str:
     return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
 
 
+def cell_width(char: str) -> int:
+    if not char:
+        return 0
+    category = unicodedata.category(char)
+    if category in {"Cc", "Cf"} or unicodedata.combining(char):
+        return 0
+    if unicodedata.east_asian_width(char) in {"F", "W"}:
+        return 2
+    return 1
+
+
+def display_width(text: str) -> int:
+    return sum(cell_width(char) for char in strip_ansi(text))
+
+
+def split_cells(text: str, width: int) -> list[tuple[str, int, int]]:
+    width = max(1, width)
+    if not text:
+        return [("", 0, 0)]
+    segments: list[tuple[str, int, int]] = []
+    start = 0
+    current: list[str] = []
+    current_width = 0
+    for idx, char in enumerate(text):
+        char_width = cell_width(char)
+        if current and current_width + char_width > width:
+            segments.append(("".join(current), start, idx))
+            start = idx
+            current = []
+            current_width = 0
+        current.append(char)
+        current_width += char_width
+    segments.append(("".join(current), start, len(text)))
+    return segments
+
+
+def cursor_segment_index(segments: list[tuple[str, int, int]], cursor: int) -> int:
+    if cursor <= 0:
+        return 0
+    if cursor >= segments[-1][2]:
+        return len(segments) - 1
+    for idx, (_text, start, end) in enumerate(segments):
+        if start <= cursor < end:
+            return idx
+        if cursor == end and idx + 1 < len(segments) and segments[idx + 1][1] == cursor:
+            return idx + 1
+    return len(segments) - 1
+
+
 def wrap_display_line(text: str, width: int) -> list[str]:
     if width <= 4:
         return [text[:width]]
@@ -3528,29 +3981,56 @@ def fixed_prompt_input_display(
     prompt: str = "> ",
     max_rows: int = 4,
 ) -> tuple[list[str], int, int]:
-    usable = max(10, width - len(prompt))
+    prompt_width = display_width(prompt)
+    usable = max(10, width - prompt_width)
     cursor = max(0, min(cursor, len(input_buffer)))
-    if input_buffer:
-        segments = [
-            input_buffer[idx : idx + usable]
-            for idx in range(0, len(input_buffer), usable)
-        ]
-    else:
-        segments = [""]
-    cursor_row = cursor // usable
-    cursor_col_in_segment = cursor % usable
-    if cursor_row >= len(segments):
-        segments.append("")
+    segments = split_cells(input_buffer, usable)
+    if (
+        cursor == len(input_buffer)
+        and segments
+        and display_width(segments[-1][0]) >= usable
+    ):
+        segments.append(("", cursor, cursor))
 
-    shown_start = max(0, len(segments) - max_rows)
-    shown = segments[shown_start:]
+    cursor_row = cursor_segment_index(segments, cursor)
+    shown_start = min(
+        max(0, cursor_row - max_rows + 1),
+        max(0, len(segments) - max_rows),
+    )
+    shown = segments[shown_start : shown_start + max_rows]
     cursor_row_offset = max(0, cursor_row - shown_start)
-    cursor_col = len(prompt) + cursor_col_in_segment + 1
+    _current_line, start, _end = segments[cursor_row]
+    cursor_col = prompt_width + display_width(input_buffer[start:cursor]) + 1
 
     rows = []
-    for idx, line in enumerate(shown):
-        rows.append((style(prompt, "turquoise", "bold") if idx == 0 else " " * len(prompt)) + line)
+    for offset, (line, _start, _end) in enumerate(shown):
+        segment_index = shown_start + offset
+        prefix = style(prompt, "turquoise", "bold") if segment_index == 0 else " " * prompt_width
+        rows.append(prefix + line)
     return rows, cursor_row_offset, cursor_col
+
+
+def utf8_key_from_first_byte(fd: int, first: bytes) -> str:
+    if not first:
+        return ""
+    value = first[0]
+    if value < 0x80:
+        return first.decode("utf-8", errors="replace")
+    if 0xC0 <= value <= 0xDF:
+        needed = 2
+    elif 0xE0 <= value <= 0xEF:
+        needed = 3
+    elif 0xF0 <= value <= 0xF7:
+        needed = 4
+    else:
+        return first.decode("utf-8", errors="replace")
+    seq = bytearray(first)
+    while len(seq) < needed:
+        readable, _writeable, _errors = select.select([fd], [], [], 0.02)
+        if not readable:
+            break
+        seq.extend(os.read(fd, 1))
+    return bytes(seq).decode("utf-8", errors="replace")
 
 
 class MotokoTui:
@@ -3575,6 +4055,11 @@ class MotokoTui:
         self.events_lock = threading.Lock()
         self.generating = False
         self.maintaining = False
+        self.study_running = False
+        self.study_status = "study: starting"
+        self.study_last_note = ""
+        self.study_phase_started = time.monotonic()
+        self.last_input_at = time.monotonic()
         self.cancel_event = threading.Event()
         self.pending_prompts: collections.deque[str] = collections.deque()
         self.answer_entry: dict | None = None
@@ -3622,17 +4107,19 @@ class MotokoTui:
             signal.signal(signal.SIGWINCH, on_winch)
             self.write("\033[?25l\033[?7l")
             self.render(force=True)
+            self.start_study_loop()
             if self.resume_maintenance_on_start:
                 self.resume_maintenance_on_start = False
                 self.start_maintenance(resumed=True)
             while self.running:
                 self.drain_events()
-                timeout = 0.04 if self.generating or self.maintaining else 0.12
+                timeout = 0.04 if self.generating or self.maintaining or self.study_running else 0.12
                 readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
                 if readable:
+                    self.last_input_at = time.monotonic()
                     self.handle_key(self.read_key())
                 now_ts = time.monotonic()
-                if self.dirty or ((self.generating or self.maintaining) and now_ts - self.last_render > 0.08):
+                if self.dirty or ((self.generating or self.maintaining or self.study_running) and now_ts - self.last_render > 0.08):
                     self.render()
         finally:
             signal.signal(signal.SIGWINCH, old_winch)
@@ -3652,7 +4139,7 @@ class MotokoTui:
         if not first:
             return ""
         if first != b"\x1b":
-            return first.decode("utf-8", errors="replace")
+            return utf8_key_from_first_byte(self.stdin_fd, first)
         seq = bytearray(first)
         while True:
             readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0.01)
@@ -3914,6 +4401,14 @@ class MotokoTui:
             elif text == "/exit":
                 save_conversation(self.conv)
                 self.running = False
+            elif text == "/new" or text.startswith("/new "):
+                title = text[len("/new") :].strip() or None
+                save_conversation(self.conv)
+                self.conv = new_conversation(title)
+                save_conversation(self.conv)
+                self.messages = self.seed_messages(self.conv)
+                self.status = "new conversation"
+                self.append("system", f"new conversation: {self.conv.get('title', 'Untitled')} [{self.conv.get('id', '')}]")
             elif text == "/stop":
                 if self.generating:
                     self.cancel_event.set()
@@ -3945,6 +4440,9 @@ class MotokoTui:
             elif text == "/dossier-show" or text.startswith("/dossier-show "):
                 selector = text[len("/dossier-show") :].strip() or None
                 self.append("system", self.capture_text(lambda: print_dossier(load_dossier(selector), evidence=False)))
+            elif text == "/study" or text.startswith("/study "):
+                body = text[len("/study") :].strip()
+                self.run_blocking_command("Studying context...", lambda: self.study_from_body(body))
             elif text.startswith("/memory search "):
                 query = text[len("/memory search ") :]
                 self.append("system", self.capture_text(lambda: print_memory_search(query)))
@@ -3952,6 +4450,8 @@ class MotokoTui:
                 self.append("system", self.capture_text(lambda: print_memories(verbose=True)))
             elif text.startswith("/title "):
                 self.conv["title"] = text[len("/title ") :].strip() or self.conv["title"]
+                self.conv["title_kind"] = "manual"
+                self.conv.pop("title_generated", None)
                 save_conversation(self.conv)
                 self.append("system", f"title: {self.conv['title']}")
             elif text == "/resume" or text.startswith("/resume "):
@@ -4052,6 +4552,9 @@ class MotokoTui:
         self.conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
         save_conversation(self.conv)
 
+    def study_from_body(self, body: str) -> None:
+        print(study_query(self.conv, body))
+
     def capture_text(self, func) -> str:
         class Capture:
             def __init__(self) -> None:
@@ -4104,6 +4607,12 @@ class MotokoTui:
 
     def start_generation(self, user_text: str) -> None:
         maybe_set_title(self.conv, user_text)
+        topic = maybe_attach_relevant_existing_topic(self.conv, user_text)
+        if topic:
+            self.append("system", f"auto-attached topic dossier: {topic.get('id')} ({topic.get('name', '')})")
+        dossier = maybe_attach_relevant_existing_dossier(self.conv, user_text)
+        if dossier:
+            self.append("system", f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
         self.conv.setdefault("messages", []).append({"role": "user", "content": user_text})
         self.append("user", user_text)
         self.answer_entry = self.append("assistant", "")
@@ -4209,8 +4718,58 @@ class MotokoTui:
                 self.maintenance_phase_started = time.monotonic()
                 self.status = event[1]
                 changed = True
+            elif kind == "study_phase":
+                self.study_running = True
+                self.study_status = event[1]
+                self.study_phase_started = time.monotonic()
+                changed = True
+            elif kind == "study_done":
+                self.study_running = False
+                notes = event[1]
+                self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
+                self.study_status = "study: idle"
+                changed = True
+            elif kind == "study_error":
+                self.study_running = False
+                self.study_status = "study: idle"
+                self.study_last_note = f"study failed: {event[1]}"
+                changed = True
         if changed:
             self.dirty = True
+
+    def start_study_loop(self) -> None:
+        if not env_flag("MOTOKO_BACKGROUND_STUDY", True):
+            self.study_status = "study: off"
+            return
+        interval = env_seconds("MOTOKO_BACKGROUND_STUDY_INTERVAL", BACKGROUND_STUDY_INTERVAL_SECONDS)
+        idle_grace = env_seconds("MOTOKO_BACKGROUND_STUDY_IDLE_GRACE", BACKGROUND_STUDY_IDLE_GRACE_SECONDS)
+
+        def worker() -> None:
+            next_run = time.monotonic() + 1
+            while self.running:
+                time.sleep(1)
+                now_ts = time.monotonic()
+                if now_ts < next_run:
+                    continue
+                if self.generating or self.maintaining or self.pending_prompts:
+                    next_run = now_ts + min(5, interval)
+                    continue
+                if now_ts - self.last_input_at < idle_grace:
+                    next_run = now_ts + 1
+                    continue
+                next_run = now_ts + interval
+                self.put_event(("study_phase", "study: scanning"))
+                try:
+                    notes = background_study_step(
+                        self.conv,
+                        phase_callback=lambda phase: self.put_event(("study_phase", phase)),
+                    )
+                except Exception as exc:  # Background study must not break chat.
+                    self.put_event(("study_error", f"{type(exc).__name__}: {exc}"))
+                else:
+                    self.put_event(("study_done", notes))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def start_maintenance(self, *, resumed: bool = False) -> None:
         if self.maintaining or self.generating:
@@ -4374,6 +4933,7 @@ class MotokoTui:
         title = (
             f" {style('Motoko', 'purple', 'bold')}  "
             f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
+            f"{style(model_badge(), 'dim')}  "
             f"{style(display_status, 'turquoise')}"
         )
         spinner = self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)] if self.tui_spinner_frames else ""
@@ -4384,9 +4944,14 @@ class MotokoTui:
             title += f"  {spinner} {(self.maintenance_status or self.status)} {elapsed}s".rstrip()
         if self.pending_prompts:
             title += f"  queued:{len(self.pending_prompts)}"
+        if self.study_running:
+            elapsed = int(time.monotonic() - self.study_phase_started)
+            title += f"  {spinner} {self.study_status} {elapsed}s".rstrip()
+        elif self.study_last_note:
+            title += f"  {style(self.study_last_note, 'dim')}"
         title_lines = wrap_display_line(title, width)
-        if len(title_lines) > 2:
-            title_lines = title_lines[:2]
+        if len(title_lines) > 3:
+            title_lines = title_lines[:3]
             plain = strip_ansi(title_lines[-1])
             title_lines[-1] = plain[: max(0, width - 1)].rstrip() + "…"
         title_height = len(title_lines)
@@ -4415,7 +4980,7 @@ class MotokoTui:
         cursor_row = min(height, input_start_row + cursor_row_offset)
         screen += f"\033[{cursor_row};{min(width, cursor_col)}H\033[?25h"
         self.write(screen)
-        if self.generating or self.maintaining:
+        if self.generating or self.maintaining or self.study_running:
             self.tui_spinner_index += 1
         self.last_render = time.monotonic()
         self.dirty = False
@@ -4466,7 +5031,7 @@ class MotokoTui:
             max(0, len(options) - max_rows),
         )
         visible_options = options[start : start + max_rows]
-        rows = [style(f" Suggestions {start + 1}-{start + len(visible_options)}/{len(options)}", "bold", "turquoise")]
+        rows = []
         for offset, option in enumerate(visible_options):
             idx = start + offset
             marker = ">" if idx == self.dropdown_index else " "
@@ -4480,8 +5045,6 @@ class MotokoTui:
                 rows.append(style(text[:width], "bold", "purple"))
             else:
                 rows.append(text[:width])
-        if start + max_rows < len(options):
-            rows.append(style("   more below", "dim"))
         return rows
 
     def input_display(self, width: int) -> tuple[list[str], int, int]:
@@ -4536,6 +5099,13 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/exit":
             save_conversation(conv)
             return
+        if user_text == "/new" or user_text.startswith("/new "):
+            save_conversation(conv)
+            title = user_text[len("/new") :].strip() or None
+            conv = new_conversation(title)
+            save_conversation(conv)
+            print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+            continue
         if user_text == "/help":
             print(format_help())
             continue
@@ -4547,6 +5117,8 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text.startswith("/title "):
             conv["title"] = user_text[len("/title ") :].strip() or conv["title"]
+            conv["title_kind"] = "manual"
+            conv.pop("title_generated", None)
             save_conversation(conv)
             print(f"title: {conv['title']}")
             continue
@@ -4626,6 +5198,12 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             print(f"attached dossier: {dossier['id']}")
             continue
+        if user_text == "/study" or user_text.startswith("/study "):
+            try:
+                print(study_query(conv, user_text[len("/study") :]))
+            except SystemExit as exc:
+                print(exc)
+            continue
         if user_text == "/attach-dossier" or user_text.startswith("/attach-dossier "):
             selector = user_text[len("/attach-dossier") :].strip() or None
             dossier = load_dossier(selector)
@@ -4700,6 +5278,12 @@ def chat_loop(conv: dict) -> None:
             continue
 
         maybe_set_title(conv, user_text)
+        topic = maybe_attach_relevant_existing_topic(conv, user_text)
+        if topic:
+            print(f"sys auto-attached topic dossier: {topic.get('id')} ({topic.get('name', '')})")
+        dossier = maybe_attach_relevant_existing_dossier(conv, user_text)
+        if dossier:
+            print(f"sys auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
         conv.setdefault("messages", []).append({"role": "user", "content": user_text})
         print("\n" + style("Motoko ", "purple", "bold"), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
@@ -4830,6 +5414,88 @@ def propose_memories(
     return memories
 
 
+def title_candidate_messages(conv: dict) -> list[dict]:
+    return [
+        msg
+        for msg in conv.get("messages", [])
+        if msg.get("role") in {"user", "assistant"} and msg.get("content", "").strip()
+    ]
+
+
+def should_generate_conversation_title(conv: dict) -> bool:
+    if conv.get("title_generated"):
+        return False
+    title = (conv.get("title") or "Untitled").strip()
+    title_kind = conv.get("title_kind")
+    if title_kind == "manual":
+        return False
+    if title_kind not in {"unset", "provisional", None} and title != "Untitled":
+        return False
+    return len(title_candidate_messages(conv)) >= TITLE_MIN_MESSAGES
+
+
+def sanitize_generated_title(text: str) -> str:
+    line = next((row.strip() for row in text.splitlines() if row.strip()), "")
+    line = re.sub(r"^(title|conversation)\s*:\s*", "", line, flags=re.IGNORECASE)
+    line = line.strip(" \t\r\n\"'`*_")
+    line = re.sub(r"\s+", " ", line)
+    line = re.sub(r"[\x00-\x1f\x7f]", "", line)
+    if not line:
+        return ""
+    return line[:TITLE_MAX_CHARS].rstrip(" .,:;-")
+
+
+def generate_conversation_title(
+    conv: dict,
+    *,
+    timeout: float = TITLE_MODEL_TIMEOUT_SECONDS,
+) -> str:
+    transcript = []
+    if conv.get("summary"):
+        transcript.append(f"summary: {conv.get('summary', '')[:1200]}")
+    for msg in title_candidate_messages(conv)[-8:]:
+        transcript.append(f"{msg.get('role')}: {compact_text(msg.get('content', ''), 900)}")
+    prompt = textwrap.dedent(
+        f"""
+        Create a compact title for this conversation.
+        Return only the title, no quotes, no prefix, no punctuation-only flourish.
+        Use at most {TITLE_MAX_CHARS} characters.
+
+        Transcript:
+        {chr(10).join(transcript)}
+        """
+    ).strip()
+    title = quiet_model(
+        [
+            {
+                "role": "system",
+                "content": "You name private conversations with short, faithful, specific titles.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        timeout=timeout,
+    )
+    return sanitize_generated_title(title)
+
+
+def maybe_generate_conversation_title(
+    conv: dict,
+    *,
+    timeout: float = TITLE_MODEL_TIMEOUT_SECONDS,
+) -> str | None:
+    if not should_generate_conversation_title(conv):
+        return None
+    title = generate_conversation_title(conv, timeout=timeout)
+    if not title:
+        return None
+    conv["title"] = title
+    conv["title_kind"] = "model"
+    conv["title_generated"] = now()
+    save_conversation(conv)
+    return title
+
+
 def memorize_conversation(conv: dict) -> None:
     if not conv.get("messages"):
         print("nothing to memorize yet")
@@ -4872,6 +5538,21 @@ def auto_maintain_conversation(
     set_phase("memory: checking")
     messages = conv.get("messages", [])
     message_count = len(messages)
+    if should_generate_conversation_title(conv):
+        set_phase("title: naming")
+        try:
+            title = run_with_wall_timeout(
+                "title generation",
+                TITLE_MODEL_TIMEOUT_SECONDS,
+                maybe_generate_conversation_title,
+                conv,
+                timeout=TITLE_MODEL_TIMEOUT_SECONDS,
+            )
+        except (Exception, SystemExit):
+            title = None
+        if title:
+            notes.append(f"title: {title}")
+
     last_memory = int(conv.get("last_auto_memory_message_count", 0) or 0)
     if (
         message_count >= AUTO_MEMORY_MIN_MESSAGES
@@ -4956,6 +5637,14 @@ def command_chat(args) -> None:
     for dossier_id in args.dossier or []:
         dossier = load_dossier(dossier_id)
         conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
+    save_conversation(conv)
+    chat_loop(conv)
+
+
+def command_new(args) -> None:
+    if getattr(args, "line", False):
+        os.environ["MOTOKO_TUI"] = "0"
+    conv = new_conversation(args.title)
     save_conversation(conv)
     chat_loop(conv)
 
@@ -5059,6 +5748,17 @@ def command_dossier(args) -> None:
         name=args.name,
     )
     print(f"{dossier['id']}  {dossier.get('name', '')}  {dossier.get('query', '')}")
+
+
+def command_study(args) -> None:
+    query = " ".join(args.query)
+    if args.conversation:
+        conv = load_conversation(args.conversation)
+    else:
+        conv = new_conversation(args.title or f"study: {slug_title(query)}")
+        save_conversation(conv)
+    print(study_query(conv, query))
+    print(f"conversation: {conv.get('title', 'Untitled')} [{conv.get('id', '')}]")
 
 
 def command_dossiers(_args) -> None:
@@ -5173,6 +5873,11 @@ def main(argv: list[str]) -> int:
     chat.add_argument("--line", action="store_true", help="use the legacy line-oriented interface")
     chat.set_defaults(func=command_chat)
 
+    new = sub.add_parser("new", help="start a new chat")
+    new.add_argument("--title")
+    new.add_argument("--line", action="store_true", help="use the legacy line-oriented interface")
+    new.set_defaults(func=command_new)
+
     resume = sub.add_parser("resume", help="resume a conversation")
     resume.add_argument("id", nargs="?")
     resume.add_argument("--line", action="store_true", help="use the legacy line-oriented interface")
@@ -5231,6 +5936,12 @@ def main(argv: list[str]) -> int:
     dossier.add_argument("query", nargs="+")
     dossier.add_argument("--name")
     dossier.set_defaults(func=command_dossier)
+
+    study = sub.add_parser("study", help="run the best bounded study action for a query")
+    study.add_argument("query", nargs="+")
+    study.add_argument("--conversation", help="attach study output to an existing conversation")
+    study.add_argument("--title", help="title for the new study conversation")
+    study.set_defaults(func=command_study)
 
     dossiers = sub.add_parser("dossiers", help="list memory dossiers")
     dossiers.set_defaults(func=command_dossiers)
