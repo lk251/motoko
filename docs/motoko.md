@@ -2,12 +2,14 @@
 
 Date: 2026-05-17
 
-Motoko is the first terminal chat interface for the HB3 `personal` realm. It is
-intentionally small: a Python standard-library script that talks to the existing
-local llama.cpp OpenAI-compatible endpoint for Qwen3.6.
+Motoko is the first terminal chat interface for the HB3 `personal` realm, and
+is also available as a small local helper for the `mares` and `javier` realms.
+It is intentionally small: a Python standard-library script that talks to the
+existing local llama.cpp OpenAI-compatible endpoint for Qwen3.6.
 
-Motoko is not Texere, not Hermes, and not an agent runtime. It is a personal
-chat and memory tool for the `personal` account.
+Motoko is not Texere, not Hermes, and not an agent runtime. It is primarily a
+personal chat and memory tool; when used from `javier` or `mares`, its repo
+commands are fixed read-only review helpers.
 
 For documents, Motoko uses a small dependency-free form of hierarchical
 retrieval-augmented generation: it builds chunk summaries, file summaries, and a
@@ -16,9 +18,11 @@ and includes those excerpts in the prompt.
 
 ## Security Boundary
 
-Motoko is installed only for `users.users.personal` on HB3. The `personal`
-account is non-sudo and has local-model access, but does not have Hermes
-provider-key access.
+Motoko is installed for `personal`, `mares`, and `javier` on HB3. Each account
+uses its own home directory, so conversations, memories, indexes, and
+permissions are separate unless Javier deliberately imports or copies state.
+The `personal` and `mares` accounts are non-sudo. The `personal` account has
+local-model access, but does not have Hermes provider-key access.
 
 Motoko does not use:
 
@@ -43,7 +47,7 @@ On `.#hb3-headless`, the default Qwen3.6 service starts at boot. The
 
 ## Storage
 
-Default state paths:
+Default per-user state paths:
 
 ```text
 ~/.local/state/motoko/conversations/
@@ -55,11 +59,79 @@ Default state paths:
 Default config path:
 
 ```text
+~/.config/motoko/config.json
 ~/.config/motoko/allowdirs
 ~/.config/motoko/personality.md
 ```
 
 Conversation files are JSON. Memories are append-only JSONL rows.
+
+## Permissions
+
+Motoko has a small per-user feature gate stored in:
+
+```text
+~/.config/motoko/config.json
+```
+
+Inspect it with:
+
+```bash
+motoko permissions
+motoko permissions path
+```
+
+Change it with:
+
+```bash
+motoko permissions set chat-only
+motoko permissions set repo-read
+motoko permissions set repo-review
+```
+
+The modes are:
+
+- `chat-only`: chat, conversations, memories, profile, personality, and status;
+  no document reads, indexes, or repo inspection.
+- `repo-read`: `chat-only` plus allowlisted document reads and document
+  indexes. This is the default because it preserves Motoko's original document
+  workflow.
+- `repo-review`: `repo-read` plus fixed read-only Git/review summaries for
+  allowlisted repositories.
+
+These permissions are Motoko feature gates, not a sandbox. The real security
+boundary is still the Unix user, file permissions, SSH policy, NixOS service
+policy, and explicit document allowlists. Motoko permissions do not grant sudo,
+do not grant Git push access, and do not bypass `motoko allow-dir`.
+
+Per-user index defaults can also live in `config.json`:
+
+```json
+{
+  "permissions": {
+    "mode": "repo-review"
+  },
+  "index": {
+    "max_derived_bytes": "2GiB",
+    "max_files": 20000,
+    "max_file_bytes": "8MiB"
+  }
+}
+```
+
+Environment overrides are available for one-off sessions:
+
+```bash
+MOTOKO_PERMISSIONS=chat-only motoko
+MOTOKO_MAX_DERIVED_INDEX_BYTES=250GiB motoko index ~/Documents
+MOTOKO_INDEX_MAX_FILES=50000 motoko index ~/Documents
+MOTOKO_INDEX_MAX_FILE_BYTES=20MiB motoko index ~/Documents
+```
+
+To set defaults manually for `personal` or `mares`, log into that account and
+run `motoko permissions set MODE`, then edit `~/.config/motoko/config.json` if
+that account needs different index limits. State and config remain under that
+account's own home directory.
 
 ## Personality And Style
 
@@ -164,6 +236,7 @@ motoko resume CONVERSATION_ID
 motoko show
 motoko show CONVERSATION_ID
 motoko status
+motoko permissions
 ```
 
 When an ID is omitted in an interactive terminal, Motoko opens a numbered
@@ -211,6 +284,12 @@ Useful in-chat commands:
 /compact
 /sources
 /status
+/permissions
+/permissions set MODE
+/repo status [PATH]
+/repo diff [PATH]
+/repo log [PATH]
+/repo review [PATH]
 /personality
 /profile
 /profile-refresh
@@ -241,6 +320,32 @@ It does not add prompt-toolkit, rich, textual, urwid, curses UI dependencies,
 or any package outside the Python standard library. It intentionally keeps a
 line-mode fallback because raw terminal control varies across TTYs and SSH
 clients.
+
+Repo commands are available in `repo-review` mode:
+
+```bash
+motoko repo status ~/repos/nixos-configs
+motoko repo diff ~/repos/nixos-configs
+motoko repo log ~/repos/nixos-configs
+motoko repo review ~/repos/nixos-configs
+```
+
+Inside a chat:
+
+```text
+/repo status ~/repos/nixos-configs
+/repo diff ~/repos/nixos-configs
+/repo log ~/repos/nixos-configs
+/repo review ~/repos/nixos-configs
+```
+
+The report is attached to the conversation as bounded context so Motoko can
+discuss it in the next answer. These commands use fixed Git invocations:
+`status --short --branch`, diff summaries, recent log, and
+`scripts/nixos-review-gate` when that executable exists. They do not run an
+arbitrary shell, do not call sudo, do not push, do not switch NixOS, and do not
+print full patch contents by default. The repo path must still be under an
+allowlisted directory.
 
 `/memorize` asks the local model to propose durable memories from the current
 conversation. Motoko prints the proposal and appends it only after an explicit
@@ -362,7 +467,9 @@ common cache/vendor directories and files that look binary. The goal is one
 corpus index per source tree, not separate indexes by file extension.
 
 By default, a new reusable index may store up to 200 GiB of derived chunk text
-under Motoko state. Override this for a reviewed one-off index with:
+under Motoko state unless the current user's `~/.config/motoko/config.json`
+sets a smaller `index.max_derived_bytes`. Override this for a reviewed one-off
+index with:
 
 ```bash
 motoko index ~/Documents --max-derived-bytes 250GiB
@@ -373,6 +480,12 @@ or set:
 ```bash
 MOTOKO_MAX_DERIVED_INDEX_BYTES=250GiB motoko index ~/Documents
 ```
+
+Per-user `index.max_files` and `index.max_file_bytes` limits are fail-closed:
+Motoko stops before writing a new index if the source tree exceeds those
+configured bounds. That is useful for source-code/admin accounts where an
+unexpected generated file or huge tree should be reviewed before ingestion.
+Personal document accounts can leave those limits unset or set them higher.
 
 Start a chat while indexing a directory:
 

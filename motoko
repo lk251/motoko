@@ -45,6 +45,8 @@ DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
 DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
+DEFAULT_PERMISSION_MODE = "repo-read"
+REPO_COMMAND_OUTPUT_CHARS = 24000
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -116,6 +118,18 @@ DEEP_RETRIEVAL_TERMS = {
     "thorough",
 }
 
+PERMISSION_MODE_DESCRIPTIONS = {
+    "chat-only": "chat, memories, profile, and conversations; no document reads, indexes, or repo inspection",
+    "repo-read": "chat plus allowlisted document reads and indexes; no repo command subprocesses",
+    "repo-review": "repo-read plus fixed read-only Git/review commands for allowlisted repositories",
+}
+
+PERMISSION_MODE_CAPABILITIES = {
+    "chat-only": set(),
+    "repo-read": {"file-read", "index"},
+    "repo-review": {"file-read", "index", "repo-read"},
+}
+
 SKIP_INDEX_DIR_NAMES = {
     ".git",
     ".hg",
@@ -156,6 +170,12 @@ SLASH_COMMANDS = [
     ("/compact", "summarize older turns into compact context"),
     ("/sources", "show sources used for the last answer"),
     ("/status", "show model, memory, and context state"),
+    ("/permissions", "show current Motoko capability mode"),
+    ("/permissions set MODE", "set default capability mode"),
+    ("/repo status [PATH]", "show read-only Git status for an allowlisted repo"),
+    ("/repo diff [PATH]", "show read-only Git diff summary for an allowlisted repo"),
+    ("/repo log [PATH]", "show recent Git log for an allowlisted repo"),
+    ("/repo review [PATH]", "show repo status, diff summary, and review-gate output when present"),
     ("/personality", "show the active personality/style file"),
     ("/profile", "show Motoko's profile dossier about Javier"),
     ("/profile-refresh", "rebuild the profile dossier from memories and conversations"),
@@ -197,6 +217,8 @@ SHELL_COMMANDS = [
     "profile",
     "remember",
     "status",
+    "permissions",
+    "repo",
     "allow-dir",
 ]
 
@@ -210,6 +232,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/compact",
     "/sources",
     "/status",
+    "/permissions",
     "/personality",
     "/profile",
     "/profile-refresh",
@@ -393,11 +416,15 @@ def parse_byte_count(value: str) -> int:
 
 
 def max_derived_index_bytes(override: str | None = None) -> int:
-    raw = override or os.environ.get("MOTOKO_MAX_DERIVED_INDEX_BYTES")
+    raw = (
+        override
+        or os.environ.get("MOTOKO_MAX_DERIVED_INDEX_BYTES")
+        or config_index_value("max_derived_bytes")
+    )
     if not raw:
         return DEFAULT_MAX_DERIVED_INDEX_BYTES
     try:
-        return parse_byte_count(raw)
+        return parse_config_byte_count(raw, "index.max_derived_bytes")
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -567,6 +594,174 @@ def atomic_write(path: pathlib.Path, text: str) -> None:
     tmp.write_text(text, encoding="utf-8")
     tmp.chmod(0o600)
     tmp.replace(path)
+
+
+def config_path() -> pathlib.Path:
+    root = ensure_private_dir(config_root())
+    return root / "config.json"
+
+
+def default_config() -> dict:
+    return {
+        "permissions": {
+            "mode": DEFAULT_PERMISSION_MODE,
+        },
+        "index": {
+            "max_derived_bytes": None,
+            "max_files": None,
+            "max_file_bytes": None,
+        },
+    }
+
+
+def merged_config(data: dict | None) -> dict:
+    merged = default_config()
+    if not isinstance(data, dict):
+        return merged
+    permissions = data.get("permissions")
+    if isinstance(permissions, dict):
+        mode = permissions.get("mode")
+        if isinstance(mode, str) and mode in PERMISSION_MODE_DESCRIPTIONS:
+            merged["permissions"]["mode"] = mode
+    index = data.get("index")
+    if isinstance(index, dict):
+        for key in ("max_derived_bytes", "max_files", "max_file_bytes"):
+            if key in index:
+                merged["index"][key] = index[key]
+    return merged
+
+
+def load_config() -> dict:
+    path = config_path()
+    if not path.exists():
+        return default_config()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid Motoko config JSON at {path}: {exc}") from exc
+    except OSError as exc:
+        raise SystemExit(f"cannot read Motoko config at {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"invalid Motoko config at {path}: top-level value must be an object")
+    return merged_config(data)
+
+
+def save_config(config: dict) -> None:
+    path = config_path()
+    atomic_write(path, json.dumps(merged_config(config), ensure_ascii=False, indent=2) + "\n")
+
+
+def config_index_value(key: str):
+    return load_config().get("index", {}).get(key)
+
+
+def parse_config_byte_count(raw, field: str) -> int:
+    if isinstance(raw, int):
+        if raw < 0:
+            raise ValueError(f"{field} must be non-negative")
+        return raw
+    if isinstance(raw, str):
+        return parse_byte_count(raw)
+    raise ValueError(f"{field} must be a byte count string or integer")
+
+
+def parse_optional_positive_int(raw, field: str) -> int | None:
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{field} must be a positive integer") from exc
+    if value <= 0:
+        raise SystemExit(f"{field} must be a positive integer")
+    return value
+
+
+def index_max_files() -> int | None:
+    return parse_optional_positive_int(
+        os.environ.get("MOTOKO_INDEX_MAX_FILES") or config_index_value("max_files"),
+        "index.max_files",
+    )
+
+
+def index_max_file_bytes() -> int | None:
+    raw = os.environ.get("MOTOKO_INDEX_MAX_FILE_BYTES") or config_index_value("max_file_bytes")
+    if raw in (None, ""):
+        return None
+    try:
+        return parse_config_byte_count(raw, "index.max_file_bytes")
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def permission_mode() -> str:
+    mode = os.environ.get("MOTOKO_PERMISSIONS") or load_config().get("permissions", {}).get("mode")
+    if mode not in PERMISSION_MODE_DESCRIPTIONS:
+        valid = ", ".join(PERMISSION_MODE_DESCRIPTIONS)
+        raise SystemExit(f"invalid Motoko permission mode {mode!r}; choose one of: {valid}")
+    return mode
+
+
+def require_permission(capability: str) -> None:
+    mode = permission_mode()
+    if capability in PERMISSION_MODE_CAPABILITIES.get(mode, set()):
+        return
+    raise SystemExit(
+        f"Motoko permission mode '{mode}' does not allow {capability}; "
+        "run 'motoko permissions' for available modes"
+    )
+
+
+def set_permission_mode(mode: str) -> None:
+    if mode not in PERMISSION_MODE_DESCRIPTIONS:
+        valid = ", ".join(PERMISSION_MODE_DESCRIPTIONS)
+        raise SystemExit(f"unknown permission mode {mode!r}; choose one of: {valid}")
+    config = load_config()
+    config.setdefault("permissions", {})["mode"] = mode
+    save_config(config)
+
+
+def format_config_limit(raw, *, is_bytes: bool = False) -> str:
+    if raw in (None, ""):
+        return "unbounded"
+    if is_bytes:
+        try:
+            return human_bytes(parse_config_byte_count(raw, "limit"))
+        except ValueError:
+            return str(raw)
+    return str(raw)
+
+
+def format_permissions() -> str:
+    config = load_config()
+    mode = permission_mode()
+    index = config.get("index", {})
+    lines = [
+        f"mode: {mode}",
+        f"config: {config_path()}",
+        "",
+        "Modes:",
+    ]
+    for name, description in PERMISSION_MODE_DESCRIPTIONS.items():
+        marker = "*" if name == mode else " "
+        lines.append(f" {marker} {name:<11} {description}")
+    lines.extend(
+        [
+            "",
+            "Index defaults:",
+            f"  max derived text: {format_config_limit(index.get('max_derived_bytes'), is_bytes=True)}",
+            f"  max files:        {format_config_limit(index.get('max_files'))}",
+            f"  max file size:    {format_config_limit(index.get('max_file_bytes'), is_bytes=True)}",
+            "",
+            "Notes:",
+            "  Permissions are Motoko feature gates, not an OS sandbox.",
+            "  Document and repo reads still require allowlisted directories.",
+            "  Repo commands are fixed read-only Git/review summaries; no shell, sudo, or push.",
+        ]
+    )
+    if os.environ.get("MOTOKO_PERMISSIONS"):
+        lines.append("  MOTOKO_PERMISSIONS is overriding the configured mode for this process.")
+    return "\n".join(lines)
 
 
 def slug_title(text: str) -> str:
@@ -1615,6 +1810,7 @@ def require_allowed(path: pathlib.Path) -> None:
 
 
 def read_text_file(path: pathlib.Path) -> str:
+    require_permission("file-read")
     require_allowed(path)
     data = path.read_bytes()
     if len(data) > MAX_CONTEXT_BYTES:
@@ -1672,12 +1868,46 @@ def iter_index_candidates(root: pathlib.Path, pattern: str | None) -> list[pathl
     return sorted(candidates)
 
 
+def apply_index_limits(candidates: list[pathlib.Path]) -> list[pathlib.Path]:
+    max_files = index_max_files()
+    if max_files is not None and len(candidates) > max_files:
+        raise SystemExit(
+            f"index candidate count {len(candidates)} exceeds configured limit {max_files}; "
+            "use --glob or raise index.max_files for this user"
+        )
+
+    max_file_bytes = index_max_file_bytes()
+    if max_file_bytes is not None:
+        oversized = []
+        for candidate in candidates:
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                continue
+            if size > max_file_bytes:
+                oversized.append((size, candidate))
+        if oversized:
+            oversized.sort(reverse=True)
+            examples = "\n".join(
+                f"  {human_bytes(size):>10}  {candidate}"
+                for size, candidate in oversized[:5]
+            )
+            raise SystemExit(
+                f"{len(oversized)} file(s) exceed configured index.max_file_bytes "
+                f"{human_bytes(max_file_bytes)}:\n{examples}\n"
+                "Use --glob to narrow the index, remove generated files from the source set, "
+                "or raise the per-user limit."
+            )
+    return candidates
+
+
 def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dict:
+    require_permission("index")
     root = pathlib.Path(path).expanduser().resolve()
     require_allowed(root)
     if not root.exists():
         raise SystemExit(f"not found: {root}")
-    candidates = iter_index_candidates(root, pattern)
+    candidates = apply_index_limits(iter_index_candidates(root, pattern))
     total_bytes = 0
     largest: list[tuple[int, pathlib.Path]] = []
     for candidate in candidates:
@@ -1710,6 +1940,7 @@ def print_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> None:
 
 
 def context_item_from_file(path: str) -> dict:
+    require_permission("file-read")
     resolved = pathlib.Path(path).expanduser().resolve()
     if not resolved.is_file():
         raise SystemExit(f"not a file: {resolved}")
@@ -2492,11 +2723,12 @@ def build_document_index(
     name: str | None = None,
     max_derived_bytes: str | None = None,
 ) -> dict:
+    require_permission("index")
     root = pathlib.Path(path).expanduser().resolve()
     require_allowed(root)
     if not root.exists():
         raise SystemExit(f"not a file or directory: {root}")
-    candidates = iter_index_candidates(root, pattern)
+    candidates = apply_index_limits(iter_index_candidates(root, pattern))
     if not candidates:
         raise SystemExit(f"no ingestible text files matched {pattern or AUTO_INDEX_GLOB} under {root}")
 
@@ -3349,6 +3581,20 @@ def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str
             parts.append(text)
             sources.extend(dossier_sources)
             continue
+        if item.get("kind") == "repo":
+            label = f"{item.get('command', 'repo')} {item.get('root', '')}".strip()
+            content = item.get("content", "")
+            parts.append(f"--- [repo:{label}] ---\n{content}")
+            sources.append(
+                {
+                    "kind": "repo",
+                    "command": item.get("command", ""),
+                    "root": item.get("root", ""),
+                    "bytes": item.get("bytes", 0),
+                    "created": item.get("created", ""),
+                }
+            )
+            continue
         label = item.get("path", "context")
         content = item.get("content", "")
         parts.append(f"--- [file:{label}] {label} ---\n{content}")
@@ -3750,6 +3996,8 @@ HELP_SECTIONS = [
             ("/title TEXT", "rename this conversation"),
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
             ("/status", "show model, memory, and context state"),
+            ("/permissions", "show current Motoko feature permissions"),
+            ("/permissions set MODE", "set default feature permission mode"),
         ],
     ),
     (
@@ -3766,6 +4014,15 @@ HELP_SECTIONS = [
             ("/attach-dossier [ID]", "attach an existing memory dossier"),
             ("/study QUERY", "choose and run the best bounded study action"),
             ("/sources", "show sources and context-planning reasons for the last answer"),
+        ],
+    ),
+    (
+        "Repo Review",
+        [
+            ("/repo status [PATH]", "attach a read-only Git status report"),
+            ("/repo diff [PATH]", "attach a read-only Git diff summary"),
+            ("/repo log [PATH]", "attach a recent Git log report"),
+            ("/repo review [PATH]", "attach status, diff, log, and review-gate output"),
         ],
     ),
     (
@@ -3816,6 +4073,12 @@ HELP_SECTIONS = [
             ("motoko study QUERY", "run a bounded study action in a new conversation"),
             ("motoko compact [ID]", "compact a saved conversation"),
             ("motoko status", "show model, memory, and state paths"),
+            ("motoko permissions", "show feature permissions and index defaults"),
+            ("motoko permissions set MODE", "set default feature permission mode"),
+            ("motoko repo status [PATH]", "show Git status for an allowlisted repo"),
+            ("motoko repo diff [PATH]", "show Git diff summaries for an allowlisted repo"),
+            ("motoko repo log [PATH]", "show recent Git log for an allowlisted repo"),
+            ("motoko repo review [PATH]", "show repo review summary; runs review gate if present"),
             ("motoko profile refresh", "rebuild the profile dossier"),
             ("motoko memory review", "list memories with provenance"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
@@ -3837,6 +4100,8 @@ def format_help() -> str:
             "  Indexes, topic dossiers, and memory dossiers live under ~/.local/state/motoko.",
             "  Each turn receives ranked memories and recent conversation capsules.",
             "  Use /sources after an answer to inspect why context was selected.",
+            "  Use /permissions to choose which Motoko features this user account may use.",
+            "  Repo commands are fixed read-only summaries over allowlisted Git repos.",
             "  Quiet after-answer maintenance saves high-confidence durable memories and compacts long chats.",
             "  The background study loop refreshes catalogs and suggestions while idle.",
             "  Heavy idle profile refresh is opt-in with MOTOKO_BACKGROUND_PROFILE=1.",
@@ -3857,6 +4122,7 @@ def format_about() -> str:
             f"endpoint: {endpoint()}",
             f"state: {state_root()}",
             f"config: {config_root()}",
+            f"permissions: {permission_mode()}",
             f"spinner: {''.join(spinner_frames()) or 'off'}",
         ]
     )
@@ -3927,6 +4193,12 @@ def format_sources(sources: list[dict]) -> str:
         elif kind == "file":
             lines.append(f"{idx:3d}  file  {source.get('path', '')}  {source.get('bytes', 0)} bytes")
             lines.append("     why: explicitly attached file")
+        elif kind == "repo":
+            lines.append(
+                f"{idx:3d}  repo {source.get('command', '')}  "
+                f"{source.get('root', '')}  {source.get('bytes', 0)} bytes"
+            )
+            lines.append("     why: explicitly attached read-only repo report")
         elif kind == "index":
             lines.append(
                 f"{idx:3d}  index {source.get('id', '')}  "
@@ -4015,6 +4287,9 @@ def format_status(conv: dict | None = None) -> str:
     topic_items = [item for item in context_items if item.get("kind") == "topic"]
     dossier_items = [item for item in context_items if item.get("kind") == "dossier"]
     file_items = [item for item in context_items if item.get("kind") == "file"]
+    repo_items = [item for item in context_items if item.get("kind") == "repo"]
+    config = load_config()
+    index_config = config.get("index", {})
 
     lines = [
         f"model: {model_name()}",
@@ -4022,6 +4297,13 @@ def format_status(conv: dict | None = None) -> str:
         f"endpoint: {endpoint()}",
         f"state: {state_root()}",
         f"config: {config_root()}",
+        f"permissions: {permission_mode()}",
+        (
+            "index limits: "
+            f"derived {format_config_limit(index_config.get('max_derived_bytes'), is_bytes=True)}, "
+            f"files {format_config_limit(index_config.get('max_files'))}, "
+            f"file {format_config_limit(index_config.get('max_file_bytes'), is_bytes=True)}"
+        ),
         f"conversations: {len(conversations)}",
         f"memories: {len(memories)} total, {pinned} pinned",
         f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",
@@ -4043,7 +4325,8 @@ def format_status(conv: dict | None = None) -> str:
                     "attached context: "
                     f"{len(file_items)} file(s), {len(index_items)} index(es), "
                     f"{len(topic_items)} topic dossier(s), "
-                    f"{len(dossier_items)} memory dossier(s)"
+                    f"{len(dossier_items)} memory dossier(s), "
+                    f"{len(repo_items)} repo report(s)"
                 ),
                 f"auto-selected memories for current context: {len(selected_memories)}",
                 f"auto-selected recent conversations: {len(selected_conversations)}",
@@ -4116,6 +4399,158 @@ def build_dossier_from_chat(_conv: dict, text: str) -> dict:
     if not query:
         raise SystemExit("usage: /dossier QUERY")
     return build_memory_dossier(query)
+
+
+def bounded_output(text: str, max_chars: int = REPO_COMMAND_OUTPUT_CHARS) -> str:
+    text = text.rstrip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + f"\n... truncated after {max_chars} characters ..."
+
+
+def repo_root_for_path(path: str | None = None) -> pathlib.Path:
+    require_permission("repo-read")
+    base = pathlib.Path(path or os.getcwd()).expanduser().resolve()
+    if not base.exists():
+        raise SystemExit(f"repo path does not exist: {base}")
+    require_allowed(base)
+    workdir = base.parent if base.is_file() else base
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit("git is not available in PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"git repo discovery timed out under {workdir}") from exc
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or f"not a Git repository: {workdir}")
+    root = pathlib.Path(result.stdout.strip()).resolve()
+    require_allowed(root)
+    return root
+
+
+def run_git_readonly(repo: pathlib.Path, args: list[str], *, timeout: int = 20) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"git {' '.join(args)} timed out in {repo}") from exc
+    output = result.stdout.rstrip()
+    errors = result.stderr.strip()
+    if result.returncode != 0:
+        raise SystemExit(errors or f"git {' '.join(args)} failed with exit {result.returncode}")
+    if errors:
+        return (output + "\n" + errors).strip()
+    return output
+
+
+def format_command_section(title: str, body: str) -> str:
+    return f"== {title} ==\n{body.strip() or '(no output)'}"
+
+
+def repo_status_report(path: str | None = None) -> tuple[pathlib.Path, str]:
+    repo = repo_root_for_path(path)
+    status = run_git_readonly(repo, ["status", "--short", "--branch"])
+    return repo, "\n\n".join(
+        [
+            f"repo: {repo}",
+            format_command_section("git status --short --branch", status),
+        ]
+    )
+
+
+def repo_diff_report(path: str | None = None) -> tuple[pathlib.Path, str]:
+    repo = repo_root_for_path(path)
+    sections = [
+        f"repo: {repo}",
+        format_command_section("git diff --stat", run_git_readonly(repo, ["diff", "--stat"])),
+        format_command_section("git diff --name-status", run_git_readonly(repo, ["diff", "--name-status"])),
+        format_command_section("git diff --cached --stat", run_git_readonly(repo, ["diff", "--cached", "--stat"])),
+        format_command_section("git diff --cached --name-status", run_git_readonly(repo, ["diff", "--cached", "--name-status"])),
+    ]
+    return repo, "\n\n".join(sections)
+
+
+def repo_log_report(path: str | None = None) -> tuple[pathlib.Path, str]:
+    repo = repo_root_for_path(path)
+    log = run_git_readonly(repo, ["log", "--oneline", "--decorate", "-n", "12"])
+    return repo, "\n\n".join(
+        [
+            f"repo: {repo}",
+            format_command_section("git log --oneline --decorate -n 12", log),
+        ]
+    )
+
+
+def repo_review_report(path: str | None = None) -> tuple[pathlib.Path, str]:
+    repo = repo_root_for_path(path)
+    sections = [
+        f"repo: {repo}",
+        format_command_section("git status --short --branch", run_git_readonly(repo, ["status", "--short", "--branch"])),
+        format_command_section("git diff --stat", run_git_readonly(repo, ["diff", "--stat"])),
+        format_command_section("git diff --name-status", run_git_readonly(repo, ["diff", "--name-status"])),
+        format_command_section("git log --oneline --decorate -n 12", run_git_readonly(repo, ["log", "--oneline", "--decorate", "-n", "12"])),
+    ]
+    review_gate = repo / "scripts" / "nixos-review-gate"
+    if review_gate.exists() and os.access(review_gate, os.X_OK):
+        try:
+            result = subprocess.run(
+                [str(review_gate)],
+                cwd=str(repo),
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=45,
+            )
+        except subprocess.TimeoutExpired:
+            sections.append(format_command_section("scripts/nixos-review-gate", "timed out after 45 seconds"))
+        else:
+            sections.append(
+                format_command_section(
+                    f"scripts/nixos-review-gate (exit {result.returncode})",
+                    result.stdout,
+                )
+            )
+    else:
+        sections.append(format_command_section("review gate", "no executable scripts/nixos-review-gate in this repo"))
+    return repo, "\n\n".join(sections)
+
+
+def repo_report(command: str, path: str | None = None) -> tuple[pathlib.Path, str]:
+    if command == "status":
+        return repo_status_report(path)
+    if command == "diff":
+        return repo_diff_report(path)
+    if command == "log":
+        return repo_log_report(path)
+    if command == "review":
+        return repo_review_report(path)
+    raise SystemExit("usage: repo status|diff|log|review [PATH]")
+
+
+def context_item_from_repo_report(command: str, repo: pathlib.Path, report: str) -> dict:
+    content = bounded_output(report)
+    return {
+        "kind": "repo",
+        "command": command,
+        "root": str(repo),
+        "created": now(),
+        "bytes": len(content.encode("utf-8")),
+        "content": content,
+    }
 
 
 def print_command_menu() -> None:
@@ -4769,6 +5204,13 @@ class MotokoTui:
                 self.append("system", format_sources(self.conv.get("last_sources", [])))
             elif text == "/status":
                 self.append("system", format_status(self.conv))
+            elif text == "/permissions":
+                self.append("system", format_permissions())
+            elif text.startswith("/permissions set "):
+                mode = text[len("/permissions set ") :].strip()
+                self.append("system", self.capture_text(lambda: command_permissions_set(mode)))
+            elif text == "/repo" or text.startswith("/repo "):
+                self.attach_repo_report(text[len("/repo") :].strip())
             elif text == "/personality":
                 self.append("system", self.capture_text(print_personality))
             elif text == "/profile":
@@ -4901,6 +5343,16 @@ class MotokoTui:
         dossier = build_dossier_from_chat(self.conv, body)
         self.conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
         save_conversation(self.conv)
+
+    def attach_repo_report(self, body: str) -> None:
+        parts = body.split(maxsplit=1)
+        command = parts[0] if parts else ""
+        path = parts[1] if len(parts) > 1 else None
+        repo, report = repo_report(command, path)
+        item = context_item_from_repo_report(command, repo, report)
+        self.conv.setdefault("context_items", []).append(item)
+        save_conversation(self.conv)
+        self.append("system", f"attached repo {command} report for {repo}\n\n{item['content']}")
 
     def study_from_body(self, body: str) -> None:
         print(study_query(self.conv, body))
@@ -5640,6 +6092,28 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/status":
             print_status(conv)
             continue
+        if user_text == "/permissions":
+            print(format_permissions())
+            continue
+        if user_text.startswith("/permissions set "):
+            command_permissions_set(user_text[len("/permissions set ") :].strip())
+            continue
+        if user_text == "/repo" or user_text.startswith("/repo "):
+            body = user_text[len("/repo") :].strip()
+            parts = body.split(maxsplit=1)
+            command = parts[0] if parts else ""
+            path = parts[1] if len(parts) > 1 else None
+            try:
+                repo, report = repo_report(command, path)
+            except SystemExit as exc:
+                print(exc)
+                continue
+            item = context_item_from_repo_report(command, repo, report)
+            conv.setdefault("context_items", []).append(item)
+            save_conversation(conv)
+            print(f"attached repo {command} report for {repo}")
+            print(item["content"])
+            continue
         if user_text == "/personality":
             print_personality()
             continue
@@ -6270,6 +6744,28 @@ def command_status(_args) -> None:
     print_status()
 
 
+def command_permissions(args) -> None:
+    if args.permissions_command in (None, "show"):
+        print(format_permissions())
+    elif args.permissions_command == "set":
+        command_permissions_set(args.mode)
+    elif args.permissions_command == "path":
+        print(config_path())
+    else:
+        raise SystemExit("unknown permissions command")
+
+
+def command_permissions_set(mode: str) -> None:
+    set_permission_mode(mode)
+    print(f"permissions mode set: {mode}")
+    print(f"config: {config_path()}")
+
+
+def command_repo(args) -> None:
+    repo, report = repo_report(args.repo_command, args.path)
+    print(bounded_output(report))
+
+
 def command_remember(args) -> None:
     add_memory(" ".join(args.text))
     print("memory saved")
@@ -6318,6 +6814,29 @@ def main(argv: list[str]) -> int:
 
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
+
+    permissions = sub.add_parser("permissions", help="show or set Motoko feature permissions")
+    permissions_sub = permissions.add_subparsers(dest="permissions_command")
+    permissions_show = permissions_sub.add_parser("show", help="show current feature permissions")
+    permissions_show.set_defaults(func=command_permissions)
+    permissions_set = permissions_sub.add_parser("set", help="set feature permission mode")
+    permissions_set.add_argument("mode", choices=sorted(PERMISSION_MODE_DESCRIPTIONS))
+    permissions_set.set_defaults(func=command_permissions)
+    permissions_path_cmd = permissions_sub.add_parser("path", help="print config file path")
+    permissions_path_cmd.set_defaults(func=command_permissions)
+    permissions.set_defaults(func=command_permissions)
+
+    repo = sub.add_parser("repo", help="run fixed read-only Git/review summaries")
+    repo_sub = repo.add_subparsers(dest="repo_command", required=True)
+    for name, help_text in [
+        ("status", "show Git status"),
+        ("diff", "show Git diff summary"),
+        ("log", "show recent Git log"),
+        ("review", "show status, diff, log, and review-gate output when present"),
+    ]:
+        repo_cmd = repo_sub.add_parser(name, help=help_text)
+        repo_cmd.add_argument("path", nargs="?")
+        repo_cmd.set_defaults(func=command_repo)
 
     listed = sub.add_parser("list", help="list conversations")
     listed.set_defaults(func=command_list)

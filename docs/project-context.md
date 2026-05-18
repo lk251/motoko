@@ -9,8 +9,9 @@ host integration policy.
 ## Current Role
 
 Motoko is Javier's local terminal personal assistant for the HB3 `personal`
-realm. She is meant to feel conversational and useful for private daily notes,
-documents, memory, and local Qwen chat.
+realm, and a small local repo-review helper for the `mares` and `javier`
+realms. She is meant to feel conversational and useful for private daily notes,
+documents, memory, local Qwen chat, and bounded source-repo inspection.
 
 She is intentionally not:
 
@@ -28,9 +29,15 @@ The active NixOS integration lives in `/home/javier/repos/nixos-configs`.
 Current intended deployment:
 
 - Motoko is packaged as this repository's `packages.x86_64-linux.default`.
-- `nixos-configs` consumes Motoko through a private GitHub flake input.
-- HB3 installs Motoko only for the non-sudo `personal` user.
+- `nixos-configs` consumes Motoko through a private mbp111 Git flake input.
+- HB3 installs Motoko for `personal`, `mares`, and `javier`.
+- Motoko state is per-user under `~/.local/state/motoko`; config is per-user
+  under `~/.config/motoko`.
 - `personal` has local-model access but no Hermes/provider-key group access.
+- `mares` is non-sudo and can use Motoko for work/repo review without inheriting
+  Javier's personal Motoko state.
+- `javier` can use Motoko for admin-side NixOS review with deliberately smaller
+  source-index limits.
 - `.#hb3-headless` starts the default Qwen3.6 local model service so `personal`
   can use Motoko without first entering an admin account.
 - Motoko's default endpoint is the local MTP llama.cpp endpoint:
@@ -48,6 +55,8 @@ behavior:
 - no database server;
 - no pip/npm/runtime dependency installs;
 - explicit document allowlists;
+- per-user feature permissions in `~/.config/motoko/config.json`;
+- fixed read-only repo commands only in `repo-review` mode;
 - source documents are read-only;
 - memory, indexes, and topics stay under Motoko-owned state paths.
 
@@ -70,6 +79,10 @@ Accepted directions:
 - explicit profile dossiers from memories and conversations;
 - hierarchical document indexes;
 - topic dossiers and deeper dossiers over already indexed material;
+- per-user permission modes for chat-only, document reads/indexing, and
+  read-only repo review;
+- fixed repo status/diff/log/review commands that attach bounded summaries as
+  context without arbitrary shell execution;
 - TTY-friendly terminal ergonomics;
 - no new runtime dependencies unless the benefit is reviewed and concrete.
 

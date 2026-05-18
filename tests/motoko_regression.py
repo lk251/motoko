@@ -364,6 +364,68 @@ def test_index_plan(m):
         assert plan["bytes"] == 6
 
 
+def test_permissions_config(m):
+    old_permissions = os.environ.get("MOTOKO_PERMISSIONS")
+    try:
+        os.environ.pop("MOTOKO_PERMISSIONS", None)
+        with isolated_state():
+            assert m.permission_mode() == "repo-read"
+            m.set_permission_mode("chat-only")
+            assert m.permission_mode() == "chat-only"
+            try:
+                m.require_permission("file-read")
+            except SystemExit as exc:
+                assert "does not allow file-read" in str(exc)
+            else:
+                raise AssertionError("chat-only should block file reads")
+            m.set_permission_mode("repo-review")
+            assert "repo-read" in m.PERMISSION_MODE_CAPABILITIES[m.permission_mode()]
+            assert "repo-review" in m.format_permissions()
+    finally:
+        if old_permissions is None:
+            os.environ.pop("MOTOKO_PERMISSIONS", None)
+        else:
+            os.environ["MOTOKO_PERMISSIONS"] = old_permissions
+
+
+def test_index_limits(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.txt").write_text("alpha\n", encoding="utf-8")
+        (docs / "b.txt").write_text("bravo\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        config = m.load_config()
+        config["index"]["max_files"] = 1
+        m.save_config(config)
+        try:
+            m.plan_document_index(str(docs))
+        except SystemExit as exc:
+            assert "candidate count" in str(exc)
+        else:
+            raise AssertionError("max_files should block oversized indexes")
+
+        config["index"]["max_files"] = 10
+        config["index"]["max_file_bytes"] = "4B"
+        m.save_config(config)
+        try:
+            m.plan_document_index(str(docs))
+        except SystemExit as exc:
+            assert "index.max_file_bytes" in str(exc)
+        else:
+            raise AssertionError("max_file_bytes should block oversized files")
+
+
+def test_repo_context_item(m):
+    with isolated_state() as tmp:
+        item = m.context_item_from_repo_report("status", tmp, "repo: fake\nclean")
+        text, sources = m.render_context_with_sources([item], "")
+        assert "repo:status" in text
+        assert "clean" in text
+        assert sources[0]["kind"] == "repo"
+        assert sources[0]["command"] == "status"
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -381,6 +443,9 @@ def main() -> int:
         test_help_overlay_closes,
         test_fake_openai_stream,
         test_index_plan,
+        test_permissions_config,
+        test_index_limits,
+        test_repo_context_item,
     ]
     for test in tests:
         test(m)
