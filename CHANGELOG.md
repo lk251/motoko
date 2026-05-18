@@ -34,6 +34,9 @@ not the easiest place to review what changed after a long work session.
 - Documented that future HRAG quality work should happen through Motoko-owned
   runtime behavior and synthetic fixtures, without Codex reading Javier's
   personal documents.
+- Added bounded heavy background refresh for attached stale document indexes or
+  meaningful batches of new files, with visible `bg-heavy: indexing(model)`
+  status and prompt queuing while the local model focuses on indexing.
 
 ## 2026-05-18
 

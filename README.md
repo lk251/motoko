@@ -21,6 +21,8 @@ Design constraints:
   dossiers before building new derived context.
 - A low-intensity idle background study loop that refreshes the private context
   catalog without silently crawling new directories or competing with chat.
+- Bounded heavy background index refresh for attached stale indexes or meaningful
+  batches of new files, visible in the TUI status bar.
 - A durable study-job ledger under Motoko state so interrupted background study
   passes are visible and the next pass can safely recompute/resume planning.
 - Context planning lanes and `/sources` explanations for why each memory,

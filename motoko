@@ -68,6 +68,9 @@ CONTEXT_PLAN_BUDGET_CHARS = 180000
 BACKGROUND_STUDY_INTERVAL_SECONDS = 60
 BACKGROUND_STUDY_IDLE_GRACE_SECONDS = 8
 BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
+BACKGROUND_HEAVY_INDEX_COOLDOWN_SECONDS = 30 * 60
+BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES = 3
+BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES = 64 * 1024
 MAX_MEMORY_CHARS = 1800
 MEMORY_RETRIEVAL_LIMIT = 18
 MEMORY_SEARCH_LIMIT = 40
@@ -569,6 +572,11 @@ def study_jobs_path() -> pathlib.Path:
     return root / "study-jobs.jsonl"
 
 
+def heavy_study_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "heavy-study.json"
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -955,6 +963,16 @@ def env_seconds(name: str, default: int) -> int:
         return default
     try:
         return max(1, int(float(raw)))
+    except ValueError:
+        return default
+
+
+def env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(minimum, int(raw))
     except ValueError:
         return default
 
@@ -3097,6 +3115,179 @@ def attach_context_item(conv: dict, item: dict) -> bool:
     return True
 
 
+def replace_attached_index(conv: dict, old_index_id: str, new_index: dict) -> None:
+    replacement = context_item_from_index(new_index)
+    items = conv.setdefault("context_items", [])
+    for idx, item in enumerate(items):
+        if item.get("kind") == "index" and item.get("id") == old_index_id:
+            items[idx] = replacement
+            save_conversation(conv)
+            return
+    items.append(replacement)
+    save_conversation(conv)
+
+
+def read_heavy_study_state() -> dict:
+    path = heavy_study_path()
+    if not path.exists():
+        return {"indexes": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"indexes": {}}
+    return data if isinstance(data, dict) else {"indexes": {}}
+
+
+def write_heavy_study_state(state: dict) -> None:
+    state.setdefault("indexes", {})
+    atomic_write(heavy_study_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    heavy_study_path().chmod(0o600)
+
+
+def heavy_index_key(index: dict) -> str:
+    raw = "\0".join(
+        [
+            index.get("root", ""),
+            index.get("glob", AUTO_INDEX_GLOB),
+            index.get("name", ""),
+        ]
+    )
+    return sha256_hex(raw.encode("utf-8"))[:16]
+
+
+def heavy_index_cooldown_active(index: dict, state: dict) -> bool:
+    key = heavy_index_key(index)
+    record = state.get("indexes", {}).get(key, {})
+    attempted = parse_timestamp(record.get("last_attempt", ""))
+    if attempted is None:
+        return False
+    cooldown = env_seconds(
+        "MOTOKO_BACKGROUND_HEAVY_INDEX_COOLDOWN",
+        BACKGROUND_HEAVY_INDEX_COOLDOWN_SECONDS,
+    )
+    age = (_dt.datetime.now(_dt.timezone.utc).astimezone() - attempted.astimezone()).total_seconds()
+    return age < cooldown
+
+
+def mark_heavy_index_attempt(index: dict, state: dict, *, result: str, new_index_id: str = "") -> None:
+    state.setdefault("indexes", {})[heavy_index_key(index)] = {
+        "root": index.get("root", ""),
+        "glob": index.get("glob", AUTO_INDEX_GLOB),
+        "name": index.get("name", ""),
+        "last_attempt": now(),
+        "last_result": result,
+        "new_index_id": new_index_id,
+    }
+    write_heavy_study_state(state)
+
+
+def index_change_summary(index: dict) -> dict:
+    status, warnings = index_staleness(index)
+    root = pathlib.Path(index.get("root", "")).expanduser().resolve()
+    pattern = index.get("glob") or AUTO_INDEX_GLOB
+    known_paths = {
+        str(pathlib.Path(file_item.get("path", "")).expanduser().resolve())
+        for file_item in index.get("files", [])
+        if file_item.get("path")
+    }
+    try:
+        require_allowed(root)
+        candidates = apply_index_limits(iter_index_candidates(root, pattern))
+    except SystemExit as exc:
+        return {
+            "status": status,
+            "warnings": warnings + [str(exc)],
+            "new_files": [],
+            "new_bytes": 0,
+        }
+    current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
+    new_files = sorted(
+        path for path_text, path in current_paths.items() if path_text not in known_paths
+    )
+    new_bytes = 0
+    for path in new_files:
+        try:
+            new_bytes += path.stat().st_size
+        except OSError:
+            pass
+    return {
+        "status": status,
+        "warnings": warnings,
+        "new_files": new_files,
+        "new_bytes": new_bytes,
+    }
+
+
+def heavy_index_refresh_reason(summary: dict) -> str | None:
+    if summary.get("status") == "stale":
+        return "stale indexed source content"
+    new_files = len(summary.get("new_files", []))
+    new_bytes = int(summary.get("new_bytes", 0) or 0)
+    min_files = env_int(
+        "MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES",
+        BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES,
+    )
+    min_bytes = env_int(
+        "MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES",
+        BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES,
+    )
+    if new_files >= min_files:
+        return f"{new_files} new files"
+    if new_bytes >= min_bytes:
+        return f"{human_bytes(new_bytes)} of new files"
+    return None
+
+
+def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]:
+    if not env_flag("MOTOKO_BACKGROUND_HEAVY_INDEX", True):
+        return []
+    state = read_heavy_study_state()
+    notes = []
+    for item in list(conv.get("context_items", [])):
+        if item.get("kind") != "index" or not item.get("id"):
+            continue
+        try:
+            index = load_index(item.get("id"))
+        except SystemExit as exc:
+            notes.append(f"heavy index refresh skipped: {exc}")
+            continue
+        summary = index_change_summary(index)
+        reason = heavy_index_refresh_reason(summary)
+        if reason is None:
+            new_files = len(summary.get("new_files", []))
+            if new_files:
+                name = index.get("name", index.get("id"))
+                notes.append(f"{new_files} new file(s) below heavy index threshold for {name}")
+            continue
+        if heavy_index_cooldown_active(index, state):
+            notes.append(f"heavy index refresh on cooldown for {index.get('name', index.get('id'))}")
+            continue
+        mark_heavy_index_attempt(index, state, result=f"started: {reason}")
+        if phase_callback is not None:
+            phase_callback("bg-heavy: indexing(model)")
+        try:
+            refreshed = build_document_index(
+                index.get("root", ""),
+                index.get("glob") or AUTO_INDEX_GLOB,
+                index.get("name", ""),
+            )
+            replace_attached_index(conv, index.get("id", ""), refreshed)
+        except SystemExit as exc:
+            mark_heavy_index_attempt(index, state, result=f"failed: {exc}")
+            notes.append(f"heavy index refresh failed for {index.get('name', index.get('id'))}: {exc}")
+            continue
+        except Exception as exc:
+            mark_heavy_index_attempt(index, state, result=f"failed: {type(exc).__name__}: {exc}")
+            notes.append(f"heavy index refresh failed for {index.get('name', index.get('id'))}: {exc}")
+            continue
+        mark_heavy_index_attempt(index, state, result="refreshed", new_index_id=refreshed.get("id", ""))
+        notes.append(
+            f"heavy index refreshed {index.get('id')} -> {refreshed.get('id')} ({reason})"
+        )
+        break
+    return notes
+
+
 def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | None:
     attached = attached_item_ids(conv, "dossier")
     for dossier in ranked_dossiers_for_query(query):
@@ -3249,6 +3440,13 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     ]
     if stale_indexes:
         notes.append(f"{len(stale_indexes)} index(es) need review or rebuild")
+    heavy_notes = refresh_heavy_attached_indexes(
+        conv,
+        phase_callback=lambda phase: set_phase(phase, notes=notes),
+    )
+    if heavy_notes:
+        notes.extend(heavy_notes)
+        catalog = write_context_catalog()
     if env_flag("MOTOKO_BACKGROUND_PROFILE", False) and profile_refresh_due(catalog):
         set_phase("study: profile", notes=notes)
         try:
@@ -4124,6 +4322,7 @@ def format_help() -> str:
             "  Repo commands are fixed read-only summaries over allowlisted Git repos.",
             "  Quiet after-answer maintenance saves high-confidence durable memories and compacts long chats.",
             "  The background study loop refreshes catalogs and suggestions while idle.",
+            "  Attached stale indexes can refresh in bg-heavy: indexing(model) while prompts queue.",
             "  Heavy idle profile refresh is opt-in with MOTOKO_BACKGROUND_PROFILE=1.",
             "  Source documents are never modified.",
             "  Spinner modes: MOTOKO_SPINNER=auto|ascii|block|braille|off.",
@@ -5188,6 +5387,11 @@ class MotokoTui:
         if text.startswith("/"):
             self.handle_command(text)
             return
+        if self.study_running and self.study_status.startswith("bg-heavy:"):
+            self.pending_prompts.append(text)
+            self.append("queued", text)
+            self.status = f"queued {len(self.pending_prompts)} prompt(s) while Motoko is deep-indexing"
+            return
         if self.generating:
             self.pending_prompts.append(text)
             self.append("queued", text)
@@ -5565,6 +5769,9 @@ class MotokoTui:
                 notes = event[1]
                 self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
                 self.study_status = "study: idle"
+                if self.pending_prompts and not self.generating and not self.maintaining:
+                    next_prompt = self.pending_prompts.popleft()
+                    self.start_generation(next_prompt)
                 changed = True
             elif kind == "study_error":
                 self.study_running = False
@@ -5842,8 +6049,12 @@ class MotokoTui:
 
     def study_status_label(self) -> str:
         phase = self.study_status
+        if phase.startswith("bg-heavy:"):
+            return phase
         if "profile" in phase:
             return "bg-heavy: profile(model)"
+        if "index" in phase:
+            return "bg-heavy: indexing(model)"
         if "catalog" in phase:
             return "bg-light: catalog(cpu)"
         if "planning" in phase:

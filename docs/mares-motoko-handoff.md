@@ -212,6 +212,7 @@ Motoko uses the same directory shape for every Unix account:
 ~/.local/state/motoko/context-catalog.json
 ~/.local/state/motoko/study-state.json
 ~/.local/state/motoko/study-jobs.jsonl
+~/.local/state/motoko/heavy-study.json
 ~/.config/motoko/allowdirs
 ~/.config/motoko/personality.md
 ```

@@ -137,6 +137,61 @@ def test_interrupted_background_study_resume_note(m):
     assert state["status"] == "completed"
 
 
+def test_heavy_index_refresh_replaces_attached_index(m):
+    docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
+    docs.mkdir()
+    old_file = docs / "a.org"
+    old_file.write_text("* TODO Old task\n", encoding="utf-8")
+    for idx in range(3):
+        (docs / f"new-{idx}.org").write_text(f"* TODO New task {idx}\n", encoding="utf-8")
+    m.add_allowed_dir(str(docs))
+
+    old_index = {
+        "id": "old-index",
+        "name": "orgfiles",
+        "root": str(docs),
+        "glob": "*.org",
+        "created": m.now(),
+        "corpus_summary": "old org index",
+        "files": [
+            {
+                "path": str(old_file),
+                "source_fingerprint": m.source_fingerprint(old_file),
+                "chunks": [],
+            }
+        ],
+    }
+    write_json(m.index_path(old_index["id"]), old_index)
+    conv = m.new_conversation("Heavy index")
+    conv["id"] = "heavy-index"
+    conv["context_items"] = [m.context_item_from_index(old_index)]
+    m.save_conversation(conv)
+
+    new_index = dict(old_index)
+    new_index["id"] = "new-index"
+    new_index["created"] = m.now()
+    new_index["files"] = [
+        {
+            "path": str(path),
+            "source_fingerprint": m.source_fingerprint(path),
+            "chunks": [],
+        }
+        for path in sorted(docs.glob("*.org"))
+    ]
+
+    old_build = m.build_document_index
+    phases = []
+    try:
+        m.build_document_index = lambda path, pattern, name=None, max_derived_bytes=None: new_index
+        notes = m.refresh_heavy_attached_indexes(conv, phase_callback=phases.append)
+    finally:
+        m.build_document_index = old_build
+
+    assert "bg-heavy: indexing(model)" in phases
+    assert any("heavy index refreshed old-index -> new-index" in note for note in notes)
+    assert conv["context_items"][0]["id"] == "new-index"
+
+
 def main() -> int:
     m = load_motoko()
     with isolated_state():
@@ -149,7 +204,9 @@ def main() -> int:
         test_background_study_state(m)
     with isolated_state():
         test_interrupted_background_study_resume_note(m)
-    print("5 motoko evaluation checks passed")
+    with isolated_state():
+        test_heavy_index_refresh_replaces_attached_index(m)
+    print("6 motoko evaluation checks passed")
     return 0
 
 

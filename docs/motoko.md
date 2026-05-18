@@ -418,10 +418,28 @@ directories or create large document indexes; document access still starts from
 explicit allowlists and `/index`. Use `/study QUERY` for a deliberate bounded
 study pass that either reuses an existing dossier, builds a topic dossier from
 an attached or relevant index, or builds a memory/conversation dossier.
+For document corpora already attached to the active conversation, Motoko may
+also run a heavier background index refresh when an attached index becomes stale
+or when enough new files appear under the indexed root. This work uses the local
+model endpoint for summaries, is shown in the top status bar as
+`bg-heavy: indexing(model)`, and queues new prompts until the refresh finishes
+so the chat does not compete with the indexing pass. It is deliberately bounded:
+it only considers already attached indexes, waits for normal idle time, refreshes
+at most one index per pass, and uses a cooldown plus new-file thresholds so tiny
+repo edits do not immediately trigger a large rebuild.
 Background study writes `study-state.json` and appends events to
 `study-jobs.jsonl` under Motoko state. If Motoko exits during the cheap
 catalog/planning pass, the next pass records the interrupted job and recomputes
 from current state; no personal documents are lost or rewritten.
+
+Heavy index refresh can be tuned for one-off sessions:
+
+```bash
+MOTOKO_BACKGROUND_HEAVY_INDEX=0 motoko
+MOTOKO_BACKGROUND_HEAVY_INDEX_COOLDOWN=3600 motoko
+MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES=5 motoko
+MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES=131072 motoko
+```
 
 `/profile-refresh` or `motoko profile refresh` builds a compact profile dossier
 from durable memories and recent conversation material. This is an explicit
