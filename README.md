@@ -21,6 +21,10 @@ Design constraints:
   dossiers before building new derived context.
 - A low-intensity idle background study loop that refreshes the private context
   catalog without silently crawling new directories or competing with chat.
+- A durable study-job ledger under Motoko state so interrupted background study
+  passes are visible and the next pass can safely recompute/resume planning.
+- Context planning lanes and `/sources` explanations for why each memory,
+  conversation, dossier, index, or chunk was included.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
 - TTY-safe ASCII spinner by default, with braille as explicit opt-in.
@@ -42,6 +46,7 @@ Design constraints:
 See [docs/motoko.md](docs/motoko.md) for usage and operating notes.
 See [docs/project-context.md](docs/project-context.md) for the HB3/NixOS,
 security, and interface context that should guide future changes.
+See [CHANGELOG.md](CHANGELOG.md) for concise user-facing change summaries.
 
 ## Nix
 
@@ -67,4 +72,10 @@ Run only the stdlib evaluation harness:
 
 ```bash
 nix build .#checks.x86_64-linux.evaluation
+```
+
+Run only the pseudo-terminal render checks:
+
+```bash
+nix build .#checks.x86_64-linux.tty
 ```

@@ -56,6 +56,10 @@
             MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_eval.py}
             touch "$out"
           '';
+          tty = pkgs.runCommand "motoko-tty-tests" { nativeBuildInputs = [ pkgs.python312 ]; } ''
+            MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_tty.py}
+            touch "$out"
+          '';
         }
       );
 

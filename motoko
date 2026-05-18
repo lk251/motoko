@@ -61,6 +61,7 @@ STUDY_INDEX_MIN_SCORE = 1
 CONTEXT_CATALOG_INDEX_LIMIT = 10
 CONTEXT_CATALOG_DOSSIER_LIMIT = 12
 CONTEXT_CATALOG_SUMMARY_CHARS = 900
+CONTEXT_PLAN_BUDGET_CHARS = 180000
 BACKGROUND_STUDY_INTERVAL_SECONDS = 60
 BACKGROUND_STUDY_IDLE_GRACE_SECONDS = 8
 BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
@@ -513,6 +514,11 @@ def context_catalog_path() -> pathlib.Path:
 def study_state_path() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return root / "study-state.json"
+
+
+def study_jobs_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "study-jobs.jsonl"
 
 
 def conversation_path(conversation_id: str) -> pathlib.Path:
@@ -1835,12 +1841,65 @@ def write_study_state(state: dict) -> None:
     atomic_write(study_state_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
 
 
-def write_study_phase(phase: str, *, notes: list[str] | None = None, mode: str = "background") -> None:
+def append_jsonl(path: pathlib.Path, row: dict) -> None:
+    ensure_private_dir(path.parent)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    path.chmod(0o600)
+
+
+def append_study_job_event(job_id: str, event: str, **fields) -> None:
+    append_jsonl(
+        study_jobs_path(),
+        {
+            "time": now(),
+            "job_id": job_id,
+            "event": event,
+            **fields,
+        },
+    )
+
+
+def read_study_jobs(limit: int = 20) -> list[dict]:
+    path = study_jobs_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines[-limit:]:
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def study_job_id() -> str:
+    return "study-" + _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+
+
+def study_state_incomplete(state: dict | None) -> bool:
+    if not isinstance(state, dict):
+        return False
+    return state.get("status") == "running" and state.get("phase") != "study: idle"
+
+
+def write_study_phase(
+    phase: str,
+    *,
+    notes: list[str] | None = None,
+    mode: str = "background",
+    job_id: str | None = None,
+    status: str = "running",
+) -> None:
     write_study_state(
         {
             "updated": now(),
             "phase": phase,
+            "status": status,
             "mode": mode,
+            "job_id": job_id,
             "notes": notes or [],
         }
     )
@@ -2847,14 +2906,32 @@ def context_sufficiency_note(conv: dict, query: str, sources: list[dict]) -> str
 
 
 def background_study_step(conv: dict, phase_callback=None) -> list[str]:
+    job_id = study_job_id()
+    previous_state = read_study_state()
+    previous_job = previous_state.get("job_id") if study_state_incomplete(previous_state) else None
+    append_study_job_event(
+        job_id,
+        "started",
+        mode="catalog-and-planning",
+        conversation_id=conv.get("id", ""),
+        resumed_from_job_id=previous_job or "",
+        resumed_from_phase=previous_state.get("phase", "") if previous_job else "",
+    )
+
     def set_phase(phase: str, *, notes: list[str] | None = None) -> None:
-        write_study_phase(phase, notes=notes)
+        write_study_phase(phase, notes=notes, job_id=job_id)
+        append_study_job_event(job_id, "phase", phase=phase, notes=notes or [])
         if phase_callback is not None:
             phase_callback(phase)
 
     set_phase("study: catalog")
     catalog = write_context_catalog()
     notes = []
+    if previous_job:
+        notes.append(
+            f"resumed after interrupted study job {previous_job} "
+            f"at {previous_state.get('phase', 'unknown')}"
+        )
     stale_indexes = [
         item
         for item in catalog.get("indexes", [])
@@ -2890,11 +2967,14 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     state = {
         "updated": now(),
         "phase": "study: idle",
+        "status": "completed",
         "mode": "catalog-and-planning",
+        "job_id": job_id,
         "notes": notes[:8],
         "catalog_updated": catalog.get("updated", ""),
     }
     write_study_state(state)
+    append_study_job_event(job_id, "completed", notes=notes[:8], catalog_updated=catalog.get("updated", ""))
     return notes[:3]
 
 
@@ -3231,6 +3311,33 @@ def render_conversation_summary(conv: dict) -> str:
     return summary
 
 
+def context_plan_from_lanes(lanes: list[dict]) -> dict:
+    total_chars = sum(int(lane.get("chars", 0) or 0) for lane in lanes)
+    return {
+        "kind": "context-plan",
+        "budget_chars": CONTEXT_PLAN_BUDGET_CHARS,
+        "total_chars": total_chars,
+        "status": "over-budget" if total_chars > CONTEXT_PLAN_BUDGET_CHARS else "ok",
+        "lanes": lanes,
+    }
+
+
+def format_context_plan(plan: dict) -> str:
+    lines = [
+        (
+            "Context plan: "
+            f"{plan.get('total_chars', 0)}/{plan.get('budget_chars', CONTEXT_PLAN_BUDGET_CHARS)} "
+            f"chars ({plan.get('status', 'unknown')})"
+        )
+    ]
+    for lane in plan.get("lanes", []):
+        lines.append(
+            f"- {lane.get('lane')}: {lane.get('chars', 0)} chars, "
+            f"{lane.get('sources', 0)} source(s), {lane.get('purpose', '')}"
+        )
+    return "\n".join(lines)
+
+
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
@@ -3255,6 +3362,53 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
     sources.extend(context_sources)
     sources.append({"kind": "context-catalog", "updated": catalog.get("updated", "")})
+    context_plan = context_plan_from_lanes(
+        [
+            {
+                "lane": "personality",
+                "chars": len(personality_text),
+                "sources": 1,
+                "purpose": "tone and behavior only",
+            },
+            {
+                "lane": "profile",
+                "chars": len(profile_text),
+                "sources": len(profile_sources),
+                "purpose": "stable Javier context",
+            },
+            {
+                "lane": "durable memories",
+                "chars": len(memory_text),
+                "sources": len(memory_sources),
+                "purpose": "ranked personal facts and preferences",
+            },
+            {
+                "lane": "recent conversations",
+                "chars": len(recent_text),
+                "sources": len(recent_sources),
+                "purpose": "bounded recency plus relevance recall",
+            },
+            {
+                "lane": "conversation summary",
+                "chars": len(render_conversation_summary(conv)),
+                "sources": 1 if conv.get("summary", "").strip() else 0,
+                "purpose": "compacted older turns",
+            },
+            {
+                "lane": "attached context",
+                "chars": len(context_text),
+                "sources": len(context_sources),
+                "purpose": "explicit files, indexes, topics, dossiers",
+            },
+            {
+                "lane": "catalog",
+                "chars": len(catalog_text),
+                "sources": 1,
+                "purpose": "available private context inventory",
+            },
+        ]
+    )
+    sources.append(context_plan)
     sufficiency = context_sufficiency_note(conv, query, sources)
     return textwrap.dedent(
         f"""
@@ -3295,6 +3449,9 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
 
         Available private context catalog:
         {catalog_text}
+
+        Context selection plan:
+        {format_context_plan(context_plan)}
 
         {sufficiency}
         """
@@ -3587,31 +3744,50 @@ def format_sources(sources: list[dict]) -> str:
     for idx, source in enumerate(sources, 1):
         kind = source.get("kind", "source")
         if kind == "memory":
+            reasons = []
+            if source.get("pinned"):
+                reasons.append("pinned")
+            if source.get("matched_terms", 0):
+                reasons.append(f"matched {source.get('matched_terms')} prompt term(s)")
+            reasons.append(f"importance {source.get('importance', MEMORY_DEFAULT_IMPORTANCE)}")
             detail = source.get("source", "unknown")
             if source.get("conversation_id"):
                 detail += f"; conversation {source.get('conversation_id')}"
             detail += (
-                f"; i{source.get('importance', MEMORY_DEFAULT_IMPORTANCE)}"
                 f"; score {source.get('score', 0)}"
             )
-            if source.get("pinned"):
-                detail += "; pinned"
             lines.append(f"{idx:3d}  memory {source.get('id', '')}  {detail}")
+            lines.append(f"     why: {', '.join(reasons)}")
         elif kind == "personality":
             lines.append(
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "
                 f"{source.get('path', '')}"
             )
+            lines.append("     why: tone and conversational style guidance")
         elif kind == "profile":
             lines.append(
                 f"{idx:3d}  profile dossier  updated {relative_time(source.get('updated', ''))}  "
                 f"{source.get('memory_count', 0)} memories  "
                 f"{source.get('conversation_count', 0)} conversations"
             )
+            lines.append("     why: stable long-term profile context")
         elif kind == "conversation-summary":
             lines.append(f"{idx:3d}  compacted conversation summary")
+            lines.append("     why: older turns compressed for continuity")
         elif kind == "context-catalog":
             lines.append(f"{idx:3d}  context catalog  updated {relative_time(source.get('updated', ''))}")
+            lines.append("     why: inventory of available private context")
+        elif kind == "context-plan":
+            lines.append(
+                f"{idx:3d}  context plan  "
+                f"{source.get('total_chars', 0)}/{source.get('budget_chars', CONTEXT_PLAN_BUDGET_CHARS)} chars  "
+                f"{source.get('status', 'unknown')}"
+            )
+            for lane in source.get("lanes", []):
+                lines.append(
+                    f"     lane: {lane.get('lane')}  {lane.get('chars', 0)} chars  "
+                    f"{lane.get('sources', 0)} source(s)  {lane.get('purpose', '')}"
+                )
         elif kind == "recent-conversation":
             selection = ",".join(source.get("selection", [])) or "-"
             lines.append(
@@ -3622,14 +3798,17 @@ def format_sources(sources: list[dict]) -> str:
                 f"updated {relative_time(source.get('updated', ''))}  "
                 f"{source.get('title', '')}"
             )
+            lines.append(f"     why: selected by {selection} lane")
         elif kind == "file":
             lines.append(f"{idx:3d}  file  {source.get('path', '')}  {source.get('bytes', 0)} bytes")
+            lines.append("     why: explicitly attached file")
         elif kind == "index":
             lines.append(
                 f"{idx:3d}  index {source.get('id', '')}  "
                 f"{source.get('status', 'unknown')}  "
                 f"{source.get('retrieval', 'summary')} retrieval  {source.get('name', '')}"
             )
+            lines.append("     why: attached document index summary and retrieval root")
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
         elif kind == "topic":
@@ -3637,37 +3816,44 @@ def format_sources(sources: list[dict]) -> str:
                 f"{idx:3d}  topic {source.get('id', '')}  "
                 f"{source.get('name', '')}  query: {source.get('query', '')}"
             )
+            lines.append("     why: attached or auto-selected topic dossier")
         elif kind == "topic-evidence":
             lines.append(
                 f"{idx:3d}  topic evidence  {source.get('path', '')} "
                 f"chunk {source.get('chunk')}  topic {source.get('topic', '')}"
             )
+            lines.append("     why: relevant evidence excerpt from topic dossier")
         elif kind == "dossier":
             lines.append(
                 f"{idx:3d}  memory dossier {source.get('id', '')}  "
                 f"{source.get('name', '')}  query: {source.get('query', '')}"
             )
+            lines.append("     why: attached or auto-selected query-focused memory dossier")
         elif kind == "dossier-memory":
             lines.append(
                 f"{idx:3d}  dossier memory  {source.get('memory', '')}  "
                 f"dossier {source.get('dossier', '')}  {source.get('source', '')}"
             )
+            lines.append("     why: memory excerpt selected inside attached dossier")
         elif kind == "dossier-conversation":
             lines.append(
                 f"{idx:3d}  dossier conversation {source.get('conversation_id', '')}  "
                 f"updated {relative_time(source.get('updated', ''))}  "
                 f"{source.get('title', '')}"
             )
+            lines.append("     why: prior conversation excerpt selected inside attached dossier")
         elif kind == "file-summary":
             lines.append(
                 f"{idx:3d}  file summary  {source.get('path', '')}  "
                 f"index {source.get('index', '')}  {source.get('status', 'unknown')}"
             )
+            lines.append("     why: relevant file summary from attached index")
         elif kind == "chunk":
             lines.append(
                 f"{idx:3d}  chunk  {source.get('path', '')} "
                 f"chunk {source.get('chunk')}  index {source.get('index', '')}"
             )
+            lines.append("     why: relevant chunk retrieved from attached index")
         else:
             lines.append(f"{idx:3d}  {json.dumps(source, ensure_ascii=False)}")
     return "\n".join(lines)
@@ -3695,6 +3881,7 @@ def format_status(conv: dict | None = None) -> str:
     profile = load_profile_dossier()
     maintenance = read_maintenance_state()
     study_state = read_study_state()
+    study_jobs = read_study_jobs(limit=1)
     catalog = read_context_catalog()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
@@ -3715,6 +3902,7 @@ def format_status(conv: dict | None = None) -> str:
         f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",
         f"maintenance: {maintenance.get('phase', maintenance.get('status', 'unknown')) if maintenance else 'idle'}",
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
+        f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
         f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
@@ -4921,7 +5109,8 @@ class MotokoTui:
 
     def render(self, *, force: bool = False) -> None:
         self.drain_events()
-        width, height = shutil.get_terminal_size((80, 24))
+        size = self.terminal_size()
+        width, height = size.columns, size.lines
         width = max(40, width)
         height = max(12, height)
         options = self.dropdown_options()
@@ -5051,6 +5240,12 @@ class MotokoTui:
 
     def input_display(self, width: int) -> tuple[list[str], int, int]:
         return fixed_prompt_input_display(self.input_buffer, self.cursor, width)
+
+    def terminal_size(self) -> os.terminal_size:
+        try:
+            return os.get_terminal_size(self.stdout_fd)
+        except OSError:
+            return shutil.get_terminal_size((80, 24))
 
 
 def chat_loop(conv: dict) -> None:

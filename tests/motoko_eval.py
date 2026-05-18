@@ -92,6 +92,23 @@ def test_context_sufficiency_and_catalog(m):
     assert "conversations=" in text
 
 
+def test_context_plan_and_source_reasons(m):
+    conv = m.new_conversation("Sources")
+    conv["id"] = "sources"
+    m.add_memory(
+        "Javier wants Motoko source reports to explain why context was included.",
+        source="test",
+        conversation_id=conv["id"],
+        importance=4,
+    )
+    _prompt, sources = m.build_system_prompt_and_sources(conv, "source reports")
+    assert any(source.get("kind") == "context-plan" for source in sources)
+    report = m.format_sources(sources)
+    assert "context plan" in report
+    assert "lane:" in report
+    assert "why:" in report
+
+
 def test_background_study_state(m):
     conv = m.new_conversation("Background")
     conv["id"] = "background"
@@ -104,6 +121,20 @@ def test_background_study_state(m):
     assert "study: planning" in phases
     assert state["phase"] == "study: idle"
     assert isinstance(notes, list)
+    jobs = m.read_study_jobs()
+    assert jobs
+    assert jobs[-1]["event"] == "completed"
+
+
+def test_interrupted_background_study_resume_note(m):
+    conv = m.new_conversation("Interrupted")
+    conv["id"] = "interrupted"
+    m.save_conversation(conv)
+    m.write_study_phase("study: catalog", job_id="study-old", status="running")
+    notes = m.background_study_step(conv)
+    assert any("resumed after interrupted study job study-old" in note for note in notes)
+    state = m.read_study_state()
+    assert state["status"] == "completed"
 
 
 def main() -> int:
@@ -113,8 +144,12 @@ def main() -> int:
     with isolated_state():
         test_context_sufficiency_and_catalog(m)
     with isolated_state():
+        test_context_plan_and_source_reasons(m)
+    with isolated_state():
         test_background_study_state(m)
-    print("3 motoko evaluation checks passed")
+    with isolated_state():
+        test_interrupted_background_study_resume_note(m)
+    print("5 motoko evaluation checks passed")
     return 0
 
 

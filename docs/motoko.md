@@ -289,8 +289,9 @@ long chats so context remains usable without forcing every old turn into the
 model prompt.
 
 `/sources` prints the memories, recent conversation capsules, compacted summary,
-attached files, file summaries, document chunks, and index freshness state used
-for the last answer. This is meant to make answers inspectable: Motoko should
+attached files, file summaries, document chunks, index freshness state, and
+context planning lanes used for the last answer. It also prints a short `why:`
+line for each source. This is meant to make answers inspectable: Motoko should
 be able to say which stored context influenced a response instead of sounding
 like she has unbounded hidden knowledge.
 
@@ -306,6 +307,10 @@ directories or create large document indexes; document access still starts from
 explicit allowlists and `/index`. Use `/study QUERY` for a deliberate bounded
 study pass that either reuses an existing dossier, builds a topic dossier from
 an attached or relevant index, or builds a memory/conversation dossier.
+Background study writes `study-state.json` and appends events to
+`study-jobs.jsonl` under Motoko state. If Motoko exits during the cheap
+catalog/planning pass, the next pass records the interrupted job and recomputes
+from current state; no personal documents are lost or rewritten.
 
 `/profile-refresh` or `motoko profile refresh` builds a compact profile dossier
 from durable memories and recent conversation material. This is an explicit

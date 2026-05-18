@@ -125,6 +125,12 @@ Current UI direction:
   opt-in, such as `MOTOKO_BACKGROUND_PROFILE=1` for idle profile refreshes, so
   the background loop does not compete with active chat. It must not silently
   crawl broad new directories or build large document indexes.
+- Background study should leave a durable job trail in Motoko state. For the
+  current cheap catalog/planning pass, recovery means detecting the interrupted
+  job, recording that fact, and recomputing from current state. Future heavier
+  study jobs should use the same ledger to resume at a finer granularity.
+- `/sources` should explain why context was included and show context planning
+  lanes, not merely list raw source objects.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
 - The default spinner should be ASCII everywhere. Braille is an explicit opt-in
@@ -135,7 +141,11 @@ Current UI direction:
 
 The highest-ROI next engineering improvement is improving the quality of
 profile dossiers and document-derived dossiers after real personal documents
-are added. The regression suite now includes a small fake OpenAI-compatible
-test server plus an evaluation harness for study reuse, context sufficiency,
-and background study state, so Motoko can test streaming, maintenance, recall,
-profile, and study behavior without requiring Qwen or llama.cpp to be running.
+are added inside the `personal` realm. Codex should not need access to those
+documents; improvements should be made through synthetic fixtures, user-visible
+reports, and Motoko-owned runtime behavior. The regression suite now includes a
+small fake OpenAI-compatible test server, a pseudo-terminal render harness, and
+an evaluation harness for study reuse, context sufficiency, and background
+study state, so Motoko can test streaming, maintenance, recall, profile, TUI,
+and study behavior without requiring Qwen, llama.cpp, or Javier's personal
+documents to be available to Codex.
