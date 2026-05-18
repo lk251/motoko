@@ -129,6 +129,24 @@ def test_interrupted_maintenance_resume(m):
         assert m.read_maintenance_state()["retry_count"] == 1
 
 
+def test_other_conversation_maintenance_is_quietly_abandoned(m):
+    with isolated_state():
+        conv = m.new_conversation("Current")
+        conv["id"] = "current"
+        other = m.new_conversation("Other")
+        other["id"] = "other"
+        state = m.begin_maintenance_state(other)
+        m.write_maintenance_state(state)
+
+        should_resume, note = m.resume_interrupted_maintenance(conv)
+        assert not should_resume
+        assert note is None
+        abandoned = m.read_maintenance_state()
+        assert abandoned["status"] == "abandoned"
+        assert abandoned["conversation_id"] == "other"
+        assert abandoned["abandoned_reason"] == "opened different conversation"
+
+
 def test_profile_dossier(m):
     with isolated_state():
         conv = m.new_conversation("Profile source")
@@ -321,6 +339,7 @@ def main() -> int:
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
         test_interrupted_maintenance_resume,
+        test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,
         test_memory_dossier,
         test_spinner_and_input_wrapping,

@@ -7,6 +7,9 @@ not the easiest place to review what changed after a long work session.
 
 - Added this changelog as the durable home for the short "what changed" lists
   from accepted Motoko work.
+- Quieted stale maintenance from a different conversation on startup. Motoko
+  still marks the old maintenance job abandoned, but no longer shows an alarming
+  `sys abandoned interrupted maintenance...` line in a fresh chat.
 - Added a durable background study job ledger in `study-jobs.jsonl`, plus
   interrupted-job detection for the current cheap catalog/planning pass.
 - Added context planning lanes to the prompt and `/sources`, making the active

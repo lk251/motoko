@@ -871,11 +871,9 @@ def resume_interrupted_maintenance(conv: dict) -> tuple[bool, str | None]:
     if state.get("conversation_id") != conv.get("id"):
         state["status"] = "abandoned"
         state["abandoned"] = now()
+        state["abandoned_reason"] = "opened different conversation"
         write_maintenance_state(state)
-        return (
-            False,
-            f"abandoned interrupted maintenance for another conversation: {state.get('conversation_id', '')}",
-        )
+        return False, None
     retry_count = int(state.get("retry_count", 0) or 0)
     if retry_count >= MAINTENANCE_MAX_RETRIES:
         state["status"] = "abandoned"
