@@ -1610,15 +1610,35 @@ def allowed_dirs() -> list[pathlib.Path]:
     return dirs
 
 
+def nix_managed_config_message(path: pathlib.Path, description: str) -> str | None:
+    if not path.is_symlink():
+        return None
+    target = path.resolve(strict=False)
+    if not str(target).startswith("/nix/store/"):
+        return None
+    return (
+        f"cannot update Motoko {description} at {path}: it is Nix-managed "
+        f"and points to {target}. Update the NixOS/Home Manager configuration "
+        "that defines this file, then rebuild or activate it."
+    )
+
+
 def add_allowed_dir(path: str) -> None:
     resolved = pathlib.Path(path).expanduser().resolve()
     if not resolved.is_dir():
         raise SystemExit(f"not a directory: {resolved}")
     existing = allowed_dirs()
     if resolved not in existing:
-        with allowdirs_path().open("a", encoding="utf-8") as fh:
-            fh.write(str(resolved) + "\n")
-        allowdirs_path().chmod(0o600)
+        path = allowdirs_path()
+        try:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(str(resolved) + "\n")
+            path.chmod(0o600)
+        except OSError as exc:
+            message = nix_managed_config_message(path, "document allowlist")
+            if message:
+                raise SystemExit(message) from None
+            raise SystemExit(f"cannot update Motoko document allowlist at {path}: {exc}") from None
     print(f"allowed: {resolved}")
 
 

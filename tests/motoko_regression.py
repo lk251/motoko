@@ -364,6 +364,20 @@ def test_index_plan(m):
         assert plan["bytes"] == 6
 
 
+def test_nix_managed_allowdirs_message(m):
+    with isolated_state() as tmp:
+        config = tmp / "config"
+        config.mkdir()
+        allowdirs = config / "allowdirs"
+        allowdirs.symlink_to("/nix/store/motoko-test-allowdirs")
+
+        message = m.nix_managed_config_message(allowdirs, "document allowlist")
+        assert message is not None
+        assert "Nix-managed" in message
+        assert "NixOS/Home Manager" in message
+        assert str(allowdirs) in message
+
+
 def test_permissions_config(m):
     old_permissions = os.environ.get("MOTOKO_PERMISSIONS")
     try:
@@ -443,6 +457,7 @@ def main() -> int:
         test_help_overlay_closes,
         test_fake_openai_stream,
         test_index_plan,
+        test_nix_managed_allowdirs_message,
         test_permissions_config,
         test_index_limits,
         test_repo_context_item,
