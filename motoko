@@ -3574,6 +3574,7 @@ def format_help() -> str:
         and stdout are terminals. Set MOTOKO_TUI=0 or use --line for legacy
         line mode.
         Thinking spinner: MOTOKO_SPINNER=auto|ascii|block|braille|off.
+        auto uses the tty-safe ASCII spinner; braille is explicit opt-in.
         Source documents are never modified.
         """
     ).strip()
@@ -3705,6 +3706,7 @@ def format_status(conv: dict | None = None) -> str:
 
     lines = [
         f"model: {model_name()}",
+        f"model badge: {model_badge()}",
         f"endpoint: {endpoint()}",
         f"state: {state_root()}",
         f"config: {config_root()}",

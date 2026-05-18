@@ -238,6 +238,20 @@ def test_generated_title(m):
         assert not m.should_generate_conversation_title(manual)
 
 
+def test_dropdown_scrolls_without_header(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.dropdown_index = 9
+    options = [
+        {"label": f"/cmd-{idx}", "description": f"description {idx}", "value": f"/cmd-{idx}"}
+        for idx in range(12)
+    ]
+    rows = [m.strip_ansi(row) for row in ui.dropdown_display(80, options)]
+    assert len(rows) == 8
+    assert not any("Suggestions" in row for row in rows)
+    assert any("> /cmd-9" in row for row in rows)
+    assert not any("/cmd-0" in row for row in rows)
+
+
 def test_wall_timeout(m):
     start = time.monotonic()
     try:
@@ -310,6 +324,8 @@ def main() -> int:
         test_profile_dossier,
         test_memory_dossier,
         test_spinner_and_input_wrapping,
+        test_generated_title,
+        test_dropdown_scrolls_without_header,
         test_wall_timeout,
         test_fake_openai_stream,
         test_index_plan,
