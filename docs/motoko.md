@@ -174,6 +174,20 @@ After that, files under the allowed directory can be attached directly with
 `/read PATH` or `motoko chat --file PATH`. Larger directories should be indexed
 with `motoko index DIR`, `motoko chat --dir DIR`, or `/index DIR`.
 
+When Motoko starts in an allowlisted directory without an attached matching
+index, she treats that directory tree as a **corpus**: a distinct body of source
+material plus Motoko-owned derived artifacts such as indexes, summaries, chunks,
+topic dossiers, memory dossiers, freshness metadata, and study state. If a
+matching corpus index already exists for the current directory root, Motoko
+attaches it automatically and freshness checks decide whether later background
+refresh is useful. If no matching index exists, the TUI asks whether to learn
+the directory tree. Saying `yes` starts a heavy local-model indexing pass over
+all readable text files under that root and stores a separate corpus index for
+that directory. Saying `no` records a short decline cooldown so she does not ask
+again immediately. Binary files and common cache/vendor directories are skipped
+because they are not useful model context; source documents themselves remain
+read-only.
+
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
 Motoko never edits, rewrites, annotates, truncates, moves, or deletes source
@@ -439,6 +453,8 @@ MOTOKO_BACKGROUND_HEAVY_INDEX=0 motoko
 MOTOKO_BACKGROUND_HEAVY_INDEX_COOLDOWN=3600 motoko
 MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES=5 motoko
 MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES=131072 motoko
+MOTOKO_CWD_LEARN=0 motoko
+MOTOKO_CWD_LEARN_DECLINE_COOLDOWN=86400 motoko
 ```
 
 `/profile-refresh` or `motoko profile refresh` builds a compact profile dossier

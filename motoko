@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import codecs
 import collections
+import contextlib
 import datetime as _dt
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -71,6 +73,7 @@ BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
 BACKGROUND_HEAVY_INDEX_COOLDOWN_SECONDS = 30 * 60
 BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES = 3
 BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES = 64 * 1024
+CWD_LEARN_DECLINE_COOLDOWN_SECONDS = 24 * 60 * 60
 MAX_MEMORY_CHARS = 1800
 MEMORY_RETRIEVAL_LIMIT = 18
 MEMORY_SEARCH_LIMIT = 40
@@ -2820,6 +2823,17 @@ def build_document_index(
             shutil.rmtree(index_data_dir(index_id), ignore_errors=True)
 
 
+def build_document_index_quiet(
+    path: str,
+    pattern: str | None = AUTO_INDEX_GLOB,
+    name: str | None = None,
+    max_derived_bytes: str | None = None,
+) -> dict:
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        return build_document_index(path, pattern, name, max_derived_bytes)
+
+
 def context_item_from_index(index: dict) -> dict:
     status, warnings = index_staleness(index)
     return {
@@ -3266,7 +3280,7 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
         if phase_callback is not None:
             phase_callback("bg-heavy: indexing(model)")
         try:
-            refreshed = build_document_index(
+            refreshed = build_document_index_quiet(
                 index.get("root", ""),
                 index.get("glob") or AUTO_INDEX_GLOB,
                 index.get("name", ""),
@@ -3286,6 +3300,85 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
         )
         break
     return notes
+
+
+def cwd_learning_key(root: pathlib.Path, pattern: str = AUTO_INDEX_GLOB) -> str:
+    raw = f"{root}\0{pattern or AUTO_INDEX_GLOB}"
+    return sha256_hex(raw.encode("utf-8"))[:16]
+
+
+def cwd_learning_declined_recently(root: pathlib.Path, pattern: str = AUTO_INDEX_GLOB) -> bool:
+    state = read_heavy_study_state()
+    record = state.get("cwd_declines", {}).get(cwd_learning_key(root, pattern), {})
+    declined = parse_timestamp(record.get("declined_at", ""))
+    if declined is None:
+        return False
+    cooldown = env_seconds(
+        "MOTOKO_CWD_LEARN_DECLINE_COOLDOWN",
+        CWD_LEARN_DECLINE_COOLDOWN_SECONDS,
+    )
+    age = (_dt.datetime.now(_dt.timezone.utc).astimezone() - declined.astimezone()).total_seconds()
+    return age < cooldown
+
+
+def record_cwd_learning_decline(root: pathlib.Path, pattern: str = AUTO_INDEX_GLOB) -> None:
+    state = read_heavy_study_state()
+    state.setdefault("cwd_declines", {})[cwd_learning_key(root, pattern)] = {
+        "root": str(root),
+        "glob": pattern or AUTO_INDEX_GLOB,
+        "declined_at": now(),
+    }
+    write_heavy_study_state(state)
+
+
+def matching_cwd_indexes(root: pathlib.Path, pattern: str = AUTO_INDEX_GLOB) -> list[dict]:
+    root_text = str(root.resolve())
+    glob_text = pattern or AUTO_INDEX_GLOB
+    rows = [
+        index
+        for index in list_indexes()
+        if index.get("root") == root_text and (index.get("glob") or AUTO_INDEX_GLOB) == glob_text
+    ]
+    rows.sort(key=lambda index: index.get("created", ""), reverse=True)
+    return rows
+
+
+def cwd_learning_plan(root: pathlib.Path | None = None, pattern: str = AUTO_INDEX_GLOB) -> dict | None:
+    if not env_flag("MOTOKO_CWD_LEARN", True):
+        return None
+    root = (root or pathlib.Path.cwd()).expanduser().resolve()
+    try:
+        plan = plan_document_index(str(root), pattern)
+    except SystemExit:
+        return None
+    if not plan.get("files", 0):
+        return None
+    return {
+        "root": root,
+        "glob": pattern or AUTO_INDEX_GLOB,
+        "files": plan.get("files", 0),
+        "bytes": plan.get("bytes", 0),
+        "existing": matching_cwd_indexes(root, pattern),
+    }
+
+
+def attach_best_cwd_index(conv: dict, plan: dict) -> dict | None:
+    for index in plan.get("existing", []):
+        status, _warnings = index_staleness(index)
+        if status in {"fresh", "metadata-changed", "stale", "unknown"}:
+            attach_context_item(conv, context_item_from_index(index))
+            return index
+    return None
+
+
+def cwd_learning_offer_text(plan: dict) -> str:
+    root = plan["root"]
+    return (
+        f"This is the first time in this conversation that I have seen {root} "
+        "without a fresh full-text index attached. Learn this directory tree now? "
+        f"Suggested scope: all readable text files under this tree ({plan['files']} file(s), "
+        f"{human_bytes(plan['bytes'])}). Binary/cache/vendor files are skipped. Reply yes or no."
+    )
 
 
 def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | None:
@@ -5047,10 +5140,12 @@ class MotokoTui:
         self.overlay_title: str | None = None
         self.overlay_lines: list[str] | None = None
         self.overlay_scroll = 0
+        self.cwd_index_offer: dict | None = None
         self.messages = self.seed_messages(conv)
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
             self.append("system", resume_note)
+        self.maybe_offer_cwd_learning()
 
     def seed_messages(self, conv: dict) -> list[dict]:
         rows = [
@@ -5387,6 +5482,9 @@ class MotokoTui:
         if text.startswith("/"):
             self.handle_command(text)
             return
+        if self.cwd_index_offer is not None and text.strip().lower() in {"y", "yes", "n", "no"}:
+            self.handle_cwd_index_answer(text)
+            return
         if self.study_running and self.study_status.startswith("bg-heavy:"):
             self.pending_prompts.append(text)
             self.append("queued", text)
@@ -5545,6 +5643,63 @@ class MotokoTui:
         except Exception as exc:  # Defensive: keep the TUI alive.
             self.append("error", f"{type(exc).__name__}: {exc}")
         self.dirty = True
+
+    def maybe_offer_cwd_learning(self) -> None:
+        if self.conv.get("context_items"):
+            return
+        plan = cwd_learning_plan()
+        if plan is None:
+            return
+        existing = attach_best_cwd_index(self.conv, plan)
+        if existing is not None:
+            status, _warnings = index_staleness(existing)
+            self.append(
+                "system",
+                f"attached corpus index for {plan['root']}: {existing.get('id')} ({status})",
+            )
+            return
+        if cwd_learning_declined_recently(plan["root"], plan["glob"]):
+            return
+        self.cwd_index_offer = plan
+        self.append("system", cwd_learning_offer_text(plan))
+
+    def handle_cwd_index_answer(self, text: str) -> None:
+        plan = self.cwd_index_offer
+        self.cwd_index_offer = None
+        if plan is None:
+            return
+        answer = text.strip().lower()
+        if answer in {"n", "no"}:
+            record_cwd_learning_decline(plan["root"], plan["glob"])
+            self.append("system", f"not learning {plan['root']} now")
+            return
+        self.append("system", f"learning corpus: {plan['root']}")
+        self.start_cwd_indexing(plan)
+
+    def start_cwd_indexing(self, plan: dict) -> None:
+        if self.study_running:
+            self.append("system", "A background study job is already running.")
+            return
+        self.study_running = True
+        self.study_status = "bg-heavy: indexing(model)"
+        self.study_phase_started = time.monotonic()
+
+        def worker() -> None:
+            try:
+                index = build_document_index_quiet(
+                    str(plan["root"]),
+                    plan["glob"],
+                    plan["root"].name or str(plan["root"]),
+                )
+                attach_context_item(self.conv, context_item_from_index(index))
+                self.put_event(("system_note", f"learned corpus index: {index.get('id')}"))
+                self.put_event(("study_done", [f"learned corpus index {index.get('id')}"]))
+            except SystemExit as exc:
+                self.put_event(("study_error", str(exc)))
+            except Exception as exc:
+                self.put_event(("study_error", f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def attach_index_from_path(self, path: str) -> None:
         if not path:
@@ -5777,6 +5932,9 @@ class MotokoTui:
                 self.study_running = False
                 self.study_status = "study: idle"
                 self.study_last_note = f"study failed: {event[1]}"
+                changed = True
+            elif kind == "system_note":
+                self.append("system", event[1])
                 changed = True
         if changed:
             self.dirty = True
@@ -6744,6 +6902,29 @@ def command_show(args) -> None:
         print(f"{role}> {content}\n")
 
 
+def maybe_prompt_cwd_learning_for_line_chat(conv: dict) -> None:
+    if tui_enabled() or conv.get("context_items") or not sys.stdin.isatty():
+        return
+    plan = cwd_learning_plan()
+    if plan is None:
+        return
+    existing = attach_best_cwd_index(conv, plan)
+    if existing is not None:
+        status, _warnings = index_staleness(existing)
+        print(f"sys attached corpus index for {plan['root']}: {existing.get('id')} ({status})")
+        return
+    if cwd_learning_declined_recently(plan["root"], plan["glob"]):
+        return
+    print("sys " + cwd_learning_offer_text(plan))
+    answer = input("Learn this corpus now? [y/N] ").strip().lower()
+    if answer not in {"y", "yes"}:
+        record_cwd_learning_decline(plan["root"], plan["glob"])
+        print(f"sys not learning {plan['root']} now")
+        return
+    index = build_document_index(str(plan["root"]), plan["glob"], plan["root"].name or str(plan["root"]))
+    attach_context_item(conv, context_item_from_index(index))
+
+
 def command_chat(args) -> None:
     if getattr(args, "line", False):
         os.environ["MOTOKO_TUI"] = "0"
@@ -6762,6 +6943,7 @@ def command_chat(args) -> None:
     for dossier_id in args.dossier or []:
         dossier = load_dossier(dossier_id)
         conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
+    maybe_prompt_cwd_learning_for_line_chat(conv)
     save_conversation(conv)
     chat_loop(conv)
 
@@ -6770,6 +6952,7 @@ def command_new(args) -> None:
     if getattr(args, "line", False):
         os.environ["MOTOKO_TUI"] = "0"
     conv = new_conversation(args.title)
+    maybe_prompt_cwd_learning_for_line_chat(conv)
     save_conversation(conv)
     chat_loop(conv)
 

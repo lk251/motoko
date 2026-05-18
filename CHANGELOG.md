@@ -37,6 +37,9 @@ not the easiest place to review what changed after a long work session.
 - Added bounded heavy background refresh for attached stale document indexes or
   meaningful batches of new files, with visible `bg-heavy: indexing(model)`
   status and prompt queuing while the local model focuses on indexing.
+- Added current-directory corpus learning: Motoko can ask to learn an
+  allowlisted directory tree on first use, auto-attach an existing matching
+  corpus index later, and keep separate derived artifacts per directory root.
 
 ## 2026-05-18
 

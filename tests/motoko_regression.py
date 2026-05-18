@@ -378,6 +378,56 @@ def test_nix_managed_allowdirs_message(m):
         assert str(allowdirs) in message
 
 
+def test_cwd_learning_plan_and_existing_index(m):
+    old_cwd = os.getcwd()
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "plan.org").write_text("* TODO Plan tomorrow\n", encoding="utf-8")
+        (docs / "notes.md").write_text("# Notes\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        os.chdir(docs)
+        try:
+            plan = m.cwd_learning_plan()
+            assert plan is not None
+            assert plan["root"] == docs.resolve()
+            assert plan["files"] == 2
+            assert "readable text files" in m.cwd_learning_offer_text(plan)
+
+            index = {
+                "id": "corpus-index",
+                "name": "docs",
+                "root": str(docs.resolve()),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": m.now(),
+                "corpus_summary": "test corpus",
+                "files": [
+                    {
+                        "path": str((docs / "plan.org").resolve()),
+                        "source_fingerprint": m.source_fingerprint(docs / "plan.org"),
+                        "chunks": [],
+                    },
+                    {
+                        "path": str((docs / "notes.md").resolve()),
+                        "source_fingerprint": m.source_fingerprint(docs / "notes.md"),
+                        "chunks": [],
+                    },
+                ],
+            }
+            write_conversation(m, m.new_conversation("placeholder"))
+            m.atomic_write(
+                m.index_path(index["id"]),
+                json.dumps(index, ensure_ascii=False, indent=2) + "\n",
+            )
+            refreshed = m.cwd_learning_plan()
+            conv = m.new_conversation("Cwd attach")
+            attached = m.attach_best_cwd_index(conv, refreshed)
+            assert attached["id"] == "corpus-index"
+            assert conv["context_items"][0]["id"] == "corpus-index"
+        finally:
+            os.chdir(old_cwd)
+
+
 def test_permissions_config(m):
     old_permissions = os.environ.get("MOTOKO_PERMISSIONS")
     try:
@@ -458,6 +508,7 @@ def main() -> int:
         test_fake_openai_stream,
         test_index_plan,
         test_nix_managed_allowdirs_message,
+        test_cwd_learning_plan_and_existing_index,
         test_permissions_config,
         test_index_limits,
         test_repo_context_item,

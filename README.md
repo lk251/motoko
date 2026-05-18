@@ -36,6 +36,9 @@ Design constraints:
   with visible phases, resumable state, and `/sources` provenance.
 - Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers
   for sustained attention on a subject.
+- Current-directory corpus learning: when started inside an allowlisted
+  directory without an attached index, Motoko can ask once whether to learn that
+  directory tree and then stores separate corpus artifacts per directory root.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
 - Duplicate-aware indexing reuses exact chunks already present in Motoko state
