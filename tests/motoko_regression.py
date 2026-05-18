@@ -94,9 +94,9 @@ def test_maintenance_state_and_phases(m):
         ]
         write_conversation(m, conv)
 
-        old_propose = m.propose_memories
+        old_propose = m.propose_memories_bounded
         try:
-            m.propose_memories = lambda _conv, timeout=m.MODEL_TIMEOUT_SECONDS: [
+            m.propose_memories_bounded = lambda _conv, timeout=m.MODEL_TIMEOUT_SECONDS: [
                 "Javier prefers concise terminal output."
             ]
             state = m.begin_maintenance_state(conv)
@@ -111,7 +111,7 @@ def test_maintenance_state_and_phases(m):
             m.clear_maintenance_state(state["job_id"])
             assert m.read_maintenance_state() is None
         finally:
-            m.propose_memories = old_propose
+            m.propose_memories_bounded = old_propose
 
 
 def test_interrupted_maintenance_resume(m):
@@ -196,7 +196,7 @@ def test_spinner_and_input_wrapping(m):
     try:
         os.environ["TERM"] = "xterm-256color"
         os.environ["MOTOKO_SPINNER"] = "auto"
-        assert m.spinner_frames() == ["-", "/", "|", "\\"]
+        assert m.spinner_frames() == ["/", "|", "\\", "-"]
         os.environ["MOTOKO_SPINNER"] = "braille"
         assert m.spinner_frames()[0] == "⠋"
     finally:
@@ -281,6 +281,37 @@ def test_wall_timeout(m):
     assert time.monotonic() - start < 0.2
 
 
+def test_help_about_and_explicit_memory(m):
+    with isolated_state():
+        help_text = m.format_help()
+        assert "Session:" in help_text
+        assert "Memory:" in help_text
+        assert "q or Esc" in help_text
+        about = m.format_about()
+        assert "Motoko " in about
+        assert "model badge:" in about
+        assert m.explicit_memory_candidates("Please remember that I prefer small terminal UIs.") == [
+            "I prefer small terminal UIs."
+        ]
+        conv = m.new_conversation("Memory request")
+        saved = m.save_explicit_user_memories(
+            "remember: I like Motoko to be careful with memories.",
+            conv["id"],
+        )
+        assert saved == 1
+        assert "careful with memories" in m.read_memory_rows()[0]["text"]
+
+
+def test_help_overlay_closes(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.dirty = False
+    ui.open_overlay("help", "Motoko help\n\nSession:")
+    assert ui.overlay_lines is not None
+    ui.handle_key("q")
+    assert ui.overlay_lines is None
+    assert ui.dirty
+
+
 class FakeHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 - stdlib handler API
         length = int(self.headers.get("Content-Length", "0"))
@@ -346,6 +377,8 @@ def main() -> int:
         test_generated_title,
         test_dropdown_scrolls_without_header,
         test_wall_timeout,
+        test_help_about_and_explicit_memory,
+        test_help_overlay_closes,
         test_fake_openai_stream,
         test_index_plan,
     ]

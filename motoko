@@ -39,6 +39,7 @@ except ImportError:  # pragma: no cover - readline is platform dependent.
 
 
 APP = "motoko"
+APP_VERSION = "0.1.0"
 DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
 MAX_CONTEXT_BYTES = 96 * 1024
@@ -131,6 +132,7 @@ SKIP_INDEX_DIR_NAMES = {
 SLASH_COMMANDS = [
     ("/help", "show full help"),
     ("/", "show compact command menu"),
+    ("/about", "show Motoko version and runtime details"),
     ("/exit", "save and exit"),
     ("/stop", "stop the current streamed answer"),
     ("/new [TITLE]", "start a new conversation"),
@@ -171,6 +173,7 @@ SLASH_COMMANDS = [
 
 SHELL_COMMANDS = [
     "help",
+    "about",
     "chat",
     "list",
     "new",
@@ -200,6 +203,7 @@ SHELL_COMMANDS = [
 SIMPLE_SLASH_COMMANDS = {
     "/help",
     "/",
+    "/about",
     "/exit",
     "/stop",
     "/new",
@@ -333,6 +337,23 @@ def current_git_branch() -> str:
     return branch or "-"
 
 
+def app_revision() -> str:
+    source = pathlib.Path(__file__).resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source.parent), "rev-parse", "--short=12", "HEAD"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "-"
+    revision = result.stdout.strip()
+    return revision or "-"
+
+
 def human_bytes(count: int) -> str:
     value = float(count)
     units = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -386,9 +407,9 @@ def spinner_frames() -> list[str]:
     if mode in {"0", "false", "no", "none", "off"}:
         return []
     if mode == "auto":
-        return ["-", "/", "|", "\\"]
+        return ["/", "|", "\\", "-"]
     if mode == "ascii":
-        return ["-", "/", "|", "\\"]
+        return ["/", "|", "\\", "-"]
     if mode in {"block", "blink", "square"}:
         return ["■", " "]
     if mode == "braille":
@@ -398,7 +419,7 @@ def spinner_frames() -> list[str]:
     if custom:
         return list(custom)
 
-    return ["-", "/", "|", "\\"]
+    return ["/", "|", "\\", "-"]
 
 
 class ThinkingSpinner:
@@ -991,6 +1012,45 @@ def add_memory(
     with memories_path().open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     memories_path().chmod(0o600)
+
+
+def explicit_memory_candidates(text: str) -> list[str]:
+    value = text.strip()
+    if not value:
+        return []
+    if re.search(r"\b(don't|dont|do not)\s+remember\b", value, flags=re.IGNORECASE):
+        return []
+    patterns = [
+        r"^\s*(?:please\s+)?remember(?:\s+that|:)?\s+(.+)$",
+        r"\b(?:please\s+)?remember(?:\s+that|:)?\s+(.+)$",
+        r"\b(?:make|create|save)\s+(?:a\s+)?memory(?:\s+that|:)?\s+(.+)$",
+        r"\b(?:keep|store)\s+this\s+(?:as\s+)?(?:a\s+)?memory(?:\s*:)?\s+(.+)$",
+    ]
+    candidates = []
+    for pattern in patterns:
+        match = re.search(pattern, value, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        candidate = re.sub(r"\s+", " ", match.group(1).strip())
+        candidate = candidate.strip(" \t\r\n\"'")
+        if candidate and len(candidate) <= MAX_MEMORY_CHARS:
+            candidates.append(candidate)
+            break
+    return candidates
+
+
+def save_explicit_user_memories(text: str, conversation_id: str) -> int:
+    saved = 0
+    for candidate in explicit_memory_candidates(text):
+        add_memory(
+            candidate,
+            source="explicit-chat",
+            conversation_id=conversation_id,
+            derived_from="explicit-user-request",
+            importance=4,
+        )
+        saved += 1
+    return saved
 
 
 def resolve_memory(rows: list[dict], selector: str) -> tuple[int, dict]:
@@ -3518,6 +3578,75 @@ def run_with_wall_timeout(label: str, wall_timeout: float, func, *args, **kwargs
     return result[0] if result else None
 
 
+def motoko_program_path() -> str:
+    source = pathlib.Path(__file__).resolve()
+    if source.exists():
+        return str(source)
+    return sys.argv[0]
+
+
+def propose_memories_subprocess(conv: dict, *, timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS) -> list[str]:
+    payload = json.dumps({"conversation": conv, "timeout": timeout}, ensure_ascii=False)
+    env = dict(os.environ)
+    env["MOTOKO_INTERNAL"] = "1"
+    try:
+        result = subprocess.run(
+            [sys.executable, motoko_program_path(), "__internal-propose-memories"],
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            timeout=timeout + 5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"memory proposal timed out after {int(timeout)}s; helper process was terminated"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"memory proposal helper failed: {detail or 'no diagnostic'}")
+    try:
+        data = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("memory proposal helper returned invalid JSON") from exc
+    if not isinstance(data, list):
+        raise RuntimeError("memory proposal helper returned a non-list result")
+    return [str(item).strip() for item in data if str(item).strip()]
+
+
+def propose_memories_bounded(
+    conv: dict,
+    *,
+    timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+) -> list[str]:
+    if os.environ.get("MOTOKO_INTERNAL") == "1":
+        return propose_memories(conv, timeout=timeout)
+    if env_flag("MOTOKO_MEMORY_PROPOSAL_HELPER", True):
+        return propose_memories_subprocess(conv, timeout=timeout)
+    return run_with_wall_timeout(
+        "memory proposal",
+        timeout,
+        propose_memories,
+        conv,
+        timeout=timeout,
+    )
+
+
+def command_internal_propose_memories() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        conv = payload.get("conversation") or {}
+        timeout = float(payload.get("timeout") or MAINTENANCE_MODEL_TIMEOUT_SECONDS)
+        proposals = propose_memories(conv, timeout=timeout)
+    except BaseException as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(proposals, ensure_ascii=False))
+    return 0
+
+
 def call_model_with_callback(
     messages: list[dict],
     *,
@@ -3608,131 +3737,129 @@ def read_streaming_response(
     return "".join(collected)
 
 
+HELP_SECTIONS = [
+    (
+        "Session",
+        [
+            ("/help", "open this help; in the TUI press q or Esc to return"),
+            ("/about", "show version, model, endpoint, and state paths"),
+            ("/", "show a compact command menu"),
+            ("/exit", "save and exit"),
+            ("/stop", "stop the current streamed answer"),
+            ("/new [TITLE]", "save this chat and start a new conversation"),
+            ("/title TEXT", "rename this conversation"),
+            ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
+            ("/status", "show model, memory, and context state"),
+        ],
+    ),
+    (
+        "Context And Study",
+        [
+            ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
+            ("/index-plan PATH", "preview an index without writing derived text"),
+            ("/index PATH", "build and attach a mixed text document index"),
+            ("/attach-index [ID]", "attach an existing document index"),
+            ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
+            ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
+            ("/attach-topic [ID]", "attach an existing topic dossier"),
+            ("/dossier QUERY", "build and attach a memory/conversation dossier"),
+            ("/attach-dossier [ID]", "attach an existing memory dossier"),
+            ("/study QUERY", "choose and run the best bounded study action"),
+            ("/sources", "show sources and context-planning reasons for the last answer"),
+        ],
+    ),
+    (
+        "Lists And Inspectors",
+        [
+            ("/indexes", "list document indexes"),
+            ("/topics", "list topic dossiers"),
+            ("/topic-show [ID]", "show a topic dossier"),
+            ("/dossiers", "list memory dossiers"),
+            ("/dossier-show [ID]", "show a memory dossier"),
+            ("/personality", "show the active personality/style file"),
+            ("/profile", "show Motoko's profile dossier about Javier"),
+            ("/profile-refresh", "rebuild the profile dossier"),
+        ],
+    ),
+    (
+        "Memory",
+        [
+            ("/compact", "summarize older messages into compact context"),
+            ("/remember TEXT", "save a durable memory manually"),
+            ("/memories", "list saved memories"),
+            ("/memory search TEXT", "search and rank saved memories"),
+            ("/memory review", "list memories with provenance"),
+            ("/memory edit ID TEXT", "edit a memory"),
+            ("/memory importance ID 1-5", "set memory priority"),
+            ("/memory pin ID", "always include a memory when possible"),
+            ("/memory unpin ID", "remove a memory pin"),
+            ("/forget ID", "delete a memory"),
+            ("/memorize", "ask Motoko to propose memories from this chat"),
+        ],
+    ),
+    (
+        "Shell",
+        [
+            ("motoko help", "show this command reference"),
+            ("motoko about", "show version and runtime details"),
+            ("motoko", "start a new chat"),
+            ("motoko new", "start a new chat"),
+            ("motoko chat --line", "use the legacy line-oriented interface"),
+            ("motoko list", "list conversations"),
+            ("motoko resume [ID]", "resume a conversation; picker if ID omitted"),
+            ("motoko show [ID]", "show a transcript; picker if ID omitted"),
+            ("motoko index PATH", "build a mixed text document index"),
+            ("motoko index PATH --plan", "preview an index without writing derived text"),
+            ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
+            ("motoko deepen INDEX_ID QUERY", "build a larger topic dossier"),
+            ("motoko dossier QUERY", "build a memory/conversation dossier"),
+            ("motoko study QUERY", "run a bounded study action in a new conversation"),
+            ("motoko compact [ID]", "compact a saved conversation"),
+            ("motoko status", "show model, memory, and state paths"),
+            ("motoko profile refresh", "rebuild the profile dossier"),
+            ("motoko memory review", "list memories with provenance"),
+            ("motoko allow-dir DIR", "allow document reads under a directory"),
+        ],
+    ),
+]
+
+
 def format_help() -> str:
-    return textwrap.dedent(
-        """
-        Commands:
-          /help                 show this help
-          /                     show a compact command menu
-          /exit                 save and exit
-          /stop                 stop the current streamed answer
-          /new [TITLE]          save this chat and start a new conversation
-          /title TEXT           rename this conversation
-          /resume [ID]          switch to another saved conversation; picker if ID omitted
-          /read PATH            attach a bounded excerpt from an allowlisted text file
-          /index-plan PATH      preview an index without writing derived text
-          /index PATH           build and attach a mixed text document index
-          /attach-index [ID]    attach an existing document index; picker if ID omitted
-          /topic [INDEX_ID] QUERY
-                                build and attach a topic-focused dossier
-          /deepen [INDEX_ID] QUERY
-                                build a larger topic dossier for deep work
-          /attach-topic [ID]    attach an existing topic dossier; picker if ID omitted
-          /dossier QUERY        build and attach a query-focused memory dossier
-          /attach-dossier [ID]  attach an existing memory dossier; picker if ID omitted
-          /indexes              list document indexes
-          /topics               list topic dossiers
-          /topic-show [ID]      show a topic dossier; picker if ID omitted
-          /dossiers             list memory dossiers
-          /dossier-show [ID]    show a memory dossier; picker if ID omitted
-          /study QUERY          choose and run the best bounded study action
-          /compact              summarize older messages into compact context
-          /sources              show sources used for the last answer
-          /status               show model, memory, and context state
-          /personality          show the active personality/style file
-          /profile              show Motoko's profile dossier about Javier
-          /profile-refresh      rebuild the profile dossier
-          /remember TEXT        save a durable memory manually
-          /memories             list saved memories
-          /memory search TEXT   search and rank saved memories
-          /memory review        list memories with provenance
-          /memory edit ID TEXT  edit a memory
-          /memory importance ID 1-5
-                                set memory priority
-          /memory pin ID        always include a memory when possible
-          /memory unpin ID      remove a memory pin
-          /forget ID            delete a memory
-          /memorize             ask Motoko to propose memories from this chat
+    lines = ["Motoko help", "TUI: press q or Esc to close help and return to the conversation.", ""]
+    for section, rows in HELP_SECTIONS:
+        lines.append(f"{section}:")
+        for command, description in rows:
+            lines.append(f"  {command:<30} {description}")
+        lines.append("")
+    lines.extend(
+        [
+            "Notes:",
+            "  Indexes, topic dossiers, and memory dossiers live under ~/.local/state/motoko.",
+            "  Each turn receives ranked memories and recent conversation capsules.",
+            "  Use /sources after an answer to inspect why context was selected.",
+            "  Quiet after-answer maintenance saves high-confidence durable memories and compacts long chats.",
+            "  The background study loop refreshes catalogs and suggestions while idle.",
+            "  Heavy idle profile refresh is opt-in with MOTOKO_BACKGROUND_PROFILE=1.",
+            "  Source documents are never modified.",
+            "  Spinner modes: MOTOKO_SPINNER=auto|ascii|block|braille|off.",
+        ]
+    )
+    return "\n".join(lines)
 
-        Shell commands:
-          motoko help           show this full Motoko command reference
-          motoko                start a new chat
-          motoko new            start a new chat
-          motoko chat --line    use the legacy line-oriented interface
-          motoko list           list conversations
-          motoko resume [ID]    resume a conversation; picker if ID omitted
-          motoko resume --line  resume with the legacy line-oriented interface
-          motoko show [ID]      show a transcript; picker if ID omitted
-          motoko index PATH     build a mixed text document index
-          motoko index PATH --plan
-                                preview an index without writing derived text
-          motoko index PATH --max-derived-bytes 200GiB
-          motoko indexes        list document indexes
-          motoko topic INDEX_ID QUERY
-          motoko topic INDEX_ID QUERY --chunks 80
-          motoko deepen INDEX_ID QUERY
-          motoko topics         list topic dossiers
-          motoko topic-show [ID]
-          motoko chat --topic TOPIC_ID
-          motoko dossier QUERY  build a memory/conversation dossier
-          motoko dossiers       list memory dossiers
-          motoko dossier-show [ID]
-          motoko chat --dossier DOSSIER_ID
-          motoko study QUERY    run a bounded study action in a new conversation
-          motoko compact [ID]   compact a saved conversation; picker if ID omitted
-          motoko status         show model, memory, and state paths
-          motoko profile        show Motoko's profile dossier about Javier
-          motoko profile refresh
-                                rebuild the profile dossier
-          motoko memories       list saved memories
-          motoko memory search TEXT
-          motoko memory review  list memories with provenance
-          motoko memory edit ID TEXT
-          motoko memory importance ID 1-5
-          motoko memory pin ID
-          motoko memory unpin ID
-          motoko forget ID      delete a memory
-          motoko personality    show personality/style guidance
-          motoko personality path
-          motoko personality init
-          motoko allow-dir DIR  allow document reads under a directory
 
-        Indexes store derived chunk files under ~/.local/state/motoko/indexes.
-        Topic dossiers store derived summaries and excerpts under ~/.local/state/motoko/topics.
-        Memory dossiers store query-focused summaries and excerpts under ~/.local/state/motoko/dossiers.
-        Each turn receives a ranked subset of cross-conversation memories and
-        recent saved conversation capsules based on the current prompt, recent
-        conversation context, memory importance, pins, repeated sightings,
-        thread relevance, and recency. Use /sources after an answer to inspect
-        which memories and recent conversations were selected.
-        Motoko also performs quiet after-answer maintenance: she periodically
-        compacts long conversations and saves high-confidence durable memories,
-        using duplicate detection so repeated facts reinforce existing memories
-        instead of creating endless copies.
-        While the TUI is open, a low-intensity background study loop refreshes
-        the private context catalog and records study suggestions while Motoko
-        is idle. It does not silently index new directories or run heavy model
-        study passes; use /study for explicit deeper work. Set
-        MOTOKO_BACKGROUND_PROFILE=1 only if idle profile refreshes should also
-        run in the background.
-        Retrieval adapts to the question. Deep/detail/evidence-style prompts
-        receive a wider slice of attached indexes; use /deepen to build a
-        larger reusable topic dossier when a subject needs sustained attention.
-        Default derived-text budget: 200 GiB per new index. Override with
-        --max-derived-bytes or MOTOKO_MAX_DERIVED_INDEX_BYTES.
-        Default indexing mode is auto: Motoko recursively ingests readable
-        UTF-8-ish text files, including .txt, .md, .org, source files, config
-        files, and extensionless text. Use --glob only to narrow a one-off index.
-        In chat, readline completion is enabled when available: type '/' then
-        Tab to list slash commands, and omit IDs on picker-aware commands.
-        The default interactive interface is a small stdlib-only TUI when stdin
-        and stdout are terminals. Set MOTOKO_TUI=0 or use --line for legacy
-        line mode.
-        Thinking spinner: MOTOKO_SPINNER=auto|ascii|block|braille|off.
-        auto uses the tty-safe ASCII spinner; braille is explicit opt-in.
-        Source documents are never modified.
-        """
-    ).strip()
+def format_about() -> str:
+    return "\n".join(
+        [
+            f"Motoko {APP_VERSION}",
+            f"revision: {app_revision()}",
+            f"model: {model_name()}",
+            f"model badge: {model_badge()}",
+            f"endpoint: {endpoint()}",
+            f"state: {state_root()}",
+            f"config: {config_root()}",
+            f"spinner: {''.join(spinner_frames()) or 'off'}",
+        ]
+    )
 
 
 def format_sources(sources: list[dict]) -> str:
@@ -4134,30 +4261,39 @@ def cursor_segment_index(segments: list[tuple[str, int, int]], cursor: int) -> i
 
 def wrap_display_line(text: str, width: int) -> list[str]:
     if width <= 4:
-        return [text[:width]]
+        return [strip_ansi(text)[:width]]
     if not text:
         return [""]
-    ansi_prefix = ""
-    ansi_suffix = ""
-    if text.startswith("\033["):
-        match = re.match(r"(\x1b\[[0-9;?]*[A-Za-z])(.*)(\x1b\[0m)$", text)
-        if match:
-            ansi_prefix, text, ansi_suffix = match.groups()
     chunks = []
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
     for part in str(text).splitlines() or [""]:
-        plain_len = len(strip_ansi(part))
-        if plain_len <= width:
-            chunks.append(ansi_prefix + part + ansi_suffix if ansi_prefix else part)
-            continue
-        wrapped = textwrap.wrap(
-            strip_ansi(part),
-            width=width,
-            replace_whitespace=False,
-            drop_whitespace=False,
-            break_long_words=True,
-            break_on_hyphens=False,
-        )
-        chunks.extend(ansi_prefix + row + ansi_suffix if ansi_prefix else row for row in wrapped)
+        line = ""
+        line_width = 0
+        active_sgr = ""
+        idx = 0
+        while idx < len(part):
+            match = ansi_re.match(part, idx)
+            if match:
+                escape = match.group(0)
+                line += escape
+                if escape.endswith("m"):
+                    active_sgr = "" if escape == "\033[0m" else escape
+                idx = match.end()
+                continue
+            char = part[idx]
+            char_width = cell_width(char)
+            if line and line_width + char_width > width:
+                if active_sgr:
+                    line += "\033[0m"
+                chunks.append(line)
+                line = active_sgr
+                line_width = 0
+            line += char
+            line_width += char_width
+            idx += 1
+        if active_sgr and not line.endswith("\033[0m"):
+            line += "\033[0m"
+        chunks.append(line)
     return chunks or [""]
 
 
@@ -4254,6 +4390,9 @@ class MotokoTui:
         self.last_render = 0.0
         self.tui_spinner_frames = spinner_frames() or ["*"]
         self.tui_spinner_index = 0
+        self.overlay_title: str | None = None
+        self.overlay_lines: list[str] | None = None
+        self.overlay_scroll = 0
         self.messages = self.seed_messages(conv)
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
@@ -4372,6 +4511,27 @@ class MotokoTui:
             elif not self.input_buffer:
                 save_conversation(self.conv)
                 self.running = False
+            return
+        if self.overlay_lines is not None:
+            if key in {"escape", "q", "Q"}:
+                self.close_overlay()
+                return
+            if key == "up":
+                self.overlay_scroll = max(0, self.overlay_scroll - 1)
+                self.dirty = True
+                return
+            if key == "down":
+                self.overlay_scroll += 1
+                self.dirty = True
+                return
+            if key == "pageup":
+                self.overlay_scroll = max(0, self.overlay_scroll - 8)
+                self.dirty = True
+                return
+            if key == "pagedown":
+                self.overlay_scroll += 8
+                self.dirty = True
+                return
             return
         if key in {"\r", "\n"}:
             self.handle_enter()
@@ -4585,7 +4745,9 @@ class MotokoTui:
             if text in {"/", "/commands"}:
                 self.append("system", self.compact_command_menu())
             elif text == "/help":
-                self.append("system", format_help())
+                self.open_overlay("help", format_help())
+            elif text == "/about":
+                self.append("system", format_about())
             elif text == "/exit":
                 save_conversation(self.conv)
                 self.running = False
@@ -4793,6 +4955,18 @@ class MotokoTui:
         tty.setcbreak(self.stdin_fd)
         self.write("\033[?25l\033[?7l")
 
+    def open_overlay(self, title: str, text: str) -> None:
+        self.overlay_title = title
+        self.overlay_lines = text.splitlines() or [""]
+        self.overlay_scroll = 0
+        self.dirty = True
+
+    def close_overlay(self) -> None:
+        self.overlay_title = None
+        self.overlay_lines = None
+        self.overlay_scroll = 0
+        self.dirty = True
+
     def start_generation(self, user_text: str) -> None:
         maybe_set_title(self.conv, user_text)
         topic = maybe_attach_relevant_existing_topic(self.conv, user_text)
@@ -4803,6 +4977,9 @@ class MotokoTui:
             self.append("system", f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
         self.conv.setdefault("messages", []).append({"role": "user", "content": user_text})
         self.append("user", user_text)
+        explicit_saved = save_explicit_user_memories(user_text, self.conv["id"])
+        if explicit_saved:
+            self.append("system", f"memory saved from this prompt ({explicit_saved})")
         self.answer_entry = self.append("assistant", "")
         self.status = "Motoko is thinking; you can type the next prompt below"
         self.generating = True
@@ -5111,49 +5288,66 @@ class MotokoTui:
         width, height = size.columns, size.lines
         width = max(40, width)
         height = max(12, height)
+        content_width = max(20, width - 1)
         options = self.dropdown_options()
         if options:
             self.dropdown_index = min(self.dropdown_index, len(options) - 1)
         else:
             self.dropdown_index = 0
-        input_lines, cursor_row_offset, cursor_col = self.input_display(width)
-        dropdown_lines = self.dropdown_display(width, options)
-        display_status = "ready" if self.maintaining and not self.generating else self.status
+        input_lines, cursor_row_offset, cursor_col = self.input_display(content_width)
+        dropdown_lines = self.dropdown_display(content_width, options)
         title = (
             f" {style('Motoko', 'purple', 'bold')}  "
             f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
-            f"{style(model_badge(), 'dim')}  "
-            f"{style(display_status, 'turquoise')}"
+            f"{style(model_badge(), 'dim')}"
         )
         spinner = self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)] if self.tui_spinner_frames else ""
+        status_parts = []
         if self.generating:
-            title += f"  {spinner} answering".rstrip()
+            status_parts.append(style(f"{spinner} chat: answering", "turquoise"))
+        elif not self.maintaining:
+            status_parts.append(style(self.status, "turquoise"))
         if self.maintaining:
             elapsed = int(time.monotonic() - self.maintenance_phase_started)
-            title += f"  {spinner} {(self.maintenance_status or self.status)} {elapsed}s".rstrip()
+            phase = self.maintenance_status or self.status
+            label = "mem: proposing(model)" if phase == "memory: proposing" else f"mem: {phase}"
+            status_parts.append(style(f"{spinner} {label} {elapsed}s".rstrip(), "turquoise"))
         if self.pending_prompts:
-            title += f"  queued:{len(self.pending_prompts)}"
+            status_parts.append(style(f"queued:{len(self.pending_prompts)}", "yellow"))
         if self.study_running:
             elapsed = int(time.monotonic() - self.study_phase_started)
-            title += f"  {spinner} {self.study_status} {elapsed}s".rstrip()
+            status_parts.append(style(f"{spinner} {self.study_status_label()} {elapsed}s".rstrip(), "turquoise"))
+        elif self.study_status == "study: off":
+            status_parts.append(style("bg: off", "dim"))
         elif self.study_last_note:
-            title += f"  {style(self.study_last_note, 'dim')}"
-        title_lines = wrap_display_line(title, width)
-        if len(title_lines) > 3:
-            title_lines = title_lines[:3]
+            status_parts.append(style(f"bg: idle ({self.study_last_note})", "dim"))
+        else:
+            status_parts.append(style("bg: idle", "dim"))
+        if status_parts:
+            title += "  " + "  ".join(status_parts)
+        title_lines = wrap_display_line(title, content_width)
+        max_title_lines = max(1, height - (3 + len(dropdown_lines) + 1 + len(input_lines)))
+        if len(title_lines) > max_title_lines:
+            title_lines = title_lines[:max_title_lines]
             plain = strip_ansi(title_lines[-1])
-            title_lines[-1] = plain[: max(0, width - 1)].rstrip() + "…"
+            title_lines[-1] = plain[: max(0, content_width - 1)].rstrip() + "…"
         title_height = len(title_lines)
         reserve = title_height + len(dropdown_lines) + 1 + len(input_lines)
         body_height = max(3, height - reserve)
-        body_lines = self.body_display(width)
-        max_scroll = max(0, len(body_lines) - body_height)
-        self.scroll = min(self.scroll, max_scroll)
-        if self.scroll:
-            start = max(0, len(body_lines) - body_height - self.scroll)
-            visible = body_lines[start : start + body_height]
+        if self.overlay_lines is not None:
+            body_lines = self.overlay_display(content_width)
+            max_scroll = max(0, len(body_lines) - body_height)
+            self.overlay_scroll = min(self.overlay_scroll, max_scroll)
+            visible = body_lines[self.overlay_scroll : self.overlay_scroll + body_height]
         else:
-            visible = body_lines[-body_height:]
+            body_lines = self.body_display(content_width)
+            max_scroll = max(0, len(body_lines) - body_height)
+            self.scroll = min(self.scroll, max_scroll)
+            if self.scroll:
+                start = max(0, len(body_lines) - body_height - self.scroll)
+                visible = body_lines[start : start + body_height]
+            else:
+                visible = body_lines[-body_height:]
 
         rows = []
         rows.extend(title_lines)
@@ -5161,18 +5355,30 @@ class MotokoTui:
         while len(rows) < title_height + body_height:
             rows.append("")
         rows.extend(dropdown_lines)
-        rows.append(style("─" * width, "dim"))
+        rows.append(style("─" * content_width, "dim"))
         rows.extend(input_lines)
         screen = "\033[H" + "\n".join(f"{row}\033[K" for row in rows[:height])
         screen += "\033[J"
         input_start_row = title_height + body_height + len(dropdown_lines) + 2
         cursor_row = min(height, input_start_row + cursor_row_offset)
-        screen += f"\033[{cursor_row};{min(width, cursor_col)}H\033[?25h"
+        screen += f"\033[{cursor_row};{min(content_width, cursor_col)}H\033[?25h"
         self.write(screen)
         if self.generating or self.maintaining or self.study_running:
             self.tui_spinner_index += 1
         self.last_render = time.monotonic()
         self.dirty = False
+
+    def study_status_label(self) -> str:
+        phase = self.study_status
+        if "profile" in phase:
+            return "bg-heavy: profile(model)"
+        if "catalog" in phase:
+            return "bg-light: catalog(cpu)"
+        if "planning" in phase:
+            return "bg-light: planning(cpu)"
+        if "scanning" in phase:
+            return "bg-light: scanning(cpu)"
+        return f"bg: {phase}"
 
     def body_display(self, width: int) -> list[str]:
         lines = []
@@ -5210,6 +5416,22 @@ class MotokoTui:
                 lines.append((prefix if idx == 0 else " " * len(strip_ansi(prefix))) + line)
             lines.append("")
         return lines or [""]
+
+    def overlay_display(self, width: int) -> list[str]:
+        rows = []
+        title = self.overlay_title or "help"
+        rows.extend(wrap_display_line(style(title, "purple", "bold") + style("  q/Esc closes", "dim"), width))
+        rows.append("")
+        for raw in self.overlay_lines or []:
+            if raw.endswith(":") and not raw.startswith(" "):
+                text = style(raw, "turquoise", "bold")
+            elif raw.startswith("  /") or raw.startswith("  motoko"):
+                command, sep, rest = raw.strip().partition("  ")
+                text = "  " + style(command, "turquoise", "bold") + (sep + style(rest, "dim") if sep else "")
+            else:
+                text = raw
+            rows.extend(wrap_display_line(text, width))
+        return rows or [""]
 
     def dropdown_display(self, width: int, options: list[dict]) -> list[str]:
         if not options:
@@ -5290,6 +5512,9 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text in {"/", "/commands"}:
             print_command_menu()
+            continue
+        if user_text == "/about":
+            print(format_about())
             continue
         if user_text == "/exit":
             save_conversation(conv)
@@ -5480,6 +5705,9 @@ def chat_loop(conv: dict) -> None:
         if dossier:
             print(f"sys auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
         conv.setdefault("messages", []).append({"role": "user", "content": user_text})
+        explicit_saved = save_explicit_user_memories(user_text, conv["id"])
+        if explicit_saved:
+            print(f"sys memory saved from this prompt ({explicit_saved})")
         print("\n" + style("Motoko ", "purple", "bold"), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
         reply = call_model(messages)
@@ -5755,10 +5983,7 @@ def auto_maintain_conversation(
     ):
         set_phase("memory: proposing")
         saved = 0
-        proposals = run_with_wall_timeout(
-            "memory proposal",
-            MAINTENANCE_MODEL_TIMEOUT_SECONDS,
-            propose_memories,
+        proposals = propose_memories_bounded(
             conv,
             timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
         )
@@ -6051,11 +6276,16 @@ def command_remember(args) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if argv and argv[0] == "__internal-propose-memories":
+        return command_internal_propose_memories()
     parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
     sub = parser.add_subparsers(dest="command")
 
     help_cmd = sub.add_parser("help", help="show the full Motoko command reference")
     help_cmd.set_defaults(func=lambda _args: print(format_help()))
+
+    about_cmd = sub.add_parser("about", help="show Motoko version and runtime details")
+    about_cmd.set_defaults(func=lambda _args: print(format_about()))
 
     chat = sub.add_parser("chat", help="start a new chat")
     chat.add_argument("--title")

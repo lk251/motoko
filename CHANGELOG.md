@@ -18,6 +18,19 @@ not the easiest place to review what changed after a long work session.
   dossiers, indexes, and chunks are easier to audit.
 - Changed the TUI renderer to read terminal dimensions from the actual output
   file descriptor and added a stdlib pseudo-terminal resize/redraw check.
+- Added `/about` and `motoko about` with Motoko version, model badge, endpoint,
+  and state/config paths.
+- Reworked `/help` into categorized sections; in the TUI it now opens as a
+  dismissible help view instead of being appended into the conversation.
+- Kept the top status bar wrapping across as many lines as the current terminal
+  can spare, and made it show memory and background-study phases explicitly.
+- Changed automatic memory proposal work to run in a bounded helper process so a
+  stuck local model call is terminated and reported instead of leaving
+  `memory: proposing` visible forever.
+- Added deterministic memory capture for explicit natural-language requests such
+  as `remember that ...`.
+- Kept TUI rendering away from the final terminal column to avoid tty/tmux wrap
+  ambiguity in long composer lines.
 - Documented that future HRAG quality work should happen through Motoko-owned
   runtime behavior and synthetic fixtures, without Codex reading Javier's
   personal documents.

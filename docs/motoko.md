@@ -133,11 +133,12 @@ shown as `Motoko`, without a `>` suffix. System/status lines use compact `sys`.
 Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.
-The default spinner is the plain ASCII `-/|\` cycle so Linux TTYs with Terminus
+The default spinner is the plain ASCII `/|\-` cycle so Linux TTYs with Terminus
 do not show square fallback glyphs. Set `MOTOKO_SPINNER=braille` only in a
 terminal/font combination known to render braille cells correctly. The top
-status line includes the model badge, for example `qwen3.6-27b-mtp:8083`, so
-the local MTP endpoint is visible while chatting.
+status line includes the model badge, for example `qwen3.6-27b-mtp:8083`, and
+reports active memory and background-study phases such as
+`mem: proposing(model)` or `bg-light: catalog(cpu)`.
 
 Emacs-style editing keys in the TUI:
 
@@ -271,8 +272,13 @@ The top bar reports the active maintenance phase, such as `memory: checking`,
 `memory: proposing`, `memory: saving`, or `memory: compacting`. Interrupted
 maintenance writes a small resumable state file and is retried conservatively
 when the same conversation is opened again. The TUI also shows how long the
-current maintenance phase has been active; memory proposal work is bounded by a
-wall-clock timeout so a stuck proposal returns control to the chat.
+current maintenance phase has been active. Automatic memory proposal work runs
+in a bounded helper process so a stuck local model request is terminated and
+reported as a maintenance failure instead of leaving `memory: proposing`
+visible forever.
+When Javier explicitly asks Motoko to remember something with natural wording
+such as `remember that ...`, Motoko saves that memory deterministically before
+answering instead of waiting for the model proposal pass.
 After the first few messages, maintenance may also ask the local model for a
 short conversation title. First-message titles are provisional unless Javier
 set a title manually with `/title` or `motoko new --title`.
@@ -506,8 +512,8 @@ http://127.0.0.1:8083/v1/chat/completions
 
 While waiting for the first streamed response token or while background
 maintenance runs, Motoko shows a small thinking spinner. The default `auto`
-mode uses a single-character braille spinner on UTF-8 terminals and falls back
-to ASCII otherwise:
+mode uses the tty-safe ASCII spinner; braille remains opt-in because some Linux
+TTY/font paths render braille as square fallback glyphs:
 
 ```bash
 MOTOKO_SPINNER=auto motoko

@@ -82,6 +82,9 @@ def fake_tui(m, slave_fd: int):
     ui.last_render = 0.0
     ui.tui_spinner_frames = m.spinner_frames() or ["*"]
     ui.tui_spinner_index = 0
+    ui.overlay_title = None
+    ui.overlay_lines = None
+    ui.overlay_scroll = 0
     ui.messages = ui.seed_messages(ui.conv)
     ui.messages.append({"role": "user", "content": "resize redraw probe"})
     ui.messages.append({"role": "assistant", "content": "checking pty dimensions"})
