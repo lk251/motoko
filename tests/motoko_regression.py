@@ -509,6 +509,27 @@ def test_repo_context_item(m):
         assert sources[0]["command"] == "status"
 
 
+def test_cwd_indexing_ignores_light_study_done(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.events = m.collections.deque([("study_done", ["catalog fresh"])])
+    ui.events_lock = m.threading.Lock()
+    ui.cwd_indexing = True
+    ui.study_running = True
+    ui.study_status = "bg-heavy: indexing(model)"
+    ui.study_last_note = ""
+    ui.pending_prompts = m.collections.deque()
+    ui.generating = False
+    ui.maintaining = False
+    ui.dirty = False
+
+    ui.drain_events()
+
+    assert ui.cwd_indexing
+    assert ui.study_running
+    assert ui.study_status == "bg-heavy: indexing(model)"
+    assert ui.study_last_note == ""
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -532,6 +553,7 @@ def main() -> int:
         test_identity_config,
         test_index_limits,
         test_repo_context_item,
+        test_cwd_indexing_ignores_light_study_done,
     ]
     for test in tests:
         test(m)

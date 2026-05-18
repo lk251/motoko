@@ -5215,6 +5215,7 @@ class MotokoTui:
         self.overlay_lines: list[str] | None = None
         self.overlay_scroll = 0
         self.cwd_index_offer: dict | None = None
+        self.cwd_indexing = False
         self.messages = self.seed_messages(conv)
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
@@ -5559,7 +5560,7 @@ class MotokoTui:
         if self.cwd_index_offer is not None and text.strip().lower() in {"y", "yes", "n", "no"}:
             self.handle_cwd_index_answer(text)
             return
-        if self.study_running and self.study_status.startswith("bg-heavy:"):
+        if self.cwd_indexing or (self.study_running and self.study_status.startswith("bg-heavy:")):
             self.pending_prompts.append(text)
             self.append("queued", text)
             self.status = f"queued {len(self.pending_prompts)} prompt(s) while Motoko is deep-indexing"
@@ -5757,6 +5758,7 @@ class MotokoTui:
             self.append("system", "A background study job is already running.")
             return
         self.study_running = True
+        self.cwd_indexing = True
         self.study_status = "bg-heavy: indexing(model)"
         self.study_phase_started = time.monotonic()
 
@@ -5768,12 +5770,11 @@ class MotokoTui:
                     plan["root"].name or str(plan["root"]),
                 )
                 attach_context_item(self.conv, context_item_from_index(index))
-                self.put_event(("system_note", f"learned corpus index: {index.get('id')}"))
-                self.put_event(("study_done", [f"learned corpus index {index.get('id')}"]))
+                self.put_event(("cwd_index_done", index.get("id", "")))
             except SystemExit as exc:
-                self.put_event(("study_error", str(exc)))
+                self.put_event(("cwd_index_error", str(exc)))
             except Exception as exc:
-                self.put_event(("study_error", f"{type(exc).__name__}: {exc}"))
+                self.put_event(("cwd_index_error", f"{type(exc).__name__}: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -5991,11 +5992,15 @@ class MotokoTui:
                 self.status = event[1]
                 changed = True
             elif kind == "study_phase":
+                if self.cwd_indexing:
+                    continue
                 self.study_running = True
                 self.study_status = event[1]
                 self.study_phase_started = time.monotonic()
                 changed = True
             elif kind == "study_done":
+                if self.cwd_indexing:
+                    continue
                 self.study_running = False
                 notes = event[1]
                 self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
@@ -6005,9 +6010,29 @@ class MotokoTui:
                     self.start_generation(next_prompt)
                 changed = True
             elif kind == "study_error":
+                if self.cwd_indexing:
+                    continue
                 self.study_running = False
                 self.study_status = "study: idle"
                 self.study_last_note = f"study failed: {event[1]}"
+                changed = True
+            elif kind == "cwd_index_done":
+                self.cwd_indexing = False
+                self.study_running = False
+                index_id = event[1]
+                self.study_last_note = f"learned corpus index {index_id}"
+                self.study_status = "study: idle"
+                self.append("system", f"learned corpus index: {index_id}")
+                if self.pending_prompts and not self.generating and not self.maintaining:
+                    next_prompt = self.pending_prompts.popleft()
+                    self.start_generation(next_prompt)
+                changed = True
+            elif kind == "cwd_index_error":
+                self.cwd_indexing = False
+                self.study_running = False
+                self.study_status = "study: idle"
+                self.study_last_note = f"corpus learning failed: {event[1]}"
+                self.append("error", f"corpus learning failed: {event[1]}")
                 changed = True
             elif kind == "system_note":
                 self.append("system", event[1])
@@ -6029,7 +6054,7 @@ class MotokoTui:
                 now_ts = time.monotonic()
                 if now_ts < next_run:
                     continue
-                if self.generating or self.maintaining or self.pending_prompts:
+                if self.generating or self.maintaining or self.study_running or self.pending_prompts:
                     next_run = now_ts + min(5, interval)
                     continue
                 if now_ts - self.last_input_at < idle_grace:
