@@ -200,6 +200,7 @@ SLASH_COMMANDS = [
     ("/dossier-show [ID]", "show a memory dossier"),
     ("/study QUERY", "choose and run the best bounded study action"),
     ("/indexes", "list document indexes"),
+    ("/tasks [QUERY]", "show ranked Org task candidates from corpus indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
     ("/compact", "summarize older turns into compact context"),
@@ -276,6 +277,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/profile-refresh",
     "/memories",
     "/indexes",
+    "/tasks",
     "/topics",
     "/dossiers",
     "/memory review",
@@ -5498,6 +5500,36 @@ def attached_index_ids(conv: dict) -> list[str]:
     return ids
 
 
+def format_task_candidates_from_chat(conv: dict, query: str = "") -> str:
+    query = query.strip() or context_query_text(conv, conv.get("title", "")) or "priority tasks"
+    indexes = []
+    for index_id in attached_index_ids(conv):
+        try:
+            indexes.append(load_index(index_id))
+        except SystemExit:
+            continue
+    if not indexes:
+        best = best_relevant_index(query)
+        if best is not None:
+            indexes.append(best)
+    if not indexes:
+        return "No attached or relevant corpus index with structured Org task signals is available."
+
+    lines = [f"Task candidates for: {query}"]
+    found = False
+    for index in indexes:
+        ranked = ranked_task_items_from_index(index, query, limit=24)
+        if not ranked:
+            continue
+        found = True
+        lines.append(f"\nindex {index.get('id', '')}  {index.get('name', '')}  {index.get('root', '')}")
+        for _score, item in ranked:
+            lines.append(f"- {format_task_item(item)}")
+    if not found:
+        return "No structured Org task candidates were found in the selected corpus index(es)."
+    return "\n".join(lines)
+
+
 def build_topic_from_chat(conv: dict, text: str) -> dict:
     body = text.strip()
     if not body and sys.stdin.isatty():
@@ -6381,6 +6413,8 @@ class MotokoTui:
                 self.append("system", self.capture_text(print_memories))
             elif text == "/indexes":
                 self.append("system", self.capture_text(command_indexes_text))
+            elif text == "/tasks" or text.startswith("/tasks "):
+                self.append("system", format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
             elif text == "/topics":
                 self.append("system", self.capture_text(command_topics_text))
             elif text == "/topic-show" or text.startswith("/topic-show "):
@@ -7307,6 +7341,9 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/indexes":
             command_indexes_text()
+            continue
+        if user_text == "/tasks" or user_text.startswith("/tasks "):
+            print(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
             continue
         if user_text == "/topics":
             command_topics_text()

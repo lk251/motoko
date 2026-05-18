@@ -53,6 +53,8 @@ not the easiest place to review what changed after a long work session.
   and counts of newly discovered or missing files.
 - Reused the same progress/ETA status for heavy background refreshes of stale
   attached indexes, not only first-run corpus learning.
+- Added `/tasks [QUERY]` to inspect ranked Org task candidates from attached or
+  relevant corpus indexes without waiting for a model answer.
 
 ## 2026-05-18
 

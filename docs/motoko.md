@@ -277,6 +277,7 @@ such as "what are the highest priority tasks for tomorrow?" They are derived
 metadata under Motoko state; source Org files remain untouched. For task and
 priority questions, Motoko also gives the model a ranked task-candidate list
 using TODO state, priority cookies, and Org dates before asking it to answer.
+Use `/tasks [QUERY]` to inspect that ranked task-candidate list directly.
 
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
@@ -381,6 +382,7 @@ Useful in-chat commands:
 /dossier QUERY
 /attach-dossier [DOSSIER_ID]
 /indexes
+/tasks [QUERY]
 /topics
 /topic-show [TOPIC_ID]
 /dossiers

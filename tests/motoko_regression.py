@@ -565,6 +565,12 @@ def test_org_task_signals_drive_retrieval(m):
             assert "Structured task signals:" in text
             assert "Prepare tomorrow plan" in text
             assert any(source.get("kind") == "chunk" for source in sources)
+
+            conv = m.new_conversation("Tasks")
+            conv["context_items"] = [m.context_item_from_index(index)]
+            task_view = m.format_task_candidates_from_chat(conv, "priority tasks for 2026-05-19")
+            assert "Task candidates for:" in task_view
+            assert "Prepare tomorrow plan" in task_view
         finally:
             m.quiet_model = old_quiet_model
 
