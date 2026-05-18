@@ -40,6 +40,13 @@ not the easiest place to review what changed after a long work session.
 - Added current-directory corpus learning: Motoko can ask to learn an
   allowlisted directory tree on first use, auto-attach an existing matching
   corpus index later, and keep separate derived artifacts per directory root.
+- Added durable progress files for heavy corpus indexing, with TUI status
+  showing file/chunk/model-call progress, elapsed time, and ETA.
+- Added index-plan estimates for chunks and HRAG model calls so first corpus
+  passes are easier to size before starting.
+- Added Org-mode structured signals for headings, TODO states, priorities,
+  deadlines, and schedules, and used them to improve task-priority retrieval
+  from corpus indexes.
 
 ## 2026-05-18
 

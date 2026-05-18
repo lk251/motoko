@@ -81,6 +81,8 @@ Accepted directions:
 - compacted conversations;
 - explicit profile dossiers from memories and conversations;
 - hierarchical document indexes;
+- durable progress and ETA reporting for heavy corpus indexing;
+- deterministic Org-mode task/headline/deadline signals inside corpus indexes;
 - topic dossiers and deeper dossiers over already indexed material;
 - per-user permission modes for chat-only, document reads/indexing, and
   read-only repo review;

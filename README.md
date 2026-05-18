@@ -23,6 +23,8 @@ Design constraints:
   catalog without silently crawling new directories or competing with chat.
 - Bounded heavy background index refresh for attached stale indexes or meaningful
   batches of new files, visible in the TUI status bar.
+- Heavy corpus indexing records durable progress under Motoko state and reports
+  file/chunk/model-call progress with elapsed time and ETA in the TUI.
 - A durable study-job ledger under Motoko state so interrupted background study
   passes are visible and the next pass can safely recompute/resume planning.
 - Context planning lanes and `/sources` explanations for why each memory,
@@ -39,6 +41,9 @@ Design constraints:
 - Current-directory corpus learning: when started inside an allowlisted
   directory without an attached index, Motoko can ask once whether to learn that
   directory tree and then stores separate corpus artifacts per directory root.
+- Org-mode corpus artifacts include deterministic heading, TODO, priority,
+  deadline, and schedule signals so task-planning questions can retrieve the
+  right source chunks even when model summaries are too generic.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
 - Duplicate-aware indexing reuses exact chunks already present in Motoko state

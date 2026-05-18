@@ -362,6 +362,8 @@ def test_index_plan(m):
         plan = m.plan_document_index(str(docs))
         assert plan["files"] == 1
         assert plan["bytes"] == 6
+        assert plan["estimated_chunks"] == 1
+        assert plan["estimated_model_calls"] == 3
 
 
 def test_nix_managed_allowdirs_message(m):
@@ -393,6 +395,7 @@ def test_cwd_learning_plan_and_existing_index(m):
             assert plan["root"] == docs.resolve()
             assert plan["files"] == 2
             assert "readable text files" in m.cwd_learning_offer_text(plan)
+            assert "HRAG model call" in m.cwd_learning_offer_text(plan)
 
             index = {
                 "id": "corpus-index",
@@ -499,6 +502,71 @@ def test_index_limits(m):
             raise AssertionError("max_file_bytes should block oversized files")
 
 
+def test_index_progress_state(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "plan.org").write_text("* TODO Plan tomorrow\n", encoding="utf-8")
+        (docs / "notes.txt").write_text("alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            events = []
+            index = m.build_document_index(str(docs), progress_callback=events.append)
+            assert index["id"]
+            assert any(event.get("phase") == "summarizing chunk" for event in events)
+            assert any(event.get("phase") == "summarizing file" for event in events)
+            assert events[-1]["status"] == "completed"
+            progress = m.read_index_progress(index["id"])
+            assert progress is not None
+            assert progress["status"] == "completed"
+            assert progress["completed_files"] == 2
+            assert progress["completed_model_calls"] >= 5
+            assert progress["percent"] == 100
+            assert "active index jobs: 0" in m.format_status()
+        finally:
+            m.quiet_model = old_quiet_model
+
+
+def test_org_task_signals_drive_retrieval(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        tasks = docs / "tasks.org"
+        tasks.write_text(
+            "\n".join(
+                [
+                    "* TODO [#A] Prepare tomorrow plan :work:",
+                    "DEADLINE: <2026-05-19 Tue>",
+                    "Details about the highest priority task.",
+                    "* DONE Archive old note",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (docs / "ideas.org").write_text("* Idea unrelated\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+            assert index["signals"]["active_task_count"] == 1
+            assert index["signals"]["done_task_count"] == 1
+            assert index["signals"]["priorities"]["A"] == 1
+            assert "Prepare tomorrow plan" in index["signal_summary"]
+
+            text, sources = m.retrieve_from_index(index, "highest priority tasks for tomorrow")
+            assert "Structured task signals:" in text
+            assert "Prepare tomorrow plan" in text
+            assert any(source.get("kind") == "chunk" for source in sources)
+        finally:
+            m.quiet_model = old_quiet_model
+
+
 def test_repo_context_item(m):
     with isolated_state() as tmp:
         item = m.context_item_from_repo_report("status", tmp, "repo: fake\nclean")
@@ -510,12 +578,23 @@ def test_repo_context_item(m):
 
 
 def test_cwd_indexing_ignores_light_study_done(m):
+    progress = {
+        "status": "running",
+        "phase": "summarizing chunk",
+        "current_file_index": 3,
+        "total_files": 54,
+        "completed_chunks": 10,
+        "estimated_chunks": 100,
+        "percent": 9,
+        "eta_seconds": 3600,
+    }
     ui = object.__new__(m.MotokoTui)
-    ui.events = m.collections.deque([("study_done", ["catalog fresh"])])
+    ui.events = m.collections.deque([("cwd_index_progress", progress), ("study_done", ["catalog fresh"])])
     ui.events_lock = m.threading.Lock()
     ui.cwd_indexing = True
     ui.study_running = True
     ui.study_status = "bg-heavy: indexing(model)"
+    ui.index_progress = None
     ui.study_last_note = ""
     ui.pending_prompts = m.collections.deque()
     ui.generating = False
@@ -526,7 +605,8 @@ def test_cwd_indexing_ignores_light_study_done(m):
 
     assert ui.cwd_indexing
     assert ui.study_running
-    assert ui.study_status == "bg-heavy: indexing(model)"
+    assert "file 3/54" in ui.study_status
+    assert ui.index_progress["phase"] == "summarizing chunk"
     assert ui.study_last_note == ""
 
 
@@ -580,6 +660,8 @@ def main() -> int:
         test_permissions_config,
         test_identity_config,
         test_index_limits,
+        test_index_progress_state,
+        test_org_task_signals_drive_retrieval,
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,

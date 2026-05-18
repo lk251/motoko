@@ -256,6 +256,21 @@ again immediately. Binary files and common cache/vendor directories are skipped
 because they are not useful model context; source documents themselves remain
 read-only.
 
+This first corpus pass is real HRAG preprocessing, not a cheap filename scan:
+Motoko stores source chunks, asks the local model for chunk summaries, file
+summaries, and a corpus summary, and records fingerprints for freshness checks.
+Index plans and first-run learning prompts include estimated chunks and HRAG
+model calls so long jobs are easier to anticipate. While the TUI is learning a
+corpus, the top status reports file/chunk/model-call progress, elapsed time,
+and ETA; `/indexes` and `/status` also show active durable index jobs from
+Motoko state.
+
+For Org-mode files, Motoko also extracts deterministic structured signals:
+headings, TODO states, priorities, deadlines, and schedules. These signals are
+stored alongside HRAG summaries and boost retrieval for task-planning questions
+such as "what are the highest priority tasks for tomorrow?" They are derived
+metadata under Motoko state; source Org files remain untouched.
+
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
 Motoko never edits, rewrites, annotates, truncates, moves, or deletes source
@@ -292,7 +307,8 @@ do not show square fallback glyphs. Set `MOTOKO_SPINNER=braille` only in a
 terminal/font combination known to render braille cells correctly. The top
 status line includes the model badge, for example `qwen3.6-27b-mtp:8083`, and
 reports active memory and background-study phases such as
-`mem: proposing(model)` or `bg-light: catalog(cpu)`.
+`mem: proposing(model)`, `bg-light: catalog(cpu)`, or
+`bg-heavy: summarizing chunk file 6/54 chunk 10/100 9% eta 3h12m`.
 
 Emacs-style editing keys in the TUI:
 

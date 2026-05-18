@@ -74,6 +74,35 @@ BACKGROUND_HEAVY_INDEX_COOLDOWN_SECONDS = 30 * 60
 BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES = 3
 BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES = 64 * 1024
 CWD_LEARN_DECLINE_COOLDOWN_SECONDS = 24 * 60 * 60
+ORG_TODO_KEYWORDS = {
+    "TODO",
+    "NEXT",
+    "STARTED",
+    "IN-PROGRESS",
+    "WAITING",
+    "BLOCKED",
+    "SOMEDAY",
+    "DONE",
+    "CANCELLED",
+    "CANCELED",
+}
+TASK_QUERY_WORDS = {
+    "task",
+    "tasks",
+    "todo",
+    "todos",
+    "priority",
+    "priorities",
+    "prioritize",
+    "tomorrow",
+    "today",
+    "next",
+    "deadline",
+    "deadlines",
+    "scheduled",
+    "plan",
+    "planning",
+}
 MAX_MEMORY_CHARS = 1800
 MEMORY_RETRIEVAL_LIMIT = 18
 MEMORY_SEARCH_LIMIT = 40
@@ -404,6 +433,19 @@ def human_bytes(count: int) -> str:
     return f"{count} B"
 
 
+def human_duration(seconds: int | float | None) -> str:
+    if seconds is None:
+        return "?"
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
 def parse_byte_count(value: str) -> int:
     text = value.strip().lower().replace("_", "")
     match = re.fullmatch(r"(\d+)([kmgt]?i?b?|)", text)
@@ -609,11 +651,231 @@ def index_data_dir(index_id: str) -> pathlib.Path:
     return ensure_private_dir(indexes_dir() / f"{index_id}.chunks")
 
 
+def index_progress_path(index_id: str) -> pathlib.Path:
+    return indexes_dir() / f"{index_id}.progress.json"
+
+
 def atomic_write(path: pathlib.Path, text: str) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.chmod(0o600)
     tmp.replace(path)
+
+
+def public_progress_state(progress: dict) -> dict:
+    return {
+        key: value
+        for key, value in progress.items()
+        if not key.startswith("_")
+    }
+
+
+def estimate_file_chunks(path: pathlib.Path) -> int:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 1
+    return max(1, (max(1, size) + INDEX_CHUNK_CHARS - 1) // INDEX_CHUNK_CHARS)
+
+
+def estimate_corpus_summary_calls(total_files: int) -> int:
+    if total_files <= 0:
+        return 1
+    approx_summary_chars = total_files * 700
+    return max(1, (approx_summary_chars + SUMMARY_INPUT_CHARS - 1) // SUMMARY_INPUT_CHARS)
+
+
+def write_index_progress(progress: dict) -> None:
+    index_id = str(progress.get("id", "")).strip()
+    if not index_id:
+        return
+    atomic_write(
+        index_progress_path(index_id),
+        json.dumps(public_progress_state(progress), ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def read_index_progress(index_id: str) -> dict | None:
+    try:
+        return json.loads(index_progress_path(index_id).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def list_index_progress() -> list[dict]:
+    rows = []
+    for path in sorted(indexes_dir().glob("*.progress.json"), reverse=True):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    rows.sort(key=lambda row: row.get("updated", row.get("started", "")), reverse=True)
+    return rows
+
+
+def active_index_progress() -> list[dict]:
+    rows = []
+    for row in list_index_progress():
+        status = row.get("status")
+        if status not in {"completed", "failed"}:
+            rows.append(row)
+            continue
+        if status == "completed" and not index_path(str(row.get("id", ""))).exists():
+            rows.append(row)
+    return rows
+
+
+def index_progress_percent(progress: dict) -> int | None:
+    if progress.get("status") == "completed":
+        return 100
+    total = int(progress.get("estimated_model_calls", 0) or 0)
+    done = int(progress.get("completed_model_calls", 0) or 0)
+    if total <= 0:
+        return None
+    return min(99, max(0, int((done / total) * 100)))
+
+
+def update_index_progress_estimates(progress: dict) -> None:
+    started = progress.get("_started_monotonic")
+    if started is not None:
+        progress["elapsed_seconds"] = int(time.monotonic() - started)
+    done = int(progress.get("completed_model_calls", 0) or 0)
+    total = int(progress.get("estimated_model_calls", 0) or 0)
+    remaining = max(0, total - done)
+    if started is not None and done > 0 and remaining > 0:
+        rate = progress["elapsed_seconds"] / done
+        progress["eta_seconds"] = int(rate * remaining)
+    else:
+        progress["eta_seconds"] = None
+    progress["percent"] = index_progress_percent(progress)
+
+
+def emit_index_progress(progress: dict, callback=None) -> None:
+    progress["updated"] = now()
+    update_index_progress_estimates(progress)
+    write_index_progress(progress)
+    if callback is not None:
+        callback(public_progress_state(progress))
+
+
+def begin_index_progress(
+    index_id: str,
+    root: pathlib.Path,
+    pattern: str | None,
+    name: str | None,
+    candidates: list[pathlib.Path],
+    callback=None,
+) -> dict:
+    chunk_estimates = {str(path): estimate_file_chunks(path) for path in candidates}
+    estimated_chunks = sum(chunk_estimates.values())
+    progress = {
+        "id": index_id,
+        "kind": "index",
+        "status": "running",
+        "phase": "starting",
+        "root": str(root),
+        "glob": pattern or AUTO_INDEX_GLOB,
+        "name": name or root.name or str(root),
+        "started": now(),
+        "updated": now(),
+        "elapsed_seconds": 0,
+        "eta_seconds": None,
+        "percent": 0,
+        "total_files": len(candidates),
+        "completed_files": 0,
+        "current_file": "",
+        "current_file_index": 0,
+        "current_file_estimated_chunks": 0,
+        "estimated_chunks": estimated_chunks,
+        "completed_chunks": 0,
+        "current_chunk": 0,
+        "estimated_model_calls": estimated_chunks + len(candidates) + estimate_corpus_summary_calls(len(candidates)),
+        "completed_model_calls": 0,
+        "last_model_label": "",
+        "_started_monotonic": time.monotonic(),
+        "_chunk_estimates": chunk_estimates,
+    }
+    emit_index_progress(progress, callback)
+    return progress
+
+
+def index_progress_begin_file(progress: dict | None, path: pathlib.Path, ordinal: int, callback=None) -> None:
+    if progress is None:
+        return
+    progress["phase"] = "indexing file"
+    progress["current_file"] = str(path)
+    progress["current_file_index"] = ordinal
+    progress["current_file_estimated_chunks"] = progress.get("_chunk_estimates", {}).get(str(path), 1)
+    progress["current_chunk"] = 0
+    emit_index_progress(progress, callback)
+
+
+def index_progress_begin_model(progress: dict | None, phase: str, label: str, callback=None) -> None:
+    if progress is None:
+        return
+    progress["phase"] = phase
+    progress["last_model_label"] = label
+    emit_index_progress(progress, callback)
+
+
+def index_progress_finish_model(progress: dict | None, callback=None, *, chunk_done: bool = False) -> None:
+    if progress is None:
+        return
+    progress["completed_model_calls"] = int(progress.get("completed_model_calls", 0) or 0) + 1
+    if chunk_done:
+        progress["completed_chunks"] = int(progress.get("completed_chunks", 0) or 0) + 1
+    emit_index_progress(progress, callback)
+
+
+def index_progress_finish_file(progress: dict | None, callback=None) -> None:
+    if progress is None:
+        return
+    progress["completed_files"] = int(progress.get("completed_files", 0) or 0) + 1
+    progress["phase"] = "file indexed"
+    emit_index_progress(progress, callback)
+
+
+def finish_index_progress(progress: dict | None, status: str, callback=None, *, error: str = "") -> None:
+    if progress is None:
+        return
+    progress["status"] = status
+    progress["phase"] = "completed" if status == "completed" else "failed"
+    if error:
+        progress["error"] = error
+    emit_index_progress(progress, callback)
+
+
+def format_index_progress_status(progress: dict) -> str:
+    phase = str(progress.get("phase") or "indexing")
+    status = str(progress.get("status") or "running")
+    if status == "completed":
+        return "bg-heavy: index complete"
+    if status == "failed":
+        return "bg-heavy: index failed"
+    current = int(progress.get("current_file_index", 0) or 0)
+    total = int(progress.get("total_files", 0) or 0)
+    files = f"file {current}/{total}" if total else "files"
+    chunks_done = int(progress.get("completed_chunks", 0) or 0)
+    chunks_total = int(progress.get("estimated_chunks", 0) or 0)
+    chunks = f"chunk {chunks_done}/{chunks_total}" if chunks_total else ""
+    percent = progress.get("percent")
+    pct = f"{percent}%" if percent is not None else ""
+    eta = progress.get("eta_seconds")
+    eta_text = f"eta {human_duration(eta)}" if eta is not None else "eta ?"
+    parts = ["bg-heavy:", phase, files, chunks, pct, eta_text]
+    return " ".join(part for part in parts if part)
+
+
+def format_index_progress_line(progress: dict) -> str:
+    updated = relative_time(str(progress.get("updated", "")))
+    elapsed = human_duration(progress.get("elapsed_seconds"))
+    return (
+        f"{progress.get('id', '')}  {progress.get('status', 'unknown')}  "
+        f"{format_index_progress_status(progress)}  elapsed {elapsed}  "
+        f"updated {updated}  {progress.get('root', '')}"
+    )
 
 
 def config_path() -> pathlib.Path:
@@ -1998,6 +2260,7 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
         raise SystemExit(f"not found: {root}")
     candidates = apply_index_limits(iter_index_candidates(root, pattern))
     total_bytes = 0
+    estimated_chunks = 0
     largest: list[tuple[int, pathlib.Path]] = []
     for candidate in candidates:
         try:
@@ -2005,13 +2268,17 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
         except OSError:
             continue
         total_bytes += size
+        estimated_chunks += estimate_file_chunks(candidate)
         largest.append((size, candidate))
     largest.sort(reverse=True)
+    estimated_model_calls = estimated_chunks + len(candidates) + estimate_corpus_summary_calls(len(candidates))
     return {
         "root": str(root),
         "glob": pattern or AUTO_INDEX_GLOB,
         "files": len(candidates),
         "bytes": total_bytes,
+        "estimated_chunks": estimated_chunks,
+        "estimated_model_calls": estimated_model_calls,
         "largest": largest[:5],
     }
 
@@ -2022,6 +2289,8 @@ def print_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> None:
     print(f"glob: {plan['glob']}")
     print(f"candidate files: {plan['files']}")
     print(f"source bytes: {human_bytes(plan['bytes'])}")
+    print(f"estimated chunks: {plan['estimated_chunks']}")
+    print(f"estimated HRAG model calls: {plan['estimated_model_calls']}")
     if plan["largest"]:
         print("largest files:")
         for size, candidate in plan["largest"]:
@@ -2304,7 +2573,12 @@ def ranked_topics_for_query(query: str) -> list[dict]:
 
 
 def ranked_indexes_for_query(query: str) -> list[dict]:
-    return rank_items_by_query(list_indexes(), query, ["name", "root", "corpus_summary"])
+    rows = rank_items_by_query(list_indexes(), query, ["name", "root", "corpus_summary", "signal_summary"])
+    if query_wants_task_context(query):
+        for row in rows:
+            row["_score"] = int(row.get("_score", 0) or 0) + task_signal_boost(query, row.get("signals") or {})
+        rows.sort(key=lambda row: row.get("_score", 0), reverse=True)
+    return rows
 
 
 def token_counts(text: str) -> collections.Counter:
@@ -2317,6 +2591,183 @@ def score_text(query_counts: collections.Counter, text: str) -> int:
         return 0
     counts = token_counts(text)
     return sum(min(counts.get(word, 0), count) for word, count in query_counts.items())
+
+
+def query_wants_task_context(query: str) -> bool:
+    return bool(set(token_counts(query)) & TASK_QUERY_WORDS)
+
+
+def append_limited(items: list[str], value: str, limit: int) -> None:
+    value = compact_text(value.strip(), 240)
+    if value and len(items) < limit:
+        items.append(value)
+
+
+def parse_org_headline(line: str) -> dict | None:
+    match = re.match(r"^(\*+)\s+(.*)$", line.rstrip())
+    if not match:
+        return None
+    body = match.group(2).strip()
+    tags = []
+    tag_match = re.search(r"\s+(:[A-Za-z0-9_@#%:]+:)\s*$", body)
+    if tag_match:
+        tags = [tag for tag in tag_match.group(1).strip(":").split(":") if tag]
+        body = body[: tag_match.start()].rstrip()
+    parts = body.split()
+    todo = ""
+    if parts and parts[0].upper() in ORG_TODO_KEYWORDS:
+        todo = parts.pop(0).upper()
+    priority = ""
+    if parts and re.fullmatch(r"\[#([A-Za-z0-9])\]", parts[0]):
+        priority = parts.pop(0)[2].upper()
+    title = " ".join(parts).strip()
+    if not title and not todo:
+        return None
+    return {
+        "level": len(match.group(1)),
+        "todo": todo,
+        "priority": priority,
+        "title": title,
+        "tags": tags,
+    }
+
+
+def format_org_headline_signal(headline: dict) -> str:
+    parts = []
+    if headline.get("todo"):
+        parts.append(headline["todo"])
+    if headline.get("priority"):
+        parts.append(f"[#{headline['priority']}]")
+    if headline.get("title"):
+        parts.append(headline["title"])
+    if headline.get("tags"):
+        parts.append(":" + ":".join(headline["tags"]) + ":")
+    return f"{'*' * int(headline.get('level', 1) or 1)} {' '.join(parts)}".strip()
+
+
+def clean_signal_dict(signals: dict) -> dict:
+    return {
+        key: value
+        for key, value in signals.items()
+        if value not in (None, "", 0, [], {})
+    }
+
+
+def extract_document_signals(path: pathlib.Path, text: str) -> dict:
+    signals = {
+        "format": "org" if path.suffix.lower() == ".org" else "",
+        "headline_count": 0,
+        "task_count": 0,
+        "active_task_count": 0,
+        "done_task_count": 0,
+        "priorities": {},
+        "headlines": [],
+        "tasks": [],
+        "deadlines": [],
+        "scheduled": [],
+    }
+    for line in text.splitlines():
+        stripped = line.strip()
+        headline = parse_org_headline(stripped)
+        if headline is not None:
+            rendered = format_org_headline_signal(headline)
+            signals["headline_count"] += 1
+            append_limited(signals["headlines"], rendered, 40)
+            todo = headline.get("todo", "")
+            if todo:
+                signals["task_count"] += 1
+                if todo in {"DONE", "CANCELLED", "CANCELED"}:
+                    signals["done_task_count"] += 1
+                else:
+                    signals["active_task_count"] += 1
+                priority = headline.get("priority", "")
+                if priority:
+                    signals["priorities"][priority] = signals["priorities"].get(priority, 0) + 1
+                append_limited(signals["tasks"], rendered, 60)
+        if "DEADLINE:" in stripped:
+            append_limited(signals["deadlines"], stripped, 30)
+        if "SCHEDULED:" in stripped:
+            append_limited(signals["scheduled"], stripped, 30)
+    return clean_signal_dict(signals)
+
+
+def merge_signal_sets(signal_sets: list[dict], *, limit: int = 80) -> dict:
+    merged = {
+        "headline_count": 0,
+        "task_count": 0,
+        "active_task_count": 0,
+        "done_task_count": 0,
+        "priorities": {},
+        "headlines": [],
+        "tasks": [],
+        "deadlines": [],
+        "scheduled": [],
+    }
+    for signals in signal_sets:
+        if not signals:
+            continue
+        for key in ["headline_count", "task_count", "active_task_count", "done_task_count"]:
+            merged[key] += int(signals.get(key, 0) or 0)
+        for priority, count in (signals.get("priorities") or {}).items():
+            merged["priorities"][priority] = merged["priorities"].get(priority, 0) + int(count or 0)
+        for key in ["headlines", "tasks", "deadlines", "scheduled"]:
+            for value in signals.get(key, []) or []:
+                append_limited(merged[key], value, limit)
+    return clean_signal_dict(merged)
+
+
+def file_signals_from_chunks(chunks: list[dict]) -> dict:
+    return merge_signal_sets([chunk.get("signals") or {} for chunk in chunks])
+
+
+def corpus_signals_from_files(files: list[dict]) -> dict:
+    rows = []
+    for file_item in files:
+        signals = file_item.get("signals") or {}
+        if not signals:
+            continue
+        path = file_item.get("path", "")
+        prefixed = dict(signals)
+        for key in ["headlines", "tasks", "deadlines", "scheduled"]:
+            prefixed[key] = [f"{path}: {item}" for item in signals.get(key, []) or []]
+        rows.append(prefixed)
+    return merge_signal_sets(rows, limit=120)
+
+
+def format_signal_summary(signals: dict, *, limit: int = 20) -> str:
+    if not signals:
+        return ""
+    lines = []
+    task_bits = []
+    if signals.get("active_task_count"):
+        task_bits.append(f"{signals.get('active_task_count')} active")
+    if signals.get("done_task_count"):
+        task_bits.append(f"{signals.get('done_task_count')} done")
+    if signals.get("task_count") and not task_bits:
+        task_bits.append(f"{signals.get('task_count')} task(s)")
+    if task_bits:
+        lines.append("tasks: " + ", ".join(task_bits))
+    priorities = signals.get("priorities") or {}
+    if priorities:
+        lines.append("priorities: " + ", ".join(f"{key}:{priorities[key]}" for key in sorted(priorities)))
+    for label, key in [("deadlines", "deadlines"), ("scheduled", "scheduled"), ("task headlines", "tasks")]:
+        values = signals.get(key) or []
+        if values:
+            lines.append(f"{label}:")
+            lines.extend(f"- {value}" for value in values[:limit])
+    return "\n".join(lines)
+
+
+def task_signal_boost(query: str, signals: dict) -> int:
+    if not query_wants_task_context(query) or not signals:
+        return 0
+    priorities = signals.get("priorities") or {}
+    boost = int(signals.get("active_task_count", 0) or 0) * 3
+    boost += len(signals.get("deadlines", []) or []) * 2
+    boost += len(signals.get("scheduled", []) or [])
+    boost += int(priorities.get("A", 0) or 0) * 4
+    boost += int(priorities.get("B", 0) or 0) * 2
+    return min(boost, 30)
 
 
 def split_text(text: str, size: int = INDEX_CHUNK_CHARS) -> list[str]:
@@ -2631,6 +3082,8 @@ def summarize_and_store_chunk(
     content: str,
     budget: dict,
     existing_chunks: dict[str, str] | None = None,
+    progress: dict | None = None,
+    progress_callback=None,
 ) -> dict | None:
     content = content.strip()
     if not content:
@@ -2647,13 +3100,17 @@ def summarize_and_store_chunk(
             return duplicate
     label = f"{path} chunk {chunk_idx}"
     print(f"  summarizing {label}", flush=True)
+    if progress is not None:
+        progress["current_chunk"] = chunk_idx
+    index_progress_begin_model(progress, "summarizing chunk", label, progress_callback)
     summary = summarize_text(
         label,
         content[:SUMMARY_INPUT_CHARS],
         "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
     )
+    index_progress_finish_model(progress, progress_callback, chunk_done=True)
     relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content, budget, path)
-    return {
+    item = {
         "id": f"{ordinal}.{chunk_idx}",
         "path": str(path),
         "chunk": chunk_idx,
@@ -2663,6 +3120,10 @@ def summarize_and_store_chunk(
         "stored_content_bytes": content_bytes,
         "content_sha256": sha256_hex(content.encode("utf-8")),
     }
+    signals = extract_document_signals(path, content)
+    if signals:
+        item["signals"] = signals
+    return item
 
 
 def stream_index_file(
@@ -2671,6 +3132,8 @@ def stream_index_file(
     ordinal: int,
     budget: dict,
     existing_chunks: dict[str, str] | None = None,
+    progress: dict | None = None,
+    progress_callback=None,
 ) -> tuple[dict, list[dict], int]:
     stat = path.stat()
     digest = hashlib.sha256()
@@ -2686,7 +3149,17 @@ def stream_index_file(
         if not chunk:
             return
         chunk_idx += 1
-        item = summarize_and_store_chunk(path, index_id, ordinal, chunk_idx, chunk, budget, existing_chunks)
+        item = summarize_and_store_chunk(
+            path,
+            index_id,
+            ordinal,
+            chunk_idx,
+            chunk,
+            budget,
+            existing_chunks,
+            progress,
+            progress_callback,
+        )
         if item is not None:
             derived_content_bytes += item.get("stored_content_bytes", item.get("content_bytes", 0))
             indexed_chunks.append(item)
@@ -2737,16 +3210,32 @@ def chunk_blocks_by_chars(blocks: list[str], max_chars: int) -> list[list[str]]:
     return batches
 
 
-def summarize_blocks(label: str, blocks: list[str], instruction: str) -> str:
+def summarize_blocks(
+    label: str,
+    blocks: list[str],
+    instruction: str,
+    progress: dict | None = None,
+    progress_callback=None,
+    phase: str = "summarizing",
+) -> str:
     pending = [block.strip() for block in blocks if block.strip()]
     if not pending:
-        return summarize_text(label, "", instruction)
+        index_progress_begin_model(progress, phase, label, progress_callback)
+        result = summarize_text(label, "", instruction)
+        index_progress_finish_model(progress, progress_callback)
+        return result
+
+    def summarize_with_progress(model_label: str, text: str, model_instruction: str) -> str:
+        index_progress_begin_model(progress, phase, model_label, progress_callback)
+        result = summarize_text(model_label, text, model_instruction)
+        index_progress_finish_model(progress, progress_callback)
+        return result
 
     round_no = 1
     while True:
         combined = "\n\n".join(pending)
         if len(combined) <= SUMMARY_INPUT_CHARS or len(pending) == 1 or round_no > 8:
-            return summarize_text(label, combined, instruction)
+            return summarize_with_progress(label, combined, instruction)
 
         batches = chunk_blocks_by_chars(pending, SUMMARY_INPUT_CHARS)
         reduced = []
@@ -2754,14 +3243,14 @@ def summarize_blocks(label: str, blocks: list[str], instruction: str) -> str:
             batch_label = f"{label} summary batch {idx}/{len(batches)} round {round_no}"
             print(f"  reducing {batch_label}", flush=True)
             reduced.append(
-                summarize_text(
+                summarize_with_progress(
                     batch_label,
                     "\n\n".join(batch),
                     "Summarize this batch faithfully for a higher-level retrieval summary. Preserve names, dates, decisions, obligations, and unusual details.",
                 )
             )
         if len(reduced) >= len(pending):
-            return summarize_text(label, "\n\n".join(reduced), instruction)
+            return summarize_with_progress(label, "\n\n".join(reduced), instruction)
         pending = reduced
         round_no += 1
 
@@ -2772,6 +3261,8 @@ def index_file(
     ordinal: int,
     budget: dict,
     existing_chunks: dict[str, str] | None = None,
+    progress: dict | None = None,
+    progress_callback=None,
 ) -> dict:
     fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(
         path,
@@ -2779,6 +3270,8 @@ def index_file(
         ordinal,
         budget,
         existing_chunks,
+        progress,
+        progress_callback,
     )
 
     print(f"  summarizing file {path}", flush=True)
@@ -2787,8 +3280,12 @@ def index_file(
         [f"Chunk {chunk['chunk']}:\n{chunk['summary']}" for chunk in indexed_chunks]
         or [""],
         "Create a file-level summary from these chunk summaries. Include what the file is about and when to retrieve it.",
+        progress,
+        progress_callback,
+        "summarizing file",
     )
-    return {
+    index_progress_finish_file(progress, progress_callback)
+    item = {
         "path": str(path),
         "source_fingerprint": fingerprint,
         "indexed_sha256": fingerprint["sha256"],
@@ -2804,6 +3301,10 @@ def index_file(
         "summary": file_summary,
         "chunks": indexed_chunks,
     }
+    signals = file_signals_from_chunks(indexed_chunks)
+    if signals:
+        item["signals"] = signals
+    return item
 
 
 def build_document_index(
@@ -2811,6 +3312,7 @@ def build_document_index(
     pattern: str | None = AUTO_INDEX_GLOB,
     name: str | None = None,
     max_derived_bytes: str | None = None,
+    progress_callback=None,
 ) -> dict:
     require_permission("index")
     root = pathlib.Path(path).expanduser().resolve()
@@ -2829,6 +3331,7 @@ def build_document_index(
     files = []
     print(f"Building document index {index_id} from {len(candidates)} file(s).")
     print(f"Derived index text budget: {human_bytes(budget['max_bytes'])}.")
+    progress = begin_index_progress(index_id, root, pattern, name, candidates, progress_callback)
     existing_chunks = existing_index_chunk_cache(root)
     if existing_chunks:
         print(f"Duplicate-aware indexing: {len(existing_chunks)} existing chunk(s) available for reuse.")
@@ -2837,7 +3340,18 @@ def build_document_index(
         for idx, candidate in enumerate(candidates, 1):
             try:
                 print(f"[{idx}/{len(candidates)}] indexing {candidate}", flush=True)
-                files.append(index_file(candidate, index_id, idx, budget, existing_chunks))
+                index_progress_begin_file(progress, candidate, idx, progress_callback)
+                files.append(
+                    index_file(
+                        candidate,
+                        index_id,
+                        idx,
+                        budget,
+                        existing_chunks,
+                        progress,
+                        progress_callback,
+                    )
+                )
             except OSError as exc:
                 print(f"  skipped {candidate}: {exc}", file=sys.stderr)
 
@@ -2846,7 +3360,11 @@ def build_document_index(
             str(root),
             [f"{item['path']}:\n{item['summary']}" for item in files],
             "Create a corpus-level map from these file summaries. Explain the main themes and which files matter for which questions.",
+            progress,
+            progress_callback,
+            "summarizing corpus",
         )
+        corpus_signals = corpus_signals_from_files(files)
         index = {
             "id": index_id,
             "name": name or root.name or str(root),
@@ -2862,10 +3380,17 @@ def build_document_index(
             "corpus_summary": corpus_summary,
             "files": files,
         }
+        if corpus_signals:
+            index["signals"] = corpus_signals
+            index["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
         atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         saved = True
+        finish_index_progress(progress, "completed", progress_callback)
         print(f"index saved: {index_id}")
         return index
+    except BaseException as exc:
+        finish_index_progress(progress, "failed", progress_callback, error=f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         if not saved:
             shutil.rmtree(index_data_dir(index_id), ignore_errors=True)
@@ -2876,14 +3401,19 @@ def build_document_index_quiet(
     pattern: str | None = AUTO_INDEX_GLOB,
     name: str | None = None,
     max_derived_bytes: str | None = None,
+    progress_callback=None,
 ) -> dict:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        return build_document_index(path, pattern, name, max_derived_bytes)
+        return build_document_index(path, pattern, name, max_derived_bytes, progress_callback)
 
 
 def context_item_from_index(index: dict) -> dict:
     status, warnings = index_staleness(index)
+    summary = index.get("corpus_summary", "")
+    signal_summary = index.get("signal_summary", "")
+    if signal_summary:
+        summary = (summary + "\n\nStructured signals:\n" + signal_summary).strip()
     return {
         "kind": "index",
         "id": index["id"],
@@ -2891,7 +3421,7 @@ def context_item_from_index(index: dict) -> dict:
         "root": index.get("root", ""),
         "status": status,
         "warnings": warnings[:5],
-        "summary": index.get("corpus_summary", ""),
+        "summary": summary,
     }
 
 
@@ -2919,17 +3449,24 @@ def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, 
     query_counts = token_counts(query)
     rows = []
     for file_item in index.get("files", []):
+        file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
         for chunk in file_item.get("chunks", []):
             content = read_chunk_content(index, chunk)
+            chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
             haystack = "\n".join(
                 [
                     file_item.get("path", ""),
                     file_item.get("summary", ""),
+                    file_signal_text,
                     chunk.get("summary", ""),
+                    chunk_signal_text,
                     content[:4000],
                 ]
             )
-            rows.append((score_text(query_counts, haystack), file_item, chunk, content))
+            score = score_text(query_counts, haystack)
+            score += task_signal_boost(query, file_item.get("signals") or {})
+            score += task_signal_boost(query, chunk.get("signals") or {})
+            rows.append((score, file_item, chunk, content))
     rows.sort(key=lambda row: row[0], reverse=True)
     return rows
 
@@ -3406,6 +3943,8 @@ def cwd_learning_plan(root: pathlib.Path | None = None, pattern: str = AUTO_INDE
         "glob": pattern or AUTO_INDEX_GLOB,
         "files": plan.get("files", 0),
         "bytes": plan.get("bytes", 0),
+        "estimated_chunks": plan.get("estimated_chunks", 0),
+        "estimated_model_calls": plan.get("estimated_model_calls", 0),
         "existing": matching_cwd_indexes(root, pattern),
     }
 
@@ -3425,7 +3964,9 @@ def cwd_learning_offer_text(plan: dict) -> str:
         f"This is the first time in this conversation that I have seen {root} "
         "without a fresh full-text index attached. Learn this directory tree now? "
         f"Suggested scope: all readable text files under this tree ({plan['files']} file(s), "
-        f"{human_bytes(plan['bytes'])}). Binary/cache/vendor files are skipped. Reply yes or no."
+        f"{human_bytes(plan['bytes'])}, about {plan.get('estimated_chunks', 0)} chunk(s) and "
+        f"{plan.get('estimated_model_calls', 0)} HRAG model call(s)). "
+        "Binary/cache/vendor files are skipped. Reply yes or no."
     )
 
 
@@ -3634,22 +4175,30 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     file_rows = []
     chunk_rows = []
     for file_item in index.get("files", []):
+        file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
         file_score = score_text(
             query_counts,
-            "\n".join([file_item.get("path", ""), file_item.get("summary", "")]),
+            "\n".join([file_item.get("path", ""), file_item.get("summary", ""), file_signal_text]),
         )
+        file_score += task_signal_boost(query, file_item.get("signals") or {})
         file_rows.append((file_score, file_item))
         for chunk in file_item.get("chunks", []):
             content = read_chunk_content(index, chunk)
+            chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
             haystack = "\n".join(
                 [
                     file_item.get("path", ""),
                     file_item.get("summary", ""),
+                    file_signal_text,
                     chunk.get("summary", ""),
+                    chunk_signal_text,
                     content[:4000],
                 ]
             )
-            chunk_rows.append((score_text(query_counts, haystack), file_item, chunk))
+            chunk_score = score_text(query_counts, haystack)
+            chunk_score += task_signal_boost(query, file_item.get("signals") or {})
+            chunk_score += task_signal_boost(query, chunk.get("signals") or {})
+            chunk_rows.append((chunk_score, file_item, chunk))
 
     file_rows.sort(key=lambda row: row[0], reverse=True)
     chunk_rows.sort(key=lambda row: row[0], reverse=True)
@@ -3665,6 +4214,9 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         "Corpus summary:",
         index.get("corpus_summary", ""),
     ]
+    signal_summary = index.get("signal_summary") or format_signal_summary(index.get("signals") or {}, limit=30)
+    if signal_summary and query_wants_task_context(query):
+        parts.extend(["Structured task signals:", signal_summary])
     if index_warnings:
         parts.append("Freshness warnings:\n" + "\n".join(f"- {warning}" for warning in index_warnings[:8]))
     sources = [
@@ -3681,9 +4233,11 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     if selected_files:
         parts.append("Relevant file summaries:")
         for file_item in selected_files:
+            file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
+            signal_block = f"\nStructured signals:\n{file_signal_text}" if file_signal_text else ""
             parts.append(
                 f"- [file:{file_item.get('path')}] {file_item.get('path')}:\n"
-                f"{file_item.get('summary', '')}"
+                f"{file_item.get('summary', '')}{signal_block}"
             )
             sources.append(
                 {
@@ -3703,10 +4257,12 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                 break
             excerpt = content[:remaining]
             used += len(excerpt)
+            chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
+            signal_block = f"\n\nStructured signals:\n{chunk_signal_text}" if chunk_signal_text else ""
             parts.append(
                 f"--- [index:{index.get('id')} file:{file_item.get('path')} chunk:{chunk.get('chunk')}] ---\n"
                 f"Chunk summary:\n{chunk.get('summary', '')}\n\n"
-                f"Excerpt:\n{excerpt}"
+                f"Excerpt:\n{excerpt}{signal_block}"
             )
             sources.append(
                 {
@@ -4669,6 +5225,7 @@ def format_status(conv: dict | None = None) -> str:
     maintenance = read_maintenance_state()
     study_state = read_study_state()
     study_jobs = read_study_jobs(limit=1)
+    index_jobs = active_index_progress()
     catalog = read_context_catalog()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
@@ -4702,6 +5259,7 @@ def format_status(conv: dict | None = None) -> str:
         f"maintenance: {maintenance.get('phase', maintenance.get('status', 'unknown')) if maintenance else 'idle'}",
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
         f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
+        f"active index jobs: {len(index_jobs)}",
         f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
@@ -4724,6 +5282,8 @@ def format_status(conv: dict | None = None) -> str:
                 f"auto-selected recent conversations: {len(selected_conversations)}",
             ]
         )
+    for job in index_jobs[:3]:
+        lines.append(f"index job: {format_index_progress_line(job)}")
     return "\n".join(lines)
 
 
@@ -5222,6 +5782,7 @@ class MotokoTui:
         self.overlay_scroll = 0
         self.cwd_index_offer: dict | None = None
         self.cwd_indexing = False
+        self.index_progress: dict | None = None
         self.messages = self.seed_messages(conv)
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
@@ -5767,6 +6328,7 @@ class MotokoTui:
         self.cwd_indexing = True
         self.study_status = "bg-heavy: indexing(model)"
         self.study_phase_started = time.monotonic()
+        self.index_progress = None
 
         def worker() -> None:
             try:
@@ -5774,6 +6336,7 @@ class MotokoTui:
                     str(plan["root"]),
                     plan["glob"],
                     plan["root"].name or str(plan["root"]),
+                    progress_callback=lambda progress: self.put_event(("cwd_index_progress", progress)),
                 )
                 attach_context_item(self.conv, context_item_from_index(index))
                 self.put_event(("cwd_index_done", index.get("id", "")))
@@ -6022,9 +6585,16 @@ class MotokoTui:
                 self.study_status = "study: idle"
                 self.study_last_note = f"study failed: {event[1]}"
                 changed = True
+            elif kind == "cwd_index_progress":
+                self.index_progress = event[1]
+                self.study_running = True
+                self.cwd_indexing = True
+                self.study_status = format_index_progress_status(self.index_progress)
+                changed = True
             elif kind == "cwd_index_done":
                 self.cwd_indexing = False
                 self.study_running = False
+                self.index_progress = None
                 index_id = event[1]
                 self.study_last_note = f"learned corpus index {index_id}"
                 self.study_status = "study: idle"
@@ -6036,6 +6606,7 @@ class MotokoTui:
             elif kind == "cwd_index_error":
                 self.cwd_indexing = False
                 self.study_running = False
+                self.index_progress = None
                 self.study_status = "study: idle"
                 self.study_last_note = f"corpus learning failed: {event[1]}"
                 self.append("error", f"corpus learning failed: {event[1]}")
@@ -6255,12 +6826,12 @@ class MotokoTui:
             elapsed = int(time.monotonic() - self.maintenance_phase_started)
             phase = self.maintenance_status or self.status
             label = "mem: proposing(model)" if phase == "memory: proposing" else f"mem: {phase}"
-            status_parts.append(style(f"{spinner} {label} {elapsed}s".rstrip(), "turquoise"))
+            status_parts.append(style(f"{spinner} {label} {human_duration(elapsed)}".rstrip(), "turquoise"))
         if self.pending_prompts:
             status_parts.append(style(f"queued:{len(self.pending_prompts)}", "yellow"))
         if self.study_running:
             elapsed = int(time.monotonic() - self.study_phase_started)
-            status_parts.append(style(f"{spinner} {self.study_status_label()} {elapsed}s".rstrip(), "turquoise"))
+            status_parts.append(style(f"{spinner} {self.study_status_label()} {human_duration(elapsed)}".rstrip(), "turquoise"))
         elif self.study_status == "study: off":
             status_parts.append(style("bg: off", "dim"))
         elif self.study_last_note:
@@ -6313,6 +6884,8 @@ class MotokoTui:
         self.dirty = False
 
     def study_status_label(self) -> str:
+        if self.index_progress:
+            return format_index_progress_status(self.index_progress)
         phase = self.study_status
         if phase.startswith("bg-heavy:"):
             return phase
@@ -7088,9 +7661,12 @@ def command_indexes(_args) -> None:
 
 def command_indexes_text() -> None:
     rows = list_indexes()
-    if not rows:
+    jobs = active_index_progress()
+    if not rows and not jobs:
         print("No document indexes yet.")
         return
+    for job in jobs:
+        print(f"job  {format_index_progress_line(job)}")
     for index in rows:
         files = len(index.get("files", []))
         chunks = sum(len(file_item.get("chunks", [])) for file_item in index.get("files", []))

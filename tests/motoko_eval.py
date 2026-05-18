@@ -182,7 +182,9 @@ def test_heavy_index_refresh_replaces_attached_index(m):
     old_build = m.build_document_index
     phases = []
     try:
-        m.build_document_index = lambda path, pattern, name=None, max_derived_bytes=None: new_index
+        m.build_document_index = (
+            lambda path, pattern, name=None, max_derived_bytes=None, progress_callback=None: new_index
+        )
         notes = m.refresh_heavy_attached_indexes(conv, phase_callback=phases.append)
     finally:
         m.build_document_index = old_build
