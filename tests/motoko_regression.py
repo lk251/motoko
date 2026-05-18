@@ -388,6 +388,25 @@ def test_permissions_config(m):
             os.environ["MOTOKO_PERMISSIONS"] = old_permissions
 
 
+def test_identity_config(m):
+    with isolated_state():
+        assert m.identity_name() == "Motoko"
+        assert m.identity_realm() == "personal"
+        config = m.load_config()
+        config["identity"] = {
+            "name": "Motoko",
+            "realm": "admin",
+            "description": "Admin review assistant.",
+        }
+        m.save_config(config)
+        assert m.identity_realm() == "admin"
+        assert "Admin review assistant" in m.format_identity()
+        conv = m.new_conversation("Identity")
+        prompt, sources = m.build_system_prompt_and_sources(conv, "")
+        assert "running in the admin realm" in prompt
+        assert any(source.get("kind") == "identity" for source in sources)
+
+
 def test_index_limits(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -444,6 +463,7 @@ def main() -> int:
         test_fake_openai_stream,
         test_index_plan,
         test_permissions_config,
+        test_identity_config,
         test_index_limits,
         test_repo_context_item,
     ]

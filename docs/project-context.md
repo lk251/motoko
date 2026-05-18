@@ -33,6 +33,8 @@ Current intended deployment:
 - HB3 installs Motoko for `personal`, `mares`, and `javier`.
 - Motoko state is per-user under `~/.local/state/motoko`; config is per-user
   under `~/.config/motoko`.
+- Motoko identity is per-user in `~/.config/motoko/config.json`; the repo name
+  and executable stay `motoko`.
 - `personal` has local-model access but no Hermes/provider-key group access.
 - `mares` is non-sudo and can use Motoko for work/repo review without inheriting
   Javier's personal Motoko state.
@@ -55,6 +57,7 @@ behavior:
 - no database server;
 - no pip/npm/runtime dependency installs;
 - explicit document allowlists;
+- structured per-user identity in `~/.config/motoko/config.json`;
 - per-user feature permissions in `~/.config/motoko/config.json`;
 - fixed read-only repo commands only in `repo-review` mode;
 - source documents are read-only;
@@ -81,6 +84,8 @@ Accepted directions:
 - topic dossiers and deeper dossiers over already indexed material;
 - per-user permission modes for chat-only, document reads/indexing, and
   read-only repo review;
+- per-user identity labels for `personal`, `mares`, and `javier` without
+  splitting the codebase or renaming the repository;
 - fixed repo status/diff/log/review commands that attach bounded summaries as
   context without arbitrary shell execution;
 - TTY-friendly terminal ergonomics;
