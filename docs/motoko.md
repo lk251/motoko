@@ -342,6 +342,7 @@ motoko resume CONVERSATION_ID
 motoko show
 motoko show CONVERSATION_ID
 motoko status
+motoko tasks "priority tasks tomorrow"
 motoko permissions
 ```
 

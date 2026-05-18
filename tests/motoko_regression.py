@@ -571,6 +571,11 @@ def test_org_task_signals_drive_retrieval(m):
             task_view = m.format_task_candidates_from_chat(conv, "priority tasks for 2026-05-19")
             assert "Task candidates for:" in task_view
             assert "Prepare tomorrow plan" in task_view
+            args = type("Args", (), {"index": [index["id"]], "query": ["priority", "tasks"]})()
+            buf = m.io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.command_tasks(args)
+            assert "Prepare tomorrow plan" in buf.getvalue()
         finally:
             m.quiet_model = old_quiet_model
 

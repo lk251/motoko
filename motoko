@@ -249,6 +249,7 @@ SHELL_COMMANDS = [
     "study",
     "memories",
     "memory",
+    "tasks",
     "forget",
     "personality",
     "profile",
@@ -2346,6 +2347,16 @@ def load_index(index_id: str | None = None) -> dict:
         label_func=index_label,
         selector=index_id,
     )
+
+
+def load_index_exact(index_id: str) -> dict:
+    if re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", index_id):
+        path = index_path(index_id)
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return load_index(index_id)
 
 
 def list_topics() -> list[dict]:
@@ -7889,6 +7900,14 @@ def command_indexes(_args) -> None:
     command_indexes_text()
 
 
+def command_tasks(args) -> None:
+    conv = {"title": "Task candidates", "messages": [], "context_items": []}
+    for index_id in args.index or []:
+        index = load_index_exact(index_id)
+        conv["context_items"].append(context_item_from_index(index))
+    print(format_task_candidates_from_chat(conv, " ".join(args.query)))
+
+
 def command_indexes_text() -> None:
     rows = list_indexes()
     jobs = active_index_progress()
@@ -8202,6 +8221,11 @@ def main(argv: list[str]) -> int:
 
     indexes = sub.add_parser("indexes", help="list document indexes")
     indexes.set_defaults(func=command_indexes)
+
+    tasks = sub.add_parser("tasks", help="show ranked Org task candidates from indexes")
+    tasks.add_argument("query", nargs="*")
+    tasks.add_argument("--index", action="append", help="restrict to a specific document index")
+    tasks.set_defaults(func=command_tasks)
 
     topic = sub.add_parser("topic", help="build a topic dossier from a document index")
     topic.add_argument("index")
