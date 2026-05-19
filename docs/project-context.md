@@ -178,6 +178,46 @@ study state, so Motoko can test streaming, maintenance, recall, profile, TUI,
 and study behavior without requiring Qwen, llama.cpp, or Javier's personal
 documents to be available to Codex.
 
+## Roadmap Candidates
+
+The following path looks attractive, but it is not mandatory and should remain
+subject to measurement: design a retrieval layer that combines lexical search,
+embedding recall, reranker precision, and deterministic extraction before
+adding extra model services to HB3.
+
+This could improve more than index construction. Embeddings, rerankers, and
+better token/accounting machinery could help artifact formation, memory recall,
+HRAG retrieval, topic dossiers, domain-specific intelligence, and local-model
+efficiency. The likely shape is:
+
+- keep lexical/BM25-style search for exact names, dates, IDs, paths, commands,
+  issue numbers, and rare terms;
+- add exact or model-aware token accounting for chunk budgets, truncation
+  checks, context-pressure estimates, and compression-ratio reporting, while
+  keeping structure-aware chunking primary;
+- consider embedding indexes for raw chunks, chunk summaries, file summaries,
+  labels, entity/project names, memories, dossiers, and conversation summaries,
+  keeping raw-source vectors separate from summary vectors;
+- consider reranker models after lexical and embedding recall produce candidate
+  chunks, so Motoko sends better-grounded, smaller prompts to the LLM;
+- expand deterministic extractors for emails, URLs, paths, dates, times,
+  amounts, Git hashes, issue IDs, Org metadata, and other syntax-shaped facts;
+- consider parser-backed artifacts for Org, Markdown, email, source code,
+  configs, package manifests, and PDFs only after the dependency tradeoff is
+  reviewed;
+- improve deduplication and boilerplate handling through hashing,
+  normalized-text comparison, simhash/minhash-style fingerprints, email
+  quote/signature stripping, and later embedding similarity if an embedding
+  store exists;
+- use lightweight classifiers or routing models only for uncertain cases after
+  deterministic file/path/content heuristics are exhausted.
+
+Before installing embedding or reranker services for production use, Motoko
+should specify the storage format, artifact provenance, versioning,
+invalidation, migration, eval fixtures, privacy/realm boundaries, and NixOS
+deployment shape. The point is to make the retrieval layer measurably smarter,
+not to accumulate infrastructure.
+
 ## Deferred NixOS-Facing Model Work
 
 Motoko now has repo-local support for named model routes and deterministic
@@ -188,45 +228,3 @@ whether llama.cpp prompt/KV reuse or prompt-prefix caching is available and
 worth enabling. Do not fake server-side KV caching inside Motoko; Motoko should
 record routes, provenance, quality gates, and private output-cache hits while
 NixOS owns model residency, ports, VRAM tradeoffs, and service options.
-
-## Possible Future Retrieval Components
-
-These are useful directions to consider after the current routed worker-model
-path is measured. They should not be added casually: each one needs a concrete
-storage format, provenance story, eval gate, privacy/realm boundary, and NixOS
-deployment plan before becoming part of Motoko's normal indexing path.
-
-- Exact or model-aware token accounting for chunk budgets, truncation checks,
-  context-pressure estimates, and compression-ratio reporting. Structure-aware
-  chunking should remain primary; tokenizers are accounting tools, not the
-  source of document intelligence.
-- Embedding indexes for raw chunks, chunk summaries, file summaries, labels,
-  entity/project names, memories, dossiers, and conversation summaries. Raw
-  source embeddings and summary embeddings should stay separate because
-  summaries lose rare details.
-- Reranker models for retrieval precision after BM25/lexical and embedding
-  recall have produced candidate chunks. Rerankers should reduce prompt bloat,
-  improve grounding, and make HRAG answers more efficient.
-- Better lexical retrieval, including BM25-style scoring and possibly SQLite
-  FTS if the dependency tradeoff is accepted. Exact search remains important
-  for file paths, dates, IDs, commands, names, issue numbers, and rare terms.
-- Deterministic extractors for emails, URLs, paths, dates, times, amounts, Git
-  hashes, issue IDs, Org metadata, and other syntax-shaped facts. Deterministic
-  extraction should beat LLM extraction whenever the syntax is explicit.
-- Parser-backed artifacts for structured formats such as Org, Markdown, email,
-  source code, configs, package manifests, and PDFs. External parser tools such
-  as tree-sitter or PDF/OCR utilities require separate review because Motoko is
-  currently stdlib-only.
-- Deduplication and boilerplate handling through hashing, normalized-text
-  comparison, simhash/minhash-style fingerprints, email quote/signature
-  stripping, and later embedding similarity if an embedding store exists.
-- Lightweight classifiers or routing models for uncertain cases only, after
-  deterministic file/path/content heuristics are exhausted.
-
-The main reason to defer these is not lack of value. Embeddings, rerankers, and
-better token/accounting machinery could improve artifact formation, memory
-recall, HRAG retrieval, domain-specific intelligence, and local-model
-efficiency. The reason to defer is that they create durable derived state and
-new quality risks. Motoko should first specify how vector artifacts are stored,
-versioned, invalidated, migrated, evaluated, and kept realm-local before HB3
-installs embedding or reranking services for production use.

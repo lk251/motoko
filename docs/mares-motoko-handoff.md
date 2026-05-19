@@ -459,11 +459,6 @@ Current high-value future work:
   user-visible reports;
 - improve document-derived dossier quality after real documents are added by
   `personal`, without Codex reading those documents directly;
-- design possible future retrieval components before adding them: token
-  accounting, embedding stores, rerankers, richer lexical retrieval,
-  deterministic extractors, parser-backed artifacts, deduplication, and
-  lightweight classifiers all need explicit storage, provenance, eval,
-  migration, and realm-separation plans;
 - add better memory review/edit/delete workflows when daily use shows the exact
   friction;
 - keep background study inspectable and bounded;
