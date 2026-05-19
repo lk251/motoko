@@ -4,6 +4,11 @@ Motoko is Javier's small terminal personal assistant for the HB3 `personal`
 realm. It talks to a local llama.cpp OpenAI-compatible endpoint and is designed
 to stay simple, inspectable, and dependency-light.
 
+## Guiding Values
+
+1. Always try to choose the next steps that will increase her intelligence and competence
+2. Bring the high craftsmanship approach of a Swiss watchmaker to making Motoko, whomever is using her has to feel that she was made with much care, attention to detail, thoughtfulness and love, to work as well as possible and be crafted as well as possible.
+
 ## Working Rules
 
 - Keep Motoko dependency-free unless Javier explicitly approves a new runtime
