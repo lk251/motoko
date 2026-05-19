@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import socketserver
 import tempfile
 import threading
 import time
@@ -334,6 +335,10 @@ class FakeHandler(BaseHTTPRequestHandler):
         return
 
 
+class UnixHTTPServer(socketserver.UnixStreamServer):
+    allow_reuse_address = True
+
+
 def test_fake_openai_stream(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     FakeHandler.payloads = []
@@ -416,6 +421,63 @@ def test_model_route_config_and_summary_cache(m):
             os.environ.pop("MOTOKO_MODEL_CACHE", None)
         else:
             os.environ["MOTOKO_MODEL_CACHE"] = old_cache
+
+
+def test_local_model_catalog_unix_socket_route(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    FakeHandler.payloads = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            socket_path = tmp / "chat.sock"
+            server = UnixHTTPServer(str(socket_path), FakeHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "chat": {
+                        "endpoint": f"unix://{socket_path}",
+                        "model": "qwen-test-chat",
+                        "download_url": "https://example.invalid/model.gguf",
+                        "sha256": "sha256-test",
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            assert m.endpoint() == f"unix://{socket_path}"
+            assert m.model_name() == "qwen-test-chat"
+            assert m.model_route_badge() == "qwen:chat"
+            text = m.call_model_with_callback(
+                [{"role": "user", "content": "hello"}],
+                on_token=lambda _token: None,
+                timeout=2,
+            )
+            assert text == "hello"
+            assert FakeHandler.payloads[-1]["model"] == "qwen-test-chat"
+            routes = m.format_model_routes(include_defaults=True)
+            assert "manager=systemd-socket-worker" in routes
+            assert f"endpoint=unix://{socket_path}" in routes
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
 
 
 def test_index_plan(m):
@@ -1024,6 +1086,7 @@ def main() -> int:
         test_help_overlay_closes,
         test_fake_openai_stream,
         test_model_route_config_and_summary_cache,
+        test_local_model_catalog_unix_socket_route,
         test_index_plan,
         test_nix_managed_allowdirs_message,
         test_cwd_learning_plan_and_existing_index,

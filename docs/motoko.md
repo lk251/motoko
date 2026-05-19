@@ -594,10 +594,18 @@ Motoko separates background work into three lanes:
 - `large-model`: chat answers, corpus synthesis, dossiers, memory/profile
   reflection, audits, and hard ambiguous reasoning.
 
-The lanes are implemented through named model routes. All routes default to the
-normal chat endpoint until config or environment variables override them, so
-the feature is safe before smaller worker models are deployed. Inspect routes
-with `/model-routes` or:
+The lanes are implemented through named model routes. On HB3, NixOS declares
+the approved local model catalog in `~/.config/motoko/local-models.json`; routes
+normally point at `unix:///run/motoko-llm/<realm>/<route>.sock` and are served
+by per-realm worker users such as `mares-llm` or `personal-llm`. Motoko talks to
+those OpenAI-compatible Unix sockets, but does not call `systemctl` or run
+llama.cpp as the current user. Use `motoko-model list/info/verify/start/stop/status`
+for model-service operations.
+
+All routes still fall back to the normal chat endpoint until config,
+environment variables, or the NixOS local-model catalog override them, so the
+feature is safe before smaller worker models are deployed. Inspect routes with
+`/model-routes` or:
 
 ```bash
 motoko model-routes
@@ -631,6 +639,13 @@ Route overrides can live in `~/.config/motoko/config.json`:
 Equivalent one-off environment overrides use
 `MOTOKO_ROUTE_<ROUTE>_ENDPOINT` and `MOTOKO_ROUTE_<ROUTE>_MODEL`, for example
 `MOTOKO_ROUTE_INDEX_CHUNK_MODEL=small-summary-worker`.
+
+First requests to a Unix socket may socket-activate a model worker and block
+while weights load into VRAM. Motoko uses generous Unix-socket request timeouts
+and reports the active route/lane in visible background status. If a declared
+model file is missing, run `motoko-model verify <route>`; Motoko also includes
+catalog download URL/hash details in socket connection diagnostics when they
+are available.
 
 Before trusting newly installed worker models, run:
 
@@ -900,7 +915,15 @@ ssh hb3-personal
 motoko
 ```
 
-The default endpoint is the MTP Qwen3.6 service:
+On HB3, the default model endpoint comes from
+`~/.config/motoko/local-models.json` when NixOS provides that catalog. It is
+normally a per-realm Unix socket such as:
+
+```text
+unix:///run/motoko-llm/mares/chat.sock
+```
+
+Older or ad-hoc environments can still use the loopback MTP Qwen3.6 service:
 
 ```text
 http://127.0.0.1:8083/v1/chat/completions

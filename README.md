@@ -36,7 +36,8 @@ Design constraints:
   state.
 - TTY-safe ASCII spinner by default, with braille as explicit opt-in.
 - TUI model badge showing the active local model/endpoint, such as
-  `qwen3.6-27b-mtp:8083`.
+  `qwen3.6-27b-mtp:chat` for a per-realm Unix socket or
+  `qwen3.6-27b-mtp:8083` for an older loopback endpoint.
 - Automatic ranked memory selection and quiet after-answer memory maintenance,
   with visible phases, resumable state, and `/sources` provenance.
 - Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers
@@ -54,7 +55,7 @@ Design constraints:
   performs bounded CPU-only upgrades when it is safe to do so.
 - Background model work is routed by named worker role, so chunk/file summaries,
   labels/classification, corpus synthesis, memory/profile work, titles, audits,
-  and chat can use different local endpoints once deployment provides them.
+  and chat can use different NixOS-declared local endpoints.
 - Model-derived artifacts record provenance, schema, route, model, prompt
   version, source fingerprint, and quality status; deterministic summary routes
   use a private output cache for repeatable background work.

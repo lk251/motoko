@@ -40,10 +40,17 @@ Current intended deployment:
   Javier's personal Motoko state.
 - `javier` can use Motoko for admin-side NixOS review with deliberately smaller
   source-index limits.
-- `.#hb3-headless` starts the default Qwen3.6 local model service so `personal`
-  can use Motoko without first entering an admin account.
-- Motoko's default endpoint is the local MTP llama.cpp endpoint:
-  `http://127.0.0.1:8083/v1/chat/completions`.
+- NixOS exposes approved local model routes through
+  `~/.config/motoko/local-models.json`.
+- The HB3 local model manager kind is `systemd-socket-worker`: Motoko consumes
+  per-realm Unix sockets such as `unix:///run/motoko-llm/<realm>/<route>.sock`,
+  while llama.cpp runs as realm-specific worker users such as `mares-llm` or
+  `personal-llm`.
+- Motoko may use `motoko-model list/info/verify/start/stop/status` for
+  user-visible model service operations, but must not call `systemctl`
+  directly or assume the current user owns llama.cpp.
+- Older or ad-hoc environments can still use the loopback MTP llama.cpp
+  endpoint, `http://127.0.0.1:8083/v1/chat/completions`.
 
 Repository conventions:
 
@@ -181,6 +188,10 @@ Current UI direction:
 
 ## Near-Term Next Improvement
 
+Immediate next step:
+
+Bird’s-eye next step: after this indexing job finishes and you rebuild into the newer Motoko, the highest-value work is to make sure indexed corpus knowledge is actually used reliably in chat. The concrete next target should be retrieval-grounded answering and evaluation: when you ask “what are tomorrow’s highest-priority tasks?”, Motoko should retrieve the relevant Org/task artifacts, show enough source provenance to be trusted, and synthesize a useful answer. That best serves both values: it directly increases her intelligence/competence, and it is the kind of careful, end-to-end behavior that makes her feel thoughtfully crafted rather than merely full of background machinery.
+
 The highest-ROI next engineering improvement is improving the quality of
 profile dossiers and document-derived dossiers after real personal documents
 are added inside the `personal` realm. Codex should not need access to those
@@ -232,13 +243,12 @@ invalidation, migration, eval fixtures, privacy/realm boundaries, and NixOS
 deployment shape. The point is to make the retrieval layer measurably smarter,
 not to accumulate infrastructure.
 
-## Deferred NixOS-Facing Model Work
+## NixOS-Facing Model Boundary
 
-Motoko now has repo-local support for named model routes and deterministic
-model-output caching. The next deployment-side work belongs in
-`/home/javier/repos/nixos-configs`: choose and package local worker models,
-decide whether they should stay resident beside the main chat model, and test
-whether llama.cpp prompt/KV reuse or prompt-prefix caching is available and
-worth enabling. Do not fake server-side KV caching inside Motoko; Motoko should
-record routes, provenance, quality gates, and private output-cache hits while
-NixOS owns model residency, ports, VRAM tradeoffs, and service options.
+Motoko has repo-local support for named model routes and deterministic
+model-output caching. NixOS owns approved model files, worker users, sockets,
+VRAM residency, service hardening, and llama.cpp flags. Motoko owns route
+selection, provenance, quality gates, private output-cache hits, and graceful
+user-visible handling of queued/loading/missing-model states. Do not fake
+server-side KV caching inside Motoko; prompt-prefix/KV reuse belongs in the
+deployed local model service if measurement shows it is worthwhile.

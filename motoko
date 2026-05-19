@@ -14,6 +14,7 @@ import contextlib
 import datetime as _dt
 import fnmatch
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -22,6 +23,7 @@ import re
 import select
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import termios
@@ -31,6 +33,7 @@ import time
 import tty
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -44,6 +47,9 @@ APP = "motoko"
 APP_VERSION = "0.1.0"
 DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
+LOCAL_MODELS_CONFIG = "local-models.json"
+LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
+SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
 MODEL_ROUTE_CHAT = "chat"
 MODEL_ROUTE_INDEX_CHUNK = "index_chunk"
 MODEL_ROUTE_INDEX_FILE = "index_file"
@@ -1184,6 +1190,21 @@ def config_path() -> pathlib.Path:
     return root / "config.json"
 
 
+def local_models_path() -> pathlib.Path:
+    return config_root() / LOCAL_MODELS_CONFIG
+
+
+def load_local_model_catalog() -> dict:
+    path = local_models_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def default_config() -> dict:
     return {
         "identity": {
@@ -1574,12 +1595,87 @@ def model_route_env_key(route: str, key: str) -> str:
     return f"MOTOKO_ROUTE_{token}_{key.upper()}"
 
 
+def endpoint_is_unix(endpoint_text: str) -> bool:
+    return str(endpoint_text).startswith("unix://")
+
+
+def local_model_catalog_routes(catalog: dict | None = None) -> dict:
+    catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
+    for key in ("routes", "model_routes"):
+        routes = catalog.get(key)
+        if isinstance(routes, dict):
+            return routes
+    return {}
+
+
+def local_model_catalog_models(catalog: dict | None = None) -> dict:
+    catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
+    models = catalog.get("models")
+    return models if isinstance(models, dict) else {}
+
+
+def merged_local_model_route(route: str) -> dict:
+    route = normalize_model_route(route)
+    catalog = load_local_model_catalog()
+    routes = local_model_catalog_routes(catalog)
+    raw = routes.get(route) or routes.get(route.replace("_", "-")) or routes.get(route.replace("_", "."))
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        raw = {"endpoint": raw}
+    if not isinstance(raw, dict):
+        return {}
+    info = {key: value for key, value in raw.items() if isinstance(key, str)}
+    model_ref = info.get("model_id") or info.get("model") or info.get("model_name")
+    model_record = {}
+    if isinstance(model_ref, str):
+        candidate = local_model_catalog_models(catalog).get(model_ref)
+        if isinstance(candidate, dict):
+            model_record = candidate
+    for key in ("download_url", "url", "sha256", "hash", "model_path"):
+        if key not in info and isinstance(model_record.get(key), str):
+            info[key] = model_record[key]
+    if "model" not in info:
+        for key in ("model_name", "id", "name"):
+            value = raw.get(key) or model_record.get(key)
+            if isinstance(value, str) and value.strip():
+                info["model"] = value.strip()
+                break
+    if "endpoint" not in info:
+        manager = catalog.get("manager") if isinstance(catalog.get("manager"), dict) else {}
+        realm = catalog.get("realm") or manager.get("realm") or load_config().get("identity", {}).get("realm")
+        if manager.get("kind") == "systemd-socket-worker" and isinstance(realm, str) and realm.strip():
+            info["endpoint"] = f"unix:///run/motoko-llm/{realm.strip()}/{route}.sock"
+    if "request_path" not in info:
+        for key in ("path", "http_path", "openai_path"):
+            value = raw.get(key)
+            if isinstance(value, str) and value.startswith("/"):
+                info["request_path"] = value
+                break
+    manager = catalog.get("manager")
+    if isinstance(manager, dict) and isinstance(manager.get("kind"), str):
+        info["manager_kind"] = manager["kind"]
+    return info
+
+
 def endpoint() -> str:
-    return os.environ.get("MOTOKO_ENDPOINT", DEFAULT_ENDPOINT)
+    env_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    if env_endpoint:
+        return env_endpoint
+    local_route = merged_local_model_route(MODEL_ROUTE_CHAT)
+    if isinstance(local_route.get("endpoint"), str) and local_route["endpoint"].strip():
+        return local_route["endpoint"].strip()
+    return DEFAULT_ENDPOINT
 
 
 def model_name() -> str:
-    return os.environ.get("MOTOKO_MODEL", DEFAULT_MODEL)
+    env_model = os.environ.get("MOTOKO_MODEL")
+    if env_model:
+        return env_model
+    local_route = merged_local_model_route(MODEL_ROUTE_CHAT)
+    if isinstance(local_route.get("model"), str) and local_route["model"].strip():
+        return local_route["model"].strip()
+    return DEFAULT_MODEL
 
 
 def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
@@ -1591,35 +1687,33 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         candidate = config_root() / "config.json"
         if candidate.exists():
             configured = load_config().get("model_routes", {}).get(route, {})
-    route_endpoint = env_endpoint or configured.get("endpoint") or endpoint()
-    route_model = env_model or configured.get("model") or model_name()
+    local_route = merged_local_model_route(route)
+    route_endpoint = env_endpoint or configured.get("endpoint") or local_route.get("endpoint") or endpoint()
+    route_model = env_model or configured.get("model") or local_route.get("model") or model_name()
+    request_path = local_route.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH
     return {
         "route": route,
         "endpoint": str(route_endpoint),
         "model": str(route_model),
+        "request_path": str(request_path),
+        "manager_kind": str(local_route.get("manager_kind") or ""),
+        "download_url": str(local_route.get("download_url") or local_route.get("url") or ""),
+        "download_hash": str(local_route.get("sha256") or local_route.get("hash") or ""),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
     }
 
 
 def model_badge() -> str:
-    raw = model_name()
-    lower = raw.lower()
-    pieces = []
-    if "qwen" in lower:
-        match = re.search(r"qwen[0-9.]*", lower)
-        pieces.append(match.group(0) if match else "qwen")
-    if "27b" in lower:
-        pieces.append("27b")
-    if "mtp" in lower:
-        pieces.append("mtp")
-    if not pieces:
-        pieces.append(raw[:28])
-    endpoint_text = endpoint()
-    port = ""
+    return model_route_badge(MODEL_ROUTE_CHAT)
+
+
+def model_endpoint_suffix(endpoint_text: str) -> str:
+    if endpoint_is_unix(endpoint_text):
+        parsed = urllib.parse.urlparse(endpoint_text)
+        socket_name = pathlib.PurePosixPath(urllib.parse.unquote(parsed.path)).stem
+        return f":{socket_name}" if socket_name else ":sock"
     match = re.search(r":(\d+)(?:/|$)", endpoint_text)
-    if match:
-        port = f":{match.group(1)}"
-    return "-".join(pieces) + port
+    return f":{match.group(1)}" if match else ""
 
 
 def model_route_badge(route: str = MODEL_ROUTE_CHAT) -> str:
@@ -1638,11 +1732,7 @@ def model_route_badge(route: str = MODEL_ROUTE_CHAT) -> str:
         pieces.append("mtp")
     if not pieces:
         pieces.append(raw[:28])
-    port = ""
-    match = re.search(r":(\d+)(?:/|$)", info["endpoint"])
-    if match:
-        port = f":{match.group(1)}"
-    return "-".join(pieces) + port
+    return "-".join(pieces) + model_endpoint_suffix(info["endpoint"])
 
 
 def configured_model_routes() -> list[str]:
@@ -1650,6 +1740,10 @@ def configured_model_routes() -> list[str]:
     candidate = config_root() / "config.json"
     configured = load_config().get("model_routes", {}) if candidate.exists() else {}
     for route in configured:
+        if route in MODEL_ROUTE_DESCRIPTIONS and route not in routes:
+            routes.append(route)
+    for raw_route in local_model_catalog_routes():
+        route = normalize_model_route(raw_route, strict=False)
         if route in MODEL_ROUTE_DESCRIPTIONS and route not in routes:
             routes.append(route)
     return routes
@@ -1665,9 +1759,10 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
         if not include_defaults and is_default and route != MODEL_ROUTE_CHAT:
             continue
         marker = "default" if is_default else "configured"
+        manager = f"; manager={info['manager_kind']}" if info.get("manager_kind") else ""
         lines.append(
             f"  {route}: {info['model']} endpoint={info['endpoint']} "
-            f"({marker}; lane={model_route_lane(route)}; {info['description']})"
+            f"({marker}; lane={model_route_lane(route)}{manager}; {info['description']})"
         )
     return "\n".join(lines)
 
@@ -7035,6 +7130,96 @@ def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]
     return messages, sources
 
 
+class UnixSocketHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, *, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        sock.connect(self.socket_path)
+        self.sock = sock
+
+
+def model_request_timeout(route_info: dict, timeout: float) -> float:
+    if endpoint_is_unix(route_info.get("endpoint", "")):
+        return max(float(timeout), SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS)
+    return timeout
+
+
+def local_model_verify_hint(route_info: dict) -> str:
+    endpoint_text = str(route_info.get("endpoint", ""))
+    if not endpoint_is_unix(endpoint_text):
+        return ""
+    lines = []
+    helper = shutil.which("motoko-model")
+    if helper:
+        try:
+            result = subprocess.run(
+                [helper, "verify", str(route_info.get("route", MODEL_ROUTE_CHAT))],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            lines.append(f"motoko-model verify could not run: {exc}")
+        else:
+            if result.returncode != 0:
+                detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+                lines.append(f"motoko-model verify failed for route {route_info.get('route')}: {detail[:1200] or 'no diagnostic'}")
+    else:
+        lines.append("motoko-model helper is not on PATH")
+    if route_info.get("download_url"):
+        lines.append(f"download: {route_info['download_url']}")
+    if route_info.get("download_hash"):
+        lines.append(f"hash: {route_info['download_hash']}")
+    return "\n".join(lines)
+
+
+@contextlib.contextmanager
+def open_model_response(route_info: dict, payload: dict, *, timeout: float):
+    endpoint_text = str(route_info["endpoint"])
+    request_timeout = model_request_timeout(route_info, timeout)
+    data = json.dumps(payload).encode("utf-8")
+    if endpoint_is_unix(endpoint_text):
+        parsed = urllib.parse.urlparse(endpoint_text)
+        socket_path = urllib.parse.unquote(parsed.path)
+        if not socket_path:
+            raise SystemExit(f"model request failed: empty Unix socket endpoint for route {route_info['route']}")
+        request_path = str(route_info.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH)
+        conn = UnixSocketHTTPConnection(socket_path, timeout=request_timeout)
+        try:
+            conn.request(
+                "POST",
+                request_path,
+                body=data,
+                headers={"Content-Type": "application/json", "Host": "localhost"},
+            )
+            resp = conn.getresponse()
+            if resp.status >= 400:
+                body = resp.read(1200).decode("utf-8", errors="replace")
+                raise OSError(f"model endpoint returned HTTP {resp.status}: {body}")
+            try:
+                yield resp
+            finally:
+                resp.close()
+        finally:
+            conn.close()
+        return
+
+    req = urllib.request.Request(
+        endpoint_text,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+        yield resp
+
+
 def call_model(
     messages: list[dict],
     *,
@@ -7051,23 +7236,20 @@ def call_model(
         "temperature": temperature,
         "stream": stream,
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        route_info["endpoint"],
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     spinner = ThinkingSpinner(enabled=echo)
     try:
         spinner.start()
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_model_response(route_info, payload, timeout=timeout) as resp:
             if stream:
                 return read_streaming_response(resp, echo=echo, spinner=spinner)
             spinner.stop()
             return read_json_response(resp)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise SystemExit(f"model request failed: {exc}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        hint = local_model_verify_hint(route_info)
+        detail = f"model request failed: {exc}"
+        if hint:
+            detail += "\n" + hint
+        raise SystemExit(detail) from exc
     finally:
         spinner.stop()
 
@@ -7176,16 +7358,9 @@ def call_model_with_callback(
         "temperature": temperature,
         "stream": True,
     }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        route_info["endpoint"],
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     collected = []
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with open_model_response(route_info, payload, timeout=timeout) as resp:
             for raw in resp:
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
@@ -7205,8 +7380,12 @@ def call_model_with_callback(
                 if content:
                     collected.append(content)
                     on_token(content)
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise SystemExit(f"model request failed: {exc}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        hint = local_model_verify_hint(route_info)
+        detail = f"model request failed: {exc}"
+        if hint:
+            detail += "\n" + hint
+        raise SystemExit(detail) from exc
     return "".join(collected)
 
 
@@ -8904,7 +9083,11 @@ class MotokoTui:
         if explicit_saved:
             self.append("system", f"memory saved from this prompt ({explicit_saved})")
         self.answer_entry = self.append("assistant", "")
-        self.status = "Motoko is thinking; you can type the next prompt below"
+        chat_route = model_route(MODEL_ROUTE_CHAT)
+        if endpoint_is_unix(chat_route.get("endpoint", "")):
+            self.status = f"model queued/loading on {chat_route['route']} socket; you can type the next prompt below"
+        else:
+            self.status = "Motoko is thinking; you can type the next prompt below"
         self.generating = True
         self.cancel_event = threading.Event()
         messages, sources = build_messages(self.conv, user_text)
