@@ -13,6 +13,9 @@ to stay simple, inspectable, and dependency-light.
   reviewed design change.
 - Treat personal-memory and document-index behavior as security-sensitive:
   preserve explicit allowlists, provenance, and source visibility.
+- When changing index, memory, dossier, cache, or other derived-artifact
+  schemas, include an inspectable upgrade/migration path for old artifacts, or
+  explicitly document why source reprocessing is required.
 - Prefer small, testable improvements that make the assistant more trustworthy
   before making it more agentic.
 - Do not store secrets in this repository.
