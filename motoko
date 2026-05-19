@@ -800,6 +800,31 @@ def estimate_corpus_summary_calls(total_files: int) -> int:
     return max(1, (approx_summary_chars + SUMMARY_INPUT_CHARS - 1) // SUMMARY_INPUT_CHARS)
 
 
+def estimate_summary_block_calls(blocks: list[str], max_chars: int = SUMMARY_INPUT_CHARS) -> int:
+    pending = [block.strip() for block in blocks if block.strip()]
+    if not pending:
+        return 1
+    calls = 0
+    round_no = 1
+    while True:
+        combined = "\n\n".join(pending)
+        if len(combined) <= max_chars or len(pending) == 1 or round_no > 8:
+            return calls + 1
+        batches = chunk_blocks_by_chars(pending, max_chars)
+        calls += len(batches)
+        # Model reduction output length is not known yet. Use a conservative
+        # summary-size proxy so the plan can adapt before the extra calls start.
+        pending = ["x" * 900 for _batch in batches]
+        round_no += 1
+
+
+def estimate_summary_calls_for_block_count(block_count: int, approx_block_chars: int = 700) -> int:
+    count = max(0, int(block_count or 0))
+    if count <= 0:
+        return 1
+    return estimate_summary_block_calls(["x" * max(1, approx_block_chars) for _idx in range(count)])
+
+
 def write_index_progress(progress: dict) -> None:
     index_id = str(progress.get("id", "")).strip()
     if not index_id:
@@ -929,13 +954,60 @@ def update_index_progress_estimates(progress: dict) -> None:
         progress["elapsed_seconds"] = int(time.monotonic() - started)
     done = int(progress.get("completed_model_calls", 0) or 0)
     total = int(progress.get("estimated_model_calls", 0) or 0)
-    remaining = max(0, total - done)
-    if started is not None and done > 0 and remaining > 0:
-        rate = progress["elapsed_seconds"] / done
-        progress["eta_seconds"] = int(rate * remaining)
+    current_started = progress.get("_current_model_started_monotonic")
+    current_elapsed = 0
+    if current_started is not None:
+        current_elapsed = max(0, int(time.monotonic() - current_started))
+        progress["current_model_elapsed_seconds"] = current_elapsed
+    else:
+        progress.pop("current_model_elapsed_seconds", None)
+    in_flight = 1 if current_started is not None else 0
+    remaining_after_current = max(0, total - done - in_flight)
+    completed_seconds = float(progress.get("completed_model_seconds", 0.0) or 0.0)
+    if completed_seconds > 0 and done > 0:
+        avg_call_seconds = completed_seconds / done
+        progress["eta_basis"] = "completed model-call timing"
+    elif started is not None and done > 0:
+        avg_call_seconds = max(1.0, float(progress.get("elapsed_seconds", 0) or 0) / done)
+        progress["eta_basis"] = "elapsed per completed model call"
+    else:
+        avg_call_seconds = 0.0
+        progress["eta_basis"] = "waiting for completed model calls"
+    if avg_call_seconds > 0 and (remaining_after_current > 0 or in_flight):
+        current_remaining = 0.0
+        if in_flight:
+            # The active request may be a long file/corpus reduction. Once it
+            # exceeds the current average, keep a small reserve instead of
+            # pretending the call is certainly about to finish.
+            current_remaining = max(avg_call_seconds * 0.25, avg_call_seconds - current_elapsed)
+        progress["eta_seconds"] = int(current_remaining + avg_call_seconds * remaining_after_current)
+        progress["average_model_call_seconds"] = round(avg_call_seconds, 2)
     else:
         progress["eta_seconds"] = None
+        progress.pop("average_model_call_seconds", None)
     progress["percent"] = index_progress_percent(progress)
+
+
+def index_progress_reserve_model_calls(
+    progress: dict | None,
+    key: str,
+    expected_calls: int,
+    *,
+    preplanned_calls: int = 1,
+    callback=None,
+) -> None:
+    if progress is None:
+        return
+    expected_calls = max(1, int(expected_calls or 1))
+    preplanned_calls = max(0, int(preplanned_calls or 0))
+    reserve_key = f"{key}:{preplanned_calls}"
+    reserves = progress.setdefault("_model_call_reserves", {})
+    previous = int(reserves.get(reserve_key, preplanned_calls) or preplanned_calls)
+    if expected_calls <= previous:
+        return
+    progress["estimated_model_calls"] = int(progress.get("estimated_model_calls", 0) or 0) + (expected_calls - previous)
+    reserves[reserve_key] = expected_calls
+    emit_index_progress(progress, callback)
 
 
 def emit_index_progress(progress: dict, callback=None) -> None:
@@ -956,6 +1028,10 @@ def begin_index_progress(
 ) -> dict:
     chunk_estimates = {str(path): estimate_file_chunks(path) for path in candidates}
     estimated_chunks = sum(chunk_estimates.values())
+    file_summary_estimates = {
+        path: estimate_summary_calls_for_block_count(chunks)
+        for path, chunks in chunk_estimates.items()
+    }
     progress = {
         "id": index_id,
         "kind": "index",
@@ -977,11 +1053,13 @@ def begin_index_progress(
         "estimated_chunks": estimated_chunks,
         "completed_chunks": 0,
         "current_chunk": 0,
-        "estimated_model_calls": estimated_chunks + len(candidates) + estimate_corpus_summary_calls(len(candidates)),
+        "estimated_file_summary_calls": sum(file_summary_estimates.values()),
+        "estimated_model_calls": estimated_chunks + sum(file_summary_estimates.values()) + estimate_corpus_summary_calls(len(candidates)),
         "completed_model_calls": 0,
         "last_model_label": "",
         "_started_monotonic": time.monotonic(),
         "_chunk_estimates": chunk_estimates,
+        "_file_summary_estimates": file_summary_estimates,
     }
     emit_index_progress(progress, callback)
     return progress
@@ -1013,12 +1091,27 @@ def index_progress_begin_model(
     progress["last_model_label"] = label
     progress["model_route"] = route
     progress["background_lane"] = model_route_lane(route)
+    progress["current_model_started"] = now()
+    progress["_current_model_started_monotonic"] = time.monotonic()
+    progress["started_model_calls"] = int(progress.get("started_model_calls", 0) or 0) + 1
     emit_index_progress(progress, callback)
 
 
 def index_progress_finish_model(progress: dict | None, callback=None, *, chunk_done: bool = False) -> None:
     if progress is None:
         return
+    phase = str(progress.get("phase") or "model")
+    started = progress.pop("_current_model_started_monotonic", None)
+    if started is not None:
+        duration = max(0.0, time.monotonic() - float(started))
+        progress["last_model_call_seconds"] = round(duration, 2)
+        progress["completed_model_seconds"] = round(float(progress.get("completed_model_seconds", 0.0) or 0.0) + duration, 2)
+        phase_stats = progress.setdefault("model_call_phase_stats", {})
+        item = phase_stats.setdefault(phase, {"calls": 0, "seconds": 0.0})
+        item["calls"] = int(item.get("calls", 0) or 0) + 1
+        item["seconds"] = round(float(item.get("seconds", 0.0) or 0.0) + duration, 2)
+    progress.pop("current_model_started", None)
+    progress.pop("current_model_elapsed_seconds", None)
     progress["completed_model_calls"] = int(progress.get("completed_model_calls", 0) or 0) + 1
     if chunk_done:
         progress["completed_chunks"] = int(progress.get("completed_chunks", 0) or 0) + 1
@@ -1067,10 +1160,12 @@ def format_index_progress_status(progress: dict) -> str:
     pct = f"{percent}%" if percent is not None else ""
     eta = progress.get("eta_seconds")
     eta_text = f"eta {human_duration(eta)}" if eta is not None else "eta ?"
+    current_call = progress.get("current_model_elapsed_seconds")
+    call_text = f"call {human_duration(current_call)}" if current_call is not None else ""
     lane = progress.get("background_lane", "")
     route = progress.get("model_route", "")
     worker = f"lane {lane}/{route}" if lane and route else ""
-    parts = ["bg-heavy:", phase, worker, files, chunks, pct, eta_text]
+    parts = ["bg-heavy:", phase, worker, files, chunks, pct, eta_text, call_text]
     return " ".join(part for part in parts if part)
 
 
@@ -3115,6 +3210,7 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
     candidates = apply_index_limits(iter_index_candidates(root, pattern))
     total_bytes = 0
     estimated_chunks = 0
+    estimated_file_summary_calls = 0
     largest: list[tuple[int, pathlib.Path]] = []
     for candidate in candidates:
         try:
@@ -3122,16 +3218,19 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
         except OSError:
             continue
         total_bytes += size
-        estimated_chunks += estimate_file_chunks(candidate)
+        file_chunks = estimate_file_chunks(candidate)
+        estimated_chunks += file_chunks
+        estimated_file_summary_calls += estimate_summary_calls_for_block_count(file_chunks)
         largest.append((size, candidate))
     largest.sort(reverse=True)
-    estimated_model_calls = estimated_chunks + len(candidates) + estimate_corpus_summary_calls(len(candidates))
+    estimated_model_calls = estimated_chunks + estimated_file_summary_calls + estimate_corpus_summary_calls(len(candidates))
     return {
         "root": str(root),
         "glob": pattern or AUTO_INDEX_GLOB,
         "files": len(candidates),
         "bytes": total_bytes,
         "estimated_chunks": estimated_chunks,
+        "estimated_file_summary_calls": estimated_file_summary_calls,
         "estimated_model_calls": estimated_model_calls,
         "largest": largest[:5],
     }
@@ -3144,6 +3243,7 @@ def print_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> None:
     print(f"candidate files: {plan['files']}")
     print(f"source bytes: {human_bytes(plan['bytes'])}")
     print(f"estimated chunks: {plan['estimated_chunks']}")
+    print(f"estimated file-summary model calls: {plan['estimated_file_summary_calls']}")
     print(f"estimated HRAG model calls: {plan['estimated_model_calls']}")
     if plan["largest"]:
         print("largest files:")
@@ -4912,8 +5012,17 @@ def summarize_blocks(
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
     prompt_version: str = "summary-v1",
+    preplanned_calls: int = 1,
 ) -> str:
     pending = [block.strip() for block in blocks if block.strip()]
+    estimated_calls = estimate_summary_block_calls(pending)
+    index_progress_reserve_model_calls(
+        progress,
+        f"{phase}:{label}",
+        estimated_calls,
+        preplanned_calls=preplanned_calls,
+        callback=progress_callback,
+    )
     if not pending:
         index_progress_begin_model(progress, phase, label, progress_callback, route=route)
         result = summarize_text(
@@ -4997,6 +5106,7 @@ def index_file(
         timeout=model_timeout,
         route=MODEL_ROUTE_INDEX_FILE,
         prompt_version=FILE_SUMMARY_SCHEMA_VERSION,
+        preplanned_calls=(progress or {}).get("_file_summary_estimates", {}).get(str(path), 1),
     )
     index_progress_finish_file(progress, progress_callback)
     item = {
@@ -5223,6 +5333,7 @@ def build_document_index(
             timeout=INDEX_MODEL_TIMEOUT_SECONDS,
             route=MODEL_ROUTE_INDEX_CORPUS,
             prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
+            preplanned_calls=estimate_corpus_summary_calls(len(files)),
         )
         index = document_index_record(
             index_id=index_id,
@@ -5301,9 +5412,13 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
     }
     progress = begin_index_progress(index_id, root, pattern, name, candidates, progress_callback)
     completed_chunks = sum(len(item.get("chunks", [])) for item in files)
+    completed_file_summary_calls = sum(
+        estimate_summary_calls_for_block_count(len(item.get("chunks", [])))
+        for item in files
+    )
     progress["completed_files"] = len(files)
     progress["completed_chunks"] = completed_chunks
-    progress["completed_model_calls"] = completed_chunks + len(files)
+    progress["completed_model_calls"] = completed_chunks + completed_file_summary_calls
     emit_index_progress(progress, progress_callback)
     existing_chunks = existing_index_chunk_cache(root)
     used_ordinals = index_file_ordinals(files)
@@ -5385,6 +5500,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
             timeout=INDEX_MODEL_TIMEOUT_SECONDS,
             route=MODEL_ROUTE_INDEX_CORPUS,
             prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
+            preplanned_calls=estimate_corpus_summary_calls(len(files)),
         )
         index = document_index_record(
             index_id=index_id,

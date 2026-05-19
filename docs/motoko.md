@@ -260,11 +260,14 @@ This first corpus pass is real HRAG preprocessing, not a cheap filename scan:
 Motoko stores source chunks, asks the local model for chunk summaries, file
 summaries, and a corpus summary, and records fingerprints for freshness checks.
 Index plans and first-run learning prompts include estimated chunks and HRAG
-model calls so long jobs are easier to anticipate. While the TUI is learning a
-corpus, the top status reports file/chunk/model-call progress, elapsed time,
-and ETA; `/indexes` and `/status` also show active durable index jobs from
-Motoko state. The same progress display is used later if an attached stale
-index needs a heavy background refresh.
+model calls so long jobs are easier to anticipate. Multi-round file and corpus
+summaries can still make early estimates rough, so Motoko updates the model-call
+plan as larger reductions are discovered and bases ETA on completed model-call
+timing rather than only on raw file count. While the TUI is learning a corpus,
+the top status reports file/chunk/model-call progress, elapsed time, current
+model-call time, and ETA; `/indexes` and `/status` also show active durable
+index jobs from Motoko state. The same progress display is used later if an
+attached stale index needs a heavy background refresh.
 
 Long corpus passes checkpoint after each completed file. If Motoko is paused,
 times out, crashes, or the machine loses power, completed file work remains in

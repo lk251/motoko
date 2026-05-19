@@ -596,6 +596,49 @@ def test_index_progress_state(m):
             m.quiet_model = old_quiet_model
 
 
+def test_index_progress_eta_tracks_model_timing(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        first = docs / "a.txt"
+        first.write_text("alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        progress = m.begin_index_progress("idx", docs, m.AUTO_INDEX_GLOB, "docs", [first])
+        assert progress["estimated_model_calls"] == 3
+
+        m.index_progress_begin_model(progress, "summarizing chunk", "a chunk")
+        progress["_current_model_started_monotonic"] = m.time.monotonic() - 12
+        m.update_index_progress_estimates(progress)
+        assert progress["current_model_elapsed_seconds"] >= 11
+        assert "call " in m.format_index_progress_status(progress)
+
+        m.index_progress_finish_model(progress)
+        assert progress["completed_model_calls"] == 1
+        assert progress["completed_model_seconds"] >= 11
+        assert progress["average_model_call_seconds"] >= 11
+        assert "completed model-call timing" == progress["eta_basis"]
+
+
+def test_summary_block_estimates_expand_progress_total(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        first = docs / "big.txt"
+        first.write_text("alpha\n", encoding="utf-8")
+        progress = m.begin_index_progress("idx", docs, m.AUTO_INDEX_GLOB, "docs", [first])
+        before = progress["estimated_model_calls"]
+        blocks = ["x" * m.SUMMARY_INPUT_CHARS for _idx in range(4)]
+        expected = m.estimate_summary_block_calls(blocks)
+        assert expected > 1
+        m.index_progress_reserve_model_calls(
+            progress,
+            "summarizing file:big",
+            expected,
+            preplanned_calls=1,
+        )
+        assert progress["estimated_model_calls"] == before + expected - 1
+
+
 def test_list_indexes_ignores_progress_files(m):
     with isolated_state():
         index = {
@@ -988,6 +1031,8 @@ def main() -> int:
         test_identity_config,
         test_index_limits,
         test_index_progress_state,
+        test_index_progress_eta_tracks_model_timing,
+        test_summary_block_estimates_expand_progress_total,
         test_list_indexes_ignores_progress_files,
         test_index_resume_after_model_timeout,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
