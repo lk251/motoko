@@ -64,6 +64,27 @@ summarization-strong models for `index_chunk`, `index_file`, `index_label`, and
 `title`. `index_corpus`, `topic`, `memory`, `profile`, and `audit` should stay
 on the larger model until a worker proves itself.
 
+## Candidate Selection Notes
+
+Prefer the newest suitable local worker generation, but verify the actual model
+catalog at install time. As of 2026-05-19, the official Qwen3.6 collection
+publishes large 27B and 35B-A3B models; it does not appear to publish official
+small 0.8B, 2B, 4B, or 9B worker equivalents. The earlier small-worker
+candidates are therefore still useful candidates, not permanent pins:
+
+- `Qwen/Qwen3.5-2B` for `index_chunk`;
+- `Qwen/Qwen3-4B-Instruct-2507` for `index_file` and quality fallback;
+- `Qwen/Qwen3.5-9B` for `index_corpus`;
+- `mistralai/Ministral-3-3B-Instruct-2512` for `index_label` and structured
+  classification comparison.
+
+If official Qwen3.6 small workers, better Qwen3.x small instruct models, or
+better llama.cpp-compatible GGUF quantizations appear before installation, use
+those as challengers instead of treating the list above as fixed. The deciding
+factor is not the generation number alone; it is whether the model passes
+Motoko's route-specific evals with better faithfulness, JSON hygiene, latency,
+VRAM use, and joules per artifact.
+
 ## Caching
 
 Motoko caches deterministic model outputs for repeatable summary routes in

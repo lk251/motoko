@@ -45,6 +45,20 @@ Current intended deployment:
 - Motoko's default endpoint is the local MTP llama.cpp endpoint:
   `http://127.0.0.1:8083/v1/chat/completions`.
 
+Repository conventions:
+
+- The expected development checkouts are `/home/javier/repos/motoko` and
+  `/home/mares/repos/motoko`.
+- The private source-of-truth remote is normally `origin =
+  mbp111:/home/javier/git/motoko.git`; public mirrors such as `github` or
+  `codeberg` may exist but must be verified with `git remote -v` before use.
+- `mares` has normal development authority for Motoko source work and can
+  commit accepted changes locally in this repository. Pushing still requires an
+  explicit user request and a verified target remote.
+- Deploying a new Motoko package to HB3 is separate from source development:
+  Javier/admin owns the `nixos-configs` flake-input update, review, rebuild,
+  and switch.
+
 ## Security Shape
 
 Motoko's security comes from the HB3 account split and conservative local

@@ -83,6 +83,9 @@ not the easiest place to review what changed after a long work session.
   including embedding stores, rerankers, token accounting, richer lexical
   retrieval, deterministic extractors, parser-backed artifacts, deduplication,
   and lightweight classifiers.
+- Moved enduring repository/remotes/deployment guidance out of the completed
+  handoff path and clarified that worker-model candidates should be rechecked
+  against the latest available model generation before installation.
 - Fixed index listing so `INDEX.progress.json` job files are never treated as
   completed document indexes.
 - Made heavy corpus indexing checkpoint completed files into partial indexes,
