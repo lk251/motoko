@@ -89,6 +89,8 @@ Accepted directions:
   synthesis/audits, and interactive chat;
 - artifact provenance and quality gates for model-derived summaries before
   routing background work to smaller worker models;
+- synthetic worker-model evaluation fixtures that compare route outputs without
+  requiring Codex to read Javier's personal corpora;
 - topic dossiers and deeper dossiers over already indexed material;
 - per-user permission modes for chat-only, document reads/indexing, and
   read-only repo review;

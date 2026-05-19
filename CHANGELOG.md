@@ -70,6 +70,9 @@ not the easiest place to review what changed after a long work session.
 - Added named model routes for chat, chunk summaries, file summaries, corpus
   synthesis, topic dossiers, memory/profile work, titles, and audits. Routes
   default to the existing endpoint until configured otherwise.
+- Added an `index_label` route and `motoko model-eval` synthetic quality gate
+  for comparing worker models on chunk, file, label/classification, and corpus
+  fixtures before trusting them for bulk indexing.
 - Added artifact provenance and `motoko index-quality` checks for summary
   schema, model route, prompt version, source fingerprint, quality status,
   structured signals, corpus profiles, and task/date preservation.

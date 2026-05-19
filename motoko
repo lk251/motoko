@@ -48,6 +48,7 @@ MODEL_ROUTE_CHAT = "chat"
 MODEL_ROUTE_INDEX_CHUNK = "index_chunk"
 MODEL_ROUTE_INDEX_FILE = "index_file"
 MODEL_ROUTE_INDEX_CORPUS = "index_corpus"
+MODEL_ROUTE_INDEX_LABEL = "index_label"
 MODEL_ROUTE_TOPIC = "topic"
 MODEL_ROUTE_MEMORY = "memory"
 MODEL_ROUTE_PROFILE = "profile"
@@ -58,6 +59,7 @@ MODEL_ROUTE_DESCRIPTIONS = {
     MODEL_ROUTE_INDEX_CHUNK: "chunk-level retrieval summaries",
     MODEL_ROUTE_INDEX_FILE: "file-level summaries and file-purpose maps",
     MODEL_ROUTE_INDEX_CORPUS: "corpus-level synthesis across file summaries",
+    MODEL_ROUTE_INDEX_LABEL: "file/document labels, lightweight classification, and routing hints",
     MODEL_ROUTE_TOPIC: "topic and deep dossiers over indexed evidence",
     MODEL_ROUTE_MEMORY: "conversation compaction and memory proposal work",
     MODEL_ROUTE_PROFILE: "profile dossier synthesis",
@@ -74,13 +76,22 @@ CONVERSATION_SUMMARY_SCHEMA_VERSION = "conversation-summary-v1"
 MEMORY_PROPOSAL_SCHEMA_VERSION = "memory-proposal-v1"
 TITLE_SCHEMA_VERSION = "title-v1"
 MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
+MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
+MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
 MODEL_CACHEABLE_SUMMARY_ROUTES = {
     MODEL_ROUTE_INDEX_CHUNK,
     MODEL_ROUTE_INDEX_FILE,
     MODEL_ROUTE_INDEX_CORPUS,
+    MODEL_ROUTE_INDEX_LABEL,
     MODEL_ROUTE_TOPIC,
     MODEL_ROUTE_MEMORY,
 }
+MODEL_WORKER_EVAL_DEFAULT_ROUTES = [
+    MODEL_ROUTE_INDEX_CHUNK,
+    MODEL_ROUTE_INDEX_FILE,
+    MODEL_ROUTE_INDEX_LABEL,
+    MODEL_ROUTE_INDEX_CORPUS,
+]
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
 DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
@@ -320,6 +331,7 @@ SHELL_COMMANDS = [
     "remember",
     "status",
     "model-routes",
+    "model-eval",
     "identity",
     "permissions",
     "repo",
@@ -713,6 +725,11 @@ def model_cache_dir() -> pathlib.Path:
     return ensure_private_dir(root / "model-cache")
 
 
+def model_evals_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "model-evals")
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -746,6 +763,11 @@ def model_cache_path(cache_key: str) -> pathlib.Path:
     if len(safe) < 8:
         safe = sha256_hex(cache_key.encode("utf-8"))
     return ensure_private_dir(model_cache_dir() / safe[:2]) / f"{safe}.json"
+
+
+def model_eval_path(eval_id: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(eval_id)).strip("-") or "model-eval"
+    return model_evals_dir() / f"{safe}.json"
 
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
@@ -1557,7 +1579,7 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
 
 def model_route_lane(route: str) -> str:
     route = normalize_model_route(route)
-    if route in {MODEL_ROUTE_INDEX_CHUNK, MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_TITLE}:
+    if route in {MODEL_ROUTE_INDEX_CHUNK, MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_INDEX_LABEL, MODEL_ROUTE_TITLE}:
         return "small-model"
     if route in {MODEL_ROUTE_CHAT, MODEL_ROUTE_INDEX_CORPUS, MODEL_ROUTE_TOPIC, MODEL_ROUTE_MEMORY, MODEL_ROUTE_PROFILE, MODEL_ROUTE_AUDIT}:
         return "large-model"
@@ -1573,6 +1595,404 @@ def background_lanes_text() -> str:
             "  large-model: corpus synthesis, dossiers, memory/profile reflection, audits, final chat synthesis",
         ]
     )
+
+
+def worker_model_eval_fixtures() -> list[dict]:
+    return [
+        {
+            "id": "org-priority-chunk",
+            "route": MODEL_ROUTE_INDEX_CHUNK,
+            "role": "chunk summary",
+            "label": "orgfiles/tasks.org chunk 1",
+            "required_keys": [
+                "summary",
+                "title",
+                "kind",
+                "dates",
+                "todos",
+                "obligations",
+                "files_or_paths_mentioned",
+                "confidence",
+                "escalation_needed",
+            ],
+            "required_facts": [
+                {"name": "todo state", "any": ["TODO"]},
+                {"name": "priority", "any": ["#A", "priority A", "A priority"]},
+                {"name": "deadline", "any": ["2026-05-22", "May 22"]},
+                {"name": "scheduled date", "any": ["2026-05-21", "May 21"]},
+                {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
+                {"name": "obligation", "any": ["countersigned packet", "signed packet"]},
+                {"name": "path", "any": ["/home/mares/repos/orgfiles/legal.org", "legal.org"]},
+                {"name": "project", "any": ["violet harbor"]},
+            ],
+            "forbidden_facts": [
+                {"name": "wrong date", "any": ["2026-05-23"]},
+                {"name": "invented person", "any": ["Marina"]},
+                {"name": "invented payment", "any": ["invoice 2026-019", "payment due"]},
+            ],
+            "text": "\n".join(
+                [
+                    "* TODO [#A] Send signed Alvarez packet :client:legal:",
+                    "SCHEDULED: <2026-05-21 Thu 09:00>",
+                    "DEADLINE: <2026-05-22 Fri>",
+                    "Project: violet harbor",
+                    "File reference: /home/mares/repos/orgfiles/legal.org",
+                    "Obligation: Javier must email the countersigned packet to Ana Alvarez before noon.",
+                ]
+            ),
+            "max_output_chars": 2200,
+            "min_fact_ratio": 0.82,
+        },
+        {
+            "id": "file-purpose-map",
+            "route": MODEL_ROUTE_INDEX_FILE,
+            "role": "file summary",
+            "label": "orgfiles/tasks.org file summary",
+            "required_keys": [
+                "file_summary",
+                "file_title",
+                "file_role",
+                "file_kind",
+                "main_projects",
+                "main_dates",
+                "main_todos",
+                "main_obligations",
+                "confidence",
+                "escalation_needed",
+            ],
+            "required_facts": [
+                {"name": "file role", "any": ["planning", "task"]},
+                {"name": "priority task", "any": ["Send signed Alvarez packet", "Alvarez packet"]},
+                {"name": "deadline", "any": ["2026-05-22", "May 22"]},
+                {"name": "project", "any": ["violet harbor"]},
+                {"name": "support task", "any": ["Draft support note"]},
+                {"name": "path", "any": ["/home/mares/repos/orgfiles/tasks.org", "tasks.org"]},
+            ],
+            "forbidden_facts": [
+                {"name": "wrong repo", "any": ["nixos-configs"]},
+                {"name": "wrong status", "any": ["DONE Send signed Alvarez packet"]},
+            ],
+            "text": "\n\n".join(
+                [
+                    "Path: /home/mares/repos/orgfiles/tasks.org",
+                    "Chunk 1 summary: TODO priority A Send signed Alvarez packet for project violet harbor. "
+                    "Deadline 2026-05-22. Obligation to email Ana Alvarez before noon.",
+                    "Chunk 2 summary: TODO priority B Draft support note, scheduled 2026-05-23, "
+                    "depends on the Alvarez packet being sent.",
+                ]
+            ),
+            "max_output_chars": 2600,
+            "min_fact_ratio": 0.82,
+        },
+        {
+            "id": "document-label",
+            "route": MODEL_ROUTE_INDEX_LABEL,
+            "role": "classification label",
+            "label": "orgfiles/inbox.org label",
+            "required_keys": [
+                "label",
+                "kind",
+                "active",
+                "task_bearing",
+                "sensitive",
+                "confidence",
+                "escalation_needed",
+            ],
+            "required_facts": [
+                {"name": "org kind", "any": ["org", "notes", "task"]},
+                {"name": "task-bearing", "any": ["task_bearing", "task-bearing", "task bearing", "TODO"]},
+                {"name": "active", "any": ["active"]},
+                {"name": "legal tag", "any": ["legal"]},
+                {"name": "client tag", "any": ["client"]},
+            ],
+            "forbidden_facts": [
+                {"name": "archive", "any": ["archived"]},
+                {"name": "code", "any": ["python", "javascript"]},
+            ],
+            "text": "\n".join(
+                [
+                    "Path: /home/mares/repos/orgfiles/inbox.org",
+                    "* TODO [#A] Client legal packet :client:legal:",
+                    "DEADLINE: <2026-05-22 Fri>",
+                    "Short note: active inbox item, current item.",
+                ]
+            ),
+            "max_output_chars": 1400,
+            "min_fact_ratio": 0.80,
+        },
+        {
+            "id": "corpus-priority-synthesis",
+            "route": MODEL_ROUTE_INDEX_CORPUS,
+            "role": "corpus summary",
+            "label": "orgfiles corpus synthesis",
+            "required_keys": [
+                "corpus_summary",
+                "active_projects",
+                "priority_items",
+                "deadlines",
+                "scheduled_items",
+                "obligations",
+                "files_by_role",
+                "audit_needed",
+            ],
+            "required_facts": [
+                {"name": "top priority", "any": ["Send signed Alvarez packet", "Alvarez packet"]},
+                {"name": "deadline", "any": ["2026-05-22", "May 22"]},
+                {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
+                {"name": "project", "any": ["violet harbor"]},
+                {"name": "repo planning file", "any": ["nixos-configs.org"]},
+                {"name": "morning schedule", "any": ["2026-05-21", "May 21"]},
+            ],
+            "forbidden_facts": [
+                {"name": "wrong person", "any": ["Marina"]},
+                {"name": "invented completion", "any": ["already completed", "DONE Send signed Alvarez packet"]},
+            ],
+            "text": "\n\n".join(
+                [
+                    "File /home/mares/repos/orgfiles/tasks.org: active planning file. "
+                    "Priority A TODO Send signed Alvarez packet. Deadline 2026-05-22. "
+                    "Scheduled 2026-05-21 morning. Obligation: email Ana Alvarez.",
+                    "File /home/mares/repos/orgfiles/nixos-configs.org: repo planning file. "
+                    "Priority B TODO prepare branch review notes after the legal packet.",
+                    "File /home/mares/repos/orgfiles/ideas.org: ideas backlog for project violet harbor.",
+                ]
+            ),
+            "max_output_chars": 3000,
+            "min_fact_ratio": 0.82,
+        },
+    ]
+
+
+def worker_eval_instruction(fixture: dict) -> str:
+    keys = ", ".join(fixture.get("required_keys", []))
+    return textwrap.dedent(
+        f"""
+        You are a Motoko local indexing worker. Build a source-grounded artifact
+        for the role: {fixture.get('role', '')}.
+
+        Return only one valid JSON object. Do not use Markdown fences. Do not
+        include hidden reasoning or <think> text. Preserve exact names, dates,
+        TODO states, obligations, project names, and file paths from the source.
+        Do not invent people, dates, statuses, payments, or completed work.
+
+        Required top-level keys: {keys}
+
+        Label: {fixture.get('label', '')}
+
+        Source:
+        {fixture.get('text', '')}
+        """
+    ).strip()
+
+
+def worker_eval_messages(fixture: dict) -> list[dict]:
+    return [
+        {
+            "role": "system",
+            "content": "Create strict JSON indexing artifacts. Be faithful, compact, and source-grounded.",
+        },
+        {"role": "user", "content": worker_eval_instruction(fixture)},
+    ]
+
+
+def extract_json_object(text: str) -> tuple[dict | None, str]:
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"\s*```$", "", raw)
+    candidates = [raw]
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if 0 <= start < end:
+        candidates.append(raw[start : end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed, ""
+    return None, "response is not a valid JSON object"
+
+
+def fact_matches(text: str, fact: dict) -> bool:
+    lowered = text.lower()
+    for option in fact.get("any", []) or []:
+        needle = str(option).strip().lower()
+        if needle and needle in lowered:
+            return True
+    return False
+
+
+def score_worker_eval_output(fixture: dict, output: str, *, error: str = "") -> dict:
+    parsed, json_error = extract_json_object(output) if output else (None, "empty response")
+    output_for_scoring = output
+    if parsed is not None:
+        output_for_scoring = json.dumps(parsed, ensure_ascii=False, sort_keys=True)
+    required = fixture.get("required_facts", []) or []
+    missing = [fact.get("name", "") for fact in required if not fact_matches(output_for_scoring, fact)]
+    forbidden = [fact.get("name", "") for fact in fixture.get("forbidden_facts", []) or [] if fact_matches(output_for_scoring, fact)]
+    required_keys = fixture.get("required_keys", []) or []
+    missing_keys = [key for key in required_keys if not isinstance(parsed, dict) or key not in parsed]
+    fact_ratio = 1.0 if not required else (len(required) - len(missing)) / len(required)
+    max_chars = int(fixture.get("max_output_chars", 4000) or 4000)
+    length_ok = len(output) <= max_chars
+    no_think = "<think" not in output.lower()
+    json_valid = parsed is not None
+    status = (
+        "pass"
+        if not error
+        and json_valid
+        and not missing_keys
+        and fact_ratio >= float(fixture.get("min_fact_ratio", 0.8))
+        and not forbidden
+        and length_ok
+        and no_think
+        else "fail"
+    )
+    score = 0.0
+    score += 55.0 * fact_ratio
+    score += 15.0 if json_valid else 0.0
+    score += 10.0 if not missing_keys else max(0.0, 10.0 * (1.0 - len(missing_keys) / max(1, len(required_keys))))
+    score += 10.0 if not forbidden else 0.0
+    score += 5.0 if length_ok else 0.0
+    score += 5.0 if no_think else 0.0
+    return {
+        "status": status,
+        "score": round(score, 1),
+        "json_valid": json_valid,
+        "json_error": json_error,
+        "required_fact_count": len(required),
+        "matched_fact_count": len(required) - len(missing),
+        "missing_facts": missing,
+        "forbidden_hits": forbidden,
+        "required_key_count": len(required_keys),
+        "missing_keys": missing_keys,
+        "length_ok": length_ok,
+        "no_think": no_think,
+        "error": error,
+    }
+
+
+def run_worker_model_eval(routes: list[str] | None = None, *, timeout: float = MODEL_TIMEOUT_SECONDS) -> dict:
+    selected = [normalize_model_route(route) for route in (routes or MODEL_WORKER_EVAL_DEFAULT_ROUTES)]
+    selected_set = set(selected)
+    fixtures = [fixture for fixture in worker_model_eval_fixtures() if fixture.get("route") in selected_set]
+    if not fixtures:
+        raise SystemExit("no worker-model eval fixtures matched the requested routes")
+
+    report = {
+        "schema": MODEL_WORKER_EVAL_SCHEMA_VERSION,
+        "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+        "created": now(),
+        "prompt_version": MODEL_WORKER_EVAL_PROMPT_VERSION,
+        "routes_requested": selected,
+        "fixtures": [],
+        "route_summaries": {},
+    }
+    for fixture in fixtures:
+        route = normalize_model_route(fixture.get("route"))
+        route_info = model_route(route)
+        started = time.monotonic()
+        output = ""
+        error = ""
+        try:
+            output = quiet_model(
+                worker_eval_messages(fixture),
+                temperature=0.0,
+                timeout=timeout,
+                route=route,
+            )
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        elapsed = round(time.monotonic() - started, 3)
+        score = score_worker_eval_output(fixture, output, error=error)
+        report["fixtures"].append(
+            {
+                "id": fixture.get("id", ""),
+                "role": fixture.get("role", ""),
+                "route": route,
+                "model": route_info["model"],
+                "endpoint": route_info["endpoint"],
+                "elapsed_seconds": elapsed,
+                "output_chars": len(output),
+                "output_excerpt": compact_text(output, 900),
+                **score,
+            }
+        )
+
+    for route in selected:
+        rows = [fixture for fixture in report["fixtures"] if fixture.get("route") == route]
+        if not rows:
+            continue
+        route_info = model_route(route)
+        passed = sum(1 for row in rows if row.get("status") == "pass")
+        avg_score = sum(float(row.get("score", 0.0)) for row in rows) / len(rows)
+        report["route_summaries"][route] = {
+            "route": route,
+            "model": route_info["model"],
+            "endpoint": route_info["endpoint"],
+            "lane": model_route_lane(route),
+            "passed": passed,
+            "total": len(rows),
+            "average_score": round(avg_score, 1),
+        }
+    total = len(report["fixtures"])
+    passed = sum(1 for row in report["fixtures"] if row.get("status") == "pass")
+    report["status"] = "pass" if passed == total else "fail"
+    report["passed"] = passed
+    report["total"] = total
+    report["average_score"] = round(
+        sum(float(row.get("score", 0.0)) for row in report["fixtures"]) / max(1, total),
+        1,
+    )
+    return report
+
+
+def save_worker_model_eval_report(report: dict) -> pathlib.Path:
+    path = model_eval_path(report.get("id", "model-eval"))
+    report["saved_path"] = str(path)
+    atomic_write(path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+def format_worker_model_eval_report(report: dict) -> str:
+    lines = [
+        f"worker model eval: {report.get('status', 'unknown')} "
+        f"({report.get('passed', 0)}/{report.get('total', 0)}) "
+        f"avg {report.get('average_score', 0)}",
+        f"id: {report.get('id', '')}",
+    ]
+    if report.get("saved_path"):
+        lines.append(f"saved: {report.get('saved_path')}")
+    for route, summary in (report.get("route_summaries") or {}).items():
+        lines.append(
+            f"\n{route}: {summary.get('model', '')} endpoint={summary.get('endpoint', '')} "
+            f"lane={summary.get('lane', '')} pass {summary.get('passed', 0)}/{summary.get('total', 0)} "
+            f"avg {summary.get('average_score', 0)}"
+        )
+        for row in report.get("fixtures", []):
+            if row.get("route") != route:
+                continue
+            fact_text = f"{row.get('matched_fact_count', 0)}/{row.get('required_fact_count', 0)} facts"
+            json_text = "json ok" if row.get("json_valid") else "json fail"
+            lines.append(
+                f"- {row.get('status', 'unknown')}: {row.get('id', '')} "
+                f"score {row.get('score', 0)} {fact_text} {json_text} "
+                f"{row.get('elapsed_seconds', 0)}s"
+            )
+            details = []
+            if row.get("missing_keys"):
+                details.append("missing keys " + ", ".join(row.get("missing_keys", [])[:6]))
+            if row.get("missing_facts"):
+                details.append("missing facts " + ", ".join(row.get("missing_facts", [])[:6]))
+            if row.get("forbidden_hits"):
+                details.append("forbidden " + ", ".join(row.get("forbidden_hits", [])[:6]))
+            if row.get("error"):
+                details.append(row.get("error", ""))
+            if details:
+                lines.append("  " + "; ".join(details))
+    return "\n".join(lines)
 
 
 def artifact_provenance(
@@ -6820,6 +7240,7 @@ HELP_SECTIONS = [
             ("motoko compact [ID]", "compact a saved conversation"),
             ("motoko status", "show model, memory, and state paths"),
             ("motoko model-routes", "show chat and background worker model routes"),
+            ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
             ("motoko identity", "show active account/realm identity"),
             ("motoko permissions", "show feature permissions and index defaults"),
             ("motoko permissions set MODE", "set default feature permission mode"),
@@ -9948,6 +10369,16 @@ def command_model_routes(_args) -> None:
     print(background_lanes_text())
 
 
+def command_model_eval(args) -> None:
+    report = run_worker_model_eval(args.route, timeout=args.timeout)
+    if args.write:
+        save_worker_model_eval_report(report)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(format_worker_model_eval_report(report))
+
+
 def command_identity(args) -> None:
     if args.identity_command in (None, "show"):
         print(format_identity())
@@ -10030,6 +10461,17 @@ def main(argv: list[str]) -> int:
 
     model_routes = sub.add_parser("model-routes", help="show chat and background worker model routes")
     model_routes.set_defaults(func=command_model_routes)
+
+    model_eval = sub.add_parser("model-eval", help="evaluate configured worker routes on synthetic fixtures")
+    model_eval.add_argument(
+        "--route",
+        action="append",
+        help="route to evaluate; repeatable; defaults to index_chunk, index_file, index_label, and index_corpus",
+    )
+    model_eval.add_argument("--timeout", type=float, default=MODEL_TIMEOUT_SECONDS, help="seconds per fixture")
+    model_eval.add_argument("--write", action="store_true", help="save JSON report under Motoko state")
+    model_eval.add_argument("--json", action="store_true", help="print JSON report")
+    model_eval.set_defaults(func=command_model_eval)
 
     identity = sub.add_parser("identity", help="show account/realm identity")
     identity_sub = identity.add_subparsers(dest="identity_command")

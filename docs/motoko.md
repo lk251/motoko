@@ -370,6 +370,8 @@ motoko resume CONVERSATION_ID
 motoko show
 motoko show CONVERSATION_ID
 motoko status
+motoko model-routes
+motoko model-eval
 motoko index-enrich INDEX_ID
 motoko index-enrich --all
 motoko index-upgrade INDEX_ID
@@ -429,6 +431,7 @@ Useful in-chat commands:
 /compact
 /sources
 /status
+/model-routes
 /identity
 /permissions
 /permissions set MODE
@@ -610,6 +613,10 @@ Route overrides can live in `~/.config/motoko/config.json`:
       "endpoint": "http://127.0.0.1:8091/v1/chat/completions",
       "model": "small-summary-worker"
     },
+    "index_label": {
+      "endpoint": "http://127.0.0.1:8092/v1/chat/completions",
+      "model": "small-label-worker"
+    },
     "index_corpus": {
       "endpoint": "http://127.0.0.1:8083/v1/chat/completions",
       "model": "qwen3.6-27b-mtp-ud-q5-k-xl"
@@ -621,6 +628,23 @@ Route overrides can live in `~/.config/motoko/config.json`:
 Equivalent one-off environment overrides use
 `MOTOKO_ROUTE_<ROUTE>_ENDPOINT` and `MOTOKO_ROUTE_<ROUTE>_MODEL`, for example
 `MOTOKO_ROUTE_INDEX_CHUNK_MODEL=small-summary-worker`.
+
+Before trusting newly installed worker models, run:
+
+```bash
+motoko model-eval
+motoko model-eval --route index_chunk --route index_file
+motoko model-eval --write
+```
+
+`model-eval` uses synthetic, source-grounded fixtures for chunk summaries, file
+summaries, lightweight labels/classification, and corpus synthesis. It asks
+each configured route for strict JSON and scores whether the artifact preserves
+names, dates, TODO states, priorities, obligations, project/file references,
+source paths, avoids invented facts, and avoids `<think>` spillover. Reports
+written with `--write` are stored under `~/.local/state/motoko/model-evals/`.
+These fixtures are not a replacement for real use, but they are the gate before
+moving bulk indexing from the main chat model to smaller workers.
 
 Motoko also caches deterministic model outputs for repeatable summary routes
 under `~/.local/state/motoko/model-cache/`. This is private Motoko state and can
@@ -809,8 +833,9 @@ the model.
 Route smaller worker models only after the evaluation harness passes. The
 quality bar is preservation of names, dates, priorities, TODO states,
 obligations, project/file references, source paths, and task-priority answers
-on synthetic fixtures. The regression/evaluation tests cover this gate without
-using private personal documents.
+on synthetic fixtures. Use `motoko model-eval` for live configured routes; the
+regression/evaluation tests cover the scoring logic without using private
+personal documents.
 
 ## Topic Dossiers
 

@@ -52,6 +52,20 @@ def write_json(path: pathlib.Path, data: dict) -> None:
     path.chmod(0o600)
 
 
+@contextlib.contextmanager
+def temporary_env(updates: dict[str, str]):
+    old_values = {key: os.environ.get(key) for key in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for key, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
 def test_study_reuses_existing_dossier(m):
     conv = m.new_conversation("Study reuse")
     conv["id"] = "study-reuse"
@@ -304,6 +318,125 @@ def test_routed_index_quality_gate_preserves_org_evidence(m):
             pass
 
 
+def test_worker_model_eval_scores_routes_and_json_artifacts(m):
+    calls = []
+    old_quiet_model = m.quiet_model
+    try:
+        def fake_worker(messages, **kwargs):
+            route = kwargs.get("route")
+            calls.append(route)
+            prompt = messages[-1]["content"]
+            if route == m.MODEL_ROUTE_INDEX_CHUNK:
+                return json.dumps(
+                    {
+                        "summary": "TODO priority A send countersigned packet to Ana Alvarez for violet harbor.",
+                        "title": "Alvarez packet deadline",
+                        "kind": "org_task",
+                        "dates": ["2026-05-21", "2026-05-22"],
+                        "todos": ["TODO [#A] Send signed Alvarez packet"],
+                        "obligations": ["email the countersigned packet before noon"],
+                        "files_or_paths_mentioned": ["/home/mares/repos/orgfiles/legal.org"],
+                        "confidence": 0.93,
+                        "escalation_needed": False,
+                    }
+                )
+            if route == m.MODEL_ROUTE_INDEX_FILE:
+                return json.dumps(
+                    {
+                        "file_summary": "Planning file for tasks.org with the Alvarez packet as priority work.",
+                        "file_title": "Tasks planning",
+                        "file_role": "active planning task file",
+                        "file_kind": "org",
+                        "main_projects": ["violet harbor"],
+                        "main_dates": ["2026-05-22"],
+                        "main_todos": ["Send signed Alvarez packet", "Draft support note"],
+                        "main_obligations": ["email Ana Alvarez before noon"],
+                        "confidence": 0.91,
+                        "escalation_needed": False,
+                    }
+                )
+            if route == m.MODEL_ROUTE_INDEX_LABEL:
+                assert "inbox.org" in prompt
+                return json.dumps(
+                    {
+                        "label": "active client legal org task",
+                        "kind": "org task notes",
+                        "active": True,
+                        "task_bearing": True,
+                        "sensitive": "client legal",
+                        "confidence": 0.88,
+                        "escalation_needed": False,
+                    }
+                )
+            if route == m.MODEL_ROUTE_INDEX_CORPUS:
+                return json.dumps(
+                    {
+                        "corpus_summary": "Orgfiles corpus prioritizes the Alvarez packet before repo notes.",
+                        "active_projects": ["violet harbor"],
+                        "priority_items": ["Send signed Alvarez packet"],
+                        "deadlines": ["2026-05-22"],
+                        "scheduled_items": ["2026-05-21 morning"],
+                        "obligations": ["email Ana Alvarez"],
+                        "files_by_role": {"tasks": ["tasks.org"], "repo planning": ["nixos-configs.org"]},
+                        "audit_needed": False,
+                    }
+                )
+            raise AssertionError(f"unexpected route {route}")
+
+        m.quiet_model = fake_worker
+        with temporary_env(
+            {
+                "MOTOKO_ROUTE_INDEX_CHUNK_MODEL": "Qwen/Qwen3.5-2B",
+                "MOTOKO_ROUTE_INDEX_FILE_MODEL": "Qwen/Qwen3-4B-Instruct-2507",
+                "MOTOKO_ROUTE_INDEX_LABEL_MODEL": "mistralai/Ministral-3-3B-Instruct-2512",
+                "MOTOKO_ROUTE_INDEX_CORPUS_MODEL": "Qwen/Qwen3.5-9B",
+            }
+        ):
+            report = m.run_worker_model_eval(timeout=0.01)
+            path = m.save_worker_model_eval_report(report)
+            text = m.format_worker_model_eval_report(report)
+        assert report["status"] == "pass", text
+        assert report["passed"] == 4
+        assert calls == [
+            m.MODEL_ROUTE_INDEX_CHUNK,
+            m.MODEL_ROUTE_INDEX_FILE,
+            m.MODEL_ROUTE_INDEX_LABEL,
+            m.MODEL_ROUTE_INDEX_CORPUS,
+        ]
+        assert report["route_summaries"][m.MODEL_ROUTE_INDEX_LABEL]["model"] == "mistralai/Ministral-3-3B-Instruct-2512"
+        assert "worker model eval: pass" in text
+        assert path.exists()
+    finally:
+        m.quiet_model = old_quiet_model
+
+
+def test_worker_model_eval_flags_missing_facts(m):
+    old_quiet_model = m.quiet_model
+    try:
+        m.quiet_model = lambda *args, **kwargs: json.dumps(
+            {
+                "summary": "A vague task note.",
+                "title": "Task note",
+                "kind": "org_task",
+                "dates": [],
+                "todos": [],
+                "obligations": [],
+                "files_or_paths_mentioned": [],
+                "confidence": 0.2,
+                "escalation_needed": True,
+            }
+        )
+        report = m.run_worker_model_eval(routes=[m.MODEL_ROUTE_INDEX_CHUNK], timeout=0.01)
+        assert report["status"] == "fail"
+        row = report["fixtures"][0]
+        assert row["json_valid"]
+        assert "deadline" in row["missing_facts"]
+        assert "person" in row["missing_facts"]
+        assert "worker model eval: fail" in m.format_worker_model_eval_report(report)
+    finally:
+        m.quiet_model = old_quiet_model
+
+
 def main() -> int:
     m = load_motoko()
     with isolated_state():
@@ -322,7 +455,11 @@ def main() -> int:
         test_heavy_index_refresh_replaces_attached_index(m)
     with isolated_state():
         test_routed_index_quality_gate_preserves_org_evidence(m)
-    print("7 motoko evaluation checks passed")
+    with isolated_state():
+        test_worker_model_eval_scores_routes_and_json_artifacts(m)
+    with isolated_state():
+        test_worker_model_eval_flags_missing_facts(m)
+    print("10 motoko evaluation checks passed")
     return 0
 
 

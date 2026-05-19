@@ -22,6 +22,8 @@ models during active chat unless measurements show the cost is acceptable.
 - `index_chunk`: chunk summaries. Candidate small-model route.
 - `index_file`: file summaries, file-purpose maps, and lightweight
   classification. Candidate small-model route.
+- `index_label`: file/document labels, lightweight classification, and routing
+  hints. Candidate small-model or classifier route.
 - `index_corpus`: corpus-level synthesis across many file summaries. Usually a
   stronger or larger route than chunk/file summaries.
 - `topic`: topic and deep dossiers over retrieved evidence. Stronger route.
@@ -52,11 +54,15 @@ Do not route a task to a smaller model solely because it is faster. It must pass
 Motoko's synthetic quality gate: task-priority retrieval should preserve names,
 dates, priorities, obligations, project/file references, source paths, and
 answer quality at least as well as the current default route on fixtures.
+After the worker services are installed and route variables are configured, run
+`motoko model-eval` to score chunk, file, label/classification, and corpus
+fixtures. Use `motoko model-eval --write` to save a private JSON report under
+Motoko state for comparison between model candidates.
 
-The first useful candidates are likely 3B-8B instruction or summarization-strong
-models for `index_chunk`, `index_file`, and `title`. `index_corpus`, `topic`,
-`memory`, `profile`, and `audit` should stay on the larger model until a worker
-proves itself.
+The first useful candidates are likely 3B-8B instruction or
+summarization-strong models for `index_chunk`, `index_file`, `index_label`, and
+`title`. `index_corpus`, `topic`, `memory`, `profile`, and `audit` should stay
+on the larger model until a worker proves itself.
 
 ## Caching
 
