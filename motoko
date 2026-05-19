@@ -88,6 +88,15 @@ ORG_TODO_KEYWORDS = {
     "CANCELLED",
     "CANCELED",
 }
+
+
+class WorkPaused(Exception):
+    def __init__(self, message: str, *, work_id: str = "", work_kind: str = "work") -> None:
+        super().__init__(message)
+        self.work_id = work_id
+        self.work_kind = work_kind
+
+
 TASK_QUERY_WORDS = {
     "task",
     "tasks",
@@ -122,6 +131,7 @@ AUTO_MEMORY_MIN_MESSAGES = 4
 AUTO_MEMORY_INTERVAL_MESSAGES = 4
 AUTO_MEMORY_MAX_PROPOSALS = 5
 MODEL_TIMEOUT_SECONDS = 600
+INDEX_MODEL_TIMEOUT_SECONDS = 1800
 MAINTENANCE_MODEL_TIMEOUT_SECONDS = 90
 MAINTENANCE_MAX_RETRIES = 2
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
@@ -186,12 +196,15 @@ SLASH_COMMANDS = [
     ("/about", "show Motoko version and runtime details"),
     ("/exit", "save and exit"),
     ("/stop", "stop the current streamed answer"),
+    ("/pause", "ask active work to pause at the next durable checkpoint"),
     ("/new [TITLE]", "start a new conversation"),
     ("/title TEXT", "rename this conversation"),
     ("/resume [ID]", "switch to another saved conversation"),
     ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
     ("/index-plan PATH", "preview a document index without writing derived text"),
     ("/index PATH", "build and attach a mixed text document index"),
+    ("/index-resume INDEX_ID", "resume and attach a partial document index"),
+    ("/resume-work [INDEX_ID]", "resume unfinished Motoko work"),
     ("/attach-index [ID]", "attach an existing document index"),
     ("/topic [INDEX_ID] QUERY", "build and attach a topic dossier"),
     ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier"),
@@ -234,12 +247,15 @@ SHELL_COMMANDS = [
     "help",
     "about",
     "chat",
+    "pause",
     "list",
     "new",
     "resume",
     "show",
     "compact",
     "index",
+    "index-resume",
+    "resume-work",
     "indexes",
     "topic",
     "deepen",
@@ -270,6 +286,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/about",
     "/exit",
     "/stop",
+    "/pause",
     "/new",
     "/compact",
     "/sources",
@@ -637,6 +654,11 @@ def heavy_study_path() -> pathlib.Path:
     return root / "heavy-study.json"
 
 
+def work_pause_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "pause-request.json"
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -659,6 +681,10 @@ def index_data_dir(index_id: str) -> pathlib.Path:
 
 def index_progress_path(index_id: str) -> pathlib.Path:
     return indexes_dir() / f"{index_id}.progress.json"
+
+
+def index_partial_path(index_id: str) -> pathlib.Path:
+    return indexes_dir() / f"{index_id}.partial.json"
 
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
@@ -701,6 +727,77 @@ def write_index_progress(progress: dict) -> None:
     )
 
 
+def write_partial_index(index: dict, *, status: str, error: str = "") -> None:
+    index_id = str(index.get("id", "")).strip()
+    if not index_id:
+        return
+    partial = dict(index)
+    partial["partial"] = True
+    partial["status"] = status
+    partial["updated"] = now()
+    if error:
+        partial["error"] = error
+    atomic_write(
+        index_partial_path(index_id),
+        json.dumps(partial, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def load_partial_index(index_id: str) -> dict:
+    try:
+        data = json.loads(index_partial_path(index_id).read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"no partial index checkpoint: {index_id}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"partial index checkpoint is not valid JSON: {index_id}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"partial index checkpoint is not an object: {index_id}")
+    return data
+
+
+def list_partial_indexes() -> list[dict]:
+    rows = []
+    for path in sorted(indexes_dir().glob("*.partial.json"), reverse=True):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    rows.sort(key=lambda row: row.get("updated", row.get("created", "")), reverse=True)
+    return rows
+
+
+def request_work_pause(reason: str = "manual") -> dict:
+    request = {
+        "requested_at": now(),
+        "reason": reason,
+        "scope": "all",
+        "status": "requested",
+    }
+    atomic_write(work_pause_path(), json.dumps(request, ensure_ascii=False, indent=2) + "\n")
+    return request
+
+
+def read_work_pause_request() -> dict | None:
+    try:
+        data = json.loads(work_pause_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def clear_work_pause_request() -> None:
+    try:
+        work_pause_path().unlink()
+    except OSError:
+        pass
+
+
+def work_pause_requested() -> bool:
+    return read_work_pause_request() is not None
+
+
 def read_index_progress(index_id: str) -> dict | None:
     try:
         return json.loads(index_progress_path(index_id).read_text(encoding="utf-8"))
@@ -725,7 +822,7 @@ def active_index_progress() -> list[dict]:
     rows = []
     for row in list_index_progress():
         status = row.get("status")
-        if status not in {"completed", "failed"}:
+        if status not in {"completed", "failed", "paused"}:
             rows.append(row)
             continue
         if status == "completed" and not index_path(str(row.get("id", ""))).exists():
@@ -847,7 +944,12 @@ def finish_index_progress(progress: dict | None, status: str, callback=None, *, 
     if progress is None:
         return
     progress["status"] = status
-    progress["phase"] = "completed" if status == "completed" else "failed"
+    if status == "completed":
+        progress["phase"] = "completed"
+    elif status == "paused":
+        progress["phase"] = "paused"
+    else:
+        progress["phase"] = "failed"
     if error:
         progress["error"] = error
     emit_index_progress(progress, callback)
@@ -860,6 +962,8 @@ def format_index_progress_status(progress: dict) -> str:
         return "bg-heavy: index complete"
     if status == "failed":
         return "bg-heavy: index failed"
+    if status == "paused":
+        return "bg-heavy: index paused"
     current = int(progress.get("current_file_index", 0) or 0)
     total = int(progress.get("total_files", 0) or 0)
     files = f"file {current}/{total}" if total else "files"
@@ -1210,6 +1314,16 @@ def index_label(index: dict) -> str:
     return (
         f"{style(index.get('id', ''), 'yellow')}  "
         f"{len(index.get('files', []))} file(s)  {status}  "
+        f"{index.get('name', '')}  {index.get('root', '')}"
+    )
+
+
+def partial_index_label(index: dict) -> str:
+    completed = int(index.get("completed_files", len(index.get("files", []))) or 0)
+    total = int(index.get("total_files", completed) or completed)
+    return (
+        f"{style(index.get('id', ''), 'yellow')}  "
+        f"{index.get('status', 'unknown')}  {completed}/{total} file(s)  "
         f"{index.get('name', '')}  {index.get('root', '')}"
     )
 
@@ -2336,7 +2450,7 @@ def context_items_from_dir(path: str, pattern: str) -> list[dict]:
 def list_indexes() -> list[dict]:
     rows = []
     for path in sorted(indexes_dir().glob("*.json"), reverse=True):
-        if path.name.endswith(".progress.json"):
+        if path.name.endswith(".progress.json") or path.name.endswith(".partial.json"):
             continue
         try:
             rows.append(json.loads(path.read_text(encoding="utf-8")))
@@ -2362,6 +2476,15 @@ def load_index_exact(index_id: str) -> dict:
         except (OSError, json.JSONDecodeError):
             pass
     return load_index(index_id)
+
+
+def select_partial_index(index_id: str | None = None) -> dict:
+    return prompt_for_selection(
+        list_partial_indexes(),
+        kind="partial index",
+        label_func=partial_index_label,
+        selector=index_id,
+    )
 
 
 def list_topics() -> list[dict]:
@@ -2941,7 +3064,7 @@ def index_progress_running(index_id: str) -> bool:
     progress = read_index_progress(index_id)
     if not progress:
         return False
-    return progress.get("status") not in {"completed", "failed"}
+    return progress.get("status") not in {"completed", "failed", "paused"}
 
 
 def index_needs_signal_enrichment(index: dict) -> bool:
@@ -3121,13 +3244,19 @@ def quiet_model(
     return call_model(
         messages,
         temperature=temperature,
-        stream=False,
+        stream=True,
         echo=False,
         timeout=timeout,
     ).strip()
 
 
-def summarize_text(label: str, text: str, instruction: str) -> str:
+def summarize_text(
+    label: str,
+    text: str,
+    instruction: str,
+    *,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> str:
     clipped = text[:SUMMARY_INPUT_CHARS]
     prompt = textwrap.dedent(
         f"""
@@ -3148,11 +3277,50 @@ def summarize_text(label: str, text: str, instruction: str) -> str:
             {"role": "user", "content": prompt},
         ],
         temperature=0.2,
+        timeout=timeout,
     )
 
 
 def chunk_content_relpath(index_id: str, ordinal: int, chunk_idx: int) -> str:
     return f"{index_id}.chunks/{ordinal:06d}-{chunk_idx:06d}.txt"
+
+
+def remove_index_file_chunks(index_id: str, ordinal: int) -> None:
+    for path in index_data_dir(index_id).glob(f"{ordinal:06d}-*.txt"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def index_file_ordinals(files: list[dict]) -> set[int]:
+    ordinals = set()
+    for file_item in files:
+        raw = file_item.get("index_ordinal")
+        try:
+            ordinal = int(raw)
+        except (TypeError, ValueError):
+            ordinal = 0
+        if ordinal > 0:
+            ordinals.add(ordinal)
+            continue
+        for chunk in file_item.get("chunks", []):
+            chunk_id = str(chunk.get("id", ""))
+            prefix, _sep, _suffix = chunk_id.partition(".")
+            try:
+                ordinal = int(prefix)
+            except ValueError:
+                ordinal = 0
+            if ordinal > 0:
+                ordinals.add(ordinal)
+                break
+    return ordinals
+
+
+def next_index_file_ordinal(used_ordinals: set[int]) -> int:
+    ordinal = max(used_ordinals or {0}) + 1
+    used_ordinals.add(ordinal)
+    return ordinal
 
 
 def chunk_content_path(index: dict, chunk: dict) -> pathlib.Path | None:
@@ -3339,6 +3507,7 @@ def summarize_and_store_chunk(
     existing_chunks: dict[str, str] | None = None,
     progress: dict | None = None,
     progress_callback=None,
+    model_timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> dict | None:
     content = content.strip()
     if not content:
@@ -3362,6 +3531,7 @@ def summarize_and_store_chunk(
         label,
         content[:SUMMARY_INPUT_CHARS],
         "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
+        timeout=model_timeout,
     )
     index_progress_finish_model(progress, progress_callback, chunk_done=True)
     relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content, budget, path)
@@ -3389,6 +3559,7 @@ def stream_index_file(
     existing_chunks: dict[str, str] | None = None,
     progress: dict | None = None,
     progress_callback=None,
+    model_timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> tuple[dict, list[dict], int]:
     stat = path.stat()
     digest = hashlib.sha256()
@@ -3414,6 +3585,7 @@ def stream_index_file(
             existing_chunks,
             progress,
             progress_callback,
+            model_timeout,
         )
         if item is not None:
             derived_content_bytes += item.get("stored_content_bytes", item.get("content_bytes", 0))
@@ -3472,17 +3644,18 @@ def summarize_blocks(
     progress: dict | None = None,
     progress_callback=None,
     phase: str = "summarizing",
+    timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> str:
     pending = [block.strip() for block in blocks if block.strip()]
     if not pending:
         index_progress_begin_model(progress, phase, label, progress_callback)
-        result = summarize_text(label, "", instruction)
+        result = summarize_text(label, "", instruction, timeout=timeout)
         index_progress_finish_model(progress, progress_callback)
         return result
 
     def summarize_with_progress(model_label: str, text: str, model_instruction: str) -> str:
         index_progress_begin_model(progress, phase, model_label, progress_callback)
-        result = summarize_text(model_label, text, model_instruction)
+        result = summarize_text(model_label, text, model_instruction, timeout=timeout)
         index_progress_finish_model(progress, progress_callback)
         return result
 
@@ -3518,6 +3691,7 @@ def index_file(
     existing_chunks: dict[str, str] | None = None,
     progress: dict | None = None,
     progress_callback=None,
+    model_timeout: float = MODEL_TIMEOUT_SECONDS,
 ) -> dict:
     fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(
         path,
@@ -3527,6 +3701,7 @@ def index_file(
         existing_chunks,
         progress,
         progress_callback,
+        model_timeout,
     )
 
     print(f"  summarizing file {path}", flush=True)
@@ -3538,9 +3713,11 @@ def index_file(
         progress,
         progress_callback,
         "summarizing file",
+        timeout=model_timeout,
     )
     index_progress_finish_file(progress, progress_callback)
     item = {
+        "index_ordinal": ordinal,
         "path": str(path),
         "source_fingerprint": fingerprint,
         "indexed_sha256": fingerprint["sha256"],
@@ -3562,6 +3739,82 @@ def index_file(
     return item
 
 
+def document_index_record(
+    *,
+    index_id: str,
+    root: pathlib.Path,
+    pattern: str | None,
+    name: str | None,
+    created: str,
+    budget: dict,
+    files: list[dict],
+    corpus_summary: str = "",
+    candidates: list[pathlib.Path] | None = None,
+) -> dict:
+    index = {
+        "id": index_id,
+        "name": name or root.name or str(root),
+        "root": str(root),
+        "glob": pattern or AUTO_INDEX_GLOB,
+        "selection": "auto-text-v1" if (pattern or AUTO_INDEX_GLOB) == AUTO_INDEX_GLOB else "glob-text-v1",
+        "created": created,
+        "technique": "hierarchical retrieval-augmented generation",
+        "content_storage": "motoko-state-chunks-v1",
+        "derived_content_budget_bytes": budget["max_bytes"],
+        "derived_content_bytes": sum(item.get("derived_content_bytes", 0) for item in files),
+        "duplicate_chunk_count": sum(item.get("duplicate_chunk_count", 0) for item in files),
+        "corpus_summary": corpus_summary,
+        "signal_schema": SIGNAL_SCHEMA_VERSION,
+        "signal_enriched": now(),
+        "files": files,
+    }
+    if candidates is not None:
+        index["candidate_files"] = [str(candidate) for candidate in candidates]
+        index["total_files"] = len(candidates)
+        index["completed_files"] = len(files)
+    corpus_signals = corpus_signals_from_files(files)
+    if corpus_signals:
+        index["signals"] = corpus_signals
+        index["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
+    return index
+
+
+def pause_document_index_if_requested(
+    *,
+    index_id: str,
+    root: pathlib.Path,
+    pattern: str | None,
+    name: str | None,
+    created: str,
+    budget: dict,
+    files: list[dict],
+    candidates: list[pathlib.Path],
+    progress: dict | None,
+    progress_callback=None,
+) -> None:
+    request = read_work_pause_request()
+    if request is None:
+        return
+    message = f"work paused at durable checkpoint; resume with motoko index-resume {index_id}"
+    write_partial_index(
+        document_index_record(
+            index_id=index_id,
+            root=root,
+            pattern=pattern,
+            name=name,
+            created=created,
+            budget=budget,
+            files=files,
+            candidates=candidates,
+        ),
+        status="paused",
+        error=message,
+    )
+    finish_index_progress(progress, "paused", progress_callback)
+    clear_work_pause_request()
+    raise WorkPaused(message, work_id=index_id, work_kind="index")
+
+
 def build_document_index(
     path: str,
     pattern: str | None = AUTO_INDEX_GLOB,
@@ -3578,7 +3831,9 @@ def build_document_index(
     if not candidates:
         raise SystemExit(f"no ingestible text files matched {pattern or AUTO_INDEX_GLOB} under {root}")
 
+    clear_work_pause_request()
     index_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    created = now()
     budget = {
         "max_bytes": max_derived_index_bytes(max_derived_bytes),
         "used_bytes": 0,
@@ -3590,7 +3845,6 @@ def build_document_index(
     existing_chunks = existing_index_chunk_cache(root)
     if existing_chunks:
         print(f"Duplicate-aware indexing: {len(existing_chunks)} existing chunk(s) available for reuse.")
-    saved = False
     try:
         for idx, candidate in enumerate(candidates, 1):
             try:
@@ -3605,11 +3859,49 @@ def build_document_index(
                         existing_chunks,
                         progress,
                         progress_callback,
+                        INDEX_MODEL_TIMEOUT_SECONDS,
                     )
+                )
+                write_partial_index(
+                    document_index_record(
+                        index_id=index_id,
+                        root=root,
+                        pattern=pattern,
+                        name=name,
+                        created=created,
+                        budget=budget,
+                        files=files,
+                        candidates=candidates,
+                    ),
+                    status="running",
+                )
+                pause_document_index_if_requested(
+                    index_id=index_id,
+                    root=root,
+                    pattern=pattern,
+                    name=name,
+                    created=created,
+                    budget=budget,
+                    files=files,
+                    candidates=candidates,
+                    progress=progress,
+                    progress_callback=progress_callback,
                 )
             except OSError as exc:
                 print(f"  skipped {candidate}: {exc}", file=sys.stderr)
 
+        pause_document_index_if_requested(
+            index_id=index_id,
+            root=root,
+            pattern=pattern,
+            name=name,
+            created=created,
+            budget=budget,
+            files=files,
+            candidates=candidates,
+            progress=progress,
+            progress_callback=progress_callback,
+        )
         print("  summarizing corpus", flush=True)
         corpus_summary = summarize_blocks(
             str(root),
@@ -3618,39 +3910,45 @@ def build_document_index(
             progress,
             progress_callback,
             "summarizing corpus",
+            timeout=INDEX_MODEL_TIMEOUT_SECONDS,
         )
-        corpus_signals = corpus_signals_from_files(files)
-        index = {
-            "id": index_id,
-            "name": name or root.name or str(root),
-            "root": str(root),
-            "glob": pattern or AUTO_INDEX_GLOB,
-            "selection": "auto-text-v1" if (pattern or AUTO_INDEX_GLOB) == AUTO_INDEX_GLOB else "glob-text-v1",
-            "created": now(),
-            "technique": "hierarchical retrieval-augmented generation",
-            "content_storage": "motoko-state-chunks-v1",
-            "derived_content_budget_bytes": budget["max_bytes"],
-            "derived_content_bytes": sum(item.get("derived_content_bytes", 0) for item in files),
-            "duplicate_chunk_count": sum(item.get("duplicate_chunk_count", 0) for item in files),
-            "corpus_summary": corpus_summary,
-            "signal_schema": SIGNAL_SCHEMA_VERSION,
-            "signal_enriched": now(),
-            "files": files,
-        }
-        if corpus_signals:
-            index["signals"] = corpus_signals
-            index["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
+        index = document_index_record(
+            index_id=index_id,
+            root=root,
+            pattern=pattern,
+            name=name,
+            created=created,
+            budget=budget,
+            files=files,
+            corpus_summary=corpus_summary,
+        )
         atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
-        saved = True
+        try:
+            index_partial_path(index_id).unlink()
+        except OSError:
+            pass
         finish_index_progress(progress, "completed", progress_callback)
         print(f"index saved: {index_id}")
         return index
+    except WorkPaused:
+        raise
     except BaseException as exc:
         finish_index_progress(progress, "failed", progress_callback, error=f"{type(exc).__name__}: {exc}")
+        write_partial_index(
+            document_index_record(
+                index_id=index_id,
+                root=root,
+                pattern=pattern,
+                name=name,
+                created=created,
+                budget=budget,
+                files=files,
+                candidates=candidates,
+            ),
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         raise
-    finally:
-        if not saved:
-            shutil.rmtree(index_data_dir(index_id), ignore_errors=True)
 
 
 def build_document_index_quiet(
@@ -3663,6 +3961,154 @@ def build_document_index_quiet(
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         return build_document_index(path, pattern, name, max_derived_bytes, progress_callback)
+
+
+def resume_document_index(index_id: str, progress_callback=None) -> dict:
+    partial = load_partial_index(index_id)
+    require_permission("index")
+    clear_work_pause_request()
+    root = pathlib.Path(partial.get("root", "")).expanduser().resolve()
+    require_allowed(root)
+    pattern = partial.get("glob") or AUTO_INDEX_GLOB
+    name = partial.get("name") or root.name or str(root)
+    created = partial.get("created") or now()
+    if not root.exists():
+        raise SystemExit(f"not a file or directory: {root}")
+    candidates = apply_index_limits(iter_index_candidates(root, pattern))
+    if not candidates:
+        raise SystemExit(f"no ingestible text files matched {pattern or AUTO_INDEX_GLOB} under {root}")
+    files = list(partial.get("files", []))
+    completed_by_path = {
+        str(pathlib.Path(file_item.get("path", "")).expanduser().resolve()): file_item
+        for file_item in files
+        if file_item.get("path")
+    }
+    budget = {
+        "max_bytes": int(partial.get("derived_content_budget_bytes") or DEFAULT_MAX_DERIVED_INDEX_BYTES),
+        "used_bytes": sum(int(item.get("derived_content_bytes", 0) or 0) for item in files),
+    }
+    progress = begin_index_progress(index_id, root, pattern, name, candidates, progress_callback)
+    completed_chunks = sum(len(item.get("chunks", [])) for item in files)
+    progress["completed_files"] = len(files)
+    progress["completed_chunks"] = completed_chunks
+    progress["completed_model_calls"] = completed_chunks + len(files)
+    emit_index_progress(progress, progress_callback)
+    existing_chunks = existing_index_chunk_cache(root)
+    used_ordinals = index_file_ordinals(files)
+    try:
+        for candidate_position, candidate in enumerate(candidates, 1):
+            candidate_key = str(candidate.resolve())
+            existing = completed_by_path.get(candidate_key)
+            if existing is not None:
+                status, _warnings = file_staleness(existing)
+                if status in {"fresh", "metadata-changed"}:
+                    continue
+                raise SystemExit(
+                    f"cannot resume index {index_id}: already-indexed source changed: {candidate}"
+                )
+            try:
+                file_ordinal = next_index_file_ordinal(used_ordinals)
+                print(f"[{candidate_position}/{len(candidates)}] indexing {candidate}", flush=True)
+                remove_index_file_chunks(index_id, file_ordinal)
+                index_progress_begin_file(progress, candidate, candidate_position, progress_callback)
+                item = index_file(
+                    candidate,
+                    index_id,
+                    file_ordinal,
+                    budget,
+                    existing_chunks,
+                    progress,
+                    progress_callback,
+                    INDEX_MODEL_TIMEOUT_SECONDS,
+                )
+                files.append(item)
+                completed_by_path[candidate_key] = item
+                write_partial_index(
+                    document_index_record(
+                        index_id=index_id,
+                        root=root,
+                        pattern=pattern,
+                        name=name,
+                        created=created,
+                        budget=budget,
+                        files=files,
+                        candidates=candidates,
+                    ),
+                    status="running",
+                )
+                pause_document_index_if_requested(
+                    index_id=index_id,
+                    root=root,
+                    pattern=pattern,
+                    name=name,
+                    created=created,
+                    budget=budget,
+                    files=files,
+                    candidates=candidates,
+                    progress=progress,
+                    progress_callback=progress_callback,
+                )
+            except OSError as exc:
+                print(f"  skipped {candidate}: {exc}", file=sys.stderr)
+        pause_document_index_if_requested(
+            index_id=index_id,
+            root=root,
+            pattern=pattern,
+            name=name,
+            created=created,
+            budget=budget,
+            files=files,
+            candidates=candidates,
+            progress=progress,
+            progress_callback=progress_callback,
+        )
+        print("  summarizing corpus", flush=True)
+        corpus_summary = summarize_blocks(
+            str(root),
+            [f"{item['path']}:\n{item['summary']}" for item in files],
+            "Create a corpus-level map from these file summaries. Explain the main themes and which files matter for which questions.",
+            progress,
+            progress_callback,
+            "summarizing corpus",
+            timeout=INDEX_MODEL_TIMEOUT_SECONDS,
+        )
+        index = document_index_record(
+            index_id=index_id,
+            root=root,
+            pattern=pattern,
+            name=name,
+            created=created,
+            budget=budget,
+            files=files,
+            corpus_summary=corpus_summary,
+        )
+        atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        try:
+            index_partial_path(index_id).unlink()
+        except OSError:
+            pass
+        finish_index_progress(progress, "completed", progress_callback)
+        print(f"index saved: {index_id}")
+        return index
+    except WorkPaused:
+        raise
+    except BaseException as exc:
+        finish_index_progress(progress, "failed", progress_callback, error=f"{type(exc).__name__}: {exc}")
+        write_partial_index(
+            document_index_record(
+                index_id=index_id,
+                root=root,
+                pattern=pattern,
+                name=name,
+                created=created,
+                budget=budget,
+                files=files,
+                candidates=candidates,
+            ),
+            status="failed",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
 
 
 def context_item_from_index(index: dict) -> dict:
@@ -4142,6 +4588,8 @@ def heavy_index_refresh_reason(summary: dict) -> str | None:
 def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]:
     if not env_flag("MOTOKO_BACKGROUND_HEAVY_INDEX", True):
         return []
+    if work_pause_requested():
+        return ["heavy index refresh paused by request"]
     state = read_heavy_study_state()
     notes = []
     for item in list(conv.get("context_items", [])):
@@ -4178,6 +4626,10 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
                 progress_callback=on_progress,
             )
             replace_attached_index(conv, index.get("id", ""), refreshed)
+        except WorkPaused as exc:
+            mark_heavy_index_attempt(index, state, result=f"paused: {exc}")
+            notes.append(f"heavy index refresh paused for {index.get('name', index.get('id'))}: {exc}")
+            break
         except SystemExit as exc:
             mark_heavy_index_attempt(index, state, result=f"failed: {exc}")
             notes.append(f"heavy index refresh failed for {index.get('name', index.get('id'))}: {exc}")
@@ -4235,6 +4687,18 @@ def matching_cwd_indexes(root: pathlib.Path, pattern: str = AUTO_INDEX_GLOB) -> 
     return rows
 
 
+def matching_cwd_partial_indexes(root: pathlib.Path, pattern: str = AUTO_INDEX_GLOB) -> list[dict]:
+    root_text = str(root.resolve())
+    glob_text = pattern or AUTO_INDEX_GLOB
+    rows = [
+        index
+        for index in list_partial_indexes()
+        if index.get("root") == root_text and (index.get("glob") or AUTO_INDEX_GLOB) == glob_text
+    ]
+    rows.sort(key=lambda index: index.get("updated", index.get("created", "")), reverse=True)
+    return rows
+
+
 def cwd_learning_plan(root: pathlib.Path | None = None, pattern: str = AUTO_INDEX_GLOB) -> dict | None:
     if not env_flag("MOTOKO_CWD_LEARN", True):
         return None
@@ -4253,6 +4717,7 @@ def cwd_learning_plan(root: pathlib.Path | None = None, pattern: str = AUTO_INDE
         "estimated_chunks": plan.get("estimated_chunks", 0),
         "estimated_model_calls": plan.get("estimated_model_calls", 0),
         "existing": matching_cwd_indexes(root, pattern),
+        "partials": matching_cwd_partial_indexes(root, pattern),
     }
 
 
@@ -4267,6 +4732,16 @@ def attach_best_cwd_index(conv: dict, plan: dict) -> dict | None:
 
 def cwd_learning_offer_text(plan: dict) -> str:
     root = plan["root"]
+    partials = plan.get("partials") or []
+    if partials:
+        partial = partials[0]
+        completed = int(partial.get("completed_files", len(partial.get("files", []))) or 0)
+        total = int(partial.get("total_files", plan.get("files", completed)) or plan.get("files", completed))
+        return (
+            f"I found a partial corpus index for {root}: {partial.get('id', '')} "
+            f"({completed}/{total} file(s), status {partial.get('status', 'unknown')}). "
+            "Resume learning this directory tree now? Reply yes or no."
+        )
     return (
         f"This is the first time in this conversation that I have seen {root} "
         "without a fresh full-text index attached. Learn this directory tree now? "
@@ -4275,6 +4750,48 @@ def cwd_learning_offer_text(plan: dict) -> str:
         f"{plan.get('estimated_model_calls', 0)} HRAG model call(s)). "
         "Binary/cache/vendor files are skipped. Reply yes or no."
     )
+
+
+def build_cwd_learning_index(plan: dict, *, progress_callback=None, quiet: bool = False) -> dict:
+    partials = plan.get("partials") or []
+    if partials:
+        index_id = str(partials[0].get("id", "")).strip()
+        if quiet:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                return resume_document_index(index_id, progress_callback=progress_callback)
+        return resume_document_index(index_id, progress_callback=progress_callback)
+    builder = build_document_index_quiet if quiet else build_document_index
+    return builder(
+        str(plan["root"]),
+        plan["glob"],
+        plan["root"].name or str(plan["root"]),
+        progress_callback=progress_callback,
+    )
+
+
+def resume_partial_index(index_id: str | None = None, *, progress_callback=None) -> dict:
+    partial = select_partial_index(index_id)
+    clear_work_pause_request()
+    return resume_document_index(str(partial.get("id", "")), progress_callback=progress_callback)
+
+
+def unfinished_work_notice(limit: int = 3) -> str:
+    partials = list_partial_indexes()
+    if not partials:
+        return ""
+    lines = ["Unfinished Motoko work:"]
+    for partial in partials[:limit]:
+        completed = int(partial.get("completed_files", len(partial.get("files", []))) or 0)
+        total = int(partial.get("total_files", completed) or completed)
+        lines.append(
+            f"- partial index {partial.get('id', '')}: {partial.get('status', 'unknown')}, "
+            f"{completed}/{total} file(s), {partial.get('name', '')} {partial.get('root', '')}"
+        )
+    if len(partials) > limit:
+        lines.append(f"- ... {len(partials) - limit} more partial index(es)")
+    lines.append("Use /resume-work [INDEX_ID] or motoko resume-work INDEX_ID to continue.")
+    return "\n".join(lines)
 
 
 def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | None:
@@ -4413,6 +4930,20 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
         append_study_job_event(job_id, "phase", phase=phase, notes=notes or [])
         if phase_callback is not None:
             phase_callback(phase)
+        if work_pause_requested():
+            pause_notes = (notes or []) + ["background study paused by request"]
+            state = {
+                "updated": now(),
+                "phase": "study: paused",
+                "status": "paused",
+                "mode": "catalog-and-planning",
+                "job_id": job_id,
+                "notes": pause_notes[:8],
+            }
+            write_study_state(state)
+            append_study_job_event(job_id, "paused", notes=pause_notes[:8])
+            clear_work_pause_request()
+            raise WorkPaused("background study paused by request", work_id=job_id, work_kind="study")
 
     set_phase("study: catalog")
     catalog = write_context_catalog()
@@ -5248,6 +5779,7 @@ HELP_SECTIONS = [
             ("/", "show a compact command menu"),
             ("/exit", "save and exit"),
             ("/stop", "stop the current streamed answer"),
+            ("/pause", "ask active work to pause at the next durable checkpoint"),
             ("/new [TITLE]", "save this chat and start a new conversation"),
             ("/title TEXT", "rename this conversation"),
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
@@ -5263,6 +5795,8 @@ HELP_SECTIONS = [
             ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
             ("/index-plan PATH", "preview an index without writing derived text"),
             ("/index PATH", "build and attach a mixed text document index"),
+            ("/index-resume INDEX_ID", "resume and attach a partial document index"),
+            ("/resume-work [INDEX_ID]", "resume unfinished Motoko work"),
             ("/attach-index [ID]", "attach an existing document index"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
@@ -5547,6 +6081,7 @@ def format_status(conv: dict | None = None) -> str:
     study_state = read_study_state()
     study_jobs = read_study_jobs(limit=1)
     index_jobs = active_index_progress()
+    partial_indexes = list_partial_indexes()
     catalog = read_context_catalog()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
@@ -5581,6 +6116,7 @@ def format_status(conv: dict | None = None) -> str:
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
         f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
         f"active index jobs: {len(index_jobs)}",
+        f"partial indexes: {len(partial_indexes)}",
         f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
@@ -5870,6 +6406,8 @@ def completion_ids(kind: str) -> list[str]:
         return [row.get("id", "") for row in list_conversations()]
     if kind == "index":
         return [row.get("id", "") for row in list_indexes()]
+    if kind == "partial-index":
+        return [row.get("id", "") for row in list_partial_indexes()]
     if kind == "topic":
         return [row.get("id", "") for row in list_topics()]
     if kind == "dossier":
@@ -5902,6 +6440,8 @@ def setup_readline_completion() -> None:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-index", "/topic", "/deepen"}:
                 matches = [item for item in completion_ids("index") if item.startswith(text)]
+            elif parts and parts[0] in {"/index-resume", "/resume-work"}:
+                matches = [item for item in completion_ids("partial-index") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-topic", "/topic-show"}:
                 matches = [item for item in completion_ids("topic") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-dossier", "/dossier-show"}:
@@ -6139,6 +6679,10 @@ class MotokoTui:
         if resume_note:
             self.append("system", resume_note)
         self.maybe_offer_cwd_learning()
+        if self.cwd_index_offer is None:
+            note = unfinished_work_notice()
+            if note:
+                self.append("system", note)
 
     def seed_messages(self, conv: dict) -> list[dict]:
         rows = [
@@ -6515,6 +7059,8 @@ class MotokoTui:
                     self.status = "stopping current answer"
                 else:
                     self.append("system", "Motoko is not currently answering.")
+            elif text == "/pause":
+                self.request_pause()
             elif text == "/sources":
                 self.append("system", format_sources(self.conv.get("last_sources", [])))
             elif text == "/status":
@@ -6624,6 +7170,12 @@ class MotokoTui:
             elif text.startswith("/index "):
                 path = text[len("/index ") :].strip()
                 self.run_blocking_command("Building document index...", lambda: self.attach_index_from_path(path))
+            elif text == "/index-resume" or text.startswith("/index-resume "):
+                index_id = text[len("/index-resume ") :].strip()
+                self.run_blocking_command("Resuming document index...", lambda: self.attach_index_from_resume(index_id))
+            elif text == "/resume-work" or text.startswith("/resume-work "):
+                index_id = text[len("/resume-work ") :].strip() or None
+                self.run_blocking_command("Resuming Motoko work...", lambda: self.attach_resumed_work(index_id))
             elif text == "/topic" or text.startswith("/topic "):
                 body = text[len("/topic") :].strip()
                 self.run_blocking_command("Building topic dossier...", lambda: self.attach_topic_from_body(body))
@@ -6670,7 +7222,10 @@ class MotokoTui:
             record_cwd_learning_decline(plan["root"], plan["glob"])
             self.append("system", f"not learning {plan['root']} now")
             return
-        self.append("system", f"learning corpus: {plan['root']}")
+        if plan.get("partials"):
+            self.append("system", f"resuming corpus index: {plan['partials'][0].get('id', '')}")
+        else:
+            self.append("system", f"learning corpus: {plan['root']}")
         self.start_cwd_indexing(plan)
 
     def start_cwd_indexing(self, plan: dict) -> None:
@@ -6685,14 +7240,15 @@ class MotokoTui:
 
         def worker() -> None:
             try:
-                index = build_document_index_quiet(
-                    str(plan["root"]),
-                    plan["glob"],
-                    plan["root"].name or str(plan["root"]),
+                index = build_cwd_learning_index(
+                    plan,
                     progress_callback=lambda progress: self.put_event(("cwd_index_progress", progress)),
+                    quiet=True,
                 )
                 attach_context_item(self.conv, context_item_from_index(index))
                 self.put_event(("cwd_index_done", index.get("id", "")))
+            except WorkPaused as exc:
+                self.put_event(("cwd_index_paused", exc.work_id or ""))
             except SystemExit as exc:
                 self.put_event(("cwd_index_error", str(exc)))
             except Exception as exc:
@@ -6706,6 +7262,32 @@ class MotokoTui:
         index = build_document_index(path, AUTO_INDEX_GLOB)
         self.conv.setdefault("context_items", []).append(context_item_from_index(index))
         save_conversation(self.conv)
+
+    def attach_index_from_resume(self, index_id: str) -> None:
+        if not index_id:
+            raise SystemExit("usage: /index-resume INDEX_ID")
+        index = resume_document_index(index_id)
+        self.conv.setdefault("context_items", []).append(context_item_from_index(index))
+        save_conversation(self.conv)
+
+    def attach_resumed_work(self, index_id: str | None = None) -> None:
+        index = resume_partial_index(index_id)
+        self.conv.setdefault("context_items", []).append(context_item_from_index(index))
+        save_conversation(self.conv)
+
+    def request_pause(self) -> None:
+        active = self.generating or self.maintaining or self.study_running or self.cwd_indexing
+        if not active:
+            self.append("system", "no active Motoko work to pause")
+            return
+        request_work_pause("manual TUI command")
+        if self.generating:
+            self.cancel_event.set()
+        self.status = "pause requested; waiting for checkpoint"
+        self.append(
+            "system",
+            "pause requested; active work will pause at the next durable checkpoint",
+        )
 
     def attach_topic_from_body(self, body: str) -> None:
         topic = build_topic_from_chat(self.conv, body)
@@ -6769,6 +7351,8 @@ class MotokoTui:
             print(style(label, "turquoise", "bold"))
             func()
             print(style("Done. Returning to Motoko TUI.", "green"))
+        except WorkPaused as exc:
+            print(style(str(exc), "yellow"))
         except SystemExit as exc:
             print(style(str(exc), "red"))
         finally:
@@ -6956,6 +7540,15 @@ class MotokoTui:
                     next_prompt = self.pending_prompts.popleft()
                     self.start_generation(next_prompt)
                 changed = True
+            elif kind == "cwd_index_paused":
+                self.cwd_indexing = False
+                self.study_running = False
+                self.index_progress = None
+                index_id = event[1]
+                self.study_last_note = f"corpus learning paused {index_id}".strip()
+                self.study_status = "study: idle"
+                self.append("system", f"corpus learning paused: {index_id}\nUse /resume-work {index_id} to continue.")
+                changed = True
             elif kind == "cwd_index_error":
                 self.cwd_indexing = False
                 self.study_running = False
@@ -6997,6 +7590,8 @@ class MotokoTui:
                         self.conv,
                         phase_callback=lambda phase: self.put_event(("study_phase", phase)),
                     )
+                except WorkPaused as exc:
+                    self.put_event(("study_done", [str(exc)]))
                 except Exception as exc:  # Background study must not break chat.
                     self.put_event(("study_error", f"{type(exc).__name__}: {exc}"))
                 else:
@@ -7025,6 +7620,8 @@ class MotokoTui:
                 )
                 clear_maintenance_state(state.get("job_id"))
                 self.put_event(("maintenance_done", notes))
+            except WorkPaused as exc:
+                self.put_event(("maintenance_done", [str(exc)]))
             except Exception as exc:  # Keep hidden maintenance from breaking chat.
                 update_maintenance_state(
                     state,
@@ -7074,6 +7671,21 @@ class MotokoTui:
                 if not current or suffix.startswith(current) or value.startswith(stripped):
                     options.append({"kind": "command", "value": value, "label": command, "description": description})
             return options
+        if first in {"/index-resume", "/resume-work"} and len(words) <= 2:
+            return [
+                {
+                    "kind": "partial-index",
+                    "value": row.get("id", ""),
+                    "label": (
+                        f"{row.get('id', '')} "
+                        f"{row.get('status', 'unknown')} "
+                        f"{row.get('completed_files', len(row.get('files', [])))}/{row.get('total_files', '?')}"
+                    ),
+                    "description": row.get("root", ""),
+                }
+                for row in list_partial_indexes()
+                if not current or item_matches_selector(row, current)
+            ][:20]
         if first in {"/attach-index", "/topic", "/deepen"} and len(words) <= 2:
             return [
                 {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
@@ -7130,6 +7742,13 @@ class MotokoTui:
                 self.cursor = 0
             self.dropdown_index = 0
             self.dirty = True
+            return
+        if kind == "partial-index":
+            self.input_buffer = f"{first} {value}"
+            self.cursor = len(self.input_buffer)
+            self.submit_text(self.input_buffer)
+            self.input_buffer = ""
+            self.cursor = 0
             return
         if kind == "topic":
             if first == "/topic-show":
@@ -7393,6 +8012,9 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/exit":
             save_conversation(conv)
             return
+        if user_text == "/pause":
+            command_pause(None)
+            continue
         if user_text == "/new" or user_text.startswith("/new "):
             save_conversation(conv)
             title = user_text[len("/new") :].strip() or None
@@ -7427,6 +8049,18 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text.startswith("/index "):
             index = build_document_index(user_text[len("/index ") :].strip(), AUTO_INDEX_GLOB)
+            conv.setdefault("context_items", []).append(context_item_from_index(index))
+            save_conversation(conv)
+            print(f"attached index: {index['id']}")
+            continue
+        if user_text == "/index-resume" or user_text.startswith("/index-resume "):
+            index = resume_document_index(user_text[len("/index-resume ") :].strip())
+            conv.setdefault("context_items", []).append(context_item_from_index(index))
+            save_conversation(conv)
+            print(f"attached index: {index['id']}")
+            continue
+        if user_text == "/resume-work" or user_text.startswith("/resume-work "):
+            index = resume_partial_index(user_text[len("/resume-work ") :].strip() or None)
             conv.setdefault("context_items", []).append(context_item_from_index(index))
             save_conversation(conv)
             print(f"attached index: {index['id']}")
@@ -7858,6 +8492,11 @@ def auto_maintain_conversation(
             update_maintenance_state(state, phase, note=note)
         if phase_callback is not None:
             phase_callback(phase)
+        if work_pause_requested():
+            if state is not None:
+                update_maintenance_state(state, "memory: paused", status="paused", note="paused by request")
+            clear_work_pause_request()
+            raise WorkPaused("memory maintenance paused by request", work_id=state.get("job_id", "") if state else "", work_kind="maintenance")
 
     notes = []
     set_phase("memory: checking")
@@ -7960,7 +8599,7 @@ def maybe_prompt_cwd_learning_for_line_chat(conv: dict) -> None:
         record_cwd_learning_decline(plan["root"], plan["glob"])
         print(f"sys not learning {plan['root']} now")
         return
-    index = build_document_index(str(plan["root"]), plan["glob"], plan["root"].name or str(plan["root"]))
+    index = build_cwd_learning_index(plan)
     attach_context_item(conv, context_item_from_index(index))
 
 
@@ -8007,8 +8646,38 @@ def command_index(args) -> None:
     if args.plan:
         print_index_plan(args.path, args.glob)
         return
-    index = build_document_index(args.path, args.glob, args.name, args.max_derived_bytes)
+    try:
+        index = build_document_index(args.path, args.glob, args.name, args.max_derived_bytes)
+    except WorkPaused as exc:
+        print(exc)
+        return
     print(f"{index['id']}  {index.get('name', '')}  {index.get('root', '')}")
+
+
+def command_index_resume(args) -> None:
+    try:
+        index = resume_document_index(args.index)
+    except WorkPaused as exc:
+        print(exc)
+        return
+    print(f"{index['id']}  {index.get('name', '')}  {index.get('root', '')}")
+
+
+def command_resume_work(args) -> None:
+    try:
+        index = resume_partial_index(args.index)
+    except WorkPaused as exc:
+        print(exc)
+        return
+    print(f"{index['id']}  {index.get('name', '')}  {index.get('root', '')}")
+
+
+def command_pause(_args) -> None:
+    request = request_work_pause("manual command")
+    print(
+        "pause requested; active work will pause at the next durable checkpoint "
+        f"(requested {request.get('requested_at', '')})"
+    )
 
 
 def command_indexes(_args) -> None:
@@ -8040,11 +8709,25 @@ def command_tasks(args) -> None:
 def command_indexes_text() -> None:
     rows = list_indexes()
     jobs = active_index_progress()
-    if not rows and not jobs:
+    partials = list_partial_indexes()
+    if not rows and not jobs and not partials:
         print("No document indexes yet.")
         return
     for job in jobs:
         print(f"job  {format_index_progress_line(job)}")
+    for partial in partials:
+        completed = int(partial.get("completed_files", len(partial.get("files", []))) or 0)
+        total = int(partial.get("total_files", completed) or completed)
+        derived_bytes = int(partial.get("derived_content_bytes", 0) or 0)
+        updated = relative_time(str(partial.get("updated", partial.get("created", ""))))
+        print(
+            f"partial  {partial.get('id', '')}  {partial.get('status', 'unknown')}  "
+            f"{completed}/{total} file(s)  {human_bytes(derived_bytes)}  "
+            f"updated {updated}  {partial.get('name', '')}  {partial.get('root', '')}"
+        )
+        if partial.get("error"):
+            print(f"  error: {partial.get('error')}")
+        print(f"  resume: motoko index-resume {partial.get('id', '')}")
     for index in rows:
         files = len(index.get("files", []))
         chunks = sum(len(file_item.get("chunks", [])) for file_item in index.get("files", []))
@@ -8338,6 +9021,9 @@ def main(argv: list[str]) -> int:
     listed = sub.add_parser("list", help="list conversations")
     listed.set_defaults(func=command_list)
 
+    pause = sub.add_parser("pause", help="ask active Motoko work to pause at the next durable checkpoint")
+    pause.set_defaults(func=command_pause)
+
     index = sub.add_parser("index", help="build a document index")
     index.add_argument("path")
     index.add_argument("--glob", default=AUTO_INDEX_GLOB)
@@ -8348,6 +9034,14 @@ def main(argv: list[str]) -> int:
         help="maximum derived chunk text to store for this index, e.g. 200GiB",
     )
     index.set_defaults(func=command_index)
+
+    index_resume = sub.add_parser("index-resume", help="resume a partial document index")
+    index_resume.add_argument("index")
+    index_resume.set_defaults(func=command_index_resume)
+
+    resume_work = sub.add_parser("resume-work", help="resume unfinished Motoko work")
+    resume_work.add_argument("index", nargs="?")
+    resume_work.set_defaults(func=command_resume_work)
 
     indexes = sub.add_parser("indexes", help="list document indexes")
     indexes.set_defaults(func=command_indexes)

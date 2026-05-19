@@ -25,6 +25,9 @@ Design constraints:
   batches of new files, visible in the TUI status bar.
 - Heavy corpus indexing records durable progress under Motoko state and reports
   file/chunk/model-call progress with elapsed time and ETA in the TUI.
+- Heavy corpus indexing checkpoints completed files, can pause at durable
+  boundaries, and can resume unfinished work while rescanning the source tree
+  for new files.
 - A durable study-job ledger under Motoko state so interrupted background study
   passes are visible and the next pass can safely recompute/resume planning.
 - Context planning lanes and `/sources` explanations for why each memory,

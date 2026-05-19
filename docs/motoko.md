@@ -265,6 +265,22 @@ corpus, the top status reports file/chunk/model-call progress, elapsed time,
 and ETA; `/indexes` and `/status` also show active durable index jobs from
 Motoko state. The same progress display is used later if an attached stale
 index needs a heavy background refresh.
+
+Long corpus passes checkpoint after each completed file. If Motoko is paused,
+times out, crashes, or the machine loses power, completed file work remains in
+private partial-index state and `/indexes` shows a `partial` row with a resume
+command. On restart in the same directory, Motoko offers to resume the partial
+corpus index before starting a fresh one. Resume rescans the current directory
+tree: already indexed files are reused if their content is still fresh, newly
+discovered readable files are added, and changed already-indexed files stop the
+resume so the user can choose a clean rebuild.
+
+`/pause` and `motoko pause` are cooperative. They ask active work to stop at the
+next durable checkpoint: corpus indexing saves a partial index, chat answering
+saves the streamed partial answer, and background memory/study work records a
+paused state at its next phase boundary. A local model request that is already
+in flight may need to return or time out before Motoko reaches that checkpoint.
+
 `/indexes` reports a corpus health percentage computed from current readable
 files under the indexed root, newly discovered files, missing old files, and
 stale source fingerprints. This is the cheap CPU-side signal Motoko uses before
@@ -379,11 +395,14 @@ Useful in-chat commands:
 /help
 /
 /stop
+/pause
 /new [TITLE]
 /resume [CONVERSATION_ID]
 /read PATH
 /index-plan PATH
 /index PATH
+/index-resume INDEX_ID
+/resume-work [INDEX_ID]
 /attach-index [INDEX_ID]
 /topic [INDEX_ID] QUERY
 /deepen [INDEX_ID] QUERY
@@ -642,6 +661,8 @@ Inside a chat:
 ```text
 /index-plan ~/Documents
 /index ~/Documents
+/index-resume INDEX_ID
+/resume-work [INDEX_ID]
 /attach-index
 /attach-index INDEX_ID
 ```
@@ -688,9 +709,17 @@ This means Motoko may duplicate indexed text inside her own private state so
 that later retrieval can answer from the whole indexed corpus. The source files
 themselves are not modified. To avoid needless growth, new indexes reuse exact
 duplicate chunks already present in previous indexes instead of writing the same
-chunk text again. If an index build fails before the index JSON is saved, or if
-the derived-text budget would be exceeded, Motoko removes the partially written
-chunk directory to avoid abandoned derived text.
+chunk text again. During a long build, Motoko also writes
+`INDEX_ID.partial.json` checkpoints beside the chunk directory. These are
+private derived state, not source-document edits. If a model request fails or
+work is paused, the partial checkpoint remains resumable with:
+
+```bash
+motoko indexes
+motoko pause
+motoko index-resume INDEX_ID
+motoko resume-work INDEX_ID
+```
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

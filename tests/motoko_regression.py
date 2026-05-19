@@ -343,6 +343,11 @@ def test_fake_openai_stream(m):
         )
         assert text == "hello"
         assert tokens == ["hel", "lo"]
+        buf = m.io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            quiet = m.quiet_model([{"role": "user", "content": "hello"}], timeout=2)
+        assert quiet == "hello"
+        assert buf.getvalue() == ""
     finally:
         server.shutdown()
         server.server_close()
@@ -543,10 +548,115 @@ def test_list_indexes_ignores_progress_files(m):
         }
         m.atomic_write(m.index_path("idx"), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         m.write_index_progress({"id": "idx", "status": "running", "phase": "summarizing chunk"})
+        m.write_partial_index(index, status="failed", error="timeout")
         rows = m.list_indexes()
         assert len(rows) == 1
         assert rows[0]["id"] == "idx"
         assert "phase" not in rows[0]
+
+
+def test_index_resume_after_model_timeout(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.org").write_text("* TODO Alpha\n", encoding="utf-8")
+        (docs / "b.org").write_text("* TODO Bravo\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            def flaky_model(messages, **_kwargs):
+                prompt = messages[-1]["content"]
+                if "b.org chunk 1" in prompt:
+                    raise SystemExit("model request failed: timed out")
+                return "summary"
+
+            m.quiet_model = flaky_model
+            try:
+                m.build_document_index(str(docs))
+            except SystemExit as exc:
+                assert "timed out" in str(exc)
+            else:
+                raise AssertionError("index build should fail on the simulated timeout")
+
+            partials = m.list_partial_indexes()
+            assert len(partials) == 1
+            partial = partials[0]
+            assert partial["status"] == "failed"
+            assert partial["completed_files"] == 1
+            assert partial["total_files"] == 2
+            assert m.index_partial_path(partial["id"]).exists()
+            assert m.index_data_dir(partial["id"]).exists()
+            assert not m.index_path(partial["id"]).exists()
+
+            buf = m.io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.command_indexes_text()
+            listing = buf.getvalue()
+            assert "partial" in listing
+            assert f"motoko index-resume {partial['id']}" in listing
+
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.resume_document_index(partial["id"])
+            assert index["id"] == partial["id"]
+            assert len(index["files"]) == 2
+            assert any(file_item["path"].endswith("b.org") for file_item in index["files"])
+            assert m.index_path(index["id"]).exists()
+            assert not m.index_partial_path(index["id"]).exists()
+        finally:
+            m.quiet_model = old_quiet_model
+
+
+def test_index_pause_resume_rescans_new_files_without_overwriting_chunks(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.org").write_text("* TODO Alpha\nalpha body\n", encoding="utf-8")
+        (docs / "b.org").write_text("* TODO Bravo\nbravo body\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            pause_requested = {"done": False}
+
+            def pausing_model(messages, **_kwargs):
+                prompt = messages[-1]["content"]
+                if (
+                    "Create a file-level summary" in prompt
+                    and "b.org" in prompt
+                    and not pause_requested["done"]
+                ):
+                    pause_requested["done"] = True
+                    m.request_work_pause("test")
+                return "summary"
+
+            m.quiet_model = pausing_model
+            try:
+                m.build_document_index(str(docs))
+            except m.WorkPaused as exc:
+                partial_id = exc.work_id
+            else:
+                raise AssertionError("index build should pause at a durable checkpoint")
+
+            partial = m.load_partial_index(partial_id)
+            assert partial["status"] == "paused"
+            assert partial["completed_files"] == 2
+            (docs / "aa.org").write_text("* TODO Inserted\ninserted body\n", encoding="utf-8")
+
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.resume_document_index(partial_id)
+            assert len(index["files"]) == 3
+            paths = [pathlib.Path(item["path"]).name for item in index["files"]]
+            assert set(paths) == {"a.org", "aa.org", "b.org"}
+            b_item = next(item for item in index["files"] if item["path"].endswith("b.org"))
+            b_text = m.read_chunk_content(index, b_item["chunks"][0])
+            assert "bravo body" in b_text
+            aa_item = next(item for item in index["files"] if item["path"].endswith("aa.org"))
+            aa_text = m.read_chunk_content(index, aa_item["chunks"][0])
+            assert "inserted body" in aa_text
+        finally:
+            m.clear_work_pause_request()
+            m.quiet_model = old_quiet_model
 
 
 def test_org_task_signals_drive_retrieval(m):
@@ -780,6 +890,8 @@ def main() -> int:
         test_index_limits,
         test_index_progress_state,
         test_list_indexes_ignores_progress_files,
+        test_index_resume_after_model_timeout,
+        test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
         test_org_task_signals_drive_retrieval,
         test_index_health_reports_new_files,
         test_index_signal_enrichment_upgrades_legacy_index,

@@ -64,6 +64,9 @@ not the easiest place to review what changed after a long work session.
   active indexes that are still being built.
 - Fixed index listing so `INDEX.progress.json` job files are never treated as
   completed document indexes.
+- Made heavy corpus indexing checkpoint completed files into partial indexes,
+  resume after timeout/pause/interruption, rescan for newly added files, and
+  expose `/pause`, `/resume-work`, and `motoko index-resume`.
 
 ## 2026-05-18
 
