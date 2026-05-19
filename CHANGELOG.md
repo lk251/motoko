@@ -79,6 +79,10 @@ not the easiest place to review what changed after a long work session.
 - Added a private model-output cache for deterministic background summary
   routes; true llama.cpp prompt/KV caching remains a NixOS model-service
   follow-up.
+- Documented possible future retrieval components, including embedding stores,
+  rerankers, token accounting, richer lexical retrieval, deterministic
+  extractors, parser-backed artifacts, deduplication, and lightweight
+  classifiers.
 - Fixed index listing so `INDEX.progress.json` job files are never treated as
   completed document indexes.
 - Made heavy corpus indexing checkpoint completed files into partial indexes,
