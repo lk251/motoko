@@ -62,6 +62,11 @@ not the easiest place to review what changed after a long work session.
 - Made the light background study loop perform bounded CPU-only signal
   enrichment automatically when old completed indexes need it, while refusing
   active indexes that are still being built.
+- Added Corpus Profile v1, an inspectable derived artifact that maps file
+  roles, task/date signals, tags, and planning cues for each index.
+- Added `motoko corpus-profile` and `motoko index-upgrade` so old completed
+  indexes can gain newer derived artifacts without discarding past work or
+  rerunning model summaries.
 - Fixed index listing so `INDEX.progress.json` job files are never treated as
   completed document indexes.
 - Made heavy corpus indexing checkpoint completed files into partial indexes,

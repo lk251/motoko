@@ -294,12 +294,18 @@ metadata under Motoko state; source Org files remain untouched. For task and
 priority questions, Motoko also gives the model a ranked task-candidate list
 using TODO state, priority cookies, and Org dates before asking it to answer.
 Use `/tasks [QUERY]` to inspect that ranked task-candidate list directly.
-Older completed indexes that predate the current structured-signal schema can
-be upgraded with `motoko index-enrich INDEX_ID` or `motoko index-enrich --all`.
-This enrichment is CPU-only: it reads existing stored chunks, updates index
-metadata, and does not rerun model summaries. The light background study loop
-also enriches a small number of old completed indexes automatically when idle;
-it refuses to touch an index that still has an active progress job.
+
+Motoko also builds a **corpus profile** for each completed index. The profile is
+a deterministic derived artifact that maps file roles, task/date signals, tags,
+and high-value planning cues. It is injected into retrieval context and can be
+inspected with `/corpus-profile [INDEX_ID]` or `motoko corpus-profile INDEX_ID`.
+Older completed indexes that predate the current artifact schemas can be
+upgraded with `motoko index-upgrade INDEX_ID` or `motoko index-upgrade --all`.
+`motoko index-enrich` remains as a compatibility alias. These upgrades are
+CPU-only: they read existing stored chunks, update index metadata, and do not
+rerun model summaries. The light background study loop also upgrades a small
+number of old completed indexes automatically when idle; it refuses to touch an
+index that still has an active progress job.
 
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
@@ -366,6 +372,9 @@ motoko show CONVERSATION_ID
 motoko status
 motoko index-enrich INDEX_ID
 motoko index-enrich --all
+motoko index-upgrade INDEX_ID
+motoko index-upgrade --all
+motoko corpus-profile INDEX_ID
 motoko tasks "priority tasks tomorrow"
 motoko permissions
 ```
@@ -404,6 +413,7 @@ Useful in-chat commands:
 /index-resume INDEX_ID
 /resume-work [INDEX_ID]
 /attach-index [INDEX_ID]
+/corpus-profile [INDEX_ID]
 /topic [INDEX_ID] QUERY
 /deepen [INDEX_ID] QUERY
 /attach-topic [TOPIC_ID]
@@ -547,13 +557,14 @@ counts, and the amount of context attached to the active conversation.
 
 While the TUI is open, Motoko also runs a low-intensity background study loop
 only when she is idle. The loop refreshes a private context catalog, checks
-index freshness, and records study suggestions. By default it avoids heavy
-model calls so it does not compete with chat; set `MOTOKO_BACKGROUND_PROFILE=1`
-to allow idle profile-dossier refreshes. It does not silently crawl new
-directories or create large document indexes; document access still starts from
-explicit allowlists and `/index`. Use `/study QUERY` for a deliberate bounded
-study pass that either reuses an existing dossier, builds a topic dossier from
-an attached or relevant index, or builds a memory/conversation dossier.
+index freshness, upgrades a bounded number of old CPU-only index artifacts, and
+records study suggestions. By default it avoids heavy model calls so it does not
+compete with chat; set `MOTOKO_BACKGROUND_PROFILE=1` to allow idle
+profile-dossier refreshes. It does not silently crawl new directories or create
+large document indexes; document access still starts from explicit allowlists
+and `/index`. Use `/study QUERY` for a deliberate bounded study pass that either
+reuses an existing dossier, builds a topic dossier from an attached or relevant
+index, or builds a memory/conversation dossier.
 For document corpora already attached to the active conversation, Motoko may
 also run a heavier background index refresh when an attached index becomes stale
 or when enough new files appear under the indexed root. This work uses the local
@@ -676,6 +687,8 @@ Indexes live under:
 Each index stores:
 
 - a corpus-level summary;
+- a corpus profile that maps file roles, task/date signals, tags, and planning
+  cues for retrieval;
 - one summary per file;
 - one summary per chunk;
 - raw chunk text for later retrieval, stored as Motoko-owned derived files;
@@ -723,9 +736,12 @@ motoko resume-work INDEX_ID
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad
-indexes when needed. If only structured signals need to be added to an old
-completed index, prefer `motoko index-enrich INDEX_ID`; it is a metadata upgrade
-and should be much faster than rebuilding the HRAG summaries.
+indexes when needed. If only derived metadata such as structured signals or a
+corpus profile needs to be added to an old completed index, prefer
+`motoko index-upgrade INDEX_ID`; it is a metadata upgrade and should be much
+faster than rebuilding the HRAG summaries. Use `motoko corpus-profile INDEX_ID`
+or `/corpus-profile [INDEX_ID]` to inspect the profile that retrieval will show
+the model.
 
 ## Topic Dossiers
 

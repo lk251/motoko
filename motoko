@@ -76,6 +76,8 @@ BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES = 64 * 1024
 BACKGROUND_INDEX_ENRICH_LIMIT = 1
 CWD_LEARN_DECLINE_COOLDOWN_SECONDS = 24 * 60 * 60
 SIGNAL_SCHEMA_VERSION = "org-signals-v1"
+CORPUS_PROFILE_SCHEMA_VERSION = "corpus-profile-v1"
+BACKGROUND_INDEX_UPGRADE_LIMIT = 1
 ORG_TODO_KEYWORDS = {
     "TODO",
     "NEXT",
@@ -215,6 +217,7 @@ SLASH_COMMANDS = [
     ("/dossier-show [ID]", "show a memory dossier"),
     ("/study QUERY", "choose and run the best bounded study action"),
     ("/indexes", "list document indexes"),
+    ("/corpus-profile [ID]", "show a corpus profile"),
     ("/tasks [QUERY]", "show ranked Org task candidates from corpus indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
@@ -257,6 +260,7 @@ SHELL_COMMANDS = [
     "index-resume",
     "resume-work",
     "indexes",
+    "corpus-profile",
     "topic",
     "deepen",
     "topics",
@@ -269,6 +273,7 @@ SHELL_COMMANDS = [
     "memory",
     "tasks",
     "index-enrich",
+    "index-upgrade",
     "forget",
     "personality",
     "profile",
@@ -298,6 +303,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/profile-refresh",
     "/memories",
     "/indexes",
+    "/corpus-profile",
     "/tasks",
     "/topics",
     "/dossiers",
@@ -2544,6 +2550,7 @@ def build_context_catalog() -> dict:
                 "status": status,
                 "warnings": warnings[:4],
                 "summary": compact_text(index.get("corpus_summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
+                "corpus_profile": compact_text(corpus_profile_text(index), CONTEXT_CATALOG_SUMMARY_CHARS),
             }
         )
     topics = []
@@ -2616,7 +2623,8 @@ def format_context_catalog(catalog: dict | None = None) -> str:
             warning = f" warnings={'; '.join(item.get('warnings', []))}" if item.get("warnings") else ""
             lines.append(
                 f"- index:{item.get('id')} {item.get('name')} root={item.get('root')} "
-                f"status={item.get('status')}{warning} summary={item.get('summary')}"
+                f"status={item.get('status')}{warning} summary={item.get('summary')} "
+                f"profile={item.get('corpus_profile', '')}"
             )
     return "\n".join(lines)
 
@@ -2714,7 +2722,11 @@ def ranked_topics_for_query(query: str) -> list[dict]:
 
 
 def ranked_indexes_for_query(query: str) -> list[dict]:
-    rows = rank_items_by_query(list_indexes(), query, ["name", "root", "corpus_summary", "signal_summary"])
+    rows = rank_items_by_query(
+        list_indexes(),
+        query,
+        ["name", "root", "corpus_summary", "signal_summary", "corpus_profile_text"],
+    )
     if query_wants_task_context(query):
         for row in rows:
             row["_score"] = int(row.get("_score", 0) or 0) + task_signal_boost(query, row.get("signals") or {})
@@ -3060,6 +3072,204 @@ def format_ranked_task_items(index: dict, query: str, *, limit: int = 16) -> str
     return "\n".join(lines)
 
 
+def corpus_profile_file_role(file_item: dict) -> tuple[str, list[str], list[str]]:
+    path_text = str(file_item.get("path", ""))
+    lower = path_text.lower()
+    name = pathlib.Path(path_text).name.lower()
+    suffix = pathlib.Path(path_text).suffix.lower()
+    signals = file_item.get("signals") or {}
+    roles: list[tuple[int, str, str]] = []
+
+    def add(score: int, role: str, reason: str) -> None:
+        roles.append((score, role, reason))
+
+    if int(signals.get("active_task_count", 0) or 0):
+        add(90, "planning", "active Org tasks")
+    if signals.get("deadlines") or signals.get("scheduled"):
+        add(82, "calendar", "Org dates")
+    if signals.get("headline_count") and suffix == ".org":
+        add(55, "notes", "Org hierarchy")
+    if any(word in lower for word in ["/archive", "archive", "old/", "done/"]):
+        add(40, "archive", "archive path")
+    if any(word in name for word in ["readme", "manual", "guide", "docs", "doc"]):
+        add(72, "reference", "reference filename")
+    if any(part in lower for part in ["/docs/", "/doc/"]):
+        add(56, "reference", "documentation path")
+    if suffix in {".py", ".nix", ".sh", ".js", ".ts", ".rs", ".go", ".c", ".h"}:
+        add(66, "source", "source-code suffix")
+    if suffix in {".json", ".yaml", ".yml", ".toml", ".ini"}:
+        add(58, "config", "configuration suffix")
+    if any(word in name for word in ["journal", "diary", "log", "daily"]):
+        add(62, "journal", "journal filename")
+    if suffix in {".csv", ".tsv", ".jsonl"}:
+        add(52, "data", "data suffix")
+    if not roles:
+        add(10, "notes", "general text")
+
+    roles.sort(key=lambda row: row[0], reverse=True)
+    primary = roles[0][1]
+    secondary = []
+    reasons = []
+    for _score, role, reason in roles:
+        if role != primary and role not in secondary:
+            secondary.append(role)
+        if reason not in reasons:
+            reasons.append(reason)
+    return primary, secondary[:4], reasons[:5]
+
+
+def corpus_profile_tags(files: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for file_item in files:
+        for item in (file_item.get("signals") or {}).get("task_items", []) or []:
+            for tag in item.get("tags", []) or []:
+                counts[str(tag)] = counts.get(str(tag), 0) + 1
+    return dict(sorted(counts.items(), key=lambda row: (-row[1], row[0]))[:40])
+
+
+def corpus_profile_date_items(files: list[dict], *, limit: int = 40) -> list[dict]:
+    rows = []
+    for file_item in files:
+        path = file_item.get("path", "")
+        for item in (file_item.get("signals") or {}).get("task_items", []) or []:
+            for kind, date_key, raw_key in [
+                ("deadline", "deadline_date", "deadline"),
+                ("scheduled", "scheduled_date", "scheduled"),
+            ]:
+                date_value = str(item.get(date_key, ""))
+                if not date_value:
+                    continue
+                rows.append(
+                    clean_signal_dict(
+                        {
+                            "date": date_value,
+                            "kind": kind,
+                            "path": path,
+                            "todo": item.get("todo", ""),
+                            "priority": item.get("priority", ""),
+                            "title": item.get("title", ""),
+                            "raw": item.get(raw_key, ""),
+                        }
+                    )
+                )
+    rows.sort(key=lambda row: (row.get("date", ""), row.get("path", ""), row.get("title", "")))
+    return rows[:limit]
+
+
+def corpus_profile_task_items(files: list[dict], *, limit: int = 30) -> list[dict]:
+    rows = []
+    query = "priority tasks deadlines scheduled today tomorrow next plan"
+    for file_item in files:
+        path = file_item.get("path", "")
+        for item in (file_item.get("signals") or {}).get("task_items", []) or []:
+            row = dict(item)
+            row.setdefault("path", path)
+            rows.append((task_item_rank(row, query), row))
+    rows.sort(key=lambda row: row[0], reverse=True)
+    return [row for score, row in rows[:limit] if score > -10]
+
+
+def build_corpus_profile(
+    index_id: str,
+    root: pathlib.Path,
+    files: list[dict],
+    *,
+    created: str = "",
+) -> dict:
+    file_profiles = []
+    role_counts: dict[str, int] = {}
+    for file_item in files:
+        role, secondary_roles, reasons = corpus_profile_file_role(file_item)
+        role_counts[role] = role_counts.get(role, 0) + 1
+        signals = file_item.get("signals") or {}
+        file_profiles.append(
+            clean_signal_dict(
+                {
+                    "path": file_item.get("path", ""),
+                    "role": role,
+                    "secondary_roles": secondary_roles,
+                    "reasons": reasons,
+                    "summary": compact_text(file_item.get("summary", ""), 700),
+                    "headline_count": signals.get("headline_count", 0),
+                    "active_task_count": signals.get("active_task_count", 0),
+                    "done_task_count": signals.get("done_task_count", 0),
+                    "priorities": signals.get("priorities", {}),
+                    "task_samples": [
+                        format_task_item(dict(item, path=file_item.get("path", "")))
+                        for item in (signals.get("task_items") or [])[:8]
+                    ],
+                    "deadlines": signals.get("deadlines", [])[:8],
+                    "scheduled": signals.get("scheduled", [])[:8],
+                }
+            )
+        )
+
+    top_tasks = corpus_profile_task_items(files)
+    profile = {
+        "schema": CORPUS_PROFILE_SCHEMA_VERSION,
+        "generated": now(),
+        "index_id": index_id,
+        "root": str(root),
+        "source_index_created": created,
+        "source_file_count": len(files),
+        "role_counts": dict(sorted(role_counts.items())),
+        "file_roles": file_profiles,
+        "top_tasks": top_tasks,
+        "date_items": corpus_profile_date_items(files),
+        "tags": corpus_profile_tags(files),
+        "profile_kind": "deterministic-corpus-profile",
+    }
+    profile["summary"] = format_corpus_profile(profile, max_files=10, max_tasks=10, max_dates=8)
+    return profile
+
+
+def format_corpus_profile(profile: dict | None, *, max_files: int = 12, max_tasks: int = 12, max_dates: int = 10) -> str:
+    if not profile:
+        return ""
+    lines = [
+        f"schema: {profile.get('schema', '')}",
+        f"root: {profile.get('root', '')}",
+        f"files: {profile.get('source_file_count', 0)}",
+    ]
+    role_counts = profile.get("role_counts") or {}
+    if role_counts:
+        lines.append("roles: " + ", ".join(f"{role}:{count}" for role, count in sorted(role_counts.items())))
+    tags = profile.get("tags") or {}
+    if tags:
+        lines.append("tags: " + ", ".join(f"{tag}:{count}" for tag, count in list(tags.items())[:12]))
+    tasks = profile.get("top_tasks") or []
+    if tasks:
+        lines.append("top tasks:")
+        lines.extend(f"- {format_task_item(item)}" for item in tasks[:max_tasks])
+    dates = profile.get("date_items") or []
+    if dates:
+        lines.append("date signals:")
+        for item in dates[:max_dates]:
+            task = format_task_item(item)
+            lines.append(f"- {item.get('date', '')} {item.get('kind', '')}: {task}")
+    file_roles = profile.get("file_roles") or []
+    if file_roles:
+        lines.append("file map:")
+        for item in file_roles[:max_files]:
+            bits = [f"- {item.get('path', '')}: {item.get('role', 'notes')}"]
+            if item.get("secondary_roles"):
+                bits.append("also " + ",".join(item.get("secondary_roles", [])))
+            if item.get("active_task_count"):
+                bits.append(f"{item.get('active_task_count')} active task(s)")
+            if item.get("summary"):
+                bits.append(compact_text(item.get("summary", ""), 220))
+            lines.append("; ".join(bits))
+    return "\n".join(lines)
+
+
+def corpus_profile_text(index: dict) -> str:
+    return index.get("corpus_profile_text") or format_corpus_profile(index.get("corpus_profile") or {})
+
+
+def path_supports_structured_signals(path: pathlib.Path) -> bool:
+    return path.suffix.lower() == ".org"
+
+
 def index_progress_running(index_id: str) -> bool:
     progress = read_index_progress(index_id)
     if not progress:
@@ -3071,23 +3281,36 @@ def index_needs_signal_enrichment(index: dict) -> bool:
     if index.get("signal_schema") != SIGNAL_SCHEMA_VERSION:
         return True
     for file_item in index.get("files", []):
-        if "signals" not in file_item:
+        path = pathlib.Path(file_item.get("path", ""))
+        supported = path_supports_structured_signals(path)
+        if supported and "signals" not in file_item:
             return True
         for chunk in file_item.get("chunks", []):
-            if "signals" not in chunk and read_chunk_content(index, chunk).strip():
+            if supported and "signals" not in chunk and read_chunk_content(index, chunk).strip():
                 return True
     return False
 
 
-def enrich_index_signals(index: dict) -> tuple[dict, bool, str]:
-    index_id = index.get("id", "")
-    if not index_id:
-        raise SystemExit("index has no id")
-    if index_progress_running(index_id):
-        raise SystemExit(f"index {index_id} is still being built; wait for the active job to finish")
-    if not index_needs_signal_enrichment(index):
-        return index, False, f"index signals already current: {index_id}"
+def index_needs_corpus_profile(index: dict) -> bool:
+    if index.get("corpus_profile_schema") != CORPUS_PROFILE_SCHEMA_VERSION:
+        return True
+    profile = index.get("corpus_profile")
+    if not isinstance(profile, dict):
+        return True
+    if profile.get("schema") != CORPUS_PROFILE_SCHEMA_VERSION:
+        return True
+    if len(profile.get("file_roles", []) or []) != len(index.get("files", []) or []):
+        return True
+    if not index.get("corpus_profile_text"):
+        return True
+    return False
 
+
+def index_needs_artifact_upgrade(index: dict) -> bool:
+    return index_needs_signal_enrichment(index) or index_needs_corpus_profile(index)
+
+
+def index_with_current_signals(index: dict) -> dict:
     enriched = dict(index)
     enriched_files = []
     for file_item in index.get("files", []):
@@ -3121,8 +3344,53 @@ def enrich_index_signals(index: dict) -> tuple[dict, bool, str]:
         enriched.pop("signal_summary", None)
     enriched["signal_schema"] = SIGNAL_SCHEMA_VERSION
     enriched["signal_enriched"] = now()
-    atomic_write(index_path(index_id), json.dumps(enriched, ensure_ascii=False, indent=2) + "\n")
-    return enriched, True, f"index signals enriched: {index_id}"
+    return enriched
+
+
+def index_with_current_corpus_profile(index: dict) -> dict:
+    enriched = dict(index)
+    try:
+        root = pathlib.Path(enriched.get("root", "")).expanduser().resolve()
+    except OSError:
+        root = pathlib.Path(enriched.get("root", ""))
+    profile = build_corpus_profile(
+        enriched.get("id", ""),
+        root,
+        enriched.get("files", []) or [],
+        created=enriched.get("created", ""),
+    )
+    enriched["corpus_profile_schema"] = CORPUS_PROFILE_SCHEMA_VERSION
+    enriched["corpus_profile_enriched"] = profile.get("generated", now())
+    enriched["corpus_profile"] = profile
+    enriched["corpus_profile_text"] = profile.get("summary", "")
+    return enriched
+
+
+def upgrade_index_artifacts(index: dict) -> tuple[dict, bool, str]:
+    index_id = index.get("id", "")
+    if not index_id:
+        raise SystemExit("index has no id")
+    if index_progress_running(index_id):
+        raise SystemExit(f"index {index_id} is still being built; wait for the active job to finish")
+
+    changed = []
+    upgraded = dict(index)
+    signals_changed = False
+    if index_needs_signal_enrichment(upgraded):
+        upgraded = index_with_current_signals(upgraded)
+        signals_changed = True
+        changed.append("signals")
+    if signals_changed or index_needs_corpus_profile(upgraded):
+        upgraded = index_with_current_corpus_profile(upgraded)
+        changed.append("corpus profile")
+    if not changed:
+        return index, False, f"index artifacts already current: {index_id}"
+    atomic_write(index_path(index_id), json.dumps(upgraded, ensure_ascii=False, indent=2) + "\n")
+    return upgraded, True, f"index artifacts enriched: {index_id} ({', '.join(changed)})"
+
+
+def enrich_index_signals(index: dict) -> tuple[dict, bool, str]:
+    return upgrade_index_artifacts(index)
 
 
 def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
@@ -3131,21 +3399,25 @@ def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
     for index in list_indexes():
         if limit is not None and changed >= limit:
             break
-        if not index_needs_signal_enrichment(index):
+        if not index_needs_artifact_upgrade(index):
             continue
         index_id = index.get("id", "")
         if index_progress_running(index_id):
-            notes.append(f"index signal enrichment skipped active job {index_id}")
+            notes.append(f"index artifact upgrade skipped active job {index_id}")
             continue
         try:
-            _enriched, did_change, note = enrich_index_signals(index)
+            _enriched, did_change, note = upgrade_index_artifacts(index)
         except Exception as exc:
-            notes.append(f"index signal enrichment failed for {index_id}: {type(exc).__name__}: {exc}")
+            notes.append(f"index artifact upgrade failed for {index_id}: {type(exc).__name__}: {exc}")
             continue
         if did_change:
             changed += 1
             notes.append(note)
     return notes
+
+
+def upgrade_indexes_needing_artifacts(*, limit: int | None = None) -> list[str]:
+    return enrich_indexes_needing_signals(limit=limit)
 
 
 def split_text(text: str, size: int = INDEX_CHUNK_CHARS) -> list[str]:
@@ -3776,6 +4048,11 @@ def document_index_record(
     if corpus_signals:
         index["signals"] = corpus_signals
         index["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
+    profile = build_corpus_profile(index_id, root, files, created=created)
+    index["corpus_profile_schema"] = CORPUS_PROFILE_SCHEMA_VERSION
+    index["corpus_profile_enriched"] = profile.get("generated", now())
+    index["corpus_profile"] = profile
+    index["corpus_profile_text"] = profile.get("summary", "")
     return index
 
 
@@ -4117,6 +4394,9 @@ def context_item_from_index(index: dict) -> dict:
     signal_summary = index.get("signal_summary", "")
     if signal_summary:
         summary = (summary + "\n\nStructured signals:\n" + signal_summary).strip()
+    profile = corpus_profile_text(index)
+    if profile:
+        summary = (summary + "\n\nCorpus profile:\n" + profile).strip()
     return {
         "kind": "index",
         "id": index["id"],
@@ -4557,12 +4837,19 @@ def format_index_health(summary: dict) -> str:
 
 
 def format_index_signal_state(index: dict) -> str:
+    profile = index.get("corpus_profile")
+    if not index_needs_corpus_profile(index):
+        profile_state = "profile current"
+    elif index.get("corpus_profile_schema") or isinstance(profile, dict):
+        profile_state = "profile old"
+    else:
+        profile_state = "profile missing"
     schema = index.get("signal_schema")
     if schema == SIGNAL_SCHEMA_VERSION:
-        return "signals current"
+        return f"signals current {profile_state}"
     if schema:
-        return "signals old"
-    return "signals missing"
+        return f"signals old {profile_state}"
+    return f"signals missing {profile_state}"
 
 
 def heavy_index_refresh_reason(summary: dict) -> str | None:
@@ -4960,16 +5247,19 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     ]
     if stale_indexes:
         notes.append(f"{len(stale_indexes)} index(es) need review or rebuild")
-    enrich_limit = env_int("MOTOKO_BACKGROUND_INDEX_ENRICH_LIMIT", BACKGROUND_INDEX_ENRICH_LIMIT)
+    enrich_limit = env_int(
+        "MOTOKO_BACKGROUND_INDEX_UPGRADE_LIMIT",
+        env_int("MOTOKO_BACKGROUND_INDEX_ENRICH_LIMIT", BACKGROUND_INDEX_UPGRADE_LIMIT),
+    )
     if env_flag("MOTOKO_BACKGROUND_INDEX_ENRICH", True) and enrich_limit:
         enrichment_candidates = [
             index
             for index in list_indexes()
-            if index_needs_signal_enrichment(index)
+            if index_needs_artifact_upgrade(index)
         ]
         if enrichment_candidates:
-            set_phase("study: enriching indexes", notes=notes)
-            notes.extend(enrich_indexes_needing_signals(limit=max(1, enrich_limit)))
+            set_phase("study: upgrading indexes", notes=notes)
+            notes.extend(upgrade_indexes_needing_artifacts(limit=max(1, enrich_limit)))
             catalog = write_context_catalog()
     heavy_notes = refresh_heavy_attached_indexes(
         conv,
@@ -5021,6 +5311,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     query_counts = token_counts(query)
     top_files, top_chunks, max_retrieval_chars = retrieval_limits(query)
     index_status, index_warnings = index_staleness(index)
+    profile_text = corpus_profile_text(index)
     file_rows = []
     chunk_rows = []
     for file_item in index.get("files", []):
@@ -5063,6 +5354,8 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         "Corpus summary:",
         index.get("corpus_summary", ""),
     ]
+    if profile_text:
+        parts.extend(["Corpus profile:", profile_text])
     signal_summary = index.get("signal_summary") or format_signal_summary(index.get("signals") or {}, limit=30)
     if signal_summary and query_wants_task_context(query):
         ranked_tasks = format_ranked_task_items(index, query)
@@ -5080,6 +5373,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             "status": index_status,
             "warnings": index_warnings[:8],
             "retrieval": "deep" if wants_deep_context(query) else "normal",
+            "corpus_profile_schema": index.get("corpus_profile_schema", ""),
         }
     ]
     if selected_files:
@@ -5322,6 +5616,8 @@ def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str
                         Freshness: {status}
                         Corpus summary:
                         {index.get('corpus_summary', '')}
+                        Corpus profile:
+                        {corpus_profile_text(index)}
                         """
                     ).strip()
                 )
@@ -5798,6 +6094,7 @@ HELP_SECTIONS = [
             ("/index-resume INDEX_ID", "resume and attach a partial document index"),
             ("/resume-work [INDEX_ID]", "resume unfinished Motoko work"),
             ("/attach-index [ID]", "attach an existing document index"),
+            ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
             ("/attach-topic [ID]", "attach an existing topic dossier"),
@@ -5820,6 +6117,7 @@ HELP_SECTIONS = [
         "Lists And Inspectors",
         [
             ("/indexes", "list document indexes"),
+            ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/topics", "list topic dossiers"),
             ("/topic-show [ID]", "show a topic dossier"),
             ("/dossiers", "list memory dossiers"),
@@ -5858,6 +6156,8 @@ HELP_SECTIONS = [
             ("motoko show [ID]", "show a transcript; picker if ID omitted"),
             ("motoko index PATH", "build a mixed text document index"),
             ("motoko index PATH --plan", "preview an index without writing derived text"),
+            ("motoko corpus-profile [ID]", "show an index's corpus profile"),
+            ("motoko index-upgrade [ID]", "upgrade index-derived artifacts"),
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
             ("motoko deepen INDEX_ID QUERY", "build a larger topic dossier"),
             ("motoko dossier QUERY", "build a memory/conversation dossier"),
@@ -6006,7 +6306,9 @@ def format_sources(sources: list[dict]) -> str:
                 f"{source.get('status', 'unknown')}  "
                 f"{source.get('retrieval', 'summary')} retrieval  {source.get('name', '')}"
             )
-            lines.append("     why: attached document index summary and retrieval root")
+            profile = source.get("corpus_profile_schema", "")
+            profile_note = f"; {profile} corpus profile" if profile else ""
+            lines.append(f"     why: attached document index summary, retrieval root{profile_note}")
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
         elif kind == "topic":
@@ -6073,6 +6375,7 @@ def format_status(conv: dict | None = None) -> str:
     )
     duplicate_chunks = sum(int(index.get("duplicate_chunk_count", 0) or 0) for index in indexes)
     derived_bytes = sum(int(index.get("derived_content_bytes", 0) or 0) for index in indexes)
+    index_upgrades = sum(1 for index in indexes if index_needs_artifact_upgrade(index))
     topics = list_topics()
     dossiers = list_dossiers()
     conversations = list_conversations()
@@ -6117,6 +6420,7 @@ def format_status(conv: dict | None = None) -> str:
         f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
         f"active index jobs: {len(index_jobs)}",
         f"partial indexes: {len(partial_indexes)}",
+        f"index artifact upgrades due: {index_upgrades}",
         f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
@@ -6438,7 +6742,7 @@ def setup_readline_completion() -> None:
                 matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
-            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen"}:
+            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen", "/corpus-profile"}:
                 matches = [item for item in completion_ids("index") if item.startswith(text)]
             elif parts and parts[0] in {"/index-resume", "/resume-work"}:
                 matches = [item for item in completion_ids("partial-index") if item.startswith(text)]
@@ -7085,6 +7389,9 @@ class MotokoTui:
                 self.append("system", self.capture_text(print_memories))
             elif text == "/indexes":
                 self.append("system", self.capture_text(command_indexes_text))
+            elif text == "/corpus-profile" or text.startswith("/corpus-profile "):
+                selector = text[len("/corpus-profile") :].strip() or None
+                self.append("system", self.capture_text(lambda: print_corpus_profile(load_index(selector))))
             elif text == "/tasks" or text.startswith("/tasks "):
                 self.append("system", format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
             elif text == "/topics":
@@ -7686,7 +7993,7 @@ class MotokoTui:
                 for row in list_partial_indexes()
                 if not current or item_matches_selector(row, current)
             ][:20]
-        if first in {"/attach-index", "/topic", "/deepen"} and len(words) <= 2:
+        if first in {"/attach-index", "/topic", "/deepen", "/corpus-profile"} and len(words) <= 2:
             return [
                 {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
                 for row in list_indexes()
@@ -8101,6 +8408,10 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/indexes":
             command_indexes_text()
+            continue
+        if user_text == "/corpus-profile" or user_text.startswith("/corpus-profile "):
+            selector = user_text[len("/corpus-profile") :].strip() or None
+            print_corpus_profile(load_index(selector))
             continue
         if user_text == "/tasks" or user_text.startswith("/tasks "):
             print(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
@@ -8691,7 +9002,7 @@ def command_index_enrich(args) -> None:
         if notes:
             print("\n".join(notes))
         else:
-            print("no indexes needed signal enrichment")
+            print("no indexes needed artifact upgrades")
         return
     index = load_index(args.index)
     _enriched, changed, note = enrich_index_signals(index)
@@ -8704,6 +9015,43 @@ def command_tasks(args) -> None:
         index = load_index_exact(index_id)
         conv["context_items"].append(context_item_from_index(index))
     print(format_task_candidates_from_chat(conv, " ".join(args.query)))
+
+
+def print_corpus_profile(index: dict) -> None:
+    profile = index.get("corpus_profile")
+    if index_needs_corpus_profile(index) or not isinstance(profile, dict):
+        print(
+            f"No current corpus profile for {index.get('id', '')}. "
+            f"Run 'motoko index-upgrade {index.get('id', '')}' to build {CORPUS_PROFILE_SCHEMA_VERSION}."
+        )
+        return
+    print(f"{index.get('name', index.get('id', 'Untitled'))} [{index.get('id', '')}]")
+    print(f"root: {index.get('root', '')}")
+    print(f"generated: {profile.get('generated', '')}")
+    print()
+    print(format_corpus_profile(profile, max_files=40, max_tasks=30, max_dates=30))
+
+
+def command_corpus_profile(args) -> None:
+    index = load_index(args.index)
+    if getattr(args, "refresh", False):
+        index, _changed, note = upgrade_index_artifacts(index)
+        print(note)
+    print_corpus_profile(index)
+
+
+def command_index_upgrade(args) -> None:
+    if args.all:
+        limit = None if args.limit is None else max(0, args.limit)
+        notes = upgrade_indexes_needing_artifacts(limit=limit)
+        if notes:
+            print("\n".join(notes))
+        else:
+            print("no indexes needed artifact upgrades")
+        return
+    index = load_index(args.index)
+    _upgraded, _changed, note = upgrade_index_artifacts(index)
+    print(note)
 
 
 def command_indexes_text() -> None:
@@ -9046,11 +9394,22 @@ def main(argv: list[str]) -> int:
     indexes = sub.add_parser("indexes", help="list document indexes")
     indexes.set_defaults(func=command_indexes)
 
-    index_enrich = sub.add_parser("index-enrich", help="add current structured signals to existing indexes")
+    corpus_profile = sub.add_parser("corpus-profile", help="show a corpus profile for a document index")
+    corpus_profile.add_argument("index", nargs="?")
+    corpus_profile.add_argument("--refresh", action="store_true", help="upgrade the index artifacts before showing the profile")
+    corpus_profile.set_defaults(func=command_corpus_profile)
+
+    index_enrich = sub.add_parser("index-enrich", help="upgrade structured signals and corpus profiles on existing indexes")
     index_enrich.add_argument("index", nargs="?")
     index_enrich.add_argument("--all", action="store_true", help="enrich every index that needs it")
     index_enrich.add_argument("--limit", type=int, help="maximum indexes to enrich with --all")
     index_enrich.set_defaults(func=command_index_enrich)
+
+    index_upgrade = sub.add_parser("index-upgrade", help="upgrade derived artifacts on existing indexes")
+    index_upgrade.add_argument("index", nargs="?")
+    index_upgrade.add_argument("--all", action="store_true", help="upgrade every index that needs it")
+    index_upgrade.add_argument("--limit", type=int, help="maximum indexes to upgrade with --all")
+    index_upgrade.set_defaults(func=command_index_upgrade)
 
     tasks = sub.add_parser("tasks", help="show ranked Org task candidates from indexes")
     tasks.add_argument("query", nargs="*")

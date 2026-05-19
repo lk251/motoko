@@ -151,9 +151,11 @@ def test_background_study_enriches_legacy_index(m):
     conv["id"] = "background-enrich"
     notes = m.background_study_step(conv)
     enriched = m.load_index_exact(index["id"])
-    assert any("index signals enriched" in note for note in notes)
+    assert any("index artifacts enriched" in note for note in notes)
     assert enriched["signal_schema"] == m.SIGNAL_SCHEMA_VERSION
+    assert enriched["corpus_profile_schema"] == m.CORPUS_PROFILE_SCHEMA_VERSION
     assert "Background enrich task" in enriched["signal_summary"]
+    assert "Background enrich task" in enriched["corpus_profile_text"]
 
 
 def test_interrupted_background_study_resume_note(m):

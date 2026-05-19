@@ -688,11 +688,17 @@ def test_org_task_signals_drive_retrieval(m):
             assert index["signals"]["priorities"]["A"] == 1
             assert index["signals"]["task_items"][0]["deadline_date"] == "2026-05-19"
             assert "Prepare tomorrow plan" in index["signal_summary"]
+            assert index["corpus_profile_schema"] == m.CORPUS_PROFILE_SCHEMA_VERSION
+            assert index["corpus_profile"]["role_counts"].get("planning") == 1
+            assert "Prepare tomorrow plan" in index["corpus_profile_text"]
+            assert not m.index_needs_artifact_upgrade(index)
 
             text, sources = m.retrieve_from_index(index, "highest priority tasks for 2026-05-19")
+            assert "Corpus profile:" in text
             assert "Ranked task candidates:" in text
             assert "Structured task signals:" in text
             assert "Prepare tomorrow plan" in text
+            assert any(source.get("corpus_profile_schema") == m.CORPUS_PROFILE_SCHEMA_VERSION for source in sources)
             assert any(source.get("kind") == "chunk" for source in sources)
 
             conv = m.new_conversation("Tasks")
@@ -705,6 +711,13 @@ def test_org_task_signals_drive_retrieval(m):
             with contextlib.redirect_stdout(buf):
                 m.command_tasks(args)
             assert "Prepare tomorrow plan" in buf.getvalue()
+            args = type("Args", (), {"index": index["id"], "refresh": False})()
+            buf = m.io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.command_corpus_profile(args)
+            profile_output = buf.getvalue()
+            assert m.CORPUS_PROFILE_SCHEMA_VERSION in profile_output
+            assert "Prepare tomorrow plan" in profile_output
         finally:
             m.quiet_model = old_quiet_model
 
@@ -748,6 +761,9 @@ def test_index_signal_enrichment_upgrades_legacy_index(m):
             legacy.pop("signals", None)
             legacy.pop("signal_summary", None)
             legacy.pop("signal_schema", None)
+            legacy.pop("corpus_profile", None)
+            legacy.pop("corpus_profile_text", None)
+            legacy.pop("corpus_profile_schema", None)
             legacy["files"] = []
             for file_item in index["files"]:
                 legacy_file = dict(file_item)
@@ -768,7 +784,10 @@ def test_index_signal_enrichment_upgrades_legacy_index(m):
             assert enriched["signal_schema"] == m.SIGNAL_SCHEMA_VERSION
             assert enriched["signals"]["priorities"]["A"] == 1
             assert "Enrich legacy task" in enriched["signal_summary"]
+            assert enriched["corpus_profile_schema"] == m.CORPUS_PROFILE_SCHEMA_VERSION
+            assert "Enrich legacy task" in enriched["corpus_profile_text"]
             assert not m.index_needs_signal_enrichment(enriched)
+            assert not m.index_needs_corpus_profile(enriched)
         finally:
             m.quiet_model = old_quiet_model
 
