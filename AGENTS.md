@@ -15,7 +15,10 @@ to stay simple, inspectable, and dependency-light.
   preserve explicit allowlists, provenance, and source visibility.
 - When changing index, memory, dossier, cache, or other derived-artifact
   schemas, include an inspectable upgrade/migration path for old artifacts, or
-  explicitly document why source reprocessing is required.
+  explicitly document why source reprocessing is required. Wire deterministic
+  migrations into the bounded light CPU background lane, and wire model-based
+  reprocessing into resumable visible heavy work so corpora can gradually
+  converge instead of depending on manual one-off commands.
 - Prefer small, testable improvements that make the assistant more trustworthy
   before making it more agentic.
 - Do not store secrets in this repository.
