@@ -92,6 +92,8 @@ Motoko is deliberately simple:
 - `docs/motoko.md`: main operating manual.
 - `docs/project-context.md`: architecture, security, interface, and product
   direction.
+- `docs/model-worker-research-brief.md`: NixOS-side research target for local
+  worker models, route competence, VRAM residency, and prompt/KV-cache review.
 - `tests/motoko_regression.py`: stdlib regression tests for memory, TUI helpers,
   model-call shims, explicit memories, and indexing plans.
 - `tests/motoko_eval.py`: small evaluation harness for study, context planning,
@@ -108,6 +110,9 @@ Important environment variables:
 ```text
 MOTOKO_ENDPOINT
 MOTOKO_MODEL
+MOTOKO_ROUTE_<ROUTE>_ENDPOINT
+MOTOKO_ROUTE_<ROUTE>_MODEL
+MOTOKO_MODEL_CACHE
 MOTOKO_STATE_HOME
 MOTOKO_CONFIG_HOME
 MOTOKO_TUI
@@ -206,6 +211,7 @@ Motoko uses the same directory shape for every Unix account:
 ~/.local/state/motoko/indexes/
 ~/.local/state/motoko/topics/
 ~/.local/state/motoko/dossiers/
+~/.local/state/motoko/model-cache/
 ~/.local/state/motoko/memories.jsonl
 ~/.local/state/motoko/maintenance.json
 ~/.local/state/motoko/profile.json

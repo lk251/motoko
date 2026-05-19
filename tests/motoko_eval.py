@@ -241,6 +241,69 @@ def test_heavy_index_refresh_replaces_attached_index(m):
     assert conv["context_items"][0]["id"] == "new-index"
 
 
+def test_routed_index_quality_gate_preserves_org_evidence(m):
+    docs = pathlib.Path(tempfile.mkdtemp()) / "docs"
+    docs.mkdir()
+    try:
+        (docs / "tasks.org").write_text(
+            "\n".join(
+                [
+                    "* TODO [#A] Prepare client filing :legal:urgent:",
+                    "DEADLINE: <2026-05-20 Wed>",
+                    "Obligation: send the signed packet to Alvarez before noon.",
+                    "* TODO [#B] Draft support note",
+                    "SCHEDULED: <2026-05-21 Thu>",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (docs / "reference.org").write_text("* Reference\nProject code name: violet harbor\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        old_quiet_model = m.quiet_model
+        routes = []
+        try:
+            def routed_summary(messages, **kwargs):
+                routes.append(kwargs.get("route"))
+                prompt = messages[-1]["content"]
+                if "Prepare client filing" in prompt:
+                    return "summary: Prepare client filing, deadline 2026-05-20, Alvarez packet, urgent legal task."
+                if "violet harbor" in prompt:
+                    return "summary: reference note for violet harbor."
+                return "summary: corpus map preserving task priorities, deadlines, project names, and file paths."
+
+            m.quiet_model = routed_summary
+            index = m.build_document_index(str(docs))
+        finally:
+            m.quiet_model = old_quiet_model
+
+        assert m.MODEL_ROUTE_INDEX_CHUNK in routes
+        assert m.MODEL_ROUTE_INDEX_FILE in routes
+        assert m.MODEL_ROUTE_INDEX_CORPUS in routes
+        assert index["signals"]["priorities"]["A"] == 1
+        assert index["signals"]["task_items"][0]["deadline_date"] == "2026-05-20"
+        assert "Prepare client filing" in index["corpus_profile_text"]
+        assert index["files"][0]["summary_artifact"]["artifact_schema"] == m.FILE_SUMMARY_SCHEMA_VERSION
+        assert index["files"][0]["chunks"][0]["summary_artifact"]["source_fingerprint"]["sha256"]
+        text, sources = m.retrieve_from_index(index, "highest priority legal tasks for 2026-05-20")
+        assert "Prepare client filing" in text
+        assert "2026-05-20" in text
+        assert "tasks.org" in text
+        assert any(source.get("kind") == "chunk" for source in sources)
+        quality = m.index_quality_gate(index)
+        assert quality["status"] == "pass", m.format_index_quality_gate(quality)
+    finally:
+        try:
+            for path in sorted(docs.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            docs.rmdir()
+        except OSError:
+            pass
+
+
 def main() -> int:
     m = load_motoko()
     with isolated_state():
@@ -257,7 +320,9 @@ def main() -> int:
         test_interrupted_background_study_resume_note(m)
     with isolated_state():
         test_heavy_index_refresh_replaces_attached_index(m)
-    print("6 motoko evaluation checks passed")
+    with isolated_state():
+        test_routed_index_quality_gate_preserves_org_evidence(m)
+    print("7 motoko evaluation checks passed")
     return 0
 
 

@@ -44,6 +44,43 @@ APP = "motoko"
 APP_VERSION = "0.1.0"
 DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
+MODEL_ROUTE_CHAT = "chat"
+MODEL_ROUTE_INDEX_CHUNK = "index_chunk"
+MODEL_ROUTE_INDEX_FILE = "index_file"
+MODEL_ROUTE_INDEX_CORPUS = "index_corpus"
+MODEL_ROUTE_TOPIC = "topic"
+MODEL_ROUTE_MEMORY = "memory"
+MODEL_ROUTE_PROFILE = "profile"
+MODEL_ROUTE_TITLE = "title"
+MODEL_ROUTE_AUDIT = "audit"
+MODEL_ROUTE_DESCRIPTIONS = {
+    MODEL_ROUTE_CHAT: "interactive chat and final user-facing synthesis",
+    MODEL_ROUTE_INDEX_CHUNK: "chunk-level retrieval summaries",
+    MODEL_ROUTE_INDEX_FILE: "file-level summaries and file-purpose maps",
+    MODEL_ROUTE_INDEX_CORPUS: "corpus-level synthesis across file summaries",
+    MODEL_ROUTE_TOPIC: "topic and deep dossiers over indexed evidence",
+    MODEL_ROUTE_MEMORY: "conversation compaction and memory proposal work",
+    MODEL_ROUTE_PROFILE: "profile dossier synthesis",
+    MODEL_ROUTE_TITLE: "short conversation titles and labels",
+    MODEL_ROUTE_AUDIT: "expensive quality audits and reflective checks",
+}
+CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
+FILE_SUMMARY_SCHEMA_VERSION = "file-summary-v1"
+CORPUS_SUMMARY_SCHEMA_VERSION = "corpus-summary-v1"
+TOPIC_DOSSIER_SCHEMA_VERSION = "topic-dossier-v1"
+MEMORY_DOSSIER_SCHEMA_VERSION = "memory-dossier-v1"
+PROFILE_DOSSIER_SCHEMA_VERSION = "profile-dossier-v1"
+CONVERSATION_SUMMARY_SCHEMA_VERSION = "conversation-summary-v1"
+MEMORY_PROPOSAL_SCHEMA_VERSION = "memory-proposal-v1"
+TITLE_SCHEMA_VERSION = "title-v1"
+MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
+MODEL_CACHEABLE_SUMMARY_ROUTES = {
+    MODEL_ROUTE_INDEX_CHUNK,
+    MODEL_ROUTE_INDEX_FILE,
+    MODEL_ROUTE_INDEX_CORPUS,
+    MODEL_ROUTE_TOPIC,
+    MODEL_ROUTE_MEMORY,
+}
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
 DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
@@ -218,12 +255,14 @@ SLASH_COMMANDS = [
     ("/study QUERY", "choose and run the best bounded study action"),
     ("/indexes", "list document indexes"),
     ("/corpus-profile [ID]", "show a corpus profile"),
+    ("/index-quality [ID]", "show index artifact quality checks"),
     ("/tasks [QUERY]", "show ranked Org task candidates from corpus indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
     ("/compact", "summarize older turns into compact context"),
     ("/sources", "show sources used for the last answer"),
     ("/status", "show model, memory, and context state"),
+    ("/model-routes", "show model worker routes"),
     ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
@@ -261,6 +300,7 @@ SHELL_COMMANDS = [
     "resume-work",
     "indexes",
     "corpus-profile",
+    "index-quality",
     "topic",
     "deepen",
     "topics",
@@ -279,6 +319,7 @@ SHELL_COMMANDS = [
     "profile",
     "remember",
     "status",
+    "model-routes",
     "identity",
     "permissions",
     "repo",
@@ -296,6 +337,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/compact",
     "/sources",
     "/status",
+    "/model-routes",
     "/identity",
     "/permissions",
     "/personality",
@@ -304,6 +346,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/memories",
     "/indexes",
     "/corpus-profile",
+    "/index-quality",
     "/tasks",
     "/topics",
     "/dossiers",
@@ -665,6 +708,11 @@ def work_pause_path() -> pathlib.Path:
     return root / "pause-request.json"
 
 
+def model_cache_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "model-cache")
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -691,6 +739,13 @@ def index_progress_path(index_id: str) -> pathlib.Path:
 
 def index_partial_path(index_id: str) -> pathlib.Path:
     return indexes_dir() / f"{index_id}.partial.json"
+
+
+def model_cache_path(cache_key: str) -> pathlib.Path:
+    safe = re.sub(r"[^a-f0-9]", "", cache_key.lower())
+    if len(safe) < 8:
+        safe = sha256_hex(cache_key.encode("utf-8"))
+    return ensure_private_dir(model_cache_dir() / safe[:2]) / f"{safe}.json"
 
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
@@ -921,11 +976,21 @@ def index_progress_begin_file(progress: dict | None, path: pathlib.Path, ordinal
     emit_index_progress(progress, callback)
 
 
-def index_progress_begin_model(progress: dict | None, phase: str, label: str, callback=None) -> None:
+def index_progress_begin_model(
+    progress: dict | None,
+    phase: str,
+    label: str,
+    callback=None,
+    *,
+    route: str = MODEL_ROUTE_CHAT,
+) -> None:
     if progress is None:
         return
+    route = normalize_model_route(route)
     progress["phase"] = phase
     progress["last_model_label"] = label
+    progress["model_route"] = route
+    progress["background_lane"] = model_route_lane(route)
     emit_index_progress(progress, callback)
 
 
@@ -980,7 +1045,10 @@ def format_index_progress_status(progress: dict) -> str:
     pct = f"{percent}%" if percent is not None else ""
     eta = progress.get("eta_seconds")
     eta_text = f"eta {human_duration(eta)}" if eta is not None else "eta ?"
-    parts = ["bg-heavy:", phase, files, chunks, pct, eta_text]
+    lane = progress.get("background_lane", "")
+    route = progress.get("model_route", "")
+    worker = f"lane {lane}/{route}" if lane and route else ""
+    parts = ["bg-heavy:", phase, worker, files, chunks, pct, eta_text]
     return " ".join(part for part in parts if part)
 
 
@@ -1014,6 +1082,7 @@ def default_config() -> dict:
             "max_files": None,
             "max_file_bytes": None,
         },
+        "model_routes": {},
     }
 
 
@@ -1037,6 +1106,19 @@ def merged_config(data: dict | None) -> dict:
         for key in ("max_derived_bytes", "max_files", "max_file_bytes"):
             if key in index:
                 merged["index"][key] = index[key]
+    model_routes = data.get("model_routes")
+    if isinstance(model_routes, dict):
+        for raw_route, raw_config in model_routes.items():
+            route = normalize_model_route(raw_route, strict=False)
+            if route not in MODEL_ROUTE_DESCRIPTIONS or not isinstance(raw_config, dict):
+                continue
+            route_config = {}
+            for key in ("endpoint", "model"):
+                value = raw_config.get(key)
+                if isinstance(value, str) and value.strip():
+                    route_config[key] = value.strip()
+            if route_config:
+                merged["model_routes"][route] = route_config
     return merged
 
 
@@ -1360,12 +1442,46 @@ def load_conversation(conversation_id: str | None = None) -> dict:
     )
 
 
+def normalize_model_route(route: str | None, *, strict: bool = True) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(route or MODEL_ROUTE_CHAT).strip().lower()).strip("_")
+    if not normalized:
+        normalized = MODEL_ROUTE_CHAT
+    if strict and normalized not in MODEL_ROUTE_DESCRIPTIONS:
+        valid = ", ".join(sorted(MODEL_ROUTE_DESCRIPTIONS))
+        raise SystemExit(f"unknown Motoko model route {route!r}; choose one of: {valid}")
+    return normalized
+
+
+def model_route_env_key(route: str, key: str) -> str:
+    token = normalize_model_route(route).upper()
+    return f"MOTOKO_ROUTE_{token}_{key.upper()}"
+
+
 def endpoint() -> str:
     return os.environ.get("MOTOKO_ENDPOINT", DEFAULT_ENDPOINT)
 
 
 def model_name() -> str:
     return os.environ.get("MOTOKO_MODEL", DEFAULT_MODEL)
+
+
+def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
+    route = normalize_model_route(route)
+    env_endpoint = os.environ.get(model_route_env_key(route, "endpoint"))
+    env_model = os.environ.get(model_route_env_key(route, "model"))
+    configured = {}
+    if not env_endpoint or not env_model:
+        candidate = config_root() / "config.json"
+        if candidate.exists():
+            configured = load_config().get("model_routes", {}).get(route, {})
+    route_endpoint = env_endpoint or configured.get("endpoint") or endpoint()
+    route_model = env_model or configured.get("model") or model_name()
+    return {
+        "route": route,
+        "endpoint": str(route_endpoint),
+        "model": str(route_model),
+        "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
+    }
 
 
 def model_badge() -> str:
@@ -1387,6 +1503,190 @@ def model_badge() -> str:
     if match:
         port = f":{match.group(1)}"
     return "-".join(pieces) + port
+
+
+def model_route_badge(route: str = MODEL_ROUTE_CHAT) -> str:
+    info = model_route(route)
+    raw = info["model"]
+    lower = raw.lower()
+    pieces = []
+    if "qwen" in lower:
+        match = re.search(r"qwen[0-9.]*", lower)
+        pieces.append(match.group(0) if match else "qwen")
+    if "27b" in lower:
+        pieces.append("27b")
+    elif match := re.search(r"\b([0-9]+(?:\.[0-9]+)?b)\b", lower):
+        pieces.append(match.group(1))
+    if "mtp" in lower:
+        pieces.append("mtp")
+    if not pieces:
+        pieces.append(raw[:28])
+    port = ""
+    match = re.search(r":(\d+)(?:/|$)", info["endpoint"])
+    if match:
+        port = f":{match.group(1)}"
+    return "-".join(pieces) + port
+
+
+def configured_model_routes() -> list[str]:
+    routes = list(MODEL_ROUTE_DESCRIPTIONS)
+    candidate = config_root() / "config.json"
+    configured = load_config().get("model_routes", {}) if candidate.exists() else {}
+    for route in configured:
+        if route in MODEL_ROUTE_DESCRIPTIONS and route not in routes:
+            routes.append(route)
+    return routes
+
+
+def format_model_routes(*, include_defaults: bool = False) -> str:
+    lines = ["Model routes:"]
+    base_endpoint = endpoint()
+    base_model = model_name()
+    for route in configured_model_routes():
+        info = model_route(route)
+        is_default = info["endpoint"] == base_endpoint and info["model"] == base_model
+        if not include_defaults and is_default and route != MODEL_ROUTE_CHAT:
+            continue
+        marker = "default" if is_default else "configured"
+        lines.append(
+            f"  {route}: {info['model']} endpoint={info['endpoint']} "
+            f"({marker}; lane={model_route_lane(route)}; {info['description']})"
+        )
+    return "\n".join(lines)
+
+
+def model_route_lane(route: str) -> str:
+    route = normalize_model_route(route)
+    if route in {MODEL_ROUTE_INDEX_CHUNK, MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_TITLE}:
+        return "small-model"
+    if route in {MODEL_ROUTE_CHAT, MODEL_ROUTE_INDEX_CORPUS, MODEL_ROUTE_TOPIC, MODEL_ROUTE_MEMORY, MODEL_ROUTE_PROFILE, MODEL_ROUTE_AUDIT}:
+        return "large-model"
+    return "model"
+
+
+def background_lanes_text() -> str:
+    return "\n".join(
+        [
+            "Background lanes:",
+            "  cpu: deterministic parsing, fingerprints, corpus health, artifact upgrades, lexical retrieval",
+            "  small-model: chunk/file summaries, labels, lightweight classification",
+            "  large-model: corpus synthesis, dossiers, memory/profile reflection, audits, final chat synthesis",
+        ]
+    )
+
+
+def artifact_provenance(
+    artifact_kind: str,
+    schema: str,
+    *,
+    route: str | None = None,
+    prompt_version: str = "",
+    source_sha256: str = "",
+    deterministic: bool = False,
+    quality_status: str = "current",
+) -> dict:
+    item = {
+        "artifact_kind": artifact_kind,
+        "artifact_schema": schema,
+        "schema": schema,
+        "builder": "motoko",
+        "builder_version": APP_VERSION,
+        "created": now(),
+        "quality_status": quality_status,
+    }
+    if deterministic:
+        item["mode"] = "deterministic"
+    else:
+        route_info = model_route(route or MODEL_ROUTE_CHAT)
+        item.update(
+            {
+                "mode": "model",
+                "route": route_info["route"],
+                "model": route_info["model"],
+                "endpoint": route_info["endpoint"],
+            }
+        )
+    if prompt_version:
+        item["prompt_version"] = prompt_version
+    if source_sha256:
+        item["source_sha256"] = source_sha256
+        item["source_fingerprint"] = {"sha256": source_sha256}
+    return item
+
+
+def model_output_cache_enabled(route: str) -> bool:
+    if normalize_model_route(route) not in MODEL_CACHEABLE_SUMMARY_ROUTES:
+        return False
+    return env_flag("MOTOKO_MODEL_CACHE", True)
+
+
+def model_output_cache_key(
+    messages: list[dict],
+    *,
+    route_info: dict,
+    temperature: float,
+    prompt_version: str,
+) -> tuple[str, str]:
+    material = {
+        "schema": MODEL_OUTPUT_CACHE_SCHEMA_VERSION,
+        "route": route_info["route"],
+        "endpoint": route_info["endpoint"],
+        "model": route_info["model"],
+        "temperature": temperature,
+        "prompt_version": prompt_version,
+        "messages": messages,
+    }
+    raw = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256_hex(raw.encode("utf-8")), sha256_hex(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def read_model_output_cache(cache_key: str, *, route_info: dict, prompt_version: str) -> str | None:
+    try:
+        data = json.loads(model_cache_path(cache_key).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("schema") != MODEL_OUTPUT_CACHE_SCHEMA_VERSION:
+        return None
+    if data.get("key") != cache_key:
+        return None
+    if data.get("route") != route_info["route"]:
+        return None
+    if data.get("model") != route_info["model"] or data.get("endpoint") != route_info["endpoint"]:
+        return None
+    if data.get("prompt_version") != prompt_version:
+        return None
+    output = data.get("output")
+    return output if isinstance(output, str) else None
+
+
+def write_model_output_cache(
+    cache_key: str,
+    *,
+    route_info: dict,
+    temperature: float,
+    prompt_version: str,
+    input_sha256: str,
+    label: str,
+    output: str,
+) -> None:
+    data = {
+        "schema": MODEL_OUTPUT_CACHE_SCHEMA_VERSION,
+        "key": cache_key,
+        "created": now(),
+        "route": route_info["route"],
+        "model": route_info["model"],
+        "endpoint": route_info["endpoint"],
+        "temperature": temperature,
+        "prompt_version": prompt_version,
+        "input_sha256": input_sha256,
+        "label": compact_text(label, 300),
+        "output": output,
+    }
+    path = model_cache_path(cache_key)
+    atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    path.chmod(0o600)
 
 
 def env_flag(name: str, default: bool = True) -> bool:
@@ -2226,12 +2526,20 @@ def refresh_profile_dossier() -> dict:
         ],
         temperature=0.2,
         timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+        route=MODEL_ROUTE_PROFILE,
     )[:MAX_PROFILE_DOSSIER_CHARS]
     data = {
         "updated": now(),
         "memory_ids": memory_ids,
         "conversation_ids": conversation_ids,
         "text": text,
+        "summary_artifact": artifact_provenance(
+            "profile-dossier",
+            PROFILE_DOSSIER_SCHEMA_VERSION,
+            route=MODEL_ROUTE_PROFILE,
+            prompt_version=PROFILE_DOSSIER_SCHEMA_VERSION,
+            source_sha256=sha256_hex(source_text.encode("utf-8")),
+        ),
     }
     atomic_write(profile_path(), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
     profile_path().chmod(0o600)
@@ -2735,15 +3043,38 @@ def ranked_indexes_for_query(query: str) -> list[dict]:
 
 
 def token_counts(text: str) -> collections.Counter:
-    words = re.findall(r"[A-Za-z0-9_'-]{3,}", text.lower())
-    return collections.Counter(words)
+    return collections.Counter(token_words(text))
+
+
+def token_words(text: str) -> list[str]:
+    return re.findall(r"[A-Za-z0-9_'-]{3,}", text.lower())
 
 
 def score_text(query_counts: collections.Counter, text: str) -> int:
     if not query_counts:
         return 0
     counts = token_counts(text)
-    return sum(min(counts.get(word, 0), count) for word, count in query_counts.items())
+    if not counts:
+        return 0
+    doc_len = max(1, sum(counts.values()))
+    avg_len = 400
+    k1 = 1.2
+    b = 0.75
+    score = 0.0
+    for word, query_count in query_counts.items():
+        tf = counts.get(word, 0)
+        if not tf:
+            continue
+        saturation = (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * doc_len / avg_len))
+        weight = 1.15 if len(word) >= 7 else 1.0
+        score += weight * saturation * min(query_count, 2)
+    query_terms = list(query_counts)
+    if len(query_terms) >= 2:
+        lowered = " ".join(token_words(text))
+        for left, right in zip(query_terms, query_terms[1:]):
+            if f"{left} {right}" in lowered:
+                score += 0.5
+    return int(round(score * 10))
 
 
 def query_wants_task_context(query: str) -> bool:
@@ -3218,6 +3549,11 @@ def build_corpus_profile(
         "date_items": corpus_profile_date_items(files),
         "tags": corpus_profile_tags(files),
         "profile_kind": "deterministic-corpus-profile",
+        "provenance": artifact_provenance(
+            "corpus-profile",
+            CORPUS_PROFILE_SCHEMA_VERSION,
+            deterministic=True,
+        ),
     }
     profile["summary"] = format_corpus_profile(profile, max_files=10, max_tasks=10, max_dates=8)
     return profile
@@ -3266,6 +3602,138 @@ def corpus_profile_text(index: dict) -> str:
     return index.get("corpus_profile_text") or format_corpus_profile(index.get("corpus_profile") or {})
 
 
+def artifact_schema_current(artifact: dict | None, schema: str) -> bool:
+    if not isinstance(artifact, dict):
+        return False
+    return artifact.get("artifact_schema") == schema or artifact.get("schema") == schema
+
+
+def artifact_has_provenance(artifact: dict | None, schema: str) -> bool:
+    if not artifact_schema_current(artifact, schema):
+        return False
+    if not artifact.get("artifact_kind"):
+        return False
+    if not artifact.get("builder"):
+        return False
+    if not artifact.get("created"):
+        return False
+    if not artifact.get("quality_status"):
+        return False
+    if artifact.get("mode") in {"model", "legacy-model"}:
+        return bool(artifact.get("model") and artifact.get("route") and artifact.get("prompt_version"))
+    return artifact.get("mode") == "deterministic"
+
+
+def legacy_summary_provenance(artifact_kind: str, schema: str, *, source_sha256: str = "") -> dict:
+    item = artifact_provenance(
+        artifact_kind,
+        schema,
+        deterministic=True,
+        prompt_version="legacy-pre-provenance",
+        source_sha256=source_sha256,
+        quality_status="legacy-unverified",
+    )
+    item["mode"] = "legacy-model"
+    item["route"] = "legacy"
+    item["model"] = "unknown-legacy"
+    item["endpoint"] = ""
+    return item
+
+
+def index_quality_gate(index: dict) -> dict:
+    checks = []
+    routes: dict[str, int] = {}
+
+    def add(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    add("files present", bool(index.get("files")), f"{len(index.get('files', []))} file(s)")
+    add(
+        "corpus summary provenance",
+        artifact_has_provenance(index.get("corpus_summary_artifact"), CORPUS_SUMMARY_SCHEMA_VERSION)
+        if index.get("corpus_summary")
+        else True,
+    )
+    add("structured signals current", not index_needs_signal_enrichment(index))
+    add("corpus profile current", not index_needs_corpus_profile(index))
+    add(
+        "corpus profile provenance",
+        artifact_has_provenance(index.get("corpus_profile_artifact"), CORPUS_PROFILE_SCHEMA_VERSION),
+    )
+
+    task_signal_text = "\n".join(
+        [
+            index.get("signal_summary", ""),
+            corpus_profile_text(index),
+        ]
+    )
+    active_tasks = []
+    for item in (index.get("signals") or {}).get("task_items", []) or []:
+        if active_org_todo(item.get("todo", "")):
+            active_tasks.append(item)
+    missing_tasks = []
+    for item in active_tasks[:40]:
+        title = str(item.get("title", ""))
+        deadline = str(item.get("deadline_date", ""))
+        if title and title not in task_signal_text:
+            missing_tasks.append(title)
+        if deadline and deadline not in task_signal_text:
+            missing_tasks.append(f"{title} deadline {deadline}".strip())
+    add(
+        "task/date evidence preserved",
+        not missing_tasks,
+        "; ".join(missing_tasks[:5]),
+    )
+
+    missing_file_artifacts = []
+    missing_chunk_artifacts = []
+    for file_item in index.get("files", []) or []:
+        if not file_item.get("summary"):
+            missing_file_artifacts.append(file_item.get("path", ""))
+        if not artifact_has_provenance(file_item.get("summary_artifact"), FILE_SUMMARY_SCHEMA_VERSION):
+            missing_file_artifacts.append(f"{file_item.get('path', '')} provenance")
+        artifact = file_item.get("summary_artifact") or {}
+        if artifact.get("route"):
+            routes[artifact["route"]] = routes.get(artifact["route"], 0) + 1
+        for chunk in file_item.get("chunks", []) or []:
+            if not chunk.get("summary") or not chunk.get("content_sha256"):
+                missing_chunk_artifacts.append(f"{file_item.get('path', '')} chunk {chunk.get('chunk')}")
+            if not artifact_has_provenance(chunk.get("summary_artifact"), CHUNK_SUMMARY_SCHEMA_VERSION):
+                missing_chunk_artifacts.append(f"{file_item.get('path', '')} chunk {chunk.get('chunk')} provenance")
+            artifact = chunk.get("summary_artifact") or {}
+            if artifact.get("route"):
+                routes[artifact["route"]] = routes.get(artifact["route"], 0) + 1
+    add("file summaries have provenance", not missing_file_artifacts, "; ".join(missing_file_artifacts[:5]))
+    add("chunk summaries have provenance", not missing_chunk_artifacts, "; ".join(missing_chunk_artifacts[:5]))
+
+    passed = sum(1 for check in checks if check["ok"])
+    return {
+        "schema": "index-quality-gate-v1",
+        "index_id": index.get("id", ""),
+        "status": "pass" if passed == len(checks) else "fail",
+        "passed": passed,
+        "total": len(checks),
+        "checks": checks,
+        "routes": dict(sorted(routes.items())),
+    }
+
+
+def format_index_quality_gate(report: dict) -> str:
+    lines = [
+        f"index quality: {report.get('status', 'unknown')} "
+        f"({report.get('passed', 0)}/{report.get('total', 0)})",
+        f"index: {report.get('index_id', '')}",
+    ]
+    routes = report.get("routes") or {}
+    if routes:
+        lines.append("routes: " + ", ".join(f"{route}:{count}" for route, count in routes.items()))
+    for check in report.get("checks", []):
+        marker = "ok" if check.get("ok") else "fail"
+        detail = f" - {check.get('detail')}" if check.get("detail") else ""
+        lines.append(f"- {marker}: {check.get('name', '')}{detail}")
+    return "\n".join(lines)
+
+
 def path_supports_structured_signals(path: pathlib.Path) -> bool:
     return path.suffix.lower() == ".org"
 
@@ -3306,8 +3774,58 @@ def index_needs_corpus_profile(index: dict) -> bool:
     return False
 
 
+def index_needs_summary_provenance(index: dict) -> bool:
+    if index.get("corpus_summary") and not artifact_has_provenance(index.get("corpus_summary_artifact"), CORPUS_SUMMARY_SCHEMA_VERSION):
+        return True
+    for file_item in index.get("files", []) or []:
+        if file_item.get("summary") and not artifact_has_provenance(file_item.get("summary_artifact"), FILE_SUMMARY_SCHEMA_VERSION):
+            return True
+        for chunk in file_item.get("chunks", []) or []:
+            if chunk.get("summary") and not artifact_has_provenance(chunk.get("summary_artifact"), CHUNK_SUMMARY_SCHEMA_VERSION):
+                return True
+    return False
+
+
 def index_needs_artifact_upgrade(index: dict) -> bool:
-    return index_needs_signal_enrichment(index) or index_needs_corpus_profile(index)
+    return index_needs_signal_enrichment(index) or index_needs_corpus_profile(index) or index_needs_summary_provenance(index)
+
+
+def index_with_current_summary_provenance(index: dict) -> dict:
+    enriched = dict(index)
+    enriched_files = []
+    for file_item in enriched.get("files", []) or []:
+        enriched_file = dict(file_item)
+        if enriched_file.get("summary") and not artifact_has_provenance(enriched_file.get("summary_artifact"), FILE_SUMMARY_SCHEMA_VERSION):
+            source_sha = (
+                (enriched_file.get("source_fingerprint") or {}).get("sha256")
+                or enriched_file.get("indexed_sha256", "")
+            )
+            enriched_file["summary_artifact"] = legacy_summary_provenance(
+                "file-summary",
+                FILE_SUMMARY_SCHEMA_VERSION,
+                source_sha256=source_sha,
+            )
+        enriched_chunks = []
+        for chunk in enriched_file.get("chunks", []) or []:
+            enriched_chunk = dict(chunk)
+            if enriched_chunk.get("summary") and not artifact_has_provenance(enriched_chunk.get("summary_artifact"), CHUNK_SUMMARY_SCHEMA_VERSION):
+                enriched_chunk["summary_artifact"] = legacy_summary_provenance(
+                    "chunk-summary",
+                    CHUNK_SUMMARY_SCHEMA_VERSION,
+                    source_sha256=enriched_chunk.get("content_sha256", ""),
+                )
+            enriched_chunks.append(enriched_chunk)
+        enriched_file["chunks"] = enriched_chunks
+        enriched_files.append(enriched_file)
+    enriched["files"] = enriched_files
+    if enriched.get("corpus_summary") and not artifact_has_provenance(enriched.get("corpus_summary_artifact"), CORPUS_SUMMARY_SCHEMA_VERSION):
+        corpus_source = "\n\n".join(f"{item.get('path', '')}\n{item.get('summary', '')}" for item in enriched_files)
+        enriched["corpus_summary_artifact"] = legacy_summary_provenance(
+            "corpus-summary",
+            CORPUS_SUMMARY_SCHEMA_VERSION,
+            source_sha256=sha256_hex(corpus_source.encode("utf-8")),
+        )
+    return enriched
 
 
 def index_with_current_signals(index: dict) -> dict:
@@ -3362,6 +3880,7 @@ def index_with_current_corpus_profile(index: dict) -> dict:
     enriched["corpus_profile_schema"] = CORPUS_PROFILE_SCHEMA_VERSION
     enriched["corpus_profile_enriched"] = profile.get("generated", now())
     enriched["corpus_profile"] = profile
+    enriched["corpus_profile_artifact"] = profile.get("provenance", {})
     enriched["corpus_profile_text"] = profile.get("summary", "")
     return enriched
 
@@ -3375,6 +3894,9 @@ def upgrade_index_artifacts(index: dict) -> tuple[dict, bool, str]:
 
     changed = []
     upgraded = dict(index)
+    if index_needs_summary_provenance(upgraded):
+        upgraded = index_with_current_summary_provenance(upgraded)
+        changed.append("summary provenance")
     signals_changed = False
     if index_needs_signal_enrichment(upgraded):
         upgraded = index_with_current_signals(upgraded)
@@ -3512,6 +4034,7 @@ def quiet_model(
     *,
     temperature: float = 0.2,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    route: str = MODEL_ROUTE_CHAT,
 ) -> str:
     return call_model(
         messages,
@@ -3519,6 +4042,7 @@ def quiet_model(
         stream=True,
         echo=False,
         timeout=timeout,
+        route=route,
     ).strip()
 
 
@@ -3528,6 +4052,8 @@ def summarize_text(
     instruction: str,
     *,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    route: str = MODEL_ROUTE_CHAT,
+    prompt_version: str = "summary-v1",
 ) -> str:
     clipped = text[:SUMMARY_INPUT_CHARS]
     prompt = textwrap.dedent(
@@ -3540,17 +4066,45 @@ def summarize_text(
         {clipped}
         """
     ).strip()
-    return quiet_model(
-        [
-            {
-                "role": "system",
-                "content": "Create compact, faithful summaries for retrieval. Do not invent facts.",
-            },
-            {"role": "user", "content": prompt},
-        ],
+    messages = [
+        {
+            "role": "system",
+            "content": "Create compact, faithful summaries for retrieval. Do not invent facts.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    route_info = model_route(route)
+    if model_output_cache_enabled(route_info["route"]):
+        cache_key, input_sha256 = model_output_cache_key(
+            messages,
+            route_info=route_info,
+            temperature=0.2,
+            prompt_version=prompt_version,
+        )
+        cached = read_model_output_cache(cache_key, route_info=route_info, prompt_version=prompt_version)
+        if cached is not None:
+            return cached
+    else:
+        cache_key = ""
+        input_sha256 = ""
+
+    result = quiet_model(
+        messages,
         temperature=0.2,
         timeout=timeout,
+        route=route_info["route"],
     )
+    if cache_key:
+        write_model_output_cache(
+            cache_key,
+            route_info=route_info,
+            temperature=0.2,
+            prompt_version=prompt_version,
+            input_sha256=input_sha256,
+            label=label,
+            output=result,
+        )
+    return result
 
 
 def chunk_content_relpath(index_id: str, ordinal: int, chunk_idx: int) -> str:
@@ -3751,8 +4305,9 @@ def dedup_chunk_from_existing(
     chunk_idx: int,
     content: str,
     existing_chunks: dict[str, str],
+    digest: str | None = None,
 ) -> dict | None:
-    digest = sha256_hex(content.encode("utf-8"))
+    digest = digest or sha256_hex(content.encode("utf-8"))
     existing_content = existing_chunks.get(digest)
     if existing_content is None:
         return None
@@ -3766,6 +4321,13 @@ def dedup_chunk_from_existing(
         "content_sha256": digest,
         "content_bytes": len(content.encode("utf-8")),
         "stored_content_bytes": 0,
+        "summary_artifact": artifact_provenance(
+            "chunk-summary",
+            CHUNK_SUMMARY_SCHEMA_VERSION,
+            deterministic=True,
+            prompt_version="duplicate-chunk-reuse-v1",
+            source_sha256=digest,
+        ),
     }
 
 
@@ -3784,6 +4346,7 @@ def summarize_and_store_chunk(
     content = content.strip()
     if not content:
         return None
+    content_digest = sha256_hex(content.encode("utf-8"))
     if existing_chunks:
         duplicate = dedup_chunk_from_existing(
             path,
@@ -3791,6 +4354,7 @@ def summarize_and_store_chunk(
             chunk_idx,
             content,
             existing_chunks,
+            content_digest,
         )
         if duplicate is not None:
             return duplicate
@@ -3798,12 +4362,14 @@ def summarize_and_store_chunk(
     print(f"  summarizing {label}", flush=True)
     if progress is not None:
         progress["current_chunk"] = chunk_idx
-    index_progress_begin_model(progress, "summarizing chunk", label, progress_callback)
+    index_progress_begin_model(progress, "summarizing chunk", label, progress_callback, route=MODEL_ROUTE_INDEX_CHUNK)
     summary = summarize_text(
         label,
         content[:SUMMARY_INPUT_CHARS],
         "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
         timeout=model_timeout,
+        route=MODEL_ROUTE_INDEX_CHUNK,
+        prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
     )
     index_progress_finish_model(progress, progress_callback, chunk_done=True)
     relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content, budget, path)
@@ -3815,7 +4381,14 @@ def summarize_and_store_chunk(
         "content_path": relpath,
         "content_bytes": content_bytes,
         "stored_content_bytes": content_bytes,
-        "content_sha256": sha256_hex(content.encode("utf-8")),
+        "content_sha256": content_digest,
+        "summary_artifact": artifact_provenance(
+            "chunk-summary",
+            CHUNK_SUMMARY_SCHEMA_VERSION,
+            route=MODEL_ROUTE_INDEX_CHUNK,
+            prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
+            source_sha256=content_digest,
+        ),
     }
     signals = extract_document_signals(path, content)
     if signals:
@@ -3917,17 +4490,33 @@ def summarize_blocks(
     progress_callback=None,
     phase: str = "summarizing",
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    route: str = MODEL_ROUTE_CHAT,
+    prompt_version: str = "summary-v1",
 ) -> str:
     pending = [block.strip() for block in blocks if block.strip()]
     if not pending:
-        index_progress_begin_model(progress, phase, label, progress_callback)
-        result = summarize_text(label, "", instruction, timeout=timeout)
+        index_progress_begin_model(progress, phase, label, progress_callback, route=route)
+        result = summarize_text(
+            label,
+            "",
+            instruction,
+            timeout=timeout,
+            route=route,
+            prompt_version=prompt_version,
+        )
         index_progress_finish_model(progress, progress_callback)
         return result
 
     def summarize_with_progress(model_label: str, text: str, model_instruction: str) -> str:
-        index_progress_begin_model(progress, phase, model_label, progress_callback)
-        result = summarize_text(model_label, text, model_instruction, timeout=timeout)
+        index_progress_begin_model(progress, phase, model_label, progress_callback, route=route)
+        result = summarize_text(
+            model_label,
+            text,
+            model_instruction,
+            timeout=timeout,
+            route=route,
+            prompt_version=prompt_version,
+        )
         index_progress_finish_model(progress, progress_callback)
         return result
 
@@ -3986,6 +4575,8 @@ def index_file(
         progress_callback,
         "summarizing file",
         timeout=model_timeout,
+        route=MODEL_ROUTE_INDEX_FILE,
+        prompt_version=FILE_SUMMARY_SCHEMA_VERSION,
     )
     index_progress_finish_file(progress, progress_callback)
     item = {
@@ -4003,6 +4594,13 @@ def index_file(
         "content_storage": "motoko-state-chunks-v1",
         "derived_content_bytes": derived_content_bytes,
         "summary": file_summary,
+        "summary_artifact": artifact_provenance(
+            "file-summary",
+            FILE_SUMMARY_SCHEMA_VERSION,
+            route=MODEL_ROUTE_INDEX_FILE,
+            prompt_version=FILE_SUMMARY_SCHEMA_VERSION,
+            source_sha256=fingerprint["sha256"],
+        ),
         "chunks": indexed_chunks,
     }
     signals = file_signals_from_chunks(indexed_chunks)
@@ -4038,8 +4636,22 @@ def document_index_record(
         "corpus_summary": corpus_summary,
         "signal_schema": SIGNAL_SCHEMA_VERSION,
         "signal_enriched": now(),
+        "signal_artifact": artifact_provenance(
+            "structured-signals",
+            SIGNAL_SCHEMA_VERSION,
+            deterministic=True,
+        ),
         "files": files,
     }
+    if corpus_summary:
+        corpus_source = "\n\n".join(f"{item.get('path', '')}\n{item.get('summary', '')}" for item in files)
+        index["corpus_summary_artifact"] = artifact_provenance(
+            "corpus-summary",
+            CORPUS_SUMMARY_SCHEMA_VERSION,
+            route=MODEL_ROUTE_INDEX_CORPUS,
+            prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
+            source_sha256=sha256_hex(corpus_source.encode("utf-8")),
+        )
     if candidates is not None:
         index["candidate_files"] = [str(candidate) for candidate in candidates]
         index["total_files"] = len(candidates)
@@ -4052,6 +4664,7 @@ def document_index_record(
     index["corpus_profile_schema"] = CORPUS_PROFILE_SCHEMA_VERSION
     index["corpus_profile_enriched"] = profile.get("generated", now())
     index["corpus_profile"] = profile
+    index["corpus_profile_artifact"] = profile.get("provenance", {})
     index["corpus_profile_text"] = profile.get("summary", "")
     return index
 
@@ -4188,6 +4801,8 @@ def build_document_index(
             progress_callback,
             "summarizing corpus",
             timeout=INDEX_MODEL_TIMEOUT_SECONDS,
+            route=MODEL_ROUTE_INDEX_CORPUS,
+            prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
         )
         index = document_index_record(
             index_id=index_id,
@@ -4348,6 +4963,8 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
             progress_callback,
             "summarizing corpus",
             timeout=INDEX_MODEL_TIMEOUT_SECONDS,
+            route=MODEL_ROUTE_INDEX_CORPUS,
+            prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
         )
         index = document_index_record(
             index_id=index_id,
@@ -4547,6 +5164,12 @@ def build_topic_dossier(
             excerpts and source paths. Do not invent facts.
             """
         ).strip(),
+        route=MODEL_ROUTE_TOPIC,
+        prompt_version=TOPIC_DOSSIER_SCHEMA_VERSION,
+    )
+    evidence_source = "\n\n".join(
+        f"{item.get('index', '')}:{item.get('path', '')}:{item.get('chunk', '')}:{item.get('excerpt_sha256', '')}"
+        for item in evidence
     )
     topic = {
         "id": topic_id,
@@ -4557,6 +5180,13 @@ def build_topic_dossier(
         "source_indexes": source_indexes,
         "selected_chunk_count": len(evidence),
         "summary": summary,
+        "summary_artifact": artifact_provenance(
+            "topic-dossier",
+            TOPIC_DOSSIER_SCHEMA_VERSION,
+            route=MODEL_ROUTE_TOPIC,
+            prompt_version=TOPIC_DOSSIER_SCHEMA_VERSION,
+            source_sha256=sha256_hex(evidence_source.encode("utf-8")),
+        ),
         "evidence": evidence,
     }
     atomic_write(topic_path(topic_id), json.dumps(topic, ensure_ascii=False, indent=2) + "\n")
@@ -4661,7 +5291,17 @@ def build_memory_dossier(query: str, *, name: str | None = None) -> dict:
             tentative inferences. Do not invent facts.
             """
         ).strip(),
+        route=MODEL_ROUTE_MEMORY,
+        prompt_version=MEMORY_DOSSIER_SCHEMA_VERSION,
     )
+    memory_source_rows = [
+        item.get("id", "") + ":" + item.get("excerpt", "")
+        for item in source_memories
+    ] + [
+        item.get("id", "") + ":" + item.get("excerpt", "")
+        for item in source_conversations
+    ]
+    memory_source = "\n\n".join(memory_source_rows)
     dossier = {
         "id": dossier_id,
         "name": name or slug_title(query),
@@ -4669,6 +5309,13 @@ def build_memory_dossier(query: str, *, name: str | None = None) -> dict:
         "created": now(),
         "technique": "query-focused hierarchical retrieval over memories and conversations",
         "summary": summary,
+        "summary_artifact": artifact_provenance(
+            "memory-dossier",
+            MEMORY_DOSSIER_SCHEMA_VERSION,
+            route=MODEL_ROUTE_MEMORY,
+            prompt_version=MEMORY_DOSSIER_SCHEMA_VERSION,
+            source_sha256=sha256_hex(memory_source.encode("utf-8")),
+        ),
         "profile_used": bool(profile),
         "source_memory_count": len(source_memories),
         "source_conversation_count": len(source_conversations),
@@ -5859,16 +6506,18 @@ def call_model(
     stream: bool = True,
     echo: bool = True,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    route: str = MODEL_ROUTE_CHAT,
 ) -> str:
+    route_info = model_route(route)
     payload = {
-        "model": model_name(),
+        "model": route_info["model"],
         "messages": messages,
         "temperature": temperature,
         "stream": stream,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        endpoint(),
+        route_info["endpoint"],
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -5982,16 +6631,18 @@ def call_model_with_callback(
     on_token,
     temperature: float = 0.7,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    route: str = MODEL_ROUTE_CHAT,
 ) -> str:
+    route_info = model_route(route)
     payload = {
-        "model": model_name(),
+        "model": route_info["model"],
         "messages": messages,
         "temperature": temperature,
         "stream": True,
     }
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        endpoint(),
+        route_info["endpoint"],
         data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -6080,6 +6731,7 @@ HELP_SECTIONS = [
             ("/title TEXT", "rename this conversation"),
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
             ("/status", "show model, memory, and context state"),
+            ("/model-routes", "show chat and background worker model routes"),
             ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
@@ -6095,6 +6747,7 @@ HELP_SECTIONS = [
             ("/resume-work [INDEX_ID]", "resume unfinished Motoko work"),
             ("/attach-index [ID]", "attach an existing document index"),
             ("/corpus-profile [ID]", "show an index's corpus profile"),
+            ("/index-quality [ID]", "show index artifact quality checks"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
             ("/attach-topic [ID]", "attach an existing topic dossier"),
@@ -6118,6 +6771,7 @@ HELP_SECTIONS = [
         [
             ("/indexes", "list document indexes"),
             ("/corpus-profile [ID]", "show an index's corpus profile"),
+            ("/index-quality [ID]", "show index artifact quality checks"),
             ("/topics", "list topic dossiers"),
             ("/topic-show [ID]", "show a topic dossier"),
             ("/dossiers", "list memory dossiers"),
@@ -6157,6 +6811,7 @@ HELP_SECTIONS = [
             ("motoko index PATH", "build a mixed text document index"),
             ("motoko index PATH --plan", "preview an index without writing derived text"),
             ("motoko corpus-profile [ID]", "show an index's corpus profile"),
+            ("motoko index-quality [ID]", "show index artifact quality checks"),
             ("motoko index-upgrade [ID]", "upgrade index-derived artifacts"),
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
             ("motoko deepen INDEX_ID QUERY", "build a larger topic dossier"),
@@ -6164,6 +6819,7 @@ HELP_SECTIONS = [
             ("motoko study QUERY", "run a bounded study action in a new conversation"),
             ("motoko compact [ID]", "compact a saved conversation"),
             ("motoko status", "show model, memory, and state paths"),
+            ("motoko model-routes", "show chat and background worker model routes"),
             ("motoko identity", "show active account/realm identity"),
             ("motoko permissions", "show feature permissions and index defaults"),
             ("motoko permissions set MODE", "set default feature permission mode"),
@@ -6215,6 +6871,8 @@ def format_about() -> str:
             f"model: {model_name()}",
             f"model badge: {model_badge()}",
             f"endpoint: {endpoint()}",
+            format_model_routes(include_defaults=True),
+            background_lanes_text(),
             f"state: {state_root()}",
             f"config: {config_root()}",
             f"permissions: {permission_mode()}",
@@ -6403,6 +7061,8 @@ def format_status(conv: dict | None = None) -> str:
         f"model: {model_name()}",
         f"model badge: {model_badge()}",
         f"endpoint: {endpoint()}",
+        "model routes: " + ", ".join(f"{route}={model_route_badge(route)}" for route in configured_model_routes()),
+        "background lanes: cpu, small-model, large-model",
         f"state: {state_root()}",
         f"config: {config_root()}",
         f"permissions: {permission_mode()}",
@@ -6742,7 +7402,7 @@ def setup_readline_completion() -> None:
                 matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
-            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen", "/corpus-profile"}:
+            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality"}:
                 matches = [item for item in completion_ids("index") if item.startswith(text)]
             elif parts and parts[0] in {"/index-resume", "/resume-work"}:
                 matches = [item for item in completion_ids("partial-index") if item.startswith(text)]
@@ -7369,6 +8029,8 @@ class MotokoTui:
                 self.append("system", format_sources(self.conv.get("last_sources", [])))
             elif text == "/status":
                 self.append("system", format_status(self.conv))
+            elif text == "/model-routes":
+                self.append("system", format_model_routes(include_defaults=True))
             elif text == "/identity":
                 self.append("system", format_identity())
             elif text == "/permissions":
@@ -7392,6 +8054,9 @@ class MotokoTui:
             elif text == "/corpus-profile" or text.startswith("/corpus-profile "):
                 selector = text[len("/corpus-profile") :].strip() or None
                 self.append("system", self.capture_text(lambda: print_corpus_profile(load_index(selector))))
+            elif text == "/index-quality" or text.startswith("/index-quality "):
+                selector = text[len("/index-quality") :].strip() or None
+                self.append("system", format_index_quality_gate(index_quality_gate(load_index(selector))))
             elif text == "/tasks" or text.startswith("/tasks "):
                 self.append("system", format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
             elif text == "/topics":
@@ -7719,6 +8384,7 @@ class MotokoTui:
                     messages,
                     temperature=0.7,
                     on_token=on_token,
+                    route=MODEL_ROUTE_CHAT,
                 )
                 self.put_event(("done", reply, sources))
             except RuntimeError as exc:
@@ -7993,7 +8659,7 @@ class MotokoTui:
                 for row in list_partial_indexes()
                 if not current or item_matches_selector(row, current)
             ][:20]
-        if first in {"/attach-index", "/topic", "/deepen", "/corpus-profile"} and len(words) <= 2:
+        if first in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality"} and len(words) <= 2:
             return [
                 {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
                 for row in list_indexes()
@@ -8413,6 +9079,10 @@ def chat_loop(conv: dict) -> None:
             selector = user_text[len("/corpus-profile") :].strip() or None
             print_corpus_profile(load_index(selector))
             continue
+        if user_text == "/index-quality" or user_text.startswith("/index-quality "):
+            selector = user_text[len("/index-quality") :].strip() or None
+            print(format_index_quality_gate(index_quality_gate(load_index(selector))))
+            continue
         if user_text == "/tasks" or user_text.startswith("/tasks "):
             print(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
             continue
@@ -8461,6 +9131,9 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/status":
             print_status(conv)
+            continue
+        if user_text == "/model-routes":
+            print(format_model_routes(include_defaults=True))
             continue
         if user_text == "/identity":
             print(format_identity())
@@ -8621,8 +9294,16 @@ def compact_conversation(
         ],
         temperature=0.2,
         timeout=timeout,
+        route=MODEL_ROUTE_MEMORY,
     )
     conv["summary"] = summary[:MAX_CONVERSATION_SUMMARY_CHARS]
+    conv["summary_artifact"] = artifact_provenance(
+        "conversation-summary",
+        CONVERSATION_SUMMARY_SCHEMA_VERSION,
+        route=MODEL_ROUTE_MEMORY,
+        prompt_version=CONVERSATION_SUMMARY_SCHEMA_VERSION,
+        source_sha256=sha256_hex(older_text.encode("utf-8")),
+    )
     conv["messages"] = recent
     conv["last_auto_compact_message_count"] = len(recent)
     save_conversation(conv)
@@ -8663,6 +9344,7 @@ def propose_memories(
         stream=False,
         echo=False,
         timeout=timeout,
+        route=MODEL_ROUTE_MEMORY,
     ).strip()
     if proposal == "NO_MEMORY":
         return []
@@ -8745,6 +9427,7 @@ def generate_conversation_title(
         ],
         temperature=0.2,
         timeout=timeout,
+        route=MODEL_ROUTE_TITLE,
     )
     return sanitize_generated_title(title)
 
@@ -9054,6 +9737,11 @@ def command_index_upgrade(args) -> None:
     print(note)
 
 
+def command_index_quality(args) -> None:
+    index = load_index(args.index)
+    print(format_index_quality_gate(index_quality_gate(index)))
+
+
 def command_indexes_text() -> None:
     rows = list_indexes()
     jobs = active_index_progress()
@@ -9255,6 +9943,11 @@ def command_status(_args) -> None:
     print_status()
 
 
+def command_model_routes(_args) -> None:
+    print(format_model_routes(include_defaults=True))
+    print(background_lanes_text())
+
+
 def command_identity(args) -> None:
     if args.identity_command in (None, "show"):
         print(format_identity())
@@ -9335,6 +10028,9 @@ def main(argv: list[str]) -> int:
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
 
+    model_routes = sub.add_parser("model-routes", help="show chat and background worker model routes")
+    model_routes.set_defaults(func=command_model_routes)
+
     identity = sub.add_parser("identity", help="show account/realm identity")
     identity_sub = identity.add_subparsers(dest="identity_command")
     identity_show = identity_sub.add_parser("show", help="show active account/realm identity")
@@ -9410,6 +10106,10 @@ def main(argv: list[str]) -> int:
     index_upgrade.add_argument("--all", action="store_true", help="upgrade every index that needs it")
     index_upgrade.add_argument("--limit", type=int, help="maximum indexes to upgrade with --all")
     index_upgrade.set_defaults(func=command_index_upgrade)
+
+    index_quality = sub.add_parser("index-quality", help="show artifact quality checks for a document index")
+    index_quality.add_argument("index", nargs="?")
+    index_quality.set_defaults(func=command_index_quality)
 
     tasks = sub.add_parser("tasks", help="show ranked Org task candidates from indexes")
     tasks.add_argument("query", nargs="*")

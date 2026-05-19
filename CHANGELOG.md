@@ -67,6 +67,15 @@ not the easiest place to review what changed after a long work session.
 - Added `motoko corpus-profile` and `motoko index-upgrade` so old completed
   indexes can gain newer derived artifacts without discarding past work or
   rerunning model summaries.
+- Added named model routes for chat, chunk summaries, file summaries, corpus
+  synthesis, topic dossiers, memory/profile work, titles, and audits. Routes
+  default to the existing endpoint until configured otherwise.
+- Added artifact provenance and `motoko index-quality` checks for summary
+  schema, model route, prompt version, source fingerprint, quality status,
+  structured signals, corpus profiles, and task/date preservation.
+- Added a private model-output cache for deterministic background summary
+  routes; true llama.cpp prompt/KV caching remains a NixOS model-service
+  follow-up.
 - Fixed index listing so `INDEX.progress.json` job files are never treated as
   completed document indexes.
 - Made heavy corpus indexing checkpoint completed files into partial indexes,

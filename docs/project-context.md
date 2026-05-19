@@ -83,6 +83,12 @@ Accepted directions:
 - hierarchical document indexes;
 - durable progress and ETA reporting for heavy corpus indexing;
 - deterministic Org-mode task/headline/deadline signals inside corpus indexes;
+- deterministic CPU lanes for parsing, fingerprints, corpus health, artifact
+  upgrades, lexical retrieval, and other reliable non-LLM work;
+- named local-model routes for repetitive small-model work, large-model
+  synthesis/audits, and interactive chat;
+- artifact provenance and quality gates for model-derived summaries before
+  routing background work to smaller worker models;
 - topic dossiers and deeper dossiers over already indexed material;
 - per-user permission modes for chat-only, document reads/indexing, and
   read-only repo review;
@@ -169,3 +175,14 @@ an evaluation harness for study reuse, context sufficiency, and background
 study state, so Motoko can test streaming, maintenance, recall, profile, TUI,
 and study behavior without requiring Qwen, llama.cpp, or Javier's personal
 documents to be available to Codex.
+
+## Deferred NixOS-Facing Model Work
+
+Motoko now has repo-local support for named model routes and deterministic
+model-output caching. The next deployment-side work belongs in
+`/home/javier/repos/nixos-configs`: choose and package local worker models,
+decide whether they should stay resident beside the main chat model, and test
+whether llama.cpp prompt/KV reuse or prompt-prefix caching is available and
+worth enabling. Do not fake server-side KV caching inside Motoko; Motoko should
+record routes, provenance, quality gates, and private output-cache hits while
+NixOS owns model residency, ports, VRAM tradeoffs, and service options.

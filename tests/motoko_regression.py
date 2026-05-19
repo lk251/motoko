@@ -177,7 +177,7 @@ def test_memory_dossier(m):
 
         old_summarize = m.summarize_blocks
         try:
-            m.summarize_blocks = lambda _label, blocks, _instruction: "Dossier summary\n" + "\n".join(blocks)[:200]
+            m.summarize_blocks = lambda _label, blocks, _instruction, **_kwargs: "Dossier summary\n" + "\n".join(blocks)[:200]
             dossier = m.build_memory_dossier("craftsmanship")
             assert dossier["source_memory_count"] >= 1
             assert dossier["source_conversation_count"] >= 1
@@ -313,9 +313,15 @@ def test_help_overlay_closes(m):
 
 
 class FakeHandler(BaseHTTPRequestHandler):
+    payloads = []
+
     def do_POST(self):  # noqa: N802 - stdlib handler API
         length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
+        body = self.rfile.read(length)
+        try:
+            self.__class__.payloads.append(json.loads(body.decode("utf-8")))
+        except json.JSONDecodeError:
+            self.__class__.payloads.append({})
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -330,6 +336,7 @@ class FakeHandler(BaseHTTPRequestHandler):
 
 def test_fake_openai_stream(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    FakeHandler.payloads = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -348,6 +355,7 @@ def test_fake_openai_stream(m):
             quiet = m.quiet_model([{"role": "user", "content": "hello"}], timeout=2)
         assert quiet == "hello"
         assert buf.getvalue() == ""
+        assert FakeHandler.payloads[-1]["model"] == m.model_name()
     finally:
         server.shutdown()
         server.server_close()
@@ -355,6 +363,59 @@ def test_fake_openai_stream(m):
             os.environ.pop("MOTOKO_ENDPOINT", None)
         else:
             os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+
+
+def test_model_route_config_and_summary_cache(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_cache = os.environ.get("MOTOKO_MODEL_CACHE")
+    FakeHandler.payloads = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        os.environ["MOTOKO_ENDPOINT"] = "http://127.0.0.1:9/v1/chat/completions"
+        os.environ.pop("MOTOKO_MODEL_CACHE", None)
+        with isolated_state():
+            config = m.load_config()
+            config["model_routes"]["index_chunk"] = {
+                "endpoint": f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                "model": "tiny-index-worker",
+            }
+            m.save_config(config)
+
+            first = m.summarize_text(
+                "cache-test",
+                "alpha beta",
+                "Summarize this test.",
+                timeout=2,
+                route=m.MODEL_ROUTE_INDEX_CHUNK,
+                prompt_version="test-summary-v1",
+            )
+            second = m.summarize_text(
+                "cache-test",
+                "alpha beta",
+                "Summarize this test.",
+                timeout=2,
+                route=m.MODEL_ROUTE_INDEX_CHUNK,
+                prompt_version="test-summary-v1",
+            )
+            assert first == "hello"
+            assert second == "hello"
+            assert len(FakeHandler.payloads) == 1
+            assert FakeHandler.payloads[0]["model"] == "tiny-index-worker"
+            assert "index_chunk: tiny-index-worker" in m.format_model_routes(include_defaults=True)
+            assert list(m.model_cache_dir().glob("*/*.json"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_cache is None:
+            os.environ.pop("MOTOKO_MODEL_CACHE", None)
+        else:
+            os.environ["MOTOKO_MODEL_CACHE"] = old_cache
 
 
 def test_index_plan(m):
@@ -692,6 +753,12 @@ def test_org_task_signals_drive_retrieval(m):
             assert index["corpus_profile"]["role_counts"].get("planning") == 1
             assert "Prepare tomorrow plan" in index["corpus_profile_text"]
             assert not m.index_needs_artifact_upgrade(index)
+            assert index["corpus_summary_artifact"]["route"] == m.MODEL_ROUTE_INDEX_CORPUS
+            first_file = index["files"][0]
+            assert first_file["summary_artifact"]["route"] == m.MODEL_ROUTE_INDEX_FILE
+            assert first_file["chunks"][0]["summary_artifact"]["route"] == m.MODEL_ROUTE_INDEX_CHUNK
+            quality = m.index_quality_gate(index)
+            assert quality["status"] == "pass", m.format_index_quality_gate(quality)
 
             text, sources = m.retrieve_from_index(index, "highest priority tasks for 2026-05-19")
             assert "Corpus profile:" in text
@@ -718,6 +785,11 @@ def test_org_task_signals_drive_retrieval(m):
             profile_output = buf.getvalue()
             assert m.CORPUS_PROFILE_SCHEMA_VERSION in profile_output
             assert "Prepare tomorrow plan" in profile_output
+            args = type("Args", (), {"index": index["id"]})()
+            buf = m.io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                m.command_index_quality(args)
+            assert "index quality: pass" in buf.getvalue()
         finally:
             m.quiet_model = old_quiet_model
 
@@ -764,14 +836,18 @@ def test_index_signal_enrichment_upgrades_legacy_index(m):
             legacy.pop("corpus_profile", None)
             legacy.pop("corpus_profile_text", None)
             legacy.pop("corpus_profile_schema", None)
+            legacy.pop("corpus_profile_artifact", None)
+            legacy.pop("corpus_summary_artifact", None)
             legacy["files"] = []
             for file_item in index["files"]:
                 legacy_file = dict(file_item)
                 legacy_file.pop("signals", None)
+                legacy_file.pop("summary_artifact", None)
                 legacy_file["chunks"] = []
                 for chunk in file_item["chunks"]:
                     legacy_chunk = dict(chunk)
                     legacy_chunk.pop("signals", None)
+                    legacy_chunk.pop("summary_artifact", None)
                     legacy_file["chunks"].append(legacy_chunk)
                 legacy["files"].append(legacy_file)
             m.atomic_write(m.index_path(index["id"]), json.dumps(legacy, ensure_ascii=False, indent=2) + "\n")
@@ -786,8 +862,11 @@ def test_index_signal_enrichment_upgrades_legacy_index(m):
             assert "Enrich legacy task" in enriched["signal_summary"]
             assert enriched["corpus_profile_schema"] == m.CORPUS_PROFILE_SCHEMA_VERSION
             assert "Enrich legacy task" in enriched["corpus_profile_text"]
+            assert enriched["corpus_summary_artifact"]["quality_status"] == "legacy-unverified"
+            assert enriched["files"][0]["summary_artifact"]["quality_status"] == "legacy-unverified"
             assert not m.index_needs_signal_enrichment(enriched)
             assert not m.index_needs_corpus_profile(enriched)
+            assert not m.index_needs_summary_provenance(enriched)
         finally:
             m.quiet_model = old_quiet_model
 
@@ -901,6 +980,7 @@ def main() -> int:
         test_help_about_and_explicit_memory,
         test_help_overlay_closes,
         test_fake_openai_stream,
+        test_model_route_config_and_summary_cache,
         test_index_plan,
         test_nix_managed_allowdirs_message,
         test_cwd_learning_plan_and_existing_index,

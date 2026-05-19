@@ -52,6 +52,12 @@ Design constraints:
 - Existing completed indexes can be upgraded with current structured signals
   and corpus profiles without rerunning model summaries; idle background study
   performs bounded CPU-only upgrades when it is safe to do so.
+- Background model work is routed by named worker role, so chunk/file summaries,
+  corpus synthesis, memory/profile work, titles, audits, and chat can use
+  different local endpoints once deployment provides them.
+- Model-derived artifacts record provenance, schema, route, model, prompt
+  version, source fingerprint, and quality status; deterministic summary routes
+  use a private output cache for repeatable background work.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
 - Duplicate-aware indexing reuses exact chunks already present in Motoko state

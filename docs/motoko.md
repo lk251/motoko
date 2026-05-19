@@ -579,6 +579,55 @@ Background study writes `study-state.json` and appends events to
 catalog/planning pass, the next pass records the interrupted job and recomputes
 from current state; no personal documents are lost or rewritten.
 
+Motoko separates background work into three lanes:
+
+- `cpu`: deterministic parsing, fingerprints, corpus health, artifact upgrades,
+  lexical retrieval, and Org task/date extraction;
+- `small-model`: repetitive summarization/classification work such as chunk
+  summaries, file summaries, short labels, and file-purpose maps;
+- `large-model`: chat answers, corpus synthesis, dossiers, memory/profile
+  reflection, audits, and hard ambiguous reasoning.
+
+The lanes are implemented through named model routes. All routes default to the
+normal chat endpoint until config or environment variables override them, so
+the feature is safe before smaller worker models are deployed. Inspect routes
+with `/model-routes` or:
+
+```bash
+motoko model-routes
+```
+
+Route overrides can live in `~/.config/motoko/config.json`:
+
+```json
+{
+  "model_routes": {
+    "index_chunk": {
+      "endpoint": "http://127.0.0.1:8091/v1/chat/completions",
+      "model": "small-summary-worker"
+    },
+    "index_file": {
+      "endpoint": "http://127.0.0.1:8091/v1/chat/completions",
+      "model": "small-summary-worker"
+    },
+    "index_corpus": {
+      "endpoint": "http://127.0.0.1:8083/v1/chat/completions",
+      "model": "qwen3.6-27b-mtp-ud-q5-k-xl"
+    }
+  }
+}
+```
+
+Equivalent one-off environment overrides use
+`MOTOKO_ROUTE_<ROUTE>_ENDPOINT` and `MOTOKO_ROUTE_<ROUTE>_MODEL`, for example
+`MOTOKO_ROUTE_INDEX_CHUNK_MODEL=small-summary-worker`.
+
+Motoko also caches deterministic model outputs for repeatable summary routes
+under `~/.local/state/motoko/model-cache/`. This is private Motoko state and can
+be disabled for one process with `MOTOKO_MODEL_CACHE=0`. It is not server-side
+KV/prompt caching; true prompt-prefix/KV reuse depends on the deployed local
+model service and should be evaluated in `nixos-configs`.
+
 Heavy index refresh can be tuned for one-off sessions:
 
 ```bash
@@ -696,6 +745,20 @@ Each index stores:
   Org-mode headings, TODO state, priorities, deadlines, and schedules;
 - source fingerprints: file size, mtime, and SHA-256 at index time.
 
+Model-derived summaries also store artifact provenance: artifact kind/schema,
+Motoko builder version, route, endpoint, model, prompt version, source
+fingerprint, creation time, and quality status. Use:
+
+```bash
+motoko index-quality INDEX_ID
+```
+
+or `/index-quality [INDEX_ID]` to inspect whether a completed index has current
+summary provenance, current structured signals, a current corpus profile, and
+preserved Org task/date evidence. Older indexes can gain missing provenance and
+new deterministic artifacts with `motoko index-upgrade INDEX_ID` without
+discarding old summaries.
+
 On each question, Motoko scores the indexed summaries and chunks with a small
 local lexical retriever, then injects the corpus summary, relevant file
 summaries, and top matching excerpts into the prompt. The retrieval window
@@ -742,6 +805,12 @@ corpus profile needs to be added to an old completed index, prefer
 faster than rebuilding the HRAG summaries. Use `motoko corpus-profile INDEX_ID`
 or `/corpus-profile [INDEX_ID]` to inspect the profile that retrieval will show
 the model.
+
+Route smaller worker models only after the evaluation harness passes. The
+quality bar is preservation of names, dates, priorities, TODO states,
+obligations, project/file references, source paths, and task-priority answers
+on synthetic fixtures. The regression/evaluation tests cover this gate without
+using private personal documents.
 
 ## Topic Dossiers
 
