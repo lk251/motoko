@@ -13,6 +13,7 @@ import collections
 import contextlib
 import datetime as _dt
 import fnmatch
+import grp
 import hashlib
 import http.client
 import io
@@ -51,6 +52,7 @@ DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
 LOCAL_MODELS_CONFIG = "local-models.json"
 LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
 SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
+LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
 MODEL_ROUTE_CHAT = "chat"
 MODEL_ROUTE_INDEX_CHUNK = "index_chunk"
 MODEL_ROUTE_INDEX_FILE = "index_file"
@@ -1752,6 +1754,7 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "request_path": str(request_path),
         "manager_kind": str(local_route.get("manager_kind") or ""),
         "catalog_route": str(local_route.get("catalog_route") or ""),
+        "model_path": str(local_route.get("model_path") or ""),
         "download_url": str(local_route.get("download_url") or local_route.get("url") or ""),
         "download_hash": str(local_route.get("sha256") or local_route.get("hash") or ""),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
@@ -5176,6 +5179,10 @@ def summarize_blocks(
             f"estimated {estimated_calls} model call(s)",
             flush=True,
         )
+        if endpoint_is_unix(info["endpoint"]):
+            status = compact_local_model_status(local_model_status_text(info))
+            if status:
+                print(f"  worker status: {status}", flush=True)
         print("  pause with: motoko pause  (takes effect before the next model call)", flush=True)
     index_progress_reserve_model_calls(
         progress,
@@ -7296,29 +7303,94 @@ def model_request_timeout(route_info: dict, timeout: float) -> float:
     return timeout
 
 
+def local_model_helper_route(route_info: dict) -> str:
+    return str(route_info.get("catalog_route") or route_info.get("route", MODEL_ROUTE_CHAT))
+
+
+def run_local_model_helper(command: str, route_info: dict, *, timeout: float = LOCAL_MODEL_HELPER_TIMEOUT_SECONDS) -> str:
+    helper = shutil.which("motoko-model")
+    if not helper:
+        raise FileNotFoundError("motoko-model helper is not on PATH")
+    route = local_model_helper_route(route_info)
+    result = subprocess.run(
+        [helper, command, route],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+    if result.returncode != 0:
+        raise RuntimeError(detail or f"motoko-model {command} {route} failed")
+    return detail
+
+
+def local_model_status_text(route_info: dict) -> str:
+    if not endpoint_is_unix(str(route_info.get("endpoint", ""))):
+        return ""
+    try:
+        return run_local_model_helper("status", route_info)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return f"motoko-model status could not run: {exc}"
+
+
+def compact_local_model_status(raw: str) -> str:
+    values: dict[str, str] = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            values[key.strip()] = value.strip()
+    if not values:
+        return raw.strip()[:240]
+    fields = []
+    for key in ("route", "socket", "proxy", "backend"):
+        if values.get(key):
+            fields.append(f"{key}={values[key]}")
+    return " ".join(fields) if fields else raw.strip()[:240]
+
+
 def local_model_verify_hint(route_info: dict) -> str:
     endpoint_text = str(route_info.get("endpoint", ""))
     if not endpoint_is_unix(endpoint_text):
         return ""
     lines = []
-    helper = shutil.which("motoko-model")
-    if helper:
+    parsed = urllib.parse.urlparse(endpoint_text)
+    socket_path = pathlib.Path(urllib.parse.unquote(parsed.path))
+    try:
+        parent_stat = socket_path.parent.stat()
+    except OSError:
+        parent_stat = None
+    if parent_stat is not None:
+        current_groups = set(os.getgroups())
         try:
-            verify_route = str(route_info.get("catalog_route") or route_info.get("route", MODEL_ROUTE_CHAT))
-            result = subprocess.run(
-                [helper, "verify", verify_route],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=15,
-                check=False,
+            group_name = grp.getgrgid(parent_stat.st_gid).gr_name
+        except KeyError:
+            group_name = str(parent_stat.st_gid)
+        if parent_stat.st_gid not in current_groups:
+            try:
+                current_names = ", ".join(grp.getgrgid(gid).gr_name for gid in sorted(current_groups))
+            except KeyError:
+                current_names = ", ".join(str(gid) for gid in sorted(current_groups))
+            lines.append(
+                f"current process groups do not include {group_name}; groups are: {current_names or 'none'}"
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            lines.append(f"motoko-model verify could not run: {exc}")
-        else:
-            if result.returncode != 0:
-                detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-                lines.append(f"motoko-model verify failed for route {verify_route}: {detail[:1200] or 'no diagnostic'}")
+            lines.append(
+                f"start Motoko from a fresh login/tmux session after the rebuild, or run: sg {group_name} -c 'motoko'"
+            )
+    status = local_model_status_text(route_info)
+    if status:
+        lines.append("motoko-model status:")
+        lines.append(status[:1200])
+    model_path = str(route_info.get("model_path") or "")
+    if model_path:
+        try:
+            if not pathlib.Path(model_path).exists():
+                lines.append(f"declared model file is missing: {model_path}")
+        except OSError as exc:
+            lines.append(f"declared model file could not be checked: {exc}")
+    if shutil.which("motoko-model"):
+        lines.append(f"verify declared model files with: motoko-model verify {local_model_helper_route(route_info)}")
     else:
         lines.append("motoko-model helper is not on PATH")
     if route_info.get("download_url"):
@@ -9183,6 +9255,7 @@ class MotokoTui:
         if self.generating:
             self.append("system", "Finish or wait for the current answer before running this blocking command.")
             return
+        post_message: tuple[str, str] | None = None
         self.restore_for_blocking()
         try:
             print()
@@ -9190,16 +9263,24 @@ class MotokoTui:
             func()
             print(style("Done. Returning to Motoko TUI.", "green"))
         except WorkPaused as exc:
-            print(style(str(exc), "yellow"))
+            text = str(exc)
+            print(style(text, "yellow"))
+            post_message = ("system", text)
         except SystemExit as exc:
-            print(style(str(exc), "red"))
+            text = str(exc)
+            print(style(text, "red"))
+            post_message = ("error", text)
         except KeyboardInterrupt:
             request_work_pause("keyboard interrupt during blocking command")
+            text = "Interrupted. Pause requested; unfinished work can resume from the next durable checkpoint if one exists."
             print()
-            print(style("Interrupted. Pause requested; unfinished work can resume from the next durable checkpoint if one exists.", "yellow"))
+            print(style(text, "yellow"))
+            post_message = ("system", text)
         finally:
             self.reenter_after_blocking()
         self.messages = self.seed_messages(self.conv)
+        if post_message:
+            self.append(post_message[0], post_message[1])
         self.dirty = True
 
     def restore_for_blocking(self) -> None:

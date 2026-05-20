@@ -547,6 +547,52 @@ def test_local_model_catalog_task_routes(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_local_model_status_diagnostic_uses_catalog_route_without_hashing(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        socket_dir.mkdir()
+        route_info = {
+            "route": m.MODEL_ROUTE_TOPIC,
+            "catalog_route": "qwen35-9b-worker",
+            "endpoint": f"unix://{socket_dir / 'qwen35-9b-worker.sock'}",
+            "model_path": str(tmp / "missing.gguf"),
+            "download_url": "https://example.invalid/model.gguf",
+            "download_hash": "sha256-test",
+        }
+        old_run_helper = m.run_local_model_helper
+        old_which = m.shutil.which
+        calls = []
+
+        def fake_run_helper(command, info, *, timeout=m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS):
+            calls.append((command, m.local_model_helper_route(info), timeout))
+            if command == "status":
+                return "\n".join(
+                    [
+                        "realm=mares",
+                        "route=qwen35-9b-worker",
+                        "socket=active",
+                        "proxy=activating",
+                        "backend=activating",
+                    ]
+                )
+            raise AssertionError(f"unexpected helper command: {command}")
+
+        try:
+            m.run_local_model_helper = fake_run_helper
+            m.shutil.which = lambda name: "/run/current-system/sw/bin/motoko-model" if name == "motoko-model" else old_which(name)
+            hint = m.local_model_verify_hint(route_info)
+            assert "route=qwen35-9b-worker" in hint
+            assert "proxy=activating" in hint
+            assert "declared model file is missing" in hint
+            assert "motoko-model verify qwen35-9b-worker" in hint
+            assert calls == [("status", "qwen35-9b-worker", m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS)]
+            compact = m.compact_local_model_status(fake_run_helper("status", route_info))
+            assert compact == "route=qwen35-9b-worker socket=active proxy=activating backend=activating"
+        finally:
+            m.run_local_model_helper = old_run_helper
+            m.shutil.which = old_which
+
+
 def test_study_focus_recent_is_parsed_and_bounded(m):
     query, focus = m.parse_study_directive("summarize yesterday and today according to logbook.org --focus recent")
     assert query == "summarize yesterday and today according to logbook.org"
@@ -1189,6 +1235,7 @@ def main() -> int:
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
+        test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
         test_nix_managed_allowdirs_message,
