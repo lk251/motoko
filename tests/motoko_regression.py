@@ -480,6 +480,107 @@ def test_local_model_catalog_unix_socket_route(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_local_model_catalog_task_routes(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen35-2b-worker": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
+                        "modelId": "qwen3.5-2b-q4-k-m",
+                        "tasks": ["index_chunk", "index_label", "memory_maintenance"],
+                    },
+                    "ministral-3b-worker": {
+                        "endpoint": "unix:///run/motoko-llm/mares/ministral-3b-worker.sock",
+                        "modelId": "ministral-3-3b-instruct-2512-q4-k-m",
+                        "tasks": ["index_chunk", "index_label", "index_file"],
+                    },
+                    "qwen3-4b-instruct-worker": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen3-4b-instruct-worker.sock",
+                        "modelId": "qwen3-4b-instruct-2507-q4-k-m",
+                        "tasks": ["index_file", "index_corpus", "audit"],
+                    },
+                    "qwen35-9b-worker": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen35-9b-worker.sock",
+                        "modelId": "qwen3.5-9b-q4-k-m",
+                        "tasks": ["index_corpus", "synthesis", "audit"],
+                    },
+                    "qwen36-chat": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                        "tasks": ["chat", "deep_synthesis"],
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            chat = m.model_route(m.MODEL_ROUTE_CHAT)
+            chunk = m.model_route(m.MODEL_ROUTE_INDEX_CHUNK)
+            label = m.model_route(m.MODEL_ROUTE_INDEX_LABEL)
+            file_route = m.model_route(m.MODEL_ROUTE_INDEX_FILE)
+            corpus = m.model_route(m.MODEL_ROUTE_INDEX_CORPUS)
+            memory = m.model_route(m.MODEL_ROUTE_MEMORY)
+            assert chat["catalog_route"] == "qwen36-chat"
+            assert chunk["catalog_route"] == "qwen35-2b-worker"
+            assert label["catalog_route"] == "ministral-3b-worker"
+            assert file_route["catalog_route"] == "qwen3-4b-instruct-worker"
+            assert corpus["catalog_route"] == "qwen35-9b-worker"
+            assert memory["catalog_route"] == "qwen35-2b-worker"
+            text = m.format_model_routes(include_defaults=True)
+            assert "index_chunk: qwen3.5-2b-q4-k-m" in text
+            assert "catalog=qwen35-2b-worker" in text
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_study_focus_recent_is_parsed_and_bounded(m):
+    query, focus = m.parse_study_directive("summarize yesterday and today according to logbook.org --focus recent")
+    assert query == "summarize yesterday and today according to logbook.org"
+    assert focus == "recent"
+    assert "--focus" not in m.study_retrieval_query(query, focus)
+    assert "yesterday" in m.study_retrieval_query(query, focus)
+
+    with isolated_state():
+        conv = m.new_conversation("Study focus")
+        conv["context_items"] = [{"kind": "index", "id": "idx"}]
+        calls = []
+        old_build_topic = m.build_topic_dossier
+        try:
+            def fake_build_topic(index_ids, topic_query, **kwargs):
+                calls.append((index_ids, topic_query, kwargs))
+                return {
+                    "id": "topic1",
+                    "name": "topic",
+                    "query": topic_query,
+                    "summary": "summary",
+                    "evidence": [],
+                }
+
+            m.build_topic_dossier = fake_build_topic
+            result = m.study_query(conv, query, focus=focus)
+        finally:
+            m.build_topic_dossier = old_build_topic
+        assert result == "built topic dossier from attached index(es): topic1"
+        assert calls[0][1] == query
+        assert calls[0][2]["focus"] == "recent"
+        assert calls[0][2]["max_chunks"] == 8
+        assert "--focus" not in calls[0][2]["retrieval_query"]
+
+
 def test_index_plan(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1087,6 +1188,8 @@ def main() -> int:
         test_fake_openai_stream,
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
+        test_local_model_catalog_task_routes,
+        test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
         test_nix_managed_allowdirs_message,
         test_cwd_learning_plan_and_existing_index,

@@ -430,7 +430,7 @@ Useful in-chat commands:
 /topic-show [TOPIC_ID]
 /dossiers
 /dossier-show [DOSSIER_ID]
-/study QUERY
+/study QUERY [--focus recent]
 /compact
 /sources
 /status
@@ -570,7 +570,9 @@ profile-dossier refreshes. It does not silently crawl new directories or create
 large document indexes; document access still starts from explicit allowlists
 and `/index`. Use `/study QUERY` for a deliberate bounded study pass that either
 reuses an existing dossier, builds a topic dossier from an attached or relevant
-index, or builds a memory/conversation dossier.
+index, or builds a memory/conversation dossier. `/study QUERY --focus recent`
+is a real parsed focus hint for recent/today/yesterday retrieval; it is not
+sent through as literal query text.
 For document corpora already attached to the active conversation, Motoko may
 also run a heavier background index refresh when an attached index becomes stale
 or when enough new files appear under the indexed root. This work uses the local
@@ -646,6 +648,12 @@ and reports the active route/lane in visible background status. If a declared
 model file is missing, run `motoko-model verify <route>`; Motoko also includes
 catalog download URL/hash details in socket connection diagnostics when they
 are available.
+
+When the NixOS catalog is keyed by worker service name instead of Motoko route
+name, Motoko resolves routes through each catalog entry's `tasks` list. For
+example, `index_chunk` can map to `qwen35-2b-worker`, `index_file` to
+`qwen3-4b-instruct-worker`, `index_label` to `ministral-3b-worker`, and topic
+or corpus synthesis to `qwen35-9b-worker`.
 
 Before trusting newly installed worker models, run:
 

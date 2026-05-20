@@ -21,6 +21,7 @@ import os
 import pathlib
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -98,6 +99,30 @@ MODEL_WORKER_EVAL_DEFAULT_ROUTES = [
     MODEL_ROUTE_INDEX_LABEL,
     MODEL_ROUTE_INDEX_CORPUS,
 ]
+LOCAL_MODEL_ROUTE_TASK_ALIASES = {
+    MODEL_ROUTE_CHAT: ("chat", "deep_synthesis"),
+    MODEL_ROUTE_INDEX_CHUNK: ("index_chunk",),
+    MODEL_ROUTE_INDEX_FILE: ("index_file",),
+    MODEL_ROUTE_INDEX_CORPUS: ("index_corpus", "synthesis"),
+    MODEL_ROUTE_INDEX_LABEL: ("index_label",),
+    MODEL_ROUTE_TOPIC: ("synthesis", "deep_synthesis"),
+    MODEL_ROUTE_MEMORY: ("memory_maintenance", "synthesis"),
+    MODEL_ROUTE_PROFILE: ("synthesis", "deep_synthesis"),
+    MODEL_ROUTE_TITLE: ("index_label", "memory_maintenance"),
+    MODEL_ROUTE_AUDIT: ("audit", "deep_synthesis"),
+}
+LOCAL_MODEL_ROUTE_PREFERENCES = {
+    MODEL_ROUTE_CHAT: ("qwen36-chat",),
+    MODEL_ROUTE_INDEX_CHUNK: ("qwen35-2b-worker", "ministral-3b-worker"),
+    MODEL_ROUTE_INDEX_FILE: ("qwen3-4b-instruct-worker", "ministral-3b-worker"),
+    MODEL_ROUTE_INDEX_CORPUS: ("qwen35-9b-worker", "qwen3-4b-instruct-worker"),
+    MODEL_ROUTE_INDEX_LABEL: ("ministral-3b-worker", "qwen35-2b-worker"),
+    MODEL_ROUTE_TOPIC: ("qwen35-9b-worker", "qwen36-chat"),
+    MODEL_ROUTE_MEMORY: ("qwen35-2b-worker", "qwen35-9b-worker"),
+    MODEL_ROUTE_PROFILE: ("qwen35-9b-worker", "qwen36-chat"),
+    MODEL_ROUTE_TITLE: ("qwen35-2b-worker", "ministral-3b-worker"),
+    MODEL_ROUTE_AUDIT: ("qwen35-9b-worker", "qwen36-chat"),
+}
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
 DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
@@ -269,7 +294,7 @@ SLASH_COMMANDS = [
     ("/attach-dossier [ID]", "attach an existing memory dossier"),
     ("/dossiers", "list memory dossiers"),
     ("/dossier-show [ID]", "show a memory dossier"),
-    ("/study QUERY", "choose and run the best bounded study action"),
+    ("/study QUERY [--focus recent]", "choose and run the best bounded study action"),
     ("/indexes", "list document indexes"),
     ("/corpus-profile [ID]", "show a corpus profile"),
     ("/index-quality [ID]", "show index artifact quality checks"),
@@ -1614,11 +1639,37 @@ def local_model_catalog_models(catalog: dict | None = None) -> dict:
     return models if isinstance(models, dict) else {}
 
 
+def local_model_route_entry_for_task(route: str, routes: dict) -> tuple[str, dict] | None:
+    aliases = set(LOCAL_MODEL_ROUTE_TASK_ALIASES.get(route, (route,)))
+    candidates: list[tuple[str, dict]] = []
+    for route_id, raw in routes.items():
+        if not isinstance(route_id, str) or not isinstance(raw, dict):
+            continue
+        tasks = raw.get("tasks")
+        task_names = {str(item) for item in tasks} if isinstance(tasks, list) else set()
+        if aliases & task_names:
+            candidates.append((route_id, raw))
+    if not candidates:
+        return None
+    preferences = LOCAL_MODEL_ROUTE_PREFERENCES.get(route, ())
+    for preferred in preferences:
+        for route_id, raw in candidates:
+            model_id = str(raw.get("modelId") or raw.get("model_id") or "")
+            if route_id == preferred or model_id == preferred:
+                return route_id, raw
+    return candidates[0]
+
+
 def merged_local_model_route(route: str) -> dict:
     route = normalize_model_route(route)
     catalog = load_local_model_catalog()
     routes = local_model_catalog_routes(catalog)
+    route_id = route
     raw = routes.get(route) or routes.get(route.replace("_", "-")) or routes.get(route.replace("_", "."))
+    if raw is None:
+        selected = local_model_route_entry_for_task(route, routes)
+        if selected is not None:
+            route_id, raw = selected
     if raw is None:
         return {}
     if isinstance(raw, str):
@@ -1626,6 +1677,7 @@ def merged_local_model_route(route: str) -> dict:
     if not isinstance(raw, dict):
         return {}
     info = {key: value for key, value in raw.items() if isinstance(key, str)}
+    info.setdefault("catalog_route", route_id)
     model_ref = info.get("model_id") or info.get("model") or info.get("model_name")
     model_record = {}
     if isinstance(model_ref, str):
@@ -1636,7 +1688,7 @@ def merged_local_model_route(route: str) -> dict:
         if key not in info and isinstance(model_record.get(key), str):
             info[key] = model_record[key]
     if "model" not in info:
-        for key in ("model_name", "id", "name"):
+        for key in ("model_name", "modelId", "model_id", "displayName", "id", "name"):
             value = raw.get(key) or model_record.get(key)
             if isinstance(value, str) and value.strip():
                 info["model"] = value.strip()
@@ -1682,14 +1734,16 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
     route = normalize_model_route(route)
     env_endpoint = os.environ.get(model_route_env_key(route, "endpoint"))
     env_model = os.environ.get(model_route_env_key(route, "model"))
+    global_env_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    global_env_model = os.environ.get("MOTOKO_MODEL")
     configured = {}
     if not env_endpoint or not env_model:
         candidate = config_root() / "config.json"
         if candidate.exists():
             configured = load_config().get("model_routes", {}).get(route, {})
     local_route = merged_local_model_route(route)
-    route_endpoint = env_endpoint or configured.get("endpoint") or local_route.get("endpoint") or endpoint()
-    route_model = env_model or configured.get("model") or local_route.get("model") or model_name()
+    route_endpoint = env_endpoint or configured.get("endpoint") or global_env_endpoint or local_route.get("endpoint") or DEFAULT_ENDPOINT
+    route_model = env_model or configured.get("model") or global_env_model or local_route.get("model") or DEFAULT_MODEL
     request_path = local_route.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH
     return {
         "route": route,
@@ -1697,6 +1751,7 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "model": str(route_model),
         "request_path": str(request_path),
         "manager_kind": str(local_route.get("manager_kind") or ""),
+        "catalog_route": str(local_route.get("catalog_route") or ""),
         "download_url": str(local_route.get("download_url") or local_route.get("url") or ""),
         "download_hash": str(local_route.get("sha256") or local_route.get("hash") or ""),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
@@ -1760,9 +1815,10 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
             continue
         marker = "default" if is_default else "configured"
         manager = f"; manager={info['manager_kind']}" if info.get("manager_kind") else ""
+        catalog_route = f"; catalog={info['catalog_route']}" if info.get("catalog_route") else ""
         lines.append(
             f"  {route}: {info['model']} endpoint={info['endpoint']} "
-            f"({marker}; lane={model_route_lane(route)}{manager}; {info['description']})"
+            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}; {info['description']})"
         )
     return "\n".join(lines)
 
@@ -5111,6 +5167,16 @@ def summarize_blocks(
 ) -> str:
     pending = [block.strip() for block in blocks if block.strip()]
     estimated_calls = estimate_summary_block_calls(pending)
+    show_foreground_progress = progress is None and sys.stdout.isatty()
+    if show_foreground_progress:
+        info = model_route(route)
+        print(
+            f"  model route {info['route']} -> {info['model']} "
+            f"({model_endpoint_suffix(info['endpoint']) or info['endpoint']}); "
+            f"estimated {estimated_calls} model call(s)",
+            flush=True,
+        )
+        print("  pause with: motoko pause  (takes effect before the next model call)", flush=True)
     index_progress_reserve_model_calls(
         progress,
         f"{phase}:{label}",
@@ -5132,16 +5198,28 @@ def summarize_blocks(
         return result
 
     def summarize_with_progress(model_label: str, text: str, model_instruction: str) -> str:
+        if work_pause_requested():
+            clear_work_pause_request()
+            raise WorkPaused(f"{phase} paused by request", work_kind=phase)
         index_progress_begin_model(progress, phase, model_label, progress_callback, route=route)
-        result = summarize_text(
-            model_label,
-            text,
-            model_instruction,
-            timeout=timeout,
-            route=route,
-            prompt_version=prompt_version,
-        )
+        if show_foreground_progress:
+            print(f"  starting {model_label}", flush=True)
+        spinner = ThinkingSpinner(enabled=show_foreground_progress)
+        try:
+            spinner.start()
+            result = summarize_text(
+                model_label,
+                text,
+                model_instruction,
+                timeout=timeout,
+                route=route,
+                prompt_version=prompt_version,
+            )
+        finally:
+            spinner.stop()
         index_progress_finish_model(progress, progress_callback)
+        if show_foreground_progress:
+            print(f"  finished {model_label}", flush=True)
         return result
 
     round_no = 1
@@ -5719,10 +5797,13 @@ def build_topic_dossier(
     *,
     name: str | None = None,
     max_chunks: int = TOPIC_DEFAULT_CHUNKS,
+    retrieval_query: str | None = None,
+    focus: str | None = None,
 ) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("topic query is empty")
+    retrieval_query = (retrieval_query or query).strip()
     if not index_ids:
         raise SystemExit("topic dossier needs at least one document index")
     max_chunks = max(1, min(max_chunks, TOPIC_MAX_CHUNKS))
@@ -5741,7 +5822,7 @@ def build_topic_dossier(
                 "warnings_at_build": warnings[:8],
             }
         )
-        for score, file_item, chunk, content in ranked_index_chunks(index, query):
+        for score, file_item, chunk, content in ranked_index_chunks(index, retrieval_query):
             selected_rows.append((score, index, file_item, chunk, content))
 
     selected_rows.sort(key=lambda row: row[0], reverse=True)
@@ -5783,9 +5864,10 @@ def build_topic_dossier(
             ).strip()
         )
 
-    print(f"Building topic dossier {topic_id} from {len(evidence)} chunk(s).")
+    focus_note = f" focus={focus}" if focus else ""
+    print(f"Building topic dossier {topic_id} from {len(evidence)} chunk(s).{focus_note}")
     summary = summarize_blocks(
-        f"topic dossier: {query}",
+        f"topic dossier: {query}{focus_note}",
         blocks,
         textwrap.dedent(
             """
@@ -5806,6 +5888,8 @@ def build_topic_dossier(
         "id": topic_id,
         "name": name or slug_title(query),
         "query": query,
+        "focus": focus or "",
+        "retrieval_query": retrieval_query,
         "created": now(),
         "technique": "topic-focused hierarchical retrieval-augmented dossier",
         "source_indexes": source_indexes,
@@ -6412,32 +6496,96 @@ def profile_refresh_due(catalog: dict | None = None) -> bool:
     return bool(set(memory_ids) - known_memories or set(conversation_ids) - known_conversations)
 
 
-def study_query(conv: dict, query: str) -> str:
+def parse_study_directive(text: str) -> tuple[str, str | None]:
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    focus = None
+    query_parts = []
+    idx = 0
+    while idx < len(parts):
+        part = parts[idx]
+        if part == "--focus":
+            if idx + 1 >= len(parts):
+                raise SystemExit("usage: /study QUERY [--focus recent]")
+            focus = parts[idx + 1].strip().lower()
+            idx += 2
+            continue
+        if part.startswith("--focus="):
+            focus = part.split("=", 1)[1].strip().lower()
+            idx += 1
+            continue
+        query_parts.append(part)
+        idx += 1
+    if focus and focus not in {"recent"}:
+        raise SystemExit("unknown study focus; currently supported: recent")
+    return " ".join(query_parts).strip(), focus
+
+
+def recent_focus_terms() -> str:
+    today = _dt.datetime.now().astimezone().date()
+    yesterday = today - _dt.timedelta(days=1)
+    values = []
+    for day in (today, yesterday):
+        values.extend(
+            [
+                day.isoformat(),
+                day.strftime("%Y-%m-%d %a"),
+                day.strftime("%Y/%m/%d"),
+                day.strftime("%b %d %Y"),
+                day.strftime("%B %d %Y"),
+            ]
+        )
+    return " ".join(values + ["today", "yesterday", "recent", "latest", "logbook"])
+
+
+def study_retrieval_query(query: str, focus: str | None) -> str:
+    if focus == "recent":
+        return f"{query} {recent_focus_terms()}".strip()
+    return query
+
+
+def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
     query = query.strip()
     if not query:
         raise SystemExit("usage: /study QUERY")
+    retrieval_query = study_retrieval_query(query, focus)
+    topic_limit = min(TOPIC_DEFAULT_CHUNKS, 8) if focus == "recent" else TOPIC_DEFAULT_CHUNKS
 
-    topic = maybe_attach_relevant_existing_topic(conv, query)
+    topic = maybe_attach_relevant_existing_topic(conv, retrieval_query)
     if topic:
         return f"attached existing topic dossier: {topic.get('id')} ({topic.get('name', '')})"
 
-    dossier = maybe_attach_relevant_existing_dossier(conv, query)
+    dossier = maybe_attach_relevant_existing_dossier(conv, retrieval_query)
     if dossier:
         return f"attached existing memory dossier: {dossier.get('id')} ({dossier.get('name', '')})"
 
     index_ids = attached_index_ids(conv)
     if index_ids:
-        topic = build_topic_dossier(index_ids, query)
+        topic = build_topic_dossier(
+            index_ids,
+            query,
+            max_chunks=topic_limit,
+            retrieval_query=retrieval_query,
+            focus=focus,
+        )
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from attached index(es): {topic.get('id')}"
 
-    index = best_relevant_index(query)
+    index = best_relevant_index(retrieval_query)
     if index:
-        topic = build_topic_dossier([index["id"]], query)
+        topic = build_topic_dossier(
+            [index["id"]],
+            query,
+            max_chunks=topic_limit,
+            retrieval_query=retrieval_query,
+            focus=focus,
+        )
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from index {index.get('id')}: {topic.get('id')}"
 
-    dossier = build_memory_dossier(query)
+    dossier = build_memory_dossier(retrieval_query)
     attach_context_item(conv, context_item_from_dossier(dossier))
     return f"built memory dossier: {dossier.get('id')}"
 
@@ -7156,8 +7304,9 @@ def local_model_verify_hint(route_info: dict) -> str:
     helper = shutil.which("motoko-model")
     if helper:
         try:
+            verify_route = str(route_info.get("catalog_route") or route_info.get("route", MODEL_ROUTE_CHAT))
             result = subprocess.run(
-                [helper, "verify", str(route_info.get("route", MODEL_ROUTE_CHAT))],
+                [helper, "verify", verify_route],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -7169,7 +7318,7 @@ def local_model_verify_hint(route_info: dict) -> str:
         else:
             if result.returncode != 0:
                 detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-                lines.append(f"motoko-model verify failed for route {route_info.get('route')}: {detail[:1200] or 'no diagnostic'}")
+                lines.append(f"motoko-model verify failed for route {verify_route}: {detail[:1200] or 'no diagnostic'}")
     else:
         lines.append("motoko-model helper is not on PATH")
     if route_info.get("download_url"):
@@ -7468,7 +7617,7 @@ HELP_SECTIONS = [
             ("/attach-topic [ID]", "attach an existing topic dossier"),
             ("/dossier QUERY", "build and attach a memory/conversation dossier"),
             ("/attach-dossier [ID]", "attach an existing memory dossier"),
-            ("/study QUERY", "choose and run the best bounded study action"),
+            ("/study QUERY [--focus recent]", "choose and run the best bounded study action"),
             ("/sources", "show sources and context-planning reasons for the last answer"),
         ],
     ),
@@ -7531,7 +7680,7 @@ HELP_SECTIONS = [
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
             ("motoko deepen INDEX_ID QUERY", "build a larger topic dossier"),
             ("motoko dossier QUERY", "build a memory/conversation dossier"),
-            ("motoko study QUERY", "run a bounded study action in a new conversation"),
+            ("motoko study QUERY [--focus recent]", "run a bounded study action in a new conversation"),
             ("motoko compact [ID]", "compact a saved conversation"),
             ("motoko status", "show model, memory, and state paths"),
             ("motoko model-routes", "show chat and background worker model routes"),
@@ -9003,7 +9152,8 @@ class MotokoTui:
         self.append("system", f"attached repo {command} report for {repo}\n\n{item['content']}")
 
     def study_from_body(self, body: str) -> None:
-        print(study_query(self.conv, body))
+        query, focus = parse_study_directive(body)
+        print(study_query(self.conv, query, focus=focus))
 
     def capture_text(self, func) -> str:
         class Capture:
@@ -9043,6 +9193,10 @@ class MotokoTui:
             print(style(str(exc), "yellow"))
         except SystemExit as exc:
             print(style(str(exc), "red"))
+        except KeyboardInterrupt:
+            request_work_pause("keyboard interrupt during blocking command")
+            print()
+            print(style("Interrupted. Pause requested; unfinished work can resume from the next durable checkpoint if one exists.", "yellow"))
         finally:
             self.reenter_after_blocking()
         self.messages = self.seed_messages(self.conv)
@@ -9832,7 +9986,8 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/study" or user_text.startswith("/study "):
             try:
-                print(study_query(conv, user_text[len("/study") :]))
+                query, focus = parse_study_directive(user_text[len("/study") :])
+                print(study_query(conv, query, focus=focus))
             except SystemExit as exc:
                 print(exc)
             continue
@@ -10570,7 +10725,7 @@ def command_study(args) -> None:
     else:
         conv = new_conversation(args.title or f"study: {slug_title(query)}")
         save_conversation(conv)
-    print(study_query(conv, query))
+    print(study_query(conv, query, focus=args.focus))
     print(f"conversation: {conv.get('title', 'Untitled')} [{conv.get('id', '')}]")
 
 
@@ -10885,6 +11040,7 @@ def main(argv: list[str]) -> int:
 
     study = sub.add_parser("study", help="run the best bounded study action for a query")
     study.add_argument("query", nargs="+")
+    study.add_argument("--focus", choices=["recent"], help="bias retrieval toward a supported focus")
     study.add_argument("--conversation", help="attach study output to an existing conversation")
     study.add_argument("--title", help="title for the new study conversation")
     study.set_defaults(func=command_study)
