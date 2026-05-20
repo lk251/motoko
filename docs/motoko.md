@@ -517,6 +517,9 @@ memory ranking remains separate and uses the current prompt, the conversation
 title, recent user turns, the compacted summary, memory importance, pinned
 status, repeated sightings, thread relevance, and recency. Use `/sources` after
 an answer to see which memories and recent conversations were selected and why.
+If no answer has been generated yet, `/sources` falls back to the currently
+attached indexes, topic dossiers, and dossier evidence so study results are
+visible immediately after `/study`.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to
@@ -573,6 +576,9 @@ reuses an existing dossier, builds a topic dossier from an attached or relevant
 index, or builds a memory/conversation dossier. `/study QUERY --focus recent`
 is a real parsed focus hint for recent/today/yesterday retrieval; it is not
 sent through as literal query text.
+When a query names a file such as `logbook.org`, retrieval gives that path a
+strong deterministic boost before model synthesis so explicit file requests do
+not lose to broad task-signal matches elsewhere in the corpus.
 For document corpora already attached to the active conversation, Motoko may
 also run a heavier background index refresh when an attached index becomes stale
 or when enough new files appear under the indexed root. This work uses the local
@@ -644,16 +650,25 @@ Equivalent one-off environment overrides use
 
 First requests to a Unix socket may socket-activate a model worker and block
 while weights load into VRAM. Motoko uses generous Unix-socket request timeouts
-and reports the active route/lane in visible background status. If a declared
-model file is missing, run `motoko-model verify <route>`; Motoko also includes
-catalog download URL/hash details in socket connection diagnostics when they
-are available.
+and treats `503 Loading model` responses as a normal loading state to retry
+instead of an immediate failure. She reports the active route/lane in visible
+background status. If a declared model file is missing, run
+`motoko-model verify <route>`; Motoko also includes catalog download URL/hash
+details in socket connection diagnostics when they are available.
 
 When the NixOS catalog is keyed by worker service name instead of Motoko route
 name, Motoko resolves routes through each catalog entry's `tasks` list. For
 example, `index_chunk` can map to `qwen35-2b-worker`, `index_file` to
 `qwen3-4b-instruct-worker`, `index_label` to `ministral-3b-worker`, and topic
 or corpus synthesis to `qwen35-9b-worker`.
+
+For hierarchical summaries, Motoko can fan out independent reduction batches
+across smaller worker routes before the final synthesis route runs. For
+example, a topic dossier may reduce retrieved chunks through `index_file` and
+`index_chunk` workers in parallel, then ask the `topic` route for the final
+dossier. The NixOS catalog's `maxParallel` value is respected per route, and
+`MOTOKO_SUMMARY_MAX_PARALLEL` can cap total reduction workers for one process.
+Set `MOTOKO_SUMMARY_PARALLEL=0` to disable this fanout for a session.
 
 Before trusting newly installed worker models, run:
 

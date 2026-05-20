@@ -335,6 +335,30 @@ class FakeHandler(BaseHTTPRequestHandler):
         return
 
 
+class LoadingThenOkHandler(BaseHTTPRequestHandler):
+    calls = 0
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.calls += 1
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        if self.__class__.calls == 1:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"Loading model","type":"unavailable_error","code":503}}')
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        event = {"choices": [{"delta": {"content": "OK"}}]}
+        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *_args):
+        return
+
+
 class UnixHTTPServer(socketserver.UnixStreamServer):
     allow_reuse_address = True
 
@@ -368,6 +392,52 @@ def test_fake_openai_stream(m):
             os.environ.pop("MOTOKO_ENDPOINT", None)
         else:
             os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+
+
+def test_unix_socket_model_loading_retries(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_retry = m.MODEL_LOADING_RETRY_SECONDS
+    socket_path = None
+    LoadingThenOkHandler.calls = 0
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        m.MODEL_LOADING_RETRY_SECONDS = 0.01
+        with isolated_state() as tmp:
+            socket_path = tmp / "chat.sock"
+            server = UnixHTTPServer(str(socket_path), LoadingThenOkHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "chat": {
+                        "endpoint": f"unix://{socket_path}",
+                        "model": "qwen-loading-test",
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            assert m.quiet_model([{"role": "user", "content": "hello"}], timeout=2) == "OK"
+            assert LoadingThenOkHandler.calls == 2
+            server.shutdown()
+            server.server_close()
+    finally:
+        m.MODEL_LOADING_RETRY_SECONDS = old_retry
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
 
 
 def test_model_route_config_and_summary_cache(m):
@@ -591,6 +661,138 @@ def test_local_model_status_diagnostic_uses_catalog_route_without_hashing(m):
         finally:
             m.run_local_model_helper = old_run_helper
             m.shutil.which = old_which
+
+
+def test_summary_reductions_fan_out_across_worker_routes(m):
+    old_summary_input = m.SUMMARY_INPUT_CHARS
+    old_summarize_text = m.summarize_text
+    old_model_route = m.model_route
+    old_parallel = os.environ.get("MOTOKO_SUMMARY_PARALLEL")
+    old_max_parallel = os.environ.get("MOTOKO_SUMMARY_MAX_PARALLEL")
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+    routes = []
+
+    def fake_model_route(route=m.MODEL_ROUTE_CHAT):
+        route = m.normalize_model_route(route)
+        return {
+            "route": route,
+            "endpoint": f"unix:///tmp/{route}.sock",
+            "model": route,
+            "request_path": "/v1/chat/completions",
+            "manager_kind": "systemd-socket-worker",
+            "catalog_route": route,
+            "model_path": "",
+            "max_parallel": 1,
+            "download_url": "",
+            "download_hash": "",
+            "description": m.MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
+        }
+
+    def fake_summarize_text(label, text, instruction, *, timeout=m.MODEL_TIMEOUT_SECONDS, route=m.MODEL_ROUTE_CHAT, prompt_version="summary-v1"):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            routes.append(route)
+            active -= 1
+        return f"{route}:{label}:{len(text)}"
+
+    try:
+        os.environ["MOTOKO_SUMMARY_PARALLEL"] = "1"
+        os.environ["MOTOKO_SUMMARY_MAX_PARALLEL"] = "2"
+        m.SUMMARY_INPUT_CHARS = 20
+        m.model_route = fake_model_route
+        m.summarize_text = fake_summarize_text
+        result = m.summarize_blocks(
+            "topic dossier: test",
+            ["a" * 40, "b" * 40, "c" * 40, "d" * 40],
+            "Final summary.",
+            route=m.MODEL_ROUTE_TOPIC,
+        )
+        assert result.startswith(f"{m.MODEL_ROUTE_TOPIC}:")
+        assert max_active >= 2
+        assert m.MODEL_ROUTE_INDEX_FILE in routes
+        assert m.MODEL_ROUTE_INDEX_CHUNK in routes
+        assert routes[-1] == m.MODEL_ROUTE_TOPIC
+    finally:
+        m.SUMMARY_INPUT_CHARS = old_summary_input
+        m.summarize_text = old_summarize_text
+        m.model_route = old_model_route
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_SUMMARY_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_SUMMARY_PARALLEL"] = old_parallel
+        if old_max_parallel is None:
+            os.environ.pop("MOTOKO_SUMMARY_MAX_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_SUMMARY_MAX_PARALLEL"] = old_max_parallel
+
+
+def test_sources_fallback_lists_attached_topic_context(m):
+    with isolated_state():
+        topic = {
+            "id": "topic-test",
+            "name": "Yesterday Tasks",
+            "query": "unfinished tasks",
+            "summary": "Summary",
+            "evidence": [
+                {
+                    "index": "idx",
+                    "path": "/tmp/work/logbook.org",
+                    "chunk": 3,
+                }
+            ],
+        }
+        m.atomic_write(m.topic_path(topic["id"]), json.dumps(topic, ensure_ascii=False) + "\n")
+        conv = m.new_conversation("Topic attached")
+        conv["context_items"] = [m.context_item_from_topic(topic)]
+        text = m.format_conversation_sources(conv)
+        assert "No recorded sources for the last answer yet" in text
+        assert "topic topic-test" in text
+        assert "/tmp/work/logbook.org" in text
+
+
+def test_named_file_query_boosts_matching_path(m):
+    index = {
+        "id": "idx",
+        "name": "orgfiles",
+        "root": "/tmp/orgfiles",
+        "files": [
+            {
+                "path": "/tmp/orgfiles/organization/plan.org",
+                "summary": "High priority TODO planning notes with many active tasks.",
+                "signals": {"active_task_count": 10, "priorities": {"A": 2}},
+                "chunks": [
+                    {
+                        "chunk": 1,
+                        "summary": "TODO planning backlog and tomorrow tasks.",
+                        "content": "TODO many planning tasks for today and tomorrow.",
+                    }
+                ],
+            },
+            {
+                "path": "/tmp/orgfiles/logbook.org",
+                "summary": "Daily logbook entries for yesterday and today.",
+                "signals": {},
+                "chunks": [
+                    {
+                        "chunk": 1,
+                        "summary": "Yesterday and today logbook notes.",
+                        "content": "Yesterday unfinished work and today's notes.",
+                    }
+                ],
+            },
+        ],
+    }
+    rows = m.ranked_index_chunks(index, "summarize yesterday and today according to logbook.org")
+    assert rows[0][1]["path"].endswith("/logbook.org")
+    text, sources = m.retrieve_from_index(index, "summarize yesterday and today according to logbook.org")
+    assert "/tmp/orgfiles/logbook.org" in text
+    assert any(source.get("path", "").endswith("/logbook.org") for source in sources)
 
 
 def test_study_focus_recent_is_parsed_and_bounded(m):
@@ -1232,10 +1434,14 @@ def main() -> int:
         test_help_about_and_explicit_memory,
         test_help_overlay_closes,
         test_fake_openai_stream,
+        test_unix_socket_model_loading_retries,
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
         test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
+        test_summary_reductions_fan_out_across_worker_routes,
+        test_sources_fallback_lists_attached_topic_context,
+        test_named_file_query_boosts_matching_path,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
         test_nix_managed_allowdirs_message,

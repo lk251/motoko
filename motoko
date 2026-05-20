@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import codecs
 import collections
+import concurrent.futures
 import contextlib
 import datetime as _dt
 import fnmatch
@@ -53,6 +54,7 @@ LOCAL_MODELS_CONFIG = "local-models.json"
 LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
 SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
 LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
+MODEL_LOADING_RETRY_SECONDS = 2.0
 MODEL_ROUTE_CHAT = "chat"
 MODEL_ROUTE_INDEX_CHUNK = "index_chunk"
 MODEL_ROUTE_INDEX_FILE = "index_file"
@@ -124,6 +126,13 @@ LOCAL_MODEL_ROUTE_PREFERENCES = {
     MODEL_ROUTE_PROFILE: ("qwen35-9b-worker", "qwen36-chat"),
     MODEL_ROUTE_TITLE: ("qwen35-2b-worker", "ministral-3b-worker"),
     MODEL_ROUTE_AUDIT: ("qwen35-9b-worker", "qwen36-chat"),
+}
+SUMMARY_REDUCTION_ROUTE_PREFERENCES = {
+    MODEL_ROUTE_INDEX_CORPUS: (MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_INDEX_CHUNK),
+    MODEL_ROUTE_TOPIC: (MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_INDEX_CHUNK),
+    MODEL_ROUTE_MEMORY: (MODEL_ROUTE_INDEX_CHUNK, MODEL_ROUTE_INDEX_FILE),
+    MODEL_ROUTE_PROFILE: (MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_INDEX_CHUNK),
+    MODEL_ROUTE_AUDIT: (MODEL_ROUTE_INDEX_FILE, MODEL_ROUTE_INDEX_CHUNK),
 }
 MAX_CONTEXT_BYTES = 96 * 1024
 MAX_CONTEXT_FILES = 24
@@ -1755,6 +1764,7 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "manager_kind": str(local_route.get("manager_kind") or ""),
         "catalog_route": str(local_route.get("catalog_route") or ""),
         "model_path": str(local_route.get("model_path") or ""),
+        "max_parallel": local_route.get("maxParallel") or local_route.get("max_parallel") or 1,
         "download_url": str(local_route.get("download_url") or local_route.get("url") or ""),
         "download_hash": str(local_route.get("sha256") or local_route.get("hash") or ""),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
@@ -3751,6 +3761,43 @@ def score_text(query_counts: collections.Counter, text: str) -> int:
     return int(round(score * 10))
 
 
+def query_path_mentions(query: str) -> list[str]:
+    mentions = []
+    seen = set()
+    for raw in re.findall(r"[A-Za-z0-9_./~+-]+\.[A-Za-z0-9][A-Za-z0-9._+-]*", query):
+        value = raw.strip(".,;:()[]{}<>\"'").lower()
+        if not value:
+            continue
+        name = pathlib.PurePosixPath(value).name
+        if "." not in name:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        mentions.append(value)
+    return mentions
+
+
+def query_path_match_boost(query: str, path: str) -> int:
+    mentions = query_path_mentions(query)
+    if not mentions or not path:
+        return 0
+    path_lower = path.lower()
+    path_name = pathlib.PurePosixPath(path_lower).name
+    boost = 0
+    for mention in mentions:
+        mention_name = pathlib.PurePosixPath(mention).name
+        if path_lower == mention or path_lower.endswith("/" + mention):
+            boost += 2500
+        elif path_name == mention_name:
+            boost += 2000
+        elif mention in path_lower:
+            boost += 1200
+        elif mention_name and mention_name in path_name:
+            boost += 800
+    return boost
+
+
 def query_wants_task_context(query: str) -> bool:
     return bool(set(token_counts(query)) & TASK_QUERY_WORDS)
 
@@ -5156,6 +5203,74 @@ def chunk_blocks_by_chars(blocks: list[str], max_chars: int) -> list[list[str]]:
     return batches
 
 
+def route_parallel_limit(route: str) -> int:
+    route = normalize_model_route(route)
+    raw = os.environ.get(model_route_env_key(route, "parallel"))
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 1
+    info = model_route(route)
+    try:
+        return max(1, int(info.get("max_parallel") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def parse_route_list(raw: str) -> list[str]:
+    routes = []
+    for part in re.split(r"[,:\s]+", raw.strip()):
+        if not part:
+            continue
+        routes.append(normalize_model_route(part))
+    return routes
+
+
+def summary_reduction_route_names(final_route: str) -> list[str]:
+    final_route = normalize_model_route(final_route)
+    route_key = model_route_env_key(final_route, "reduce_routes")
+    raw = os.environ.get(route_key) or os.environ.get("MOTOKO_SUMMARY_REDUCE_ROUTES")
+    if raw:
+        candidates = parse_route_list(raw)
+    else:
+        candidates = list(SUMMARY_REDUCTION_ROUTE_PREFERENCES.get(final_route, (final_route,)))
+    if final_route not in candidates and final_route not in SUMMARY_REDUCTION_ROUTE_PREFERENCES:
+        candidates.append(final_route)
+
+    seen = set()
+    routes = []
+    for route in candidates:
+        info = model_route(route)
+        key = (info.get("endpoint", ""), info.get("model", ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        routes.append(route)
+    return routes or [final_route]
+
+
+def summary_reduction_worker_slots(final_route: str) -> list[str]:
+    if not env_flag("MOTOKO_SUMMARY_PARALLEL", True):
+        return [normalize_model_route(final_route)]
+    slots = []
+    for route in summary_reduction_route_names(final_route):
+        slots.extend([route] * route_parallel_limit(route))
+    max_slots = env_int("MOTOKO_SUMMARY_MAX_PARALLEL", len(slots) or 1, minimum=1)
+    return (slots or [normalize_model_route(final_route)])[:max_slots]
+
+
+def format_summary_worker_slots(slots: list[str]) -> str:
+    counts = collections.Counter(slots)
+    labels = []
+    for route, count in counts.items():
+        label = f"{route}={model_route_badge(route)}"
+        if count > 1:
+            label += f"x{count}"
+        labels.append(label)
+    return ", ".join(labels)
+
+
 def summarize_blocks(
     label: str,
     blocks: list[str],
@@ -5204,13 +5319,14 @@ def summarize_blocks(
         index_progress_finish_model(progress, progress_callback)
         return result
 
-    def summarize_with_progress(model_label: str, text: str, model_instruction: str) -> str:
+    def summarize_with_progress(model_label: str, text: str, model_instruction: str, call_route: str = route) -> str:
         if work_pause_requested():
             clear_work_pause_request()
             raise WorkPaused(f"{phase} paused by request", work_kind=phase)
-        index_progress_begin_model(progress, phase, model_label, progress_callback, route=route)
+        index_progress_begin_model(progress, phase, model_label, progress_callback, route=call_route)
         if show_foreground_progress:
-            print(f"  starting {model_label}", flush=True)
+            suffix = f" via {model_route_badge(call_route)}" if call_route != route else ""
+            print(f"  starting {model_label}{suffix}", flush=True)
         spinner = ThinkingSpinner(enabled=show_foreground_progress)
         try:
             spinner.start()
@@ -5219,7 +5335,7 @@ def summarize_blocks(
                 text,
                 model_instruction,
                 timeout=timeout,
-                route=route,
+                route=call_route,
                 prompt_version=prompt_version,
             )
         finally:
@@ -5229,6 +5345,64 @@ def summarize_blocks(
             print(f"  finished {model_label}", flush=True)
         return result
 
+    def summarize_reduction_batches(batches: list[list[str]], round_no: int) -> list[str]:
+        jobs = [
+            (
+                idx,
+                f"{label} summary batch {idx}/{len(batches)} round {round_no}",
+                "\n\n".join(batch),
+            )
+            for idx, batch in enumerate(batches, 1)
+        ]
+        slots = summary_reduction_worker_slots(route)
+        can_parallelize = (
+            progress is None
+            and len(jobs) > 1
+            and len(slots) > 1
+            and env_flag("MOTOKO_SUMMARY_PARALLEL", True)
+        )
+        if can_parallelize and show_foreground_progress:
+            print(
+                f"  parallel reduction: {len(jobs)} batch(es) across {format_summary_worker_slots(slots)}",
+                flush=True,
+            )
+        if not can_parallelize:
+            reduced = []
+            for idx, model_label, text in jobs:
+                call_route = slots[(idx - 1) % len(slots)] if slots else route
+                print(f"  reducing {model_label}", flush=True)
+                reduced.append(
+                    summarize_with_progress(
+                        model_label,
+                        text,
+                        "Summarize this batch faithfully for a higher-level retrieval summary. Preserve names, dates, decisions, obligations, and unusual details.",
+                        call_route=call_route,
+                    )
+                )
+            return reduced
+
+        reduced: list[str | None] = [None] * len(jobs)
+        max_workers = min(len(jobs), len(slots))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            for idx, model_label, text in jobs:
+                call_route = slots[(idx - 1) % len(slots)]
+                print(f"  reducing {model_label} via {model_route_badge(call_route)}", flush=True)
+                future = executor.submit(
+                    summarize_with_progress,
+                    model_label,
+                    text,
+                    "Summarize this batch faithfully for a higher-level retrieval summary. Preserve names, dates, decisions, obligations, and unusual details.",
+                    call_route,
+                )
+                futures[future] = (idx, model_label)
+            for future in concurrent.futures.as_completed(futures):
+                idx, model_label = futures[future]
+                reduced[idx - 1] = future.result()
+                if show_foreground_progress:
+                    print(f"  completed {model_label}", flush=True)
+        return [item or "" for item in reduced]
+
     round_no = 1
     while True:
         combined = "\n\n".join(pending)
@@ -5236,17 +5410,7 @@ def summarize_blocks(
             return summarize_with_progress(label, combined, instruction)
 
         batches = chunk_blocks_by_chars(pending, SUMMARY_INPUT_CHARS)
-        reduced = []
-        for idx, batch in enumerate(batches, 1):
-            batch_label = f"{label} summary batch {idx}/{len(batches)} round {round_no}"
-            print(f"  reducing {batch_label}", flush=True)
-            reduced.append(
-                summarize_with_progress(
-                    batch_label,
-                    "\n\n".join(batch),
-                    "Summarize this batch faithfully for a higher-level retrieval summary. Preserve names, dates, decisions, obligations, and unusual details.",
-                )
-            )
+        reduced = summarize_reduction_batches(batches, round_no)
         if len(reduced) >= len(pending):
             return summarize_with_progress(label, "\n\n".join(reduced), instruction)
         pending = reduced
@@ -5780,6 +5944,7 @@ def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, 
                 ]
             )
             score = score_text(query_counts, haystack)
+            score += query_path_match_boost(query, file_item.get("path", ""))
             score += task_signal_boost(query, file_item.get("signals") or {})
             score += task_signal_boost(query, chunk.get("signals") or {})
             rows.append((score, file_item, chunk, content))
@@ -6753,6 +6918,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             query_counts,
             "\n".join([file_item.get("path", ""), file_item.get("summary", ""), file_signal_text]),
         )
+        file_score += query_path_match_boost(query, file_item.get("path", ""))
         file_score += task_signal_boost(query, file_item.get("signals") or {})
         file_rows.append((file_score, file_item))
         for chunk in file_item.get("chunks", []):
@@ -6769,6 +6935,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                 ]
             )
             chunk_score = score_text(query_counts, haystack)
+            chunk_score += query_path_match_boost(query, file_item.get("path", ""))
             chunk_score += task_signal_boost(query, file_item.get("signals") or {})
             chunk_score += task_signal_boost(query, chunk.get("signals") or {})
             chunk_rows.append((chunk_score, file_item, chunk))
@@ -7350,6 +7517,13 @@ def compact_local_model_status(raw: str) -> str:
     return " ".join(fields) if fields else raw.strip()[:240]
 
 
+def model_loading_response(status: int, body: str) -> bool:
+    if status != 503:
+        return False
+    lowered = body.lower()
+    return "loading model" in lowered or "model loading" in lowered
+
+
 def local_model_verify_hint(route_info: dict) -> str:
     endpoint_text = str(route_info.get("endpoint", ""))
     if not endpoint_is_unix(endpoint_text):
@@ -7411,24 +7585,36 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
         if not socket_path:
             raise SystemExit(f"model request failed: empty Unix socket endpoint for route {route_info['route']}")
         request_path = str(route_info.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH)
-        conn = UnixSocketHTTPConnection(socket_path, timeout=request_timeout)
-        try:
-            conn.request(
-                "POST",
-                request_path,
-                body=data,
-                headers={"Content-Type": "application/json", "Host": "localhost"},
-            )
-            resp = conn.getresponse()
-            if resp.status >= 400:
-                body = resp.read(1200).decode("utf-8", errors="replace")
-                raise OSError(f"model endpoint returned HTTP {resp.status}: {body}")
+        deadline = time.monotonic() + request_timeout
+        loading_attempts = 0
+        while True:
+            remaining = max(1.0, deadline - time.monotonic())
+            conn = UnixSocketHTTPConnection(socket_path, timeout=remaining)
             try:
-                yield resp
+                conn.request(
+                    "POST",
+                    request_path,
+                    body=data,
+                    headers={"Content-Type": "application/json", "Host": "localhost"},
+                )
+                resp = conn.getresponse()
+                if resp.status >= 400:
+                    body = resp.read(1200).decode("utf-8", errors="replace")
+                    resp.close()
+                    if model_loading_response(resp.status, body) and time.monotonic() < deadline:
+                        loading_attempts += 1
+                        sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
+                        time.sleep(sleep_for)
+                        continue
+                    suffix = f" after {loading_attempts} loading retries" if loading_attempts else ""
+                    raise OSError(f"model endpoint returned HTTP {resp.status}{suffix}: {body}")
+                try:
+                    yield resp
+                finally:
+                    resp.close()
+                return
             finally:
-                resp.close()
-        finally:
-            conn.close()
+                conn.close()
         return
 
     req = urllib.request.Request(
@@ -7954,8 +8140,79 @@ def format_sources(sources: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def attached_context_sources(conv: dict) -> list[dict]:
+    sources = []
+    for item in conv.get("context_items", []):
+        kind = item.get("kind")
+        if kind == "index":
+            try:
+                index = load_index(item["id"])
+                status, warnings = index_staleness(index)
+            except (KeyError, SystemExit, OSError, json.JSONDecodeError):
+                continue
+            sources.append(
+                {
+                    "kind": "index",
+                    "id": index.get("id", ""),
+                    "name": index.get("name", ""),
+                    "root": index.get("root", ""),
+                    "status": status,
+                    "warnings": warnings[:8],
+                }
+            )
+            continue
+        if kind == "topic":
+            try:
+                topic = load_topic(item["id"])
+            except (KeyError, SystemExit, OSError, json.JSONDecodeError):
+                continue
+            sources.append(
+                {
+                    "kind": "topic",
+                    "id": topic.get("id", ""),
+                    "name": topic.get("name", ""),
+                    "query": topic.get("query", ""),
+                }
+            )
+            for evidence in topic.get("evidence", [])[:20]:
+                sources.append(
+                    {
+                        "kind": "topic-evidence",
+                        "topic": topic.get("id", ""),
+                        "index": evidence.get("index", ""),
+                        "path": evidence.get("path", ""),
+                        "chunk": evidence.get("chunk"),
+                    }
+                )
+            continue
+        if kind == "dossier":
+            try:
+                dossier = load_dossier(item["id"])
+            except (KeyError, SystemExit, OSError, json.JSONDecodeError):
+                continue
+            sources.append(
+                {
+                    "kind": "dossier",
+                    "id": dossier.get("id", ""),
+                    "name": dossier.get("name", ""),
+                    "query": dossier.get("query", ""),
+                }
+            )
+    return sources
+
+
+def format_conversation_sources(conv: dict) -> str:
+    sources = conv.get("last_sources", [])
+    if sources:
+        return format_sources(sources)
+    attached = attached_context_sources(conv)
+    if attached:
+        return "No recorded sources for the last answer yet. Attached context:\n" + format_sources(attached)
+    return format_sources([])
+
+
 def print_sources(conv: dict) -> None:
-    print(format_sources(conv.get("last_sources", [])))
+    print(format_conversation_sources(conv))
 
 
 def format_status(conv: dict | None = None) -> str:
@@ -8963,7 +9220,7 @@ class MotokoTui:
             elif text == "/pause":
                 self.request_pause()
             elif text == "/sources":
-                self.append("system", format_sources(self.conv.get("last_sources", [])))
+                self.append("system", format_conversation_sources(self.conv))
             elif text == "/status":
                 self.append("system", format_status(self.conv))
             elif text == "/model-routes":
