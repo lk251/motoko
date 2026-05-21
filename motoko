@@ -90,6 +90,7 @@ MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
 MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
 MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
 RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
+RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
 MODEL_CACHEABLE_SUMMARY_ROUTES = {
     MODEL_ROUTE_INDEX_CHUNK,
@@ -357,6 +358,7 @@ SLASH_COMMANDS = [
     ("/status", "show model, memory, and context state"),
     ("/model-routes", "show model worker routes"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
+    ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
     ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
@@ -417,6 +419,7 @@ SHELL_COMMANDS = [
     "model-routes",
     "model-eval",
     "retrieval-eval",
+    "retrieval-debug",
     "identity",
     "permissions",
     "repo",
@@ -436,6 +439,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/status",
     "/model-routes",
     "/retrieval-eval",
+    "/retrieval-debug",
     "/identity",
     "/permissions",
     "/personality",
@@ -861,6 +865,11 @@ def retrieval_evals_dir() -> pathlib.Path:
     return ensure_private_dir(root / "retrieval-evals")
 
 
+def retrieval_debug_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "retrieval-debug")
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -904,6 +913,11 @@ def model_eval_path(eval_id: str) -> pathlib.Path:
 def retrieval_eval_path(eval_id: str) -> pathlib.Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(eval_id)).strip("-") or "retrieval-eval"
     return retrieval_evals_dir() / f"{safe}.json"
+
+
+def retrieval_debug_path(debug_id: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(debug_id)).strip("-") or "retrieval-debug"
+    return retrieval_debug_dir() / f"{safe}.json"
 
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
@@ -2588,6 +2602,265 @@ def format_retrieval_eval_report(report: dict) -> str:
             details.append("missing terms " + ", ".join(row.get("missing_terms", [])[:6]))
         if details:
             lines.append("  " + "; ".join(details))
+    return "\n".join(lines)
+
+
+def retrieval_haystack_terms(query_counts: collections.Counter, text: str) -> list[str]:
+    if not query_counts:
+        return []
+    counts = token_counts(text)
+    return [term for term in query_counts if counts.get(term)]
+
+
+def retrieval_file_haystack(file_item: dict) -> str:
+    file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
+    return "\n".join([file_item.get("path", ""), file_item.get("summary", ""), file_signal_text])
+
+
+def retrieval_chunk_haystack(file_item: dict, chunk: dict, content: str) -> str:
+    file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
+    chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
+    return "\n".join(
+        [
+            file_item.get("path", ""),
+            file_item.get("summary", ""),
+            file_signal_text,
+            chunk.get("summary", ""),
+            chunk_signal_text,
+            content[:4000],
+        ]
+    )
+
+
+def retrieval_score_parts(
+    query: str,
+    query_counts: collections.Counter,
+    haystack: str,
+    *,
+    path: str = "",
+    file_signals: dict | None = None,
+    chunk_signals: dict | None = None,
+) -> dict:
+    lexical = score_text(query_counts, haystack)
+    path_boost = query_path_match_boost(query, path)
+    file_task_boost = task_signal_boost(query, file_signals or {})
+    chunk_task_boost = task_signal_boost(query, chunk_signals or {})
+    total = lexical + path_boost + file_task_boost + chunk_task_boost
+    return {
+        "total": total,
+        "lexical": lexical,
+        "path_boost": path_boost,
+        "file_task_boost": file_task_boost,
+        "chunk_task_boost": chunk_task_boost,
+        "matched_terms": retrieval_haystack_terms(query_counts, haystack)[:24],
+    }
+
+
+def retrieval_debug_file_row(index: dict, query: str, query_counts: collections.Counter, file_item: dict) -> dict:
+    haystack = retrieval_file_haystack(file_item)
+    status, warnings = file_staleness(file_item)
+    return {
+        "kind": "file",
+        "index": index.get("id", ""),
+        "path": file_item.get("path", ""),
+        "summary": compact_text(file_item.get("summary", ""), 280),
+        "freshness": status,
+        "warnings": warnings[:4],
+        **retrieval_score_parts(
+            query,
+            query_counts,
+            haystack,
+            path=file_item.get("path", ""),
+            file_signals=file_item.get("signals") or {},
+        ),
+    }
+
+
+def retrieval_debug_chunk_row(index: dict, query: str, query_counts: collections.Counter, file_item: dict, chunk: dict) -> dict:
+    content = read_chunk_content(index, chunk)
+    haystack = retrieval_chunk_haystack(file_item, chunk, content)
+    return {
+        "kind": "chunk",
+        "index": index.get("id", ""),
+        "path": file_item.get("path", ""),
+        "chunk": chunk.get("chunk"),
+        "summary": compact_text(chunk.get("summary", ""), 280),
+        "content_chars": len(content),
+        "content_sha256": chunk.get("content_sha256", ""),
+        "summary_matched_terms": retrieval_haystack_terms(
+            query_counts,
+            "\n".join([file_item.get("summary", ""), chunk.get("summary", "")]),
+        )[:12],
+        "content_matched_terms": retrieval_haystack_terms(query_counts, content[:4000])[:12],
+        **retrieval_score_parts(
+            query,
+            query_counts,
+            haystack,
+            path=file_item.get("path", ""),
+            file_signals=file_item.get("signals") or {},
+            chunk_signals=chunk.get("signals") or {},
+        ),
+    }
+
+
+def select_retrieval_debug_indexes(
+    query: str,
+    *,
+    conv: dict | None = None,
+    index_ids: list[str] | None = None,
+    limit: int = 3,
+) -> list[dict]:
+    if index_ids:
+        return [load_index_exact(index_id) for index_id in index_ids]
+    attached = attached_index_ids(conv or {}) if conv else []
+    if attached:
+        return [load_index_exact(index_id) for index_id in attached[:limit]]
+    ranked = [row for row in ranked_indexes_for_query(query) if int(row.get("_score", 0) or 0) > 0]
+    if ranked:
+        return [load_index_exact(row.get("id", "")) for row in ranked[:limit]]
+    return latest_indexes_by_family()[:limit]
+
+
+def diagnose_retrieval_debug(index_report: dict, query: str) -> list[str]:
+    notes = []
+    chunks = index_report.get("chunks", [])
+    files = index_report.get("files", [])
+    positive_chunks = [row for row in chunks if int(row.get("total", 0) or 0) > 0]
+    if index_report.get("freshness") == "stale":
+        notes.append("stale data: refresh or rebuild this index before trusting source answers")
+    if not chunks:
+        notes.append("chunking failure: this index has no chunks to retrieve")
+    elif not positive_chunks:
+        notes.append("recall failure: no chunk had a positive score for this query")
+    else:
+        notes.append(f"recall ok: {len(positive_chunks)} positive chunk(s) before limit")
+    mentions = query_path_mentions(query)
+    if mentions:
+        top_paths = [row.get("path", "").lower() for row in chunks[:3] + files[:3]]
+        for mention in mentions:
+            mention_name = pathlib.PurePosixPath(mention.lower()).name
+            if not any(path.endswith("/" + mention.lower()) or pathlib.PurePosixPath(path).name == mention_name for path in top_paths):
+                notes.append(f"ranking/path issue: mentioned {mention} was not in the top displayed rows")
+    if chunks and int(chunks[0].get("content_chars", 0) or 0) <= 0:
+        notes.append("chunk content issue: top chunk has no stored text available")
+    if chunks and int(chunks[0].get("content_chars", 0) or 0) > 0 and not chunks[0].get("summary"):
+        notes.append("summary issue: top chunk has source text but no chunk summary")
+    notes.append("prompt-use check: if /sources shows the right chunk but the answer ignores it, the issue is final synthesis/prompt use")
+    return notes
+
+
+def run_retrieval_debug(
+    query: str,
+    *,
+    conv: dict | None = None,
+    index_ids: list[str] | None = None,
+    limit: int = 8,
+) -> dict:
+    query = query.strip()
+    if not query:
+        raise SystemExit("usage: retrieval-debug QUERY")
+    limit = max(1, min(int(limit or 8), 50))
+    query_counts = token_counts(query)
+    indexes = select_retrieval_debug_indexes(query, conv=conv, index_ids=index_ids)
+    report = {
+        "schema": RETRIEVAL_DEBUG_SCHEMA_VERSION,
+        "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+        "created": now(),
+        "query": query,
+        "query_terms": list(query_counts),
+        "path_mentions": query_path_mentions(query),
+        "task_context": query_wants_task_context(query),
+        "indexes": [],
+    }
+    for index in indexes:
+        status, warnings = index_staleness(index)
+        file_rows = [retrieval_debug_file_row(index, query, query_counts, file_item) for file_item in index.get("files", [])]
+        chunk_rows = []
+        for file_item in index.get("files", []):
+            for chunk in file_item.get("chunks", []):
+                chunk_rows.append(retrieval_debug_chunk_row(index, query, query_counts, file_item, chunk))
+        file_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
+        chunk_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
+        index_report = {
+            "id": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "freshness": status,
+            "warnings": warnings[:8],
+            "files_considered": len(file_rows),
+            "chunks_considered": len(chunk_rows),
+            "files": file_rows[:limit],
+            "chunks": chunk_rows[:limit],
+        }
+        index_report["diagnosis"] = diagnose_retrieval_debug(index_report, query)
+        report["indexes"].append(index_report)
+    report["status"] = "empty" if not report["indexes"] else "ok"
+    return report
+
+
+def save_retrieval_debug_report(report: dict) -> pathlib.Path:
+    path = retrieval_debug_path(report.get("id", "retrieval-debug"))
+    report["saved_path"] = str(path)
+    atomic_write(path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+def format_retrieval_debug_report(report: dict) -> str:
+    lines = [
+        f"retrieval debug: {report.get('query', '')}",
+        f"id: {report.get('id', '')}",
+        "query terms: " + (", ".join(report.get("query_terms", [])) or "-"),
+    ]
+    if report.get("path_mentions"):
+        lines.append("path mentions: " + ", ".join(report.get("path_mentions", [])))
+    if report.get("saved_path"):
+        lines.append(f"saved: {report.get('saved_path')}")
+    if not report.get("indexes"):
+        lines.append("no indexes available; attach or build an index first")
+        return "\n".join(lines)
+    lines.append(
+        "guide: no relevant file means recall; wrong top chunk means ranking; warnings mean stale data; "
+        "right chunk but bad answer means prompt/final synthesis"
+    )
+    for index in report.get("indexes", []):
+        lines.append(
+            f"\nindex {index.get('id', '')}  {index.get('freshness', 'unknown')}  "
+            f"{index.get('files_considered', 0)} file(s)  {index.get('chunks_considered', 0)} chunk(s)  "
+            f"{index.get('name', '')}  {index.get('root', '')}"
+        )
+        for warning in index.get("warnings", [])[:3]:
+            lines.append(f"  warning: {warning}")
+        for note in index.get("diagnosis", []):
+            lines.append(f"  diagnosis: {note}")
+        lines.append("  top files:")
+        for idx, row in enumerate(index.get("files", [])[:5], 1):
+            lines.append(
+                f"    {idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+                f"path={row.get('path_boost', 0)} task={row.get('file_task_boost', 0)} "
+                f"{row.get('freshness', 'unknown')}  {row.get('path', '')}"
+            )
+            if row.get("matched_terms"):
+                lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+            if row.get("summary_matched_terms") or row.get("content_matched_terms"):
+                lines.append(
+                    "       matched by: "
+                    f"summary={','.join(row.get('summary_matched_terms', [])[:8]) or '-'} "
+                    f"content={','.join(row.get('content_matched_terms', [])[:8]) or '-'}"
+                )
+            if row.get("summary"):
+                lines.append("       summary: " + row.get("summary", ""))
+        lines.append("  top chunks:")
+        for idx, row in enumerate(index.get("chunks", [])[:8], 1):
+            lines.append(
+                f"    {idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+                f"path={row.get('path_boost', 0)} file_task={row.get('file_task_boost', 0)} "
+                f"chunk_task={row.get('chunk_task_boost', 0)} chars={row.get('content_chars', 0)}  "
+                f"{row.get('path', '')} chunk {row.get('chunk', '')}"
+            )
+            if row.get("matched_terms"):
+                lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+            if row.get("summary"):
+                lines.append("       summary: " + row.get("summary", ""))
     return "\n".join(lines)
 
 
@@ -8636,6 +8909,7 @@ HELP_SECTIONS = [
             ("/status", "show model, memory, and context state"),
             ("/model-routes", "show chat and background worker model routes"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
+            ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
             ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
@@ -8729,6 +9003,7 @@ HELP_SECTIONS = [
             ("motoko model-routes", "show chat and background worker model routes"),
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
             ("motoko retrieval-eval", "evaluate retrieval grounding on synthetic corpus fixtures"),
+            ("motoko retrieval-debug QUERY", "explain file/chunk retrieval scoring for a query"),
             ("motoko identity", "show active account/realm identity"),
             ("motoko permissions", "show feature permissions and index defaults"),
             ("motoko permissions set MODE", "set default feature permission mode"),
@@ -10040,6 +10315,13 @@ class MotokoTui:
                 self.append("system", format_model_routes(include_defaults=True))
             elif text == "/retrieval-eval":
                 self.append("system", format_retrieval_eval_report(run_retrieval_eval()))
+            elif text == "/retrieval-debug" or text.startswith("/retrieval-debug "):
+                query = text[len("/retrieval-debug") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
+                try:
+                    report = run_retrieval_debug(query, conv=self.conv)
+                    self.append("system", format_retrieval_debug_report(report))
+                except SystemExit as exc:
+                    self.append("error", str(exc))
             elif text == "/identity":
                 self.append("system", format_identity())
             elif text == "/permissions":
@@ -11175,6 +11457,13 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/retrieval-eval":
             print(format_retrieval_eval_report(run_retrieval_eval()))
             continue
+        if user_text == "/retrieval-debug" or user_text.startswith("/retrieval-debug "):
+            query = user_text[len("/retrieval-debug") :].strip() or context_query_text(conv, conv.get("title", ""))
+            try:
+                print(format_retrieval_debug_report(run_retrieval_debug(query, conv=conv)))
+            except SystemExit as exc:
+                print(exc)
+            continue
         if user_text == "/identity":
             print(format_identity())
             continue
@@ -12028,6 +12317,20 @@ def command_retrieval_eval(args) -> None:
         print(format_retrieval_eval_report(report))
 
 
+def command_retrieval_debug(args) -> None:
+    report = run_retrieval_debug(
+        " ".join(args.query),
+        index_ids=args.index,
+        limit=args.limit,
+    )
+    if args.write:
+        save_retrieval_debug_report(report)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print(format_retrieval_debug_report(report))
+
+
 def command_identity(args) -> None:
     if args.identity_command in (None, "show"):
         print(format_identity())
@@ -12126,6 +12429,14 @@ def main(argv: list[str]) -> int:
     retrieval_eval.add_argument("--write", action="store_true", help="save JSON report under Motoko state")
     retrieval_eval.add_argument("--json", action="store_true", help="print JSON report")
     retrieval_eval.set_defaults(func=command_retrieval_eval)
+
+    retrieval_debug = sub.add_parser("retrieval-debug", help="explain retrieval scoring for a query")
+    retrieval_debug.add_argument("query", nargs="+")
+    retrieval_debug.add_argument("--index", action="append", help="restrict to a specific document index")
+    retrieval_debug.add_argument("--limit", type=int, default=8, help="rows to show per index")
+    retrieval_debug.add_argument("--write", action="store_true", help="save JSON report under Motoko state")
+    retrieval_debug.add_argument("--json", action="store_true", help="print JSON report")
+    retrieval_debug.set_defaults(func=command_retrieval_debug)
 
     identity = sub.add_parser("identity", help="show account/realm identity")
     identity_sub = identity.add_subparsers(dest="identity_command")

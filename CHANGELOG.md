@@ -87,6 +87,9 @@ not the easiest place to review what changed after a long work session.
 - Added `motoko retrieval-eval`, a no-model synthetic fixture gate for checking
   that retrieval selects expected files, chunks, dates, TODOs, paths, and rare
   terms before generation starts.
+- Added `/retrieval-debug QUERY` and `motoko retrieval-debug QUERY` to explain
+  file/chunk retrieval scoring, path boosts, task-signal boosts, freshness, and
+  diagnosis notes before moving to embedding/reranker work.
 - Documented a tentative roadmap candidate for future retrieval components,
   including embedding stores, rerankers, token accounting, richer lexical
   retrieval, deterministic extractors, parser-backed artifacts, deduplication,

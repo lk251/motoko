@@ -829,6 +829,59 @@ def test_named_file_query_boosts_matching_path(m):
     assert any(source.get("path", "").endswith("/logbook.org") for source in sources)
 
 
+def test_retrieval_debug_explains_scores(m):
+    with isolated_state():
+        index = {
+            "id": "debug-index",
+            "name": "orgfiles",
+            "root": "/tmp/orgfiles",
+            "created": "2026-05-21T00:00:00+00:00",
+            "corpus_summary": "Daily logbook and planning notes.",
+            "files": [
+                {
+                    "path": "/tmp/orgfiles/notes.org",
+                    "summary": "General planning notes with many unrelated TODOs.",
+                    "signals": {"active_task_count": 8, "priorities": {"A": 1}},
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Planning backlog.",
+                            "content": "* TODO Backlog item\n",
+                            "signals": {"active_task_count": 1},
+                        }
+                    ],
+                },
+                {
+                    "path": "/tmp/orgfiles/logbook.org",
+                    "summary": "Daily logbook entries for yesterday and today.",
+                    "signals": {},
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Yesterday and today logbook notes.",
+                            "content": "* 2026-05-20\n** TODO Confirm retrieval debug\n",
+                            "signals": {},
+                        }
+                    ],
+                },
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        report = m.run_retrieval_debug(
+            "summarize yesterday and today according to logbook.org",
+            index_ids=[index["id"]],
+            limit=4,
+        )
+        rows = report["indexes"][0]["chunks"]
+        assert rows[0]["path"].endswith("/logbook.org")
+        assert rows[0]["path_boost"] >= 2000
+        text = m.format_retrieval_debug_report(report)
+        assert "retrieval debug:" in text
+        assert "path=2500" in text
+        assert "diagnosis:" in text
+        assert "prompt-use check" in text
+
+
 def test_study_focus_recent_is_parsed_and_bounded(m):
     query, focus = m.parse_study_directive("summarize yesterday and today according to logbook.org --focus recent")
     assert query == "summarize yesterday and today according to logbook.org"
@@ -1715,6 +1768,7 @@ def main() -> int:
         test_sources_fallback_lists_attached_topic_context,
         test_answer_grounding_audit_sources,
         test_named_file_query_boosts_matching_path,
+        test_retrieval_debug_explains_scores,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
         test_nix_managed_allowdirs_message,

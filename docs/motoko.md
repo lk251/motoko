@@ -465,6 +465,7 @@ Useful in-chat commands:
 /status
 /model-routes
 /retrieval-eval
+/retrieval-debug QUERY
 /identity
 /permissions
 /permissions set MODE
@@ -717,6 +718,15 @@ corpus fixtures to check whether the lexical retriever selects the expected
 files, chunks, dates, TODOs, paths, and rare terms before generation begins.
 Reports written with `--write` are stored under
 `~/.local/state/motoko/retrieval-evals/`.
+
+`retrieval-debug QUERY` is also deterministic. It explains which indexes were
+chosen, the top file and chunk rows, lexical score, path boost, task-signal
+boost, matched terms, summary-versus-content matches, freshness, and short
+diagnosis notes. Use it after a weak answer to distinguish recall failure,
+ranking failure, stale data, missing chunk text, weak summaries, or final
+prompt/synthesis failure. In chat, `/retrieval-debug QUERY` uses attached
+indexes first; from the shell, `motoko retrieval-debug QUERY` uses the best
+matching current indexes unless `--index INDEX_ID` is supplied.
 
 `model-eval` uses synthetic, source-grounded fixtures for chunk summaries, file
 summaries, lightweight labels/classification, and corpus synthesis. It asks

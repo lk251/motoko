@@ -65,6 +65,9 @@ Design constraints:
 - `/sources` includes an answer-grounding audit, and `motoko retrieval-eval`
   checks synthetic corpus fixtures before generation so retrieval quality is
   measurable without reading private documents.
+- `motoko retrieval-debug QUERY` explains deterministic file/chunk retrieval
+  scores, boosts, freshness, and diagnosis notes before adding embedding or
+  reranker machinery.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

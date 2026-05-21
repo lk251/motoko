@@ -208,6 +208,9 @@ The implementation path is:
 - add a deterministic answer-grounding audit to `/sources`, so each answer says
   whether it had excerpt-level evidence, only summary/memory context, stale
   context, or no usable grounding;
+- add `retrieval-debug` before embeddings/rerankers, so real-use failures can
+  be separated into recall, ranking, stale data, chunking, summary, or
+  prompt/final-synthesis problems quickly;
 - keep final user-facing chat on the strongest configured chat route while
   smaller routes continue to help with summaries, labels, dossiers, and other
   bounded background work after they pass evals;
@@ -217,6 +220,10 @@ The implementation path is:
 - add embedding and reranker storage only after the schema, provenance,
   invalidation, migration, privacy boundaries, eval fixtures, and NixOS service
   shape are explicit.
+- treat reflection as a recurring audit layer rather than an end-of-roadmap
+  feature: answer audits, retrieval audits, memory audits, stale-artifact
+  checks, and later deeper model audits should keep running throughout Motoko's
+  improvement path.
 
 The highest-ROI next engineering improvement is improving the quality of
 profile dossiers and document-derived dossiers after real personal documents
