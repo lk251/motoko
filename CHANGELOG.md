@@ -128,6 +128,10 @@ not the easiest place to review what changed after a long work session.
 - Changed normal retrieval again to use true hybrid candidate generation:
   lexical/path matches, deterministic Org/task signals, and embedding rows are
   unioned and deduplicated before the combined set is reranked.
+- Changed retrieval excerpts to honor exact dates and "last/latest/recent"
+  Org-date queries inside a selected chunk, so chronological files such as
+  `logbook.org` show the newest dated `** do`/`** log` sections instead of
+  only the beginning of a large chunk.
 - Made embedding vector refresh route-aware and parallel across batches up to
   the NixOS-declared `maxParallel`, with batch/parallel metadata shown in
   vector refresh/store reports.

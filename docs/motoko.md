@@ -1033,6 +1033,14 @@ and source excerpts remain visible in `/retrieval-debug` and `/sources`. Set
 `MOTOKO_VECTOR_RETRIEVAL=0` to disable semantic retrieval during diagnosis. Set
 `MOTOKO_VECTOR_RERANK=0` to disable reranking during diagnosis.
 
+Retrieval excerpts are query-aware after a chunk is selected. If the query
+mentions exact dates, or asks for the last/latest/recent dated entries, Motoko
+looks inside Org chunks for dated headings and extracts the matching sections
+before building `/retrieval-preview`, chat context, topic evidence, or rerank
+documents. This is specifically important for chronological files such as
+`logbook.org`, where the relevant `** do` and `** log` subsections may live
+near the end of a large chunk rather than near the beginning.
+
 Use `/feedback up|down|ok [TEXT]` after an answer to record whether it helped
 and what was wrong or right. The shorthand commands `/up [TEXT]` and
 `/down [TEXT]` do the same thing. Feedback is written to the current user's

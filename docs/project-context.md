@@ -281,6 +281,12 @@ Current sequencing notes:
   then reranked together. Exact and structured signals are still first-class
   because the big chat model can only reason over evidence that retrieval
   actually selected.
+- After retrieval selects a large chunk, excerpt selection must still be
+  source-aware. For chronological Org files, exact-date queries and
+  last/latest/recent dated-entry queries should extract the matching dated
+  heading sections from inside the chunk so preview/chat/topic/rerank context
+  contains the relevant `** do`/`** log` material rather than only the start of
+  the file.
 - Bg-heavy vectorization should use the approved embedding route efficiently:
   batch source chunks, issue concurrent embedding requests up to the
   NixOS-declared route `maxParallel` with a Motoko-side cap of 32, expose

@@ -1120,6 +1120,64 @@ def test_retrieval_debug_explains_scores(m):
         assert "prompt-use check" in text
 
 
+def test_named_logbook_recent_query_uses_latest_org_sections(m):
+    with isolated_state() as tmp:
+        docs = tmp / "orgfiles"
+        docs.mkdir()
+        old_body = "Old setup note.\n" + ("older filler line\n" * 3600)
+        recent_body = (
+            "* [2026-05-18 Mon 11:14]\n"
+            "** do\n"
+            "*** TODO Renew vector diagnostics\n"
+            "** log\n"
+            "Motoko retrieved the right file but not the newest dated section.\n\n"
+            "* [2026-05-19 Tue 12:34]\n"
+            "** do\n"
+            "*** TODO Check logbook synthesis\n"
+            "** log\n"
+            "Confirmed the last day should be selected from the tail.\n"
+        )
+        content = f"* [2026-04-09 Thu 12:39]\n** do\n{old_body}\n{recent_body}"
+        path = docs / "logbook.org"
+        path.write_text(content, encoding="utf-8")
+        index = {
+            "id": "recent-logbook-index",
+            "name": "orgfiles",
+            "root": str(docs),
+            "created": "2026-05-21T10:00:00+00:00",
+            "files": [
+                {
+                    "path": str(path),
+                    "source_fingerprint": m.source_fingerprint(path),
+                    "summary": "Daily logbook entries.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Chronological logbook chunk.",
+                            "content": content,
+                            "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            "content_bytes": len(content.encode("utf-8")),
+                        }
+                    ],
+                }
+            ],
+        }
+        query = "summarize the last two days present in logbook.org"
+        excerpt = m.query_aware_content_excerpt(query, content, 1200)
+        assert "2026-05-18" in excerpt
+        assert "2026-05-19" in excerpt
+        assert "2026-04-09" not in excerpt
+        assert "** do" in excerpt
+        assert "** log" in excerpt
+
+        text, sources = m.retrieve_from_index(index, query)
+        assert "2026-05-18" in text
+        assert "2026-05-19" in text
+        assert "2026-04-09" not in text
+        chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
+        assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
+
+
 def test_study_focus_recent_is_parsed_and_bounded(m):
     query, focus = m.parse_study_directive("summarize yesterday and today according to logbook.org --focus recent")
     assert query == "summarize yesterday and today according to logbook.org"
@@ -3268,6 +3326,7 @@ def main() -> int:
         test_answer_grounding_audit_sources,
         test_named_file_query_boosts_matching_path,
         test_retrieval_debug_explains_scores,
+        test_named_logbook_recent_query_uses_latest_org_sections,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
         test_nix_managed_allowdirs_message,

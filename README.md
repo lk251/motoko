@@ -111,6 +111,11 @@ Design constraints:
   and deduplicated, then reranked together when a `/v1/rerank` route is
   available. Exact and structured signals remain visible in `/retrieval-debug`
   and `/sources`, and rerank failures fall back to the non-reranked hybrid set.
+- For chronological Org files, exact-date queries and phrases such as "last
+  two days" or "latest entries" select the matching dated sections inside a
+  large chunk before preview/chat/rerank use the source text. This keeps
+  `logbook.org`-style `** do` and `** log` subsections visible even when the
+  file was indexed as one broad chunk.
 - `/feedback up|down|ok [TEXT]` records private per-realm answer feedback
   under Motoko state so retrieval, rerank, prompt, and answer-quality work can
   improve from real use without writing feedback into the conversation.

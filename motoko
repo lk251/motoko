@@ -2990,9 +2990,146 @@ def retrieval_file_haystack(file_item: dict) -> str:
     return "\n".join([file_item.get("path", ""), file_item.get("summary", ""), file_signal_text])
 
 
-def retrieval_chunk_haystack(file_item: dict, chunk: dict, content: str) -> str:
+def query_date_mentions(query: str) -> list[str]:
+    seen = set()
+    dates = []
+    for match in re.finditer(r"\b(\d{4}-\d{2}-\d{2})\b", query):
+        value = match.group(1)
+        if value not in seen:
+            seen.add(value)
+            dates.append(value)
+    return dates
+
+
+def query_requested_recent_section_count(query: str) -> int:
+    lowered = query.lower()
+    numbers = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+    }
+    match = re.search(
+        r"\blast\s+(\d+|one|two|three|four|five)\s+(?:day|days|entry|entries|date|dates)\b",
+        lowered,
+    )
+    if match:
+        raw = match.group(1)
+        try:
+            return max(1, min(int(raw), 7))
+        except ValueError:
+            return numbers.get(raw, 2)
+    terms = set(token_counts(query))
+    if {"today", "yesterday"} & terms:
+        return 2
+    if terms & {"latest", "recent", "newest"}:
+        return 2
+    return 0
+
+
+def org_date_from_line(line: str) -> str:
+    match = re.search(r"[<\[](\d{4}-\d{2}-\d{2})\b", line)
+    if match:
+        return match.group(1)
+    match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", line)
+    return match.group(1) if match else ""
+
+
+def org_dated_section_spans(content: str) -> list[dict]:
+    headings = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        match = re.match(r"^(\*+)\s+(.*)$", line.rstrip())
+        if match:
+            headings.append(
+                {
+                    "start": offset,
+                    "level": len(match.group(1)),
+                    "date": org_date_from_line(line),
+                }
+            )
+        offset += len(line)
+    spans = []
+    for idx, heading in enumerate(headings):
+        if not heading.get("date"):
+            continue
+        end = len(content)
+        for next_heading in headings[idx + 1 :]:
+            if int(next_heading.get("level", 1) or 1) <= int(heading.get("level", 1) or 1):
+                end = int(next_heading.get("start", end))
+                break
+        if end > int(heading.get("start", 0)):
+            spans.append({**heading, "end": end})
+    return spans
+
+
+def org_dated_sections_excerpt(content: str, dates: list[str], *, max_chars: int) -> str:
+    if not dates:
+        return ""
+    wanted = set(dates)
+    spans = [span for span in org_dated_section_spans(content) if span.get("date") in wanted]
+    if not spans:
+        return ""
+    spans.sort(key=lambda span: (str(span.get("date", "")), int(span.get("start", 0))))
+    blocks = [content[int(span["start"]) : int(span["end"])].strip() for span in spans]
+    blocks = [block for block in blocks if block]
+    if not blocks:
+        return ""
+    joined = "\n\n".join(blocks)
+    if len(joined) <= max_chars:
+        return joined
+    per_block = max(240, max_chars // max(1, len(blocks)))
+    return "\n\n".join(compact_text_middle(block, per_block) for block in blocks)[:max_chars].strip()
+
+
+def recent_org_dated_sections_excerpt(content: str, count: int, *, max_chars: int) -> str:
+    spans = org_dated_section_spans(content)
+    if not spans:
+        return ""
+    dates = sorted({str(span.get("date", "")) for span in spans if span.get("date")})
+    selected = dates[-max(1, min(count, len(dates))) :]
+    return org_dated_sections_excerpt(content, selected, max_chars=max_chars)
+
+
+def query_term_window_excerpt(query: str, content: str, *, max_chars: int) -> str:
+    if len(content) <= max_chars:
+        return content.strip()
+    lower_content = content.lower()
+    terms = [term for term in token_counts(query) if len(term) >= 4 and "." not in term]
+    positions = [lower_content.find(term.lower()) for term in terms]
+    positions = [pos for pos in positions if pos >= 0]
+    if not positions:
+        return content[:max_chars].strip()
+    anchor = min(positions)
+    start = max(0, anchor - max_chars // 3)
+    end = min(len(content), start + max_chars)
+    if end - start < max_chars:
+        start = max(0, end - max_chars)
+    return content[start:end].strip()
+
+
+def query_aware_content_excerpt(query: str, content: str, max_chars: int) -> str:
+    content = content.strip()
+    if not content:
+        return ""
+    max_chars = max(1, int(max_chars or 1))
+    if dates := query_date_mentions(query):
+        excerpt = org_dated_sections_excerpt(content, dates, max_chars=max_chars)
+        if excerpt:
+            return excerpt
+    recent_count = query_requested_recent_section_count(query)
+    if recent_count:
+        excerpt = recent_org_dated_sections_excerpt(content, recent_count, max_chars=max_chars)
+        if excerpt:
+            return excerpt
+    return query_term_window_excerpt(query, content, max_chars=max_chars)
+
+
+def retrieval_chunk_haystack(file_item: dict, chunk: dict, content: str, query: str = "") -> str:
     file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
     chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
+    content_excerpt = query_aware_content_excerpt(query, content, 4000) if query else content[:4000]
     return "\n".join(
         [
             file_item.get("path", ""),
@@ -3000,7 +3137,7 @@ def retrieval_chunk_haystack(file_item: dict, chunk: dict, content: str) -> str:
             file_signal_text,
             chunk.get("summary", ""),
             chunk_signal_text,
-            content[:4000],
+            content_excerpt,
         ]
     )
 
@@ -3051,7 +3188,8 @@ def retrieval_debug_file_row(index: dict, query: str, query_counts: collections.
 
 def retrieval_debug_chunk_row(index: dict, query: str, query_counts: collections.Counter, file_item: dict, chunk: dict) -> dict:
     content = read_chunk_content(index, chunk)
-    haystack = retrieval_chunk_haystack(file_item, chunk, content)
+    content_excerpt = query_aware_content_excerpt(query, content, 4000)
+    haystack = retrieval_chunk_haystack(file_item, chunk, content, query=query)
     return {
         "kind": "chunk",
         "index": index.get("id", ""),
@@ -3064,7 +3202,7 @@ def retrieval_debug_chunk_row(index: dict, query: str, query_counts: collections
             query_counts,
             "\n".join([file_item.get("summary", ""), chunk.get("summary", "")]),
         )[:12],
-        "content_matched_terms": retrieval_haystack_terms(query_counts, content[:4000])[:12],
+        "content_matched_terms": retrieval_haystack_terms(query_counts, content_excerpt)[:12],
         **retrieval_score_parts(
             query,
             query_counts,
@@ -8378,7 +8516,7 @@ def vector_store_chunk_lookup(store: dict) -> tuple[dict | None, dict]:
     return index, lookup
 
 
-def vector_query_document_text(index: dict | None, lookup: dict, row: dict) -> str:
+def vector_query_document_text(index: dict | None, lookup: dict, row: dict, query: str = "") -> str:
     path = str(row.get("path", ""))
     chunk_id = str(row.get("chunk", ""))
     if index and lookup:
@@ -8386,7 +8524,7 @@ def vector_query_document_text(index: dict | None, lookup: dict, row: dict) -> s
         if found:
             file_item, chunk = found
             content = read_chunk_content(index, chunk)
-            text = retrieval_chunk_haystack(file_item, chunk, content)
+            text = retrieval_chunk_haystack(file_item, chunk, content, query=query)
             if text.strip():
                 return compact_text(text, 6000)
     return "\n".join(
@@ -8461,7 +8599,7 @@ def query_vector_store(
     if rerank and rows:
         candidates = rows[: min(len(rows), max(limit, RERANK_CANDIDATE_LIMIT))]
         source_index, lookup = vector_store_chunk_lookup(store)
-        documents = [vector_query_document_text(source_index, lookup, row) for row in candidates]
+        documents = [vector_query_document_text(source_index, lookup, row, query=query) for row in candidates]
         rerank_scores, rerank_route = rerank_documents(query, documents)
         for row, rerank_score in zip(candidates, rerank_scores):
             row["rerank_score"] = round(rerank_score, 6)
@@ -9635,7 +9773,7 @@ def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, 
                     file_signal_text,
                     chunk.get("summary", ""),
                     chunk_signal_text,
-                    content[:4000],
+                    query_aware_content_excerpt(query, content, 4000),
                 ]
             )
             score = score_text(query_counts, haystack)
@@ -9702,7 +9840,7 @@ def build_topic_dossier(
     evidence = []
     blocks = []
     for score, index, file_item, chunk, content in selected_rows:
-        excerpt = content[:TOPIC_EXCERPT_CHARS]
+        excerpt = query_aware_content_excerpt(retrieval_query, content, TOPIC_EXCERPT_CHARS)
         evidence_item = {
             "index": index.get("id", ""),
             "index_name": index.get("name", ""),
@@ -10769,11 +10907,11 @@ def hybrid_candidate_guard_bonus(candidate: dict) -> float:
     return path_boost + task_boost
 
 
-def hybrid_candidate_document(index: dict, candidate: dict) -> str:
+def hybrid_candidate_document(index: dict, candidate: dict, query: str = "") -> str:
     file_item = candidate.get("file_item") or {}
     chunk = candidate.get("chunk") or {}
     content = read_chunk_content(index, chunk)
-    return compact_text(retrieval_chunk_haystack(file_item, chunk, content), 6000)
+    return compact_text(retrieval_chunk_haystack(file_item, chunk, content, query=query), 6000)
 
 
 def add_structured_task_candidates(index: dict, query: str, candidates: dict[tuple[str, str], dict]) -> None:
@@ -10823,7 +10961,7 @@ def rerank_hybrid_candidates(index: dict, query: str, candidates: dict[tuple[str
         report["warnings"].append("hybrid rerank fallback: no configured /v1/rerank route")
         return rows, report
     rerank_rows = rows[: min(len(rows), RERANK_CANDIDATE_LIMIT)]
-    documents = [hybrid_candidate_document(index, row) for row in rerank_rows]
+    documents = [hybrid_candidate_document(index, row, query=query) for row in rerank_rows]
     try:
         scores, route_info = rerank_documents(query, documents)
     except SystemExit as exc:
@@ -10869,7 +11007,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             score_parts = retrieval_score_parts(
                 query,
                 query_counts,
-                retrieval_chunk_haystack(file_item, chunk, content),
+                retrieval_chunk_haystack(file_item, chunk, content, query=query),
                 path=file_item.get("path", ""),
                 file_signals=file_item.get("signals") or {},
                 chunk_signals=chunk.get("signals") or {},
@@ -11022,7 +11160,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             remaining = max_retrieval_chars - used
             if remaining <= 0:
                 break
-            excerpt = content[:remaining]
+            excerpt = query_aware_content_excerpt(query, content, remaining)
             used += len(excerpt)
             chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
             signal_block = f"\n\nStructured signals:\n{chunk_signal_text}" if chunk_signal_text else ""
