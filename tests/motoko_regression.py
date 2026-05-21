@@ -401,6 +401,53 @@ class EmbeddingHandler(BaseHTTPRequestHandler):
         return
 
 
+class SlowEmbeddingHandler(BaseHTTPRequestHandler):
+    payloads = []
+    paths = []
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.paths.append(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        self.__class__.payloads.append(payload)
+        with self.__class__.lock:
+            self.__class__.active += 1
+            self.__class__.max_active = max(self.__class__.max_active, self.__class__.active)
+        try:
+            time.sleep(0.05)
+            inputs = payload.get("input", [])
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            data = []
+            for idx, text in enumerate(inputs):
+                text = str(text).lower()
+                vector = [
+                    1.0 if "alpha" in text else 0.0,
+                    1.0 if "beta" in text else 0.0,
+                    1.0 if "gamma" in text else 0.0,
+                    0.25,
+                ]
+                data.append({"object": "embedding", "index": idx, "embedding": vector})
+            response = {"object": "list", "data": data, "model": payload.get("model", "embedding-test")}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+        finally:
+            with self.__class__.lock:
+                self.__class__.active -= 1
+
+    def log_message(self, *_args):
+        return
+
+
 class RerankHandler(BaseHTTPRequestHandler):
     payloads = []
     paths = []
@@ -1617,6 +1664,308 @@ def test_embedding_vector_store_uses_catalog_route(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_embedding_vector_store_parallelizes_batches(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    SlowEmbeddingHandler.payloads = []
+    SlowEmbeddingHandler.paths = []
+    SlowEmbeddingHandler.active = 0
+    SlowEmbeddingHandler.max_active = 0
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = "2"
+        os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            files = []
+            for idx in range(12):
+                path = docs / f"note-{idx}.org"
+                content = f"* Alpha {idx}\nBeta gamma note {idx}.\n"
+                path.write_text(content, encoding="utf-8")
+                files.append(
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": f"Alpha note {idx}.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": f"Alpha beta gamma chunk {idx}.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                )
+            index = {
+                "id": "parallel-embedding-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "corpus_summary": "Parallel embedding route test corpus.",
+                "files": files,
+            }
+            server = ThreadingHTTPServer(("127.0.0.1", 0), SlowEmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 3,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("parallel-embedding-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+            store = m.build_vector_store("parallel-embedding-index", method=m.EMBEDDING_VECTOR_METHOD)
+
+            assert store["row_count"] == 12
+            assert store["embedding_batch_count"] == 6
+            assert store["embedding_parallelism"] == 3
+            assert SlowEmbeddingHandler.max_active >= 2
+            assert len(SlowEmbeddingHandler.payloads) == 6
+            server.shutdown()
+            server.server_close()
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+
+
+def test_embedding_vector_store_stale_when_route_model_changes(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    server = None
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            content = "* TODO Refresh vectors\n"
+            path = docs / "tasks.org"
+            path.write_text(content, encoding="utf-8")
+            index = {
+                "id": "embedding-stale-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": "Task file.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Refresh vector store task.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+            server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def write_catalog(model_id: str, dims: int = 4) -> None:
+                catalog = {
+                    "realm": "mares",
+                    "manager": {"kind": "systemd-socket-worker"},
+                    "routes": {
+                        "qwen3-embedding-0b6": {
+                            "kind": "embedding",
+                            "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings",
+                            "modelId": model_id,
+                            "tasks": ["embedding", "vector_index", "vector_query"],
+                            "endpoint_paths": ["/v1/embeddings"],
+                            "embedding_dimensions": dims,
+                            "maxParallel": 2,
+                            "openai_compatible": True,
+                        }
+                    },
+                }
+                m.ensure_private_dir(m.config_root())
+                m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            write_catalog("qwen3-embedding-0.6b-q8-0")
+            m.atomic_write(m.index_path("embedding-stale-index"), json.dumps(index, ensure_ascii=False) + "\n")
+            store = m.build_vector_store("embedding-stale-index", method=m.EMBEDDING_VECTOR_METHOD)
+            assert m.vector_store_freshness(store)[0] == "fresh"
+
+            write_catalog("qwen3-embedding-0.6b-q6-k")
+            status, warnings = m.vector_store_freshness(store)
+            assert status == "stale"
+            assert any("embedding model changed" in warning for warning in warnings)
+
+            write_catalog("qwen3-embedding-0.6b-q6-k", dims=8)
+            store["embedding_route"]["model"] = "qwen3-embedding-0.6b-q6-k"
+            status, warnings = m.vector_store_freshness(store)
+            assert status == "stale"
+            assert any("dimensions" in warning for warning in warnings)
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_embedding_vector_store_resumes_saved_progress(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    server = None
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = "1"
+        os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "1"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            files = []
+            for idx in range(3):
+                path = docs / f"task-{idx}.org"
+                content = f"* TODO Vector task {idx}\n"
+                path.write_text(content, encoding="utf-8")
+                files.append(
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": f"Vector task {idx}.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": f"Vector task chunk {idx}.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                )
+            index = {
+                "id": "resume-vector-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "files": files,
+            }
+            server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 1,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("resume-vector-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+            paused = {"requested": False}
+
+            def pause_after_first_batch(_message: str) -> None:
+                if not paused["requested"]:
+                    paused["requested"] = True
+                    m.request_work_pause("test")
+
+            try:
+                m.build_vector_store_from_index(
+                    index,
+                    method=m.EMBEDDING_VECTOR_METHOD,
+                    progress_callback=pause_after_first_batch,
+                )
+                raise AssertionError("expected vector build to pause")
+            except m.WorkPaused:
+                pass
+
+            progress_files = list(m.vector_progress_dir().glob("*.json"))
+            assert len(progress_files) == 1
+            progress = json.loads(progress_files[0].read_text(encoding="utf-8"))
+            assert progress["completed_rows"] == 1
+
+            store = m.build_vector_store("resume-vector-index", method=m.EMBEDDING_VECTOR_METHOD)
+            assert store["row_count"] == 3
+            assert len(EmbeddingHandler.payloads) == 3
+            assert list(m.vector_progress_dir().glob("*.json")) == []
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+
+
 def test_vector_query_can_use_catalog_reranker_route(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -2580,6 +2929,9 @@ def main() -> int:
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
+        test_embedding_vector_store_parallelizes_batches,
+        test_embedding_vector_store_stale_when_route_model_changes,
+        test_embedding_vector_store_resumes_saved_progress,
         test_vector_query_can_use_catalog_reranker_route,
         test_normal_retrieval_uses_embedding_rerank_by_default,
         test_index_limits,

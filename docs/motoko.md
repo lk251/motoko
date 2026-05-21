@@ -991,7 +991,18 @@ each corpus family and builds at most one store by default. The background
 study loop also performs one bounded embedding refresh pass when
 `MOTOKO_BACKGROUND_VECTOR_REFRESH` is enabled. It skips stale source indexes
 and indexes above `MOTOKO_BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS` unless you run
-the explicit command with a larger `--max-chunks` value. A fresh embedding
+the explicit command with a larger `--max-chunks` value. Embedding refresh
+uses the route's NixOS-declared `maxParallel` for concurrent batch requests by
+default, capped by the number of batches. Set `MOTOKO_EMBEDDING_PARALLEL=N` to
+override this for diagnosis, and `MOTOKO_EMBEDDING_BATCH_SIZE=N` to adjust
+batch size. Completed embedding batches are checkpointed under
+`~/.local/state/motoko/vector-progress/`, and a later `vector-refresh` for the
+same source fingerprint plus embedding route/model/dimensions resumes from
+those saved rows. Embedding stores are considered stale and rebuilt from the
+saved source index when the vector schema, source fingerprint, embedding route,
+model, or dimensions change. Dense vector coordinates are not migrated across
+incompatible embedding models; source re-vectorization is the correct upgrade
+path. A fresh embedding
 store participates in true hybrid retrieval: lexical/path candidates,
 deterministic Org/task candidates, and fresh embedding candidates are unioned
 and deduplicated before final context selection. When a catalog-discovered

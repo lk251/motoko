@@ -83,7 +83,15 @@ Design constraints:
 - `motoko vector-refresh` builds missing or stale embedding stores for current
   indexes. The background study loop may run one bounded refresh pass at a time
   when routes are available, so indexes gradually acquire semantic recall
-  without mutating source files.
+  without mutating source files. Embedding refresh uses the NixOS-declared
+  route parallelism for batch requests, so bg-heavy vectorization can use more
+  of the approved worker route while staying inside the per-realm service
+  boundary. Completed embedding batches are checkpointed under Motoko state so
+  an interrupted refresh can resume without redoing finished rows. Dense
+  vectors are rebuilt from the saved source index when the vector schema,
+  source fingerprint, embedding route, model, or dimensions change; Motoko
+  does not pretend old embedding coordinates can be migrated across
+  incompatible embedding models.
 - `motoko vector-eval` runs the synthetic retrieval fixtures through the
   lexical baseline by default, with `--method embedding-v1` available for
   measuring the approved embedding route.

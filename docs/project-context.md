@@ -281,6 +281,20 @@ Current sequencing notes:
   then reranked together. Exact and structured signals are still first-class
   because the big chat model can only reason over evidence that retrieval
   actually selected.
+- Bg-heavy vectorization should use the approved embedding route efficiently:
+  batch source chunks, issue concurrent embedding requests up to the
+  NixOS-declared route `maxParallel`, expose batch/parallel metadata in status
+  or reports, and remain bounded by the per-realm local-model service rather
+  than managing llama.cpp directly.
+- Dense embedding stores should be invalidated and rebuilt from saved
+  source/index material when their vector schema, source fingerprint,
+  embedding route, model, or dimensions change. Do not try to mathematically
+  upgrade old embedding coordinates across incompatible models; treat
+  re-vectorization as the inspectable heavy-work migration path.
+- Embedding vector refresh should checkpoint completed rows under realm-local
+  Motoko state and resume from that progress when the source fingerprint and
+  embedding route/model/dimensions still match. If those keys change, discard
+  the partial vector progress and rebuild from source/index material.
 - User feedback should accumulate as private per-realm evaluation data. Store
   ratings and notes under the active user's Motoko state, keep them out of the
   conversation transcript, and use them to guide future retrieval/rerank/prompt

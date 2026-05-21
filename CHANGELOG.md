@@ -128,6 +128,16 @@ not the easiest place to review what changed after a long work session.
 - Changed normal retrieval again to use true hybrid candidate generation:
   lexical/path matches, deterministic Org/task signals, and embedding rows are
   unioned and deduplicated before the combined set is reranked.
+- Made embedding vector refresh route-aware and parallel across batches up to
+  the NixOS-declared `maxParallel`, with batch/parallel metadata shown in
+  vector refresh/store reports.
+- Added realm-local embedding vector progress checkpoints so interrupted
+  vector refreshes can resume from completed rows when the source and
+  embedding route/model/dimensions still match.
+- Marked embedding vector stores stale when the vector schema, source
+  fingerprint, embedding route, model, or dimensions change, so background
+  refresh rebuilds incompatible dense vectors from source/index material
+  instead of treating them as migratable.
 - Added `/feedback up|down|ok [TEXT]`, `/up`, `/down`, and `motoko feedback`
   to record private per-realm answer feedback outside the conversation
   transcript for future retrieval/rerank/prompt evaluation.

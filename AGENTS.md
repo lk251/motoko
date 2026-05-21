@@ -24,6 +24,13 @@ to stay simple, inspectable, and dependency-light.
   migrations into the bounded light CPU background lane, and wire model-based
   reprocessing into resumable visible heavy work so corpora can gradually
   converge instead of depending on manual one-off commands.
+- Design background work as lane-aware, durable, and efficient. Use bounded
+  light CPU work for cheap gradual maintenance, visible `bg-heavy` work for
+  urgent/model/GPU-heavy jobs, and safe parallelism up to the approved local
+  route or workload limit when the job benefits from it. Long-running jobs
+  should expose progress, pause or recover at durable checkpoints, avoid losing
+  completed work after interruption or power loss, and include the
+  upgrade/rebuild path needed when their artifact pipeline changes.
 - Prefer small, testable improvements that make the assistant more trustworthy
   before making it more agentic.
 - Do not store secrets in this repository.

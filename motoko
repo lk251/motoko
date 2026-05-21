@@ -94,6 +94,7 @@ RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v1"
+VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
 RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
@@ -990,6 +991,19 @@ def ensure_vector_stores_dir() -> pathlib.Path:
 def vector_store_path(store_id: str) -> pathlib.Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(store_id)).strip("-") or "vector-store"
     return ensure_vector_stores_dir() / f"{safe}.json"
+
+
+def vector_progress_dir() -> pathlib.Path:
+    return state_root() / "vector-progress"
+
+
+def ensure_vector_progress_dir() -> pathlib.Path:
+    return ensure_private_dir(vector_progress_dir())
+
+
+def vector_progress_path(progress_id: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(progress_id)).strip("-") or "vector-progress"
+    return ensure_vector_progress_dir() / f"{safe}.json"
 
 
 def conversation_path(conversation_id: str) -> pathlib.Path:
@@ -7307,6 +7321,20 @@ def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float
     return embeddings, route_info
 
 
+def route_max_parallel(route_info: dict, *, default: int = 1, maximum: int = 16) -> int:
+    try:
+        value = int(route_info.get("max_parallel") or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, maximum))
+
+
+def embedding_parallelism(route_info: dict, batch_count: int) -> int:
+    default = route_max_parallel(route_info, default=1)
+    configured = env_int("MOTOKO_EMBEDDING_PARALLEL", default, minimum=1)
+    return max(1, min(configured, max(1, batch_count), 16))
+
+
 def vector_similarity(left, right) -> float:
     if isinstance(left, dict) and isinstance(right, dict):
         return sparse_dot(left, right)
@@ -7424,10 +7452,16 @@ def build_vector_store_from_index(
     method: str = VECTOR_METHOD_AUTO,
     store_id: str | None = None,
     write: bool = True,
+    progress_callback=None,
 ) -> dict:
     method = resolve_vector_method(method)
     if method == EMBEDDING_VECTOR_METHOD:
-        return build_embedding_vector_store_from_index(index, store_id=store_id, write=write)
+        return build_embedding_vector_store_from_index(
+            index,
+            store_id=store_id,
+            write=write,
+            progress_callback=progress_callback,
+        )
     dims = max(8, int(dims or DEFAULT_LEXICAL_VECTOR_DIMS))
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
@@ -7579,7 +7613,17 @@ def refresh_vector_stores(
         if phase_callback is not None:
             phase_callback(f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))}")
         try:
-            store = build_vector_store_from_index(index, method=method)
+            store = build_vector_store_from_index(
+                index,
+                method=method,
+                progress_callback=phase_callback,
+            )
+        except WorkPaused as exc:
+            item["status"] = "paused"
+            item["note"] = str(exc)
+            item["progress_id"] = exc.work_id
+            report["items"].append(item)
+            break
         except SystemExit as exc:
             item["status"] = "failed"
             item["error"] = str(exc)
@@ -7587,11 +7631,16 @@ def refresh_vector_stores(
             item["status"] = "built"
             item["store_id"] = store.get("id", "")
             item["rows"] = store.get("row_count", 0)
+            item["batches"] = store.get("embedding_batch_count", 0)
+            item["parallelism"] = store.get("embedding_parallelism", 1)
             item["path"] = store.get("path", "")
             built += 1
         report["items"].append(item)
     report["built"] = built
-    report["status"] = "built" if built else ("empty" if not report["items"] else "no-build")
+    if any(item.get("status") == "paused" for item in report["items"]):
+        report["status"] = "paused"
+    else:
+        report["status"] = "built" if built else ("empty" if not report["items"] else "no-build")
     return report
 
 
@@ -7609,11 +7658,16 @@ def format_vector_refresh_report(report: dict) -> str:
             f"{item.get('name', '')} ({item.get('reason', '')})"
         )
         if item.get("store_id"):
-            lines.append(f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)}")
+            lines.append(
+                f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)} "
+                f"batches={item.get('batches', 0)} parallel={item.get('parallelism', 1)}"
+            )
         if item.get("error"):
             lines.append(f"  error: {item.get('error', '')}")
         if item.get("note"):
             lines.append(f"  note: {item.get('note', '')}")
+        if item.get("progress_id"):
+            lines.append(f"  progress: {item.get('progress_id', '')}")
     return "\n".join(lines)
 
 
@@ -7622,40 +7676,193 @@ def build_embedding_vector_store_from_index(
     *,
     store_id: str | None = None,
     write: bool = True,
+    progress_callback=None,
 ) -> dict:
     route_info = embedding_route_info()
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
+    route_id = str(route_info.get("catalog_route") or route_info.get("route") or "")
+    route_model = str(route_info.get("model") or "")
+    route_dims = int(route_info.get("embedding_dimensions") or 0)
     candidates = []
     for file_item in index.get("files", []):
         for chunk in file_item.get("chunks", []):
             text = vector_store_row_text(index, file_item, chunk)
             if not text.strip():
                 continue
-            candidates.append((file_item, chunk, text))
-    rows = []
+            row_id = f"{file_item.get('path', '')}#{chunk.get('chunk', '')}"
+            candidates.append((row_id, file_item, chunk, text))
     batch_size = max(1, min(env_int("MOTOKO_EMBEDDING_BATCH_SIZE", EMBEDDING_BATCH_SIZE), 128))
-    dimensions = int(route_info.get("embedding_dimensions") or 0)
-    for offset in range(0, len(candidates), batch_size):
-        batch = candidates[offset : offset + batch_size]
-        embeddings, route_info = embed_texts([text for _file_item, _chunk, text in batch])
-        for (file_item, chunk, _text), vector in zip(batch, embeddings):
-            if not vector:
-                continue
-            dimensions = dimensions or len(vector)
-            rows.append(
-                {
-                    "id": f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
-                    "kind": "raw_chunk_embedding",
-                    "index": index.get("id", ""),
-                    "path": file_item.get("path", ""),
-                    "chunk": chunk.get("chunk", ""),
-                    "content_sha256": chunk.get("content_sha256", ""),
-                    "source_fingerprint": chunk.get("content_sha256", ""),
-                    "vector": vector,
-                    "summary": compact_text(chunk.get("summary", "") or file_item.get("summary", ""), 280),
-                }
+    dimensions = route_dims
+    batches = [
+        (offset, candidates[offset : offset + batch_size])
+        for offset in range(0, len(candidates), batch_size)
+    ]
+    parallelism = embedding_parallelism(route_info, len(batches))
+    progress_key = {
+        "schema": VECTOR_PROGRESS_SCHEMA_VERSION,
+        "target_schema": VECTOR_STORE_SCHEMA_VERSION,
+        "method": EMBEDDING_VECTOR_METHOD,
+        "source_index": index.get("id", ""),
+        "source_fingerprint": source_fingerprint,
+        "route": route_id,
+        "model": route_model,
+        "embedding_dimensions": route_dims,
+    }
+    progress_id = "embedding-" + sha256_hex(json.dumps(progress_key, sort_keys=True).encode("utf-8"))[:16]
+    progress_path = vector_progress_path(progress_id)
+    candidate_ids = [row_id for row_id, _file_item, _chunk, _text in candidates]
+    completed_rows_by_id: dict[str, dict] = {}
+    if write and progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            progress = {}
+        source = progress.get("source_index") if isinstance(progress.get("source_index"), dict) else {}
+        route = progress.get("embedding_route") if isinstance(progress.get("embedding_route"), dict) else {}
+        if (
+            progress.get("schema") == VECTOR_PROGRESS_SCHEMA_VERSION
+            and progress.get("method") == EMBEDDING_VECTOR_METHOD
+            and source.get("id") == index.get("id", "")
+            and source.get("fingerprint") == source_fingerprint
+            and route.get("catalog_route") == route_id
+            and route.get("model") == route_model
+            and int(route.get("embedding_dimensions") or 0) == route_dims
+        ):
+            for row in progress.get("rows", []):
+                if not isinstance(row, dict) or not row.get("id") or not row.get("vector"):
+                    continue
+                if row.get("id") in candidate_ids:
+                    completed_rows_by_id[str(row.get("id"))] = row
+
+    def row_from_vector(file_item: dict, chunk: dict, vector: list[float]) -> dict:
+        return {
+            "id": f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
+            "kind": "raw_chunk_embedding",
+            "index": index.get("id", ""),
+            "path": file_item.get("path", ""),
+            "chunk": chunk.get("chunk", ""),
+            "content_sha256": chunk.get("content_sha256", ""),
+            "source_fingerprint": chunk.get("content_sha256", ""),
+            "vector": vector,
+            "summary": compact_text(chunk.get("summary", "") or file_item.get("summary", ""), 280),
+        }
+
+    def write_progress() -> None:
+        if not write:
+            return
+        progress = {
+            "schema": VECTOR_PROGRESS_SCHEMA_VERSION,
+            "id": progress_id,
+            "created": now(),
+            "updated": now(),
+            "method": EMBEDDING_VECTOR_METHOD,
+            "target_schema": VECTOR_STORE_SCHEMA_VERSION,
+            "realm": identity_realm(),
+            "source_index": {
+                "id": index.get("id", ""),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "created": index.get("created", ""),
+                "fingerprint": source_fingerprint,
+            },
+            "embedding_route": {
+                "catalog_route": route_id,
+                "model": route_model,
+                "request_path": route_info.get("request_path", "/v1/embeddings"),
+                "embedding_dimensions": route_dims,
+                "max_parallel": route_info.get("max_parallel"),
+            },
+            "embedding_batch_size": batch_size,
+            "embedding_parallelism": parallelism,
+            "expected_rows": len(candidates),
+            "completed_rows": len(completed_rows_by_id),
+            "rows": [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id],
+        }
+        atomic_write(progress_path, json.dumps(progress, ensure_ascii=False, indent=2) + "\n")
+
+    def pause_vectorization() -> None:
+        write_progress()
+        clear_work_pause_request()
+        raise WorkPaused(
+            f"vectorization paused at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}",
+            work_id=progress_id,
+            work_kind="vector",
+        )
+
+    def embed_batch(batch):
+        embeddings, embedded_route = embed_texts(
+            [text for _row_id, _file_item, _chunk, text in batch],
+            route_id=route_id or None,
+        )
+        rows = []
+        for (_row_id, file_item, chunk, _text), vector in zip(batch, embeddings):
+            if vector:
+                rows.append(row_from_vector(file_item, chunk, vector))
+        return rows, embedded_route
+
+    pending_batches = [
+        (offset, [item for item in batch if item[0] not in completed_rows_by_id])
+        for offset, batch in batches
+    ]
+    pending_batches = [(offset, batch) for offset, batch in pending_batches if batch]
+    completed_batches = len(batches) - len(pending_batches)
+
+    def record_completed_batch(new_rows: list[dict], embedded_route: dict | None) -> None:
+        nonlocal dimensions, route_info, completed_batches
+        route_info = embedded_route or route_info
+        for row in new_rows:
+            completed_rows_by_id[str(row.get("id", ""))] = row
+            if not dimensions and isinstance(row.get("vector"), list):
+                dimensions = len(row.get("vector", []))
+        completed_batches += 1
+        write_progress()
+        if progress_callback is not None:
+            progress_callback(
+                f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))} "
+                f"batch {completed_batches}/{len(batches)} parallel {parallelism} "
+                f"rows {len(completed_rows_by_id)}/{len(candidates)}"
             )
+
+    if pending_batches and parallelism > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
+            batch_iter = iter(pending_batches)
+            futures = {}
+
+            def submit_next() -> bool:
+                if work_pause_requested():
+                    return False
+                try:
+                    offset, batch = next(batch_iter)
+                except StopIteration:
+                    return False
+                futures[executor.submit(embed_batch, batch)] = (offset, batch)
+                return True
+
+            for _slot in range(parallelism):
+                submit_next()
+            if not futures and pending_batches:
+                pause_vectorization()
+            while futures:
+                done, _pending = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    _offset, _batch = futures.pop(future)
+                    new_rows, embedded_route = future.result()
+                    record_completed_batch(new_rows, embedded_route)
+                    submit_next()
+            if len(completed_rows_by_id) < len(candidates):
+                pause_vectorization()
+    else:
+        for _offset, batch in pending_batches:
+            if work_pause_requested():
+                pause_vectorization()
+            new_rows, embedded_route = embed_batch(batch)
+            record_completed_batch(new_rows, embedded_route)
+
+    rows = [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id]
     store = {
         "schema": VECTOR_STORE_SCHEMA_VERSION,
         "id": store_id,
@@ -7670,7 +7877,11 @@ def build_embedding_vector_store_from_index(
             "model": route_info.get("model", ""),
             "request_path": route_info.get("request_path", "/v1/embeddings"),
             "embedding_dimensions": route_info.get("embedding_dimensions"),
+            "max_parallel": route_info.get("max_parallel"),
         },
+        "embedding_batch_size": batch_size,
+        "embedding_batch_count": len(batches),
+        "embedding_parallelism": parallelism,
         "source_index": {
             "id": index.get("id", ""),
             "name": index.get("name", ""),
@@ -7704,6 +7915,8 @@ def build_embedding_vector_store_from_index(
         path = vector_store_path(store_id)
         store["path"] = str(path)
         atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+        with contextlib.suppress(OSError):
+            progress_path.unlink()
     return store
 
 
@@ -7786,6 +7999,42 @@ def vector_store_due(index: dict, *, method: str = EMBEDDING_VECTOR_METHOD) -> t
 
 
 def vector_store_freshness(store: dict) -> tuple[str, list[str]]:
+    schema = str(store.get("schema") or "")
+    if schema != VECTOR_STORE_SCHEMA_VERSION:
+        return "stale", [f"vector store schema is {schema or 'missing'}; rebuild for {VECTOR_STORE_SCHEMA_VERSION}"]
+    method = str(store.get("method") or "")
+    if method not in {LEXICAL_VECTOR_METHOD, EMBEDDING_VECTOR_METHOD}:
+        return "stale", [f"vector store method is {method or 'missing'}; rebuild this vector store"]
+    if method == EMBEDDING_VECTOR_METHOD:
+        stored_route = store.get("embedding_route") if isinstance(store.get("embedding_route"), dict) else {}
+        stored_route_id = str(stored_route.get("catalog_route") or stored_route.get("route") or "")
+        if not stored_route_id:
+            return "stale", ["embedding route metadata missing; rebuild this vector store"]
+        try:
+            current_route = embedding_route_info(stored_route_id)
+        except SystemExit as exc:
+            return "stale", [f"embedding route unavailable: {exc}"]
+        current_route_id = str(current_route.get("catalog_route") or current_route.get("route") or "")
+        if stored_route_id != current_route_id:
+            return "stale", [f"embedding route changed from {stored_route_id} to {current_route_id}; rebuild this vector store"]
+        stored_model = str(stored_route.get("model") or "")
+        current_model = str(current_route.get("model") or "")
+        if stored_model != current_model:
+            return "stale", [f"embedding model changed from {stored_model or 'unknown'} to {current_model or 'unknown'}; rebuild this vector store"]
+
+        def int_or_zero(value) -> int:
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        current_dims = int_or_zero(current_route.get("embedding_dimensions"))
+        stored_route_dims = int_or_zero(stored_route.get("embedding_dimensions"))
+        store_dims = int_or_zero(store.get("dims"))
+        if current_dims and stored_route_dims and current_dims != stored_route_dims:
+            return "stale", [f"embedding dimensions changed from {stored_route_dims} to {current_dims}; rebuild this vector store"]
+        if current_dims and store_dims and current_dims != store_dims:
+            return "stale", [f"vector dimensions are {store_dims}, embedding route expects {current_dims}; rebuild this vector store"]
     source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
     index_id = str(source.get("id", ""))
     if not index_id:
@@ -7991,6 +8240,9 @@ def format_vector_store(store: dict) -> str:
         f"realm: {store.get('realm', '')}",
         f"source index: {source.get('id', '')}  {source.get('name', '')}  {source.get('root', '')}",
         f"rows: {store.get('row_count', len(store.get('rows', [])))}  dims: {store.get('dims', '')}",
+        f"embedding batches: {store.get('embedding_batch_count', 0)}  "
+        f"batch size: {store.get('embedding_batch_size', '')}  "
+        f"parallel: {store.get('embedding_parallelism', '')}",
         f"path: {store.get('path', '')}",
         f"note: {store.get('note', '')}",
     ]
