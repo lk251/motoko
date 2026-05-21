@@ -81,12 +81,19 @@ Design constraints:
   realm-local vector store. The default `auto` method uses a NixOS-declared
   `/v1/embeddings` route when the local catalog exposes one, and falls back to
   the deterministic `lexical-hash-v1` baseline otherwise.
+- `motoko vector-refresh` builds missing or stale embedding stores for current
+  indexes. The background study loop may run one bounded refresh pass at a time
+  when routes are available, so indexes gradually acquire semantic recall
+  without mutating source files.
 - `motoko vector-eval` runs the synthetic retrieval fixtures through the
   lexical baseline by default, with `--method embedding-v1` available for
   measuring the approved embedding route.
 - `motoko vector-query --rerank QUERY` explicitly reranks the top vector
   candidates through the NixOS-declared `/v1/rerank` route, so reranker
   precision can be tested without making every vector query slower.
+- Normal corpus retrieval uses a fresh embedding store as an additive semantic
+  recall source when one exists; lexical/task/path retrieval remains in the
+  prompt and in `/retrieval-debug` as the control path.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

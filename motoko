@@ -157,6 +157,8 @@ DEFAULT_LEXICAL_VECTOR_DIMS = 256
 EMBEDDING_BATCH_SIZE = 32
 VECTOR_QUERY_LIMIT = 8
 RERANK_CANDIDATE_LIMIT = 24
+BACKGROUND_VECTOR_REFRESH_LIMIT = 1
+BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS = 1000
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -378,6 +380,7 @@ SLASH_COMMANDS = [
     ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
     ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
     ("/vector-build [ID]", "build a realm-local vector store for an index"),
+    ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
     ("/vector-query [--rerank] QUERY", "query the latest vector store"),
     ("/vector-eval", "evaluate vector retrieval fixtures"),
     ("/identity", "show the active account/realm identity"),
@@ -445,6 +448,7 @@ SHELL_COMMANDS = [
     "retrieval-preview",
     "vector-plan",
     "vector-build",
+    "vector-refresh",
     "vector-query",
     "vector-eval",
     "identity",
@@ -470,6 +474,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/retrieval-preview",
     "/vector-plan",
     "/vector-build",
+    "/vector-refresh",
     "/vector-query",
     "/vector-eval",
     "/identity",
@@ -3049,6 +3054,10 @@ def diagnose_retrieval_debug(index_report: dict, query: str) -> list[str]:
         notes.append("recall failure: no chunk had a positive score for this query")
     else:
         notes.append(f"recall ok: {len(positive_chunks)} positive chunk(s) before limit")
+    if index_report.get("vector_chunks"):
+        notes.append(f"vector recall available: {len(index_report.get('vector_chunks', []))} vector-ranked chunk(s)")
+    elif index_report.get("vector_error"):
+        notes.append(f"vector recall issue: {index_report.get('vector_error')}")
     mentions = query_path_mentions(query)
     if mentions:
         top_paths = [row.get("path", "").lower() for row in chunks[:3] + files[:3]]
@@ -3107,6 +3116,26 @@ def run_retrieval_debug(
             "files": file_rows[:limit],
             "chunks": chunk_rows[:limit],
         }
+        if env_flag("MOTOKO_VECTOR_RETRIEVAL", True):
+            vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
+            if vector_store is not None:
+                try:
+                    vector_report = query_vector_store(
+                        vector_store,
+                        query,
+                        limit=limit,
+                        check_freshness=False,
+                        rerank=env_flag("MOTOKO_VECTOR_RERANK", False),
+                    )
+                except SystemExit as exc:
+                    index_report["vector_error"] = str(exc).splitlines()[0][:240]
+                else:
+                    index_report["vector_store"] = {
+                        "id": vector_report.get("store_id", ""),
+                        "method": vector_report.get("method", ""),
+                        "rerank": vector_report.get("rerank", False),
+                    }
+                    index_report["vector_chunks"] = vector_report.get("rows", [])[:limit]
         index_report["diagnosis"] = diagnose_retrieval_debug(index_report, query)
         report["indexes"].append(index_report)
     report["status"] = "empty" if not report["indexes"] else "ok"
@@ -3176,6 +3205,25 @@ def format_retrieval_debug_report(report: dict) -> str:
                 lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
             if row.get("summary"):
                 lines.append("       summary: " + row.get("summary", ""))
+        if index.get("vector_store"):
+            store = index.get("vector_store", {})
+            lines.append(
+                f"  vector store: {store.get('id', '')} method={store.get('method', '')} rerank={store.get('rerank', False)}"
+            )
+        if index.get("vector_error"):
+            lines.append(f"  vector error: {index.get('vector_error')}")
+        if index.get("vector_chunks"):
+            lines.append("  top vector chunks:")
+            for idx, row in enumerate(index.get("vector_chunks", [])[:8], 1):
+                lines.append(
+                    f"    {idx}. score={row.get('score', 0)} vec={row.get('vector_score', 0)} "
+                    f"lex={row.get('lexical', 0)} path={row.get('path_boost', 0)}  "
+                    f"{row.get('path', '')} chunk {row.get('chunk', '')}"
+                )
+                if "rerank_score" in row:
+                    lines.append(f"       rerank_score: {row.get('rerank_score', 0)}")
+                if row.get("summary"):
+                    lines.append("       summary: " + row.get("summary", ""))
     return "\n".join(lines)
 
 
@@ -7316,6 +7364,118 @@ def build_vector_store(
     return build_vector_store_from_index(index, dims=dims, method=method)
 
 
+def vector_refresh_candidates(
+    *,
+    index_id: str | None = None,
+    force: bool = False,
+    method: str = EMBEDDING_VECTOR_METHOD,
+    max_chunks: int | None = None,
+) -> list[tuple[dict, str]]:
+    indexes = [load_index(index_id)] if index_id else latest_indexes_by_family()
+    max_chunks = max_chunks if max_chunks is not None else env_int(
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS",
+        BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS,
+    )
+    rows = []
+    for index in indexes:
+        status, warnings = index_staleness(index)
+        if status == "stale":
+            rows.append((index, "skip: source index stale"))
+            continue
+        chunk_count = sum(len(file_item.get("chunks", [])) for file_item in index.get("files", []))
+        if max_chunks and chunk_count > max_chunks:
+            rows.append((index, f"skip: {chunk_count} chunk(s) exceeds automatic limit {max_chunks}"))
+            continue
+        due, reason = vector_store_due(index, method=method)
+        if due or force:
+            rows.append((index, reason))
+    return rows
+
+
+def refresh_vector_stores(
+    *,
+    index_id: str | None = None,
+    force: bool = False,
+    limit: int = 1,
+    method: str = EMBEDDING_VECTOR_METHOD,
+    max_chunks: int | None = None,
+    phase_callback=None,
+) -> dict:
+    method = resolve_vector_method(method)
+    limit = max(1, int(limit or 1))
+    report = {
+        "schema": "vector-refresh-v1",
+        "created": now(),
+        "method": method,
+        "limit": limit,
+        "items": [],
+    }
+    built = 0
+    candidates = vector_refresh_candidates(
+        index_id=index_id,
+        force=force,
+        method=method,
+        max_chunks=max_chunks,
+    )
+    for index, reason in candidates:
+        if built >= limit:
+            break
+        item = {
+            "index": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "reason": reason,
+        }
+        if reason.startswith("skip:"):
+            item["status"] = "skipped"
+            report["items"].append(item)
+            continue
+        if work_pause_requested():
+            item["status"] = "paused"
+            item["note"] = "pause requested before vector refresh"
+            report["items"].append(item)
+            break
+        if phase_callback is not None:
+            phase_callback(f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))}")
+        try:
+            store = build_vector_store_from_index(index, method=method)
+        except SystemExit as exc:
+            item["status"] = "failed"
+            item["error"] = str(exc)
+        else:
+            item["status"] = "built"
+            item["store_id"] = store.get("id", "")
+            item["rows"] = store.get("row_count", 0)
+            item["path"] = store.get("path", "")
+            built += 1
+        report["items"].append(item)
+    report["built"] = built
+    report["status"] = "built" if built else ("empty" if not report["items"] else "no-build")
+    return report
+
+
+def format_vector_refresh_report(report: dict) -> str:
+    lines = [
+        f"vector refresh: {report.get('status', 'unknown')} built={report.get('built', 0)} method={report.get('method', '')}",
+        f"created: {report.get('created', '')}",
+    ]
+    if not report.get("items"):
+        lines.append("no vector refresh candidates")
+        return "\n".join(lines)
+    for item in report.get("items", []):
+        lines.append(
+            f"- {item.get('status', 'unknown')}: {item.get('index', '')} "
+            f"{item.get('name', '')} ({item.get('reason', '')})"
+        )
+        if item.get("store_id"):
+            lines.append(f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)}")
+        if item.get("error"):
+            lines.append(f"  error: {item.get('error', '')}")
+        if item.get("note"):
+            lines.append(f"  note: {item.get('note', '')}")
+    return "\n".join(lines)
+
+
 def build_embedding_vector_store_from_index(
     index: dict,
     *,
@@ -7445,6 +7605,43 @@ def latest_vector_store() -> dict:
     if not rows:
         raise SystemExit("No vector stores yet. Run 'motoko vector-build [INDEX_ID]' first.")
     return rows[0]
+
+
+def vector_store_matches_index(store: dict, index: dict, *, method: str | None = None) -> bool:
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    if source.get("id") != index.get("id"):
+        return False
+    if method and store.get("method") != method:
+        return False
+    return True
+
+
+def latest_vector_store_for_index(
+    index: dict,
+    *,
+    method: str | None = EMBEDDING_VECTOR_METHOD,
+    fresh_only: bool = True,
+) -> dict | None:
+    for store in list_vector_stores():
+        if not vector_store_matches_index(store, index, method=method):
+            continue
+        if fresh_only:
+            freshness, _warnings = vector_store_freshness(store)
+            if freshness != "fresh":
+                continue
+        return store
+    return None
+
+
+def vector_store_due(index: dict, *, method: str = EMBEDDING_VECTOR_METHOD) -> tuple[bool, str]:
+    store = latest_vector_store_for_index(index, method=method, fresh_only=False)
+    if store is None:
+        return True, "missing"
+    freshness, warnings = vector_store_freshness(store)
+    if freshness != "fresh":
+        detail = "; ".join(warnings[:2]) if warnings else freshness
+        return True, detail or "stale"
+    return False, "fresh"
 
 
 def vector_store_freshness(store: dict) -> tuple[str, list[str]]:
@@ -9676,6 +9873,26 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
             if repair_notes:
                 notes.extend(repair_notes)
                 catalog = write_context_catalog()
+    vector_limit = env_int("MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT", BACKGROUND_VECTOR_REFRESH_LIMIT)
+    if env_flag("MOTOKO_BACKGROUND_VECTOR_REFRESH", True) and vector_limit:
+        try:
+            vector_report = refresh_vector_stores(
+                limit=vector_limit,
+                method=EMBEDDING_VECTOR_METHOD,
+                phase_callback=lambda phase: set_phase(phase, notes=notes),
+            )
+        except SystemExit as exc:
+            notes.append(f"vector refresh skipped: {exc}")
+        else:
+            built = int(vector_report.get("built", 0) or 0)
+            if built:
+                notes.append(f"vector store(s) refreshed: {built}")
+                catalog = write_context_catalog()
+            for item in vector_report.get("items", [])[:3]:
+                if item.get("status") in {"skipped", "failed", "paused"}:
+                    label = item.get("name") or item.get("index", "")
+                    detail = item.get("error") or item.get("note") or item.get("reason", "")
+                    notes.append(f"vector refresh {item.get('status')}: {label} {detail}".strip())
     if env_flag("MOTOKO_BACKGROUND_PROFILE", False) and profile_refresh_due(catalog):
         set_phase("study: profile", notes=notes)
         try:
@@ -9756,6 +9973,43 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     selected_chunks = [row for row in chunk_rows[:top_chunks] if row[0] > 0]
     if not selected_chunks:
         selected_chunks = chunk_rows[: min(2, len(chunk_rows))]
+    selected_chunks = [(score, file_item, chunk, "lexical", {}) for score, file_item, chunk in selected_chunks]
+
+    vector_report = None
+    vector_warning = ""
+    if env_flag("MOTOKO_VECTOR_RETRIEVAL", True):
+        vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
+        if vector_store is not None:
+            try:
+                vector_report = query_vector_store(
+                    vector_store,
+                    query,
+                    limit=max(top_chunks, VECTOR_QUERY_LIMIT),
+                    check_freshness=False,
+                    rerank=env_flag("MOTOKO_VECTOR_RERANK", False),
+                )
+            except SystemExit as exc:
+                vector_warning = str(exc).splitlines()[0][:240]
+            else:
+                lookup: dict[tuple[str, str], tuple[dict, dict]] = {}
+                for file_item in index.get("files", []):
+                    for chunk in file_item.get("chunks", []):
+                        lookup[(file_item.get("path", ""), str(chunk.get("chunk", "")))] = (file_item, chunk)
+                selected_keys = {
+                    (file_item.get("path", ""), str(chunk.get("chunk", "")))
+                    for _score, file_item, chunk, _method, _details in selected_chunks
+                }
+                vector_selected = []
+                for row in vector_report.get("rows", [])[:top_chunks]:
+                    key = (row.get("path", ""), str(row.get("chunk", "")))
+                    found = lookup.get(key)
+                    if not found or key in selected_keys:
+                        continue
+                    file_item, chunk = found
+                    vector_selected.append((row.get("score", 0), file_item, chunk, "vector", row))
+                    selected_keys.add(key)
+                if vector_selected:
+                    selected_chunks = (vector_selected + selected_chunks)[: max(top_chunks, len(vector_selected))]
 
     parts = [
         f"=== Document index: {index.get('name', index.get('id'))} ===",
@@ -9774,18 +10028,32 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         parts.extend(["Structured task signals:", signal_summary])
     if index_warnings:
         parts.append("Freshness warnings:\n" + "\n".join(f"- {warning}" for warning in index_warnings[:8]))
-    sources = [
-        {
-            "kind": "index",
-            "id": index.get("id", ""),
-            "name": index.get("name", ""),
-            "root": index.get("root", ""),
-            "status": index_status,
-            "warnings": index_warnings[:8],
-            "retrieval": "deep" if wants_deep_context(query) else "normal",
-            "corpus_profile_schema": index.get("corpus_profile_schema", ""),
-        }
-    ]
+    index_source = {
+        "kind": "index",
+        "id": index.get("id", ""),
+        "name": index.get("name", ""),
+        "root": index.get("root", ""),
+        "status": index_status,
+        "warnings": index_warnings[:8],
+        "retrieval": "deep" if wants_deep_context(query) else "normal",
+        "corpus_profile_schema": index.get("corpus_profile_schema", ""),
+    }
+    if vector_report:
+        index_source["vector_store"] = vector_report.get("store_id", "")
+        index_source["vector_method"] = vector_report.get("method", "")
+        index_source["vector_rows"] = len(vector_report.get("rows", []))
+        rerank_route = vector_report.get("rerank_route")
+        if isinstance(rerank_route, dict) and rerank_route:
+            index_source["vector_rerank_route"] = rerank_route.get("catalog_route", "")
+        parts.append(
+            "Semantic vector retrieval:\n"
+            f"- store {vector_report.get('store_id', '')} "
+            f"method {vector_report.get('method', '')} "
+            f"rows {len(vector_report.get('rows', []))}"
+        )
+    elif vector_warning:
+        index_source["warnings"] = index_source.get("warnings", []) + [f"vector retrieval skipped: {vector_warning}"]
+    sources = [index_source]
     if selected_files:
         parts.append("Relevant file summaries:")
         for file_item in selected_files:
@@ -9806,7 +10074,7 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     if selected_chunks:
         parts.append("Retrieved excerpts:")
         used = 0
-        for _score, file_item, chunk in selected_chunks:
+        for _score, file_item, chunk, retrieval_method, retrieval_details in selected_chunks:
             content = read_chunk_content(index, chunk)
             remaining = max_retrieval_chars - used
             if remaining <= 0:
@@ -9826,6 +10094,9 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                     "index": index.get("id", ""),
                     "path": file_item.get("path", ""),
                     "chunk": chunk.get("chunk"),
+                    "retrieval": retrieval_method,
+                    "score": retrieval_details.get("score", _score) if isinstance(retrieval_details, dict) else _score,
+                    "vector_score": retrieval_details.get("vector_score") if isinstance(retrieval_details, dict) else None,
                 }
             )
     return "\n\n".join(part for part in parts if part), sources
@@ -10737,6 +11008,7 @@ HELP_SECTIONS = [
             ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
+            ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
             ("/vector-query [--rerank] QUERY", "query the latest vector store"),
             ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/identity", "show the active account/realm identity"),
@@ -10758,6 +11030,7 @@ HELP_SECTIONS = [
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
+            ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
             ("/vector-query [--rerank] QUERY", "query the latest vector store"),
             ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
@@ -10788,6 +11061,7 @@ HELP_SECTIONS = [
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
+            ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
             ("/vector-query [--rerank] QUERY", "query the latest vector store"),
             ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
@@ -10834,6 +11108,7 @@ HELP_SECTIONS = [
             ("motoko index-storage", "audit index storage and safe cleanup opportunities"),
             ("motoko vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("motoko vector-build [ID]", "build a realm-local vector store for an index"),
+            ("motoko vector-refresh [ID]", "build missing or stale embedding vector stores"),
             ("motoko vector-query [--rerank] QUERY", "query the latest vector store"),
             ("motoko vector-eval", "evaluate vector retrieval fixtures"),
             ("motoko index-repair [ID]", "repair failed index quality artifacts"),
@@ -12205,6 +12480,10 @@ class MotokoTui:
                 selector = text[len("/vector-build") :].strip() or None
                 store = build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(self.conv))
                 self.append("system", format_vector_store(store))
+            elif text == "/vector-refresh" or text.startswith("/vector-refresh "):
+                selector = text[len("/vector-refresh") :].strip() or None
+                report = refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)
+                self.append("system", format_vector_refresh_report(report))
             elif text == "/vector-query" or text.startswith("/vector-query "):
                 query, rerank = parse_vector_query_input(text[len("/vector-query") :].strip())
                 query = query or context_query_text(self.conv, self.conv.get("title", ""))
@@ -13276,6 +13555,10 @@ def chat_loop(conv: dict) -> None:
             store = build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(conv))
             print_report(format_vector_store(store))
             continue
+        if user_text == "/vector-refresh" or user_text.startswith("/vector-refresh "):
+            selector = user_text[len("/vector-refresh") :].strip() or None
+            print_report(format_vector_refresh_report(refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)))
+            continue
         if user_text == "/vector-query" or user_text.startswith("/vector-query "):
             query, rerank = parse_vector_query_input(user_text[len("/vector-query") :].strip())
             query = query or context_query_text(conv, conv.get("title", ""))
@@ -14007,6 +14290,20 @@ def command_vector_build(args) -> None:
         print_report(format_vector_store(store))
 
 
+def command_vector_refresh(args) -> None:
+    report = refresh_vector_stores(
+        index_id=args.index,
+        force=args.force,
+        limit=args.limit,
+        method=args.method,
+        max_chunks=args.max_chunks,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_vector_refresh_report(report))
+
+
 def command_vector_query(args) -> None:
     store = load_vector_store(args.store) if args.store else latest_vector_store()
     report = query_vector_store(store, " ".join(args.query), limit=args.limit, rerank=args.rerank)
@@ -14521,6 +14818,20 @@ def main(argv: list[str]) -> int:
     vector_build.add_argument("--dims", type=int, default=DEFAULT_LEXICAL_VECTOR_DIMS, help="hashed lexical vector dimensions")
     vector_build.add_argument("--json", action="store_true", help="print JSON store")
     vector_build.set_defaults(func=command_vector_build)
+
+    vector_refresh = sub.add_parser("vector-refresh", help="build missing or stale embedding vector stores")
+    vector_refresh.add_argument("index", nargs="?", help="optional document index; defaults to latest indexes")
+    vector_refresh.add_argument(
+        "--method",
+        default=EMBEDDING_VECTOR_METHOD,
+        choices=[LEXICAL_VECTOR_METHOD, EMBEDDING_VECTOR_METHOD],
+        help="vector method to refresh",
+    )
+    vector_refresh.add_argument("--limit", type=int, default=1, help="maximum stores to build")
+    vector_refresh.add_argument("--max-chunks", type=int, default=None, help="skip indexes above this chunk count")
+    vector_refresh.add_argument("--force", action="store_true", help="rebuild even if a fresh store exists")
+    vector_refresh.add_argument("--json", action="store_true", help="print JSON report")
+    vector_refresh.set_defaults(func=command_vector_refresh)
 
     vector_query = sub.add_parser("vector-query", help="query the latest vector store")
     vector_query.add_argument("query", nargs="+")

@@ -224,14 +224,14 @@ The implementation path is:
 - make prompts cache-friendly and reuse Motoko-owned compressed context and
   output caches, while leaving true prompt/KV reuse to the NixOS llama.cpp
   service layer;
-- audit derived index storage before adding a vector store: report duplicate
+- keep auditing derived index storage alongside vector stores: report duplicate
   reference chunks, unique stored chunk bodies, logical corpus bytes, stored
   bytes, missing duplicate targets, and superseded partial/index cleanup
   opportunities. Cleanup should start as inspectable safe-GC planning, not
   aggressive deletion.
-- add embedding and reranker storage only after the schema, provenance,
+- keep embedding/reranker storage behind explicit schema, provenance,
   invalidation, migration, privacy boundaries, eval fixtures, and NixOS service
-  shape are explicit.
+  contracts.
 - treat reflection as a recurring audit layer rather than an end-of-roadmap
   feature: answer audits, retrieval audits, memory audits, stale-artifact
   checks, and later deeper model audits should keep running throughout Motoko's
@@ -262,8 +262,9 @@ Current sequencing notes:
   NixOS-owned `~/.config/motoko/local-models.json` by `kind`, `tasks`,
   `endpoint_paths`, dimensions, and advertised parallelism. Motoko stores
   vectors only in the current user's state, keeps `lexical-hash-v1` as the
-  deterministic control path, and should gate reranker use on measured quality
-  after embedding recall is working.
+  deterministic control path, uses fresh embedding stores as additive semantic
+  recall, and should gate reranker use on measured quality rather than making
+  it an invisible default.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended

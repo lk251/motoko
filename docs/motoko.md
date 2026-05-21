@@ -476,6 +476,7 @@ Useful in-chat commands:
 /index-storage
 /vector-plan [INDEX_ID]
 /vector-build [INDEX_ID]
+/vector-refresh [INDEX_ID]
 /vector-query [--rerank] QUERY
 /vector-eval
 /identity
@@ -981,6 +982,19 @@ route without writing a store. Use `motoko vector-query --rerank QUERY` to
 rerank the top vector candidates through the configured `/v1/rerank` route; it
 is explicit so normal queries do not pay the extra model-call cost until
 reranker quality has been measured.
+
+Use `motoko vector-refresh [INDEX_ID]` to build a missing or stale embedding
+store for an index. Without an index argument it considers the latest index for
+each corpus family and builds at most one store by default. The background
+study loop also performs one bounded embedding refresh pass when
+`MOTOKO_BACKGROUND_VECTOR_REFRESH` is enabled. It skips stale source indexes
+and indexes above `MOTOKO_BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS` unless you run
+the explicit command with a larger `--max-chunks` value. A fresh embedding
+store is used as an additive semantic recall source in normal index retrieval;
+lexical scores, path boosts, Org/task signals, and source excerpts remain
+visible in `/retrieval-debug` and `/sources`. Set `MOTOKO_VECTOR_RETRIEVAL=0`
+to disable semantic retrieval during diagnosis. Set `MOTOKO_VECTOR_RERANK=1`
+only when you want fresh embedding retrieval to also use the reranker route.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

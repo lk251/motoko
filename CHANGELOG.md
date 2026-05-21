@@ -118,6 +118,10 @@ not the easiest place to review what changed after a long work session.
 - Added explicit `motoko vector-query --rerank QUERY` support for
   catalog-discovered `/v1/rerank` routes, keeping reranker precision testing
   opt-in until measured.
+- Added `motoko vector-refresh` and bounded background vector refresh so fresh
+  indexes can gradually acquire `embedding-v1` stores. Normal retrieval now
+  uses a fresh embedding store as an additive semantic recall source while
+  keeping lexical/task/path retrieval visible as the control path.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.

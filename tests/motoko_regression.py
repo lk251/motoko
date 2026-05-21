@@ -1547,7 +1547,19 @@ def test_embedding_vector_store_uses_catalog_route(m):
             assert store["rows"][0]["vector"]
             report = m.query_vector_store(store, "vector deadline task", limit=3)
             assert report["rows"]
-            assert EmbeddingHandler.paths == ["/v1/embeddings", "/v1/embeddings"]
+            text, sources = m.retrieve_from_index(index, "vector deadline task")
+            assert "Semantic vector retrieval:" in text
+            assert any(source.get("vector_store") == store["id"] for source in sources)
+            refresh = m.refresh_vector_stores(
+                index_id="embedding-index",
+                force=True,
+                limit=1,
+                method=m.EMBEDDING_VECTOR_METHOD,
+            )
+            assert refresh["built"] == 1
+            assert refresh["items"][0]["store_id"]
+            assert EmbeddingHandler.paths
+            assert set(EmbeddingHandler.paths) == {"/v1/embeddings"}
             assert EmbeddingHandler.payloads[0]["model"] == "qwen3-embedding-0.6b-q8-0"
             server.shutdown()
             server.server_close()
