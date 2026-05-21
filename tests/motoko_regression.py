@@ -1794,15 +1794,77 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         ui.messages = []
         ui.scroll = 0
         ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
 
         ui.handle_command("/status")
         ui.handle_command("/sources")
+
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
 
         assert any(row.get("role") == "system" and "identity:" in row.get("content", "") for row in ui.messages)
         assert any(row.get("role") == "system" and "answer audit" in row.get("content", "") for row in ui.messages)
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
         assert saved_after["messages"] == saved_before["messages"]
+
+
+def test_tui_report_command_does_not_block_render_thread(m):
+    with isolated_state():
+        conv = m.new_conversation("Async report")
+        conv["id"] = "async-report"
+        write_conversation(m, conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+
+        started = threading.Event()
+        release = threading.Event()
+        old_format_status = m.format_status
+        try:
+            def slow_status(_conv=None):
+                started.set()
+                assert release.wait(2)
+                return "identity: Motoko\nmodel status source: test"
+
+            m.format_status = slow_status
+            ui.handle_command("/status")
+
+            assert ui.report_running == 1
+            assert ui.messages[-1]["role"] == "system"
+            assert ui.messages[-1]["content"] == "/status: running..."
+            assert started.wait(1)
+
+            release.set()
+            deadline = time.monotonic() + 2
+            while ui.report_running and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+            assert ui.report_running == 0
+            assert ui.messages[-1]["content"] == "identity: Motoko\nmodel status source: test"
+        finally:
+            release.set()
+            m.format_status = old_format_status
 
 
 def test_tui_prompt_is_saved_before_context_preparation(m):
@@ -1968,7 +2030,21 @@ def test_retrieval_preview_shows_context_without_model_call(m):
         ui.messages = []
         ui.scroll = 0
         ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
         ui.handle_command("/retrieval-preview tomorrow plan")
+
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+
         assert any("Prepare tomorrow plan" in row.get("content", "") for row in ui.messages)
         assert conv["messages"] == []
 
@@ -3823,6 +3899,7 @@ def main() -> int:
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
         test_tui_report_commands_do_not_persist_system_output,
+        test_tui_report_command_does_not_block_render_thread,
         test_tui_prompt_is_saved_before_context_preparation,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
         test_feedback_eval_exports_private_retrieval_fixtures,

@@ -187,6 +187,10 @@ not the easiest place to review what changed after a long work session.
   `motoko model-stop` so local model worker state and explicit release can be
   inspected or controlled through the approved `motoko-model` helper, without
   direct systemd access or automatic stop-on-exit.
+- Made slow TUI report commands such as `/status`, `/about`, `/sources`,
+  `/models`, retrieval previews/debug reports, task reports, and vector
+  query/eval reports run in background report workers so Enter is acknowledged
+  immediately and rendering stays responsive.
 - Kept bg-heavy elapsed-time display stable across vectorization progress-line
   updates, instead of resetting the counter on every batch status update.
 - Made the Nix flake wrapper export `MOTOKO_REVISION`, so `/about` can show the

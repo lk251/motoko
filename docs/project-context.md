@@ -186,6 +186,9 @@ Current UI direction:
   `/identity`, `/permissions`, and retrieval diagnostics should be syntax
   highlighted at terminal render time without storing ANSI escapes in
   conversation state.
+- TUI report commands that may touch indexes, helper processes, route status,
+  or retrieval diagnostics should acknowledge Enter immediately and run their
+  report-building work off the input/render path.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
 - The default spinner should be ASCII everywhere. Braille is an explicit opt-in

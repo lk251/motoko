@@ -15342,6 +15342,8 @@ class MotokoTui:
         self.events_lock = threading.Lock()
         self.generating = False
         self.answer_phase = ""
+        self.report_running = 0
+        self.report_status = ""
         self.maintaining = False
         self.study_running = False
         self.study_status = "study: starting"
@@ -15412,13 +15414,14 @@ class MotokoTui:
                 self.start_maintenance(resumed=True)
             while self.running:
                 self.drain_events()
-                timeout = 0.04 if self.generating or self.maintaining or self.study_running else 0.12
+                active_work = self.generating or self.maintaining or self.study_running or self.report_running
+                timeout = 0.04 if active_work else 0.12
                 readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
                 if readable:
                     self.last_input_at = time.monotonic()
                     self.handle_key(self.read_key())
                 now_ts = time.monotonic()
-                if self.dirty or ((self.generating or self.maintaining or self.study_running) and now_ts - self.last_render > 0.08):
+                if self.dirty or (active_work and now_ts - self.last_render > 0.08):
                     self.render()
         finally:
             signal.signal(signal.SIGWINCH, old_winch)
@@ -15727,7 +15730,7 @@ class MotokoTui:
             elif text == "/help":
                 self.open_overlay("help", format_help())
             elif text == "/about":
-                self.append("system", format_about())
+                self.start_report_command("/about", format_about)
             elif text == "/exit":
                 save_conversation(self.conv)
                 self.running = False
@@ -15748,7 +15751,7 @@ class MotokoTui:
             elif text == "/pause":
                 self.request_pause()
             elif text == "/sources":
-                self.append("system", format_conversation_sources(self.conv))
+                self.start_report_command("/sources", lambda: format_conversation_sources(self.conv))
             elif (
                 text == "/feedback"
                 or text.startswith("/feedback ")
@@ -15760,32 +15763,31 @@ class MotokoTui:
                 rating, note = parse_feedback_command(text)
                 self.append("system", format_feedback_saved(record_response_feedback(self.conv, rating, note)))
             elif text == "/status":
-                self.append("system", format_status(self.conv))
+                self.start_report_command("/status", lambda: format_status(self.conv))
             elif text == "/model-routes":
-                self.append("system", format_model_routes(include_defaults=True))
+                self.start_report_command("/model-routes", lambda: format_model_routes(include_defaults=True))
             elif text == "/models" or text.startswith("/models ") or text == "/model-status" or text.startswith("/model-status "):
                 selector = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else None
-                self.append("system", format_model_services(selector))
+                self.start_report_command(text.split(maxsplit=1)[0], lambda: format_model_services(selector))
             elif text == "/model-stop" or text.startswith("/model-stop "):
                 selector = text[len("/model-stop") :].strip()
                 if not selector:
                     self.append("system", "usage: /model-stop ROUTE")
                 else:
-                    self.append("system", stop_model_service(selector))
+                    self.start_report_command("/model-stop", lambda: stop_model_service(selector))
             elif text == "/retrieval-eval":
-                self.append("system", format_retrieval_eval_report(run_retrieval_eval()))
+                self.start_report_command("/retrieval-eval", lambda: format_retrieval_eval_report(run_retrieval_eval()))
             elif text == "/feedback-eval":
-                self.append("system", format_feedback_eval_report(run_feedback_eval()))
+                self.start_report_command("/feedback-eval", lambda: format_feedback_eval_report(run_feedback_eval()))
             elif text == "/retrieval-debug" or text.startswith("/retrieval-debug "):
                 query = text[len("/retrieval-debug") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
-                try:
-                    report = run_retrieval_debug(query, conv=self.conv)
-                    self.append("system", format_retrieval_debug_report(report))
-                except SystemExit as exc:
-                    self.append("error", str(exc))
+                self.start_report_command(
+                    "/retrieval-debug",
+                    lambda: format_retrieval_debug_report(run_retrieval_debug(query, conv=self.conv)),
+                )
             elif text == "/retrieval-preview" or text.startswith("/retrieval-preview "):
                 query = text[len("/retrieval-preview") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
-                self.append("system", format_retrieval_preview(self.conv, query))
+                self.start_report_command("/retrieval-preview", lambda: format_retrieval_preview(self.conv, query))
             elif text == "/evidence-build" or text.startswith("/evidence-build "):
                 selector = text[len("/evidence-build") :].strip() or None
                 store = build_evidence_store_from_index(load_index(selector) if selector else default_vector_index(self.conv))
@@ -15806,9 +15808,9 @@ class MotokoTui:
                 except SystemExit as exc:
                     self.append("error", str(exc))
             elif text == "/identity":
-                self.append("system", format_identity())
+                self.start_report_command("/identity", format_identity)
             elif text == "/permissions":
-                self.append("system", format_permissions())
+                self.start_report_command("/permissions", format_permissions)
             elif text.startswith("/permissions set "):
                 mode = text[len("/permissions set ") :].strip()
                 self.append("system", self.capture_text(lambda: command_permissions_set(mode)))
@@ -15835,7 +15837,7 @@ class MotokoTui:
                 self.append("system", format_index_storage_audit(index_storage_audit()))
             elif text == "/vector-plan" or text.startswith("/vector-plan "):
                 selector = text[len("/vector-plan") :].strip() or None
-                self.append("system", format_vector_plan(vector_plan(selector)))
+                self.start_report_command("/vector-plan", lambda: format_vector_plan(vector_plan(selector)))
             elif text == "/vector-build" or text.startswith("/vector-build "):
                 selector = text[len("/vector-build") :].strip() or None
                 store = build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(self.conv))
@@ -15848,17 +15850,20 @@ class MotokoTui:
                 query, rerank = parse_vector_query_input(text[len("/vector-query") :].strip())
                 query = query or context_query_text(self.conv, self.conv.get("title", ""))
                 try:
-                    self.append("system", format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank)))
+                    self.start_report_command(
+                        "/vector-query",
+                        lambda: format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank)),
+                    )
                 except SystemExit as exc:
                     self.append("error", str(exc))
             elif text == "/vector-eval":
-                self.append("system", format_vector_eval_report(run_vector_eval()))
+                self.start_report_command("/vector-eval", lambda: format_vector_eval_report(run_vector_eval()))
             elif text == "/index-repair" or text.startswith("/index-repair "):
                 selector = text[len("/index-repair") :].strip() or None
                 _repaired, _changed, note = repair_index_artifacts(load_index(selector))
                 self.append("system", note)
             elif text == "/tasks" or text.startswith("/tasks "):
-                self.append("system", format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
+                self.start_report_command("/tasks", lambda: format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
             elif text == "/topics":
                 self.append("system", self.capture_text(command_topics_text))
             elif text == "/topic-show" or text.startswith("/topic-show "):
@@ -16114,6 +16119,23 @@ class MotokoTui:
             sys.stdout = old_stdout
         return buf.getvalue().strip() or "(no output)"
 
+    def start_report_command(self, label: str, func) -> None:
+        entry = self.append("system", f"{label}: running...")
+        self.report_running += 1
+        self.report_status = label
+        self.dirty = True
+
+        def worker() -> None:
+            try:
+                text = func()
+                self.put_event(("report_done", entry, str(text).strip() or "(no output)"))
+            except SystemExit as exc:
+                self.put_event(("report_error", entry, str(exc)))
+            except Exception as exc:
+                self.put_event(("report_error", entry, f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def run_blocking_command(self, label: str, func) -> None:
         if self.generating:
             self.append("system", "Finish or wait for the current answer before running this blocking command.")
@@ -16287,6 +16309,25 @@ class MotokoTui:
                 self.answer_entry = None
                 self.append("error", event[1])
                 self.status = "ready"
+                changed = True
+            elif kind == "report_done":
+                entry, text = event[1], event[2]
+                entry["content"] = text
+                self.report_running = max(0, self.report_running - 1)
+                if not self.report_running:
+                    self.report_status = ""
+                    if not self.generating and not self.maintaining:
+                        self.status = "ready"
+                changed = True
+            elif kind == "report_error":
+                entry, text = event[1], event[2]
+                entry["role"] = "error"
+                entry["content"] = text
+                self.report_running = max(0, self.report_running - 1)
+                if not self.report_running:
+                    self.report_status = ""
+                    if not self.generating and not self.maintaining:
+                        self.status = "ready"
                 changed = True
             elif kind == "maintenance_done":
                 self.maintaining = False
@@ -16624,6 +16665,10 @@ class MotokoTui:
             status_parts.append(style(f"{spinner} chat: {answer_phase}", "turquoise"))
         elif not self.maintaining:
             status_parts.append(style(self.status, "turquoise"))
+        if self.report_running:
+            label = self.report_status or "report"
+            count = f" x{self.report_running}" if self.report_running > 1 else ""
+            status_parts.append(style(f"{spinner} {label}{count}", "turquoise"))
         if self.maintaining:
             elapsed = int(time.monotonic() - self.maintenance_phase_started)
             phase = self.maintenance_status or self.status
@@ -16680,7 +16725,7 @@ class MotokoTui:
         cursor_row = min(height, input_start_row + cursor_row_offset)
         screen += f"\033[{cursor_row};{min(content_width, cursor_col)}H\033[?25h"
         self.write(screen)
-        if self.generating or self.maintaining or self.study_running:
+        if self.generating or self.maintaining or self.study_running or self.report_running:
             self.tui_spinner_index += 1
         self.last_render = time.monotonic()
         self.dirty = False

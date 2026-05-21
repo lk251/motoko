@@ -70,6 +70,8 @@ def fake_tui(m, slave_fd: int):
     ui.events = collections.deque()
     ui.events_lock = m.threading.Lock()
     ui.generating = False
+    ui.report_running = 0
+    ui.report_status = ""
     ui.maintaining = False
     ui.study_running = False
     ui.study_status = "study: idle"
