@@ -473,6 +473,7 @@ Useful in-chat commands:
 /retrieval-eval
 /retrieval-debug QUERY
 /retrieval-preview QUERY
+/index-storage
 /identity
 /permissions
 /permissions set MODE
@@ -935,6 +936,13 @@ motoko pause
 motoko index-resume INDEX_ID
 motoko resume-work INDEX_ID
 ```
+
+Use `motoko index-storage` or `/index-storage` to audit the derived index store
+before cleanup or vector-store work. The report shows complete and partial
+indexes, duplicate reference chunks, unique stored chunk bodies, logical corpus
+bytes versus physical stored bytes, missing duplicate targets, orphan chunk
+files, and cleanup opportunities. It is intentionally read-only: safe cleanup
+starts as an inspectable plan, not automatic deletion.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

@@ -1174,6 +1174,91 @@ def test_retrieval_preview_shows_context_without_model_call(m):
         assert conv["messages"] == []
 
 
+def test_index_storage_audit_reports_duplicates_and_cleanup_plan(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        content = "same chunk body\n"
+        digest = m.sha256_hex(content.encode("utf-8"))
+        relpath = m.chunk_content_relpath("old-index", 1, 1)
+        chunk_path = m.indexes_dir() / relpath
+        m.ensure_private_dir(chunk_path.parent)
+        m.atomic_write(chunk_path, content)
+        m.atomic_write(chunk_path.parent / "999999-999999.txt", "orphan\n")
+        old_index = {
+            "id": "old-index",
+            "name": "docs",
+            "root": str(docs),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-21T10:00:00+00:00",
+            "files": [
+                {
+                    "path": str(docs / "a.org"),
+                    "chunks": [
+                        {
+                            "id": "1.1",
+                            "chunk": 1,
+                            "content_path": relpath,
+                            "content_sha256": digest,
+                            "content_bytes": len(content.encode("utf-8")),
+                            "stored_content_bytes": len(content.encode("utf-8")),
+                        }
+                    ],
+                }
+            ],
+        }
+        new_index = {
+            "id": "new-index",
+            "name": "docs",
+            "root": str(docs),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-21T11:00:00+00:00",
+            "files": [
+                {
+                    "path": str(docs / "b.org"),
+                    "chunks": [
+                        {
+                            "id": "1.1",
+                            "chunk": 1,
+                            "duplicate_of_existing_index": True,
+                            "content_sha256": digest,
+                            "content_bytes": len(content.encode("utf-8")),
+                            "stored_content_bytes": 0,
+                        }
+                    ],
+                }
+            ],
+        }
+        partial = {
+            "id": "partial-old",
+            "name": "docs",
+            "root": str(docs),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-21T09:00:00+00:00",
+            "status": "failed",
+            "files": [],
+        }
+        m.atomic_write(m.index_path("old-index"), json.dumps(old_index, ensure_ascii=False) + "\n")
+        m.atomic_write(m.index_path("new-index"), json.dumps(new_index, ensure_ascii=False) + "\n")
+        m.atomic_write(m.index_partial_path("partial-old"), json.dumps(partial, ensure_ascii=False) + "\n")
+
+        audit = m.index_storage_audit()
+        assert audit["index_count"] == 2
+        assert audit["older_complete_indexes"] == 1
+        assert audit["superseded_partial_count"] == 1
+        assert audit["duplicate_reference_chunks"] == 1
+        assert audit["missing_duplicate_target_count"] == 0
+        assert audit["estimated_dedup_saved_bytes"] == len(content.encode("utf-8"))
+        assert audit["orphan_chunk_file_count"] == 1
+        assert any(item["kind"] == "superseded-partials" for item in audit["safe_cleanup"])
+        assert any(item["kind"] == "orphan-chunk-files" for item in audit["safe_cleanup"])
+        assert any(item["kind"] == "older-complete-indexes" for item in audit["blocked_cleanup"])
+        text = m.format_index_storage_audit(audit)
+        assert "index storage audit:" in text
+        assert "duplicate reference(s)" in text
+        assert "safe cleanup plan:" in text
+
+
 def test_index_limits(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1898,6 +1983,7 @@ def main() -> int:
         test_report_highlighting_is_render_only,
         test_tui_report_commands_do_not_persist_system_output,
         test_retrieval_preview_shows_context_without_model_call,
+        test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

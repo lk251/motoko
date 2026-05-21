@@ -98,6 +98,9 @@ not the easiest place to review what changed after a long work session.
 - Added `/retrieval-preview QUERY` and `motoko retrieval-preview QUERY` to show
   the selected source context before a model is called, making prompt-use
   failures easier to distinguish from retrieval failures.
+- Added `/index-storage` and `motoko index-storage` to audit derived index
+  storage, duplicate chunk references, missing duplicate targets, orphan chunk
+  files, and safe cleanup opportunities without deleting anything.
 - Documented a tentative roadmap candidate for future retrieval components,
   including embedding stores, rerankers, token accounting, richer lexical
   retrieval, deterministic extractors, parser-backed artifacts, deduplication,
