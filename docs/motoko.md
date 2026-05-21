@@ -310,6 +310,16 @@ rerun model summaries. The light background study loop also upgrades a small
 number of old completed indexes automatically when idle; it refuses to touch an
 index that still has an active progress job.
 
+When an index is source-fresh and schema-current but still fails quality checks,
+use `motoko index-repair INDEX_ID` or `/index-repair [INDEX_ID]`. Repair is
+different from an upgrade: it targets bad model-derived artifacts, such as empty
+chunk summaries, then refreshes only the affected file summary and corpus
+summary. The idle background loop can run a bounded repair pass automatically
+with `MOTOKO_BACKGROUND_INDEX_REPAIR=1` and
+`MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT=N`. Stale source content still needs a
+source refresh or reindex; repair is for quality convergence on a current
+index.
+
 Motoko does not claim live filesystem access to the model. Attached documents
 are read by the CLI, clipped to a bounded size, and included in the prompt.
 Motoko never edits, rewrites, annotates, truncates, moves, or deletes source
@@ -379,6 +389,8 @@ motoko index-enrich INDEX_ID
 motoko index-enrich --all
 motoko index-upgrade INDEX_ID
 motoko index-upgrade --all
+motoko index-repair INDEX_ID
+motoko index-repair --all
 motoko corpus-profile INDEX_ID
 motoko tasks "priority tasks tomorrow"
 motoko permissions
@@ -419,6 +431,7 @@ Useful in-chat commands:
 /resume-work [INDEX_ID]
 /attach-index [INDEX_ID]
 /corpus-profile [INDEX_ID]
+/index-repair [INDEX_ID]
 /topic [INDEX_ID] QUERY
 /deepen [INDEX_ID] QUERY
 /attach-topic [TOPIC_ID]
@@ -823,6 +836,10 @@ summary provenance, current structured signals, a current corpus profile, and
 preserved Org task/date evidence. Older indexes can gain missing provenance and
 new deterministic artifacts with `motoko index-upgrade INDEX_ID` without
 discarding old summaries.
+If the source is fresh but the quality gate still fails, use
+`motoko index-repair INDEX_ID` to regenerate only failed model-derived
+artifacts, such as empty chunk summaries, and then refresh the affected
+higher-level summaries.
 
 On each question, Motoko scores the indexed summaries and chunks with a small
 local lexical retriever, then injects the corpus summary, relevant file

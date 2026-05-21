@@ -166,8 +166,11 @@ BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES = 64 * 1024
 BACKGROUND_INDEX_ENRICH_LIMIT = 1
 CWD_LEARN_DECLINE_COOLDOWN_SECONDS = 24 * 60 * 60
 SIGNAL_SCHEMA_VERSION = "org-signals-v1"
+SIGNAL_SUMMARY_TASK_LIMIT = 120
+QUALITY_TASK_CHECK_LIMIT = 40
 CORPUS_PROFILE_SCHEMA_VERSION = "corpus-profile-v1"
 BACKGROUND_INDEX_UPGRADE_LIMIT = 1
+BACKGROUND_INDEX_REPAIR_LIMIT = 2
 ORG_TODO_KEYWORDS = {
     "TODO",
     "NEXT",
@@ -309,6 +312,7 @@ SLASH_COMMANDS = [
     ("/indexes", "list document indexes"),
     ("/corpus-profile [ID]", "show a corpus profile"),
     ("/index-quality [ID]", "show index artifact quality checks"),
+    ("/index-repair [ID]", "repair failed index quality artifacts"),
     ("/tasks [QUERY]", "show ranked Org task candidates from corpus indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
@@ -354,6 +358,7 @@ SHELL_COMMANDS = [
     "indexes",
     "corpus-profile",
     "index-quality",
+    "index-repair",
     "topic",
     "deepen",
     "topics",
@@ -401,6 +406,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/indexes",
     "/corpus-profile",
     "/index-quality",
+    "/index-repair",
     "/tasks",
     "/topics",
     "/dossiers",
@@ -4472,7 +4478,7 @@ def index_quality_gate(index: dict) -> dict:
         if active_org_todo(item.get("todo", "")):
             active_tasks.append(item)
     missing_tasks = []
-    for item in active_tasks[:40]:
+    for item in active_tasks[:QUALITY_TASK_CHECK_LIMIT]:
         title = str(item.get("title", ""))
         deadline = str(item.get("deadline_date", ""))
         if title and title not in task_signal_text:
@@ -4658,7 +4664,7 @@ def index_with_current_signals(index: dict) -> dict:
     corpus_signals = corpus_signals_from_files(enriched_files)
     if corpus_signals:
         enriched["signals"] = corpus_signals
-        enriched["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
+        enriched["signal_summary"] = format_signal_summary(corpus_signals, limit=SIGNAL_SUMMARY_TASK_LIMIT)
     else:
         enriched.pop("signals", None)
         enriched.pop("signal_summary", None)
@@ -4742,6 +4748,305 @@ def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
 
 def upgrade_indexes_needing_artifacts(*, limit: int | None = None) -> list[str]:
     return enrich_indexes_needing_signals(limit=limit)
+
+
+def quality_gate_check_failed(report: dict, name: str) -> bool:
+    for check in report.get("checks", []) or []:
+        if check.get("name") == name:
+            return not bool(check.get("ok"))
+    return False
+
+
+def extractive_summary(text: str, *, max_lines: int = 8, max_chars: int = 1600) -> str:
+    lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lines.append(line)
+        if len(lines) >= max_lines:
+            break
+    summary = "\n".join(f"- {line}" for line in lines)
+    return compact_text(summary or text.strip(), max_chars)
+
+
+def chunk_repair_reasons(index: dict, file_item: dict, chunk: dict) -> list[str]:
+    reasons = []
+    content = read_chunk_content(index, chunk)
+    if not chunk.get("content_sha256") and content:
+        reasons.append("missing content hash")
+    if not str(chunk.get("summary", "")).strip():
+        reasons.append("empty chunk summary")
+    if chunk.get("summary") and not artifact_has_provenance(
+        chunk.get("summary_artifact"),
+        CHUNK_SUMMARY_SCHEMA_VERSION,
+    ):
+        reasons.append("missing chunk summary provenance")
+    return reasons
+
+
+def file_repair_reasons(file_item: dict) -> list[str]:
+    reasons = []
+    if not str(file_item.get("summary", "")).strip():
+        reasons.append("empty file summary")
+    if file_item.get("summary") and not artifact_has_provenance(
+        file_item.get("summary_artifact"),
+        FILE_SUMMARY_SCHEMA_VERSION,
+    ):
+        reasons.append("missing file summary provenance")
+    return reasons
+
+
+def summarize_for_repair(
+    label: str,
+    text: str,
+    instruction: str,
+    *,
+    route: str,
+    prompt_version: str,
+    timeout: float = INDEX_MODEL_TIMEOUT_SECONDS,
+) -> tuple[str, dict]:
+    summary = summarize_text(
+        label,
+        text,
+        instruction,
+        timeout=timeout,
+        route=route,
+        prompt_version=prompt_version,
+    ).strip()
+    source_sha = sha256_hex(text.encode("utf-8"))
+    if summary:
+        return summary, artifact_provenance(
+            prompt_version.removesuffix("-v1"),
+            prompt_version,
+            route=route,
+            prompt_version=prompt_version,
+            source_sha256=source_sha,
+        )
+    return extractive_summary(text), artifact_provenance(
+        prompt_version.removesuffix("-v1"),
+        prompt_version,
+        deterministic=True,
+        prompt_version="extractive-repair-v1",
+        source_sha256=source_sha,
+        quality_status="fallback-extractive",
+    )
+
+
+def repair_chunk_summary(index: dict, file_item: dict, chunk: dict) -> tuple[dict, str]:
+    content = read_chunk_content(index, chunk)
+    if not content.strip():
+        raise ValueError(f"no stored chunk text for {file_item.get('path', '')} chunk {chunk.get('chunk')}")
+    label = f"{file_item.get('path', '')} chunk {chunk.get('chunk')}"
+    summary, provenance = summarize_for_repair(
+        label,
+        content[:SUMMARY_INPUT_CHARS],
+        "Repair this retrieval chunk summary. Preserve names, dates, TODOs, obligations, decisions, and concrete details.",
+        route=MODEL_ROUTE_INDEX_CHUNK,
+        prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
+    )
+    repaired = dict(chunk)
+    repaired["summary"] = summary
+    repaired["content_sha256"] = repaired.get("content_sha256") or sha256_hex(content.encode("utf-8"))
+    repaired["summary_artifact"] = provenance
+    signals = extract_document_signals(pathlib.Path(file_item.get("path", "")), content)
+    if signals or path_supports_structured_signals(pathlib.Path(file_item.get("path", ""))):
+        repaired["signals"] = signals
+    return repaired, f"{file_item.get('path', '')} chunk {chunk.get('chunk')}"
+
+
+def repair_file_summary(file_item: dict) -> dict:
+    repaired = dict(file_item)
+    blocks = [f"Chunk {chunk.get('chunk')}:\n{chunk.get('summary', '')}" for chunk in repaired.get("chunks", [])]
+    input_text = "\n\n".join(blocks).strip()
+    summary, provenance = summarize_for_repair(
+        str(file_item.get("path", "")),
+        input_text,
+        "Repair this file-level summary from chunk summaries. Include what the file is for and when to retrieve it.",
+        route=MODEL_ROUTE_INDEX_FILE,
+        prompt_version=FILE_SUMMARY_SCHEMA_VERSION,
+    )
+    repaired["summary"] = summary
+    source_sha = (
+        (repaired.get("source_fingerprint") or {}).get("sha256")
+        or repaired.get("indexed_sha256", "")
+        or sha256_hex(input_text.encode("utf-8"))
+    )
+    repaired["summary_artifact"] = artifact_provenance(
+        "file-summary",
+        FILE_SUMMARY_SCHEMA_VERSION,
+        route=MODEL_ROUTE_INDEX_FILE if provenance.get("mode") == "model" else None,
+        deterministic=provenance.get("mode") != "model",
+        prompt_version=FILE_SUMMARY_SCHEMA_VERSION if provenance.get("mode") == "model" else "extractive-repair-v1",
+        source_sha256=source_sha,
+        quality_status=provenance.get("quality_status", "current"),
+    )
+    return repaired
+
+
+def repair_corpus_summary(index: dict) -> dict:
+    repaired = dict(index)
+    files = repaired.get("files", []) or []
+    blocks = [f"{item.get('path', '')}:\n{item.get('summary', '')}" for item in files]
+    input_text = "\n\n".join(blocks).strip()
+    summary, provenance = summarize_for_repair(
+        str(repaired.get("root", repaired.get("id", ""))),
+        input_text,
+        "Repair this corpus-level map from file summaries. Explain the main themes and which files matter for which questions.",
+        route=MODEL_ROUTE_INDEX_CORPUS,
+        prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
+    )
+    repaired["corpus_summary"] = summary
+    repaired["corpus_summary_artifact"] = artifact_provenance(
+        "corpus-summary",
+        CORPUS_SUMMARY_SCHEMA_VERSION,
+        route=MODEL_ROUTE_INDEX_CORPUS if provenance.get("mode") == "model" else None,
+        deterministic=provenance.get("mode") != "model",
+        prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION if provenance.get("mode") == "model" else "extractive-repair-v1",
+        source_sha256=sha256_hex(input_text.encode("utf-8")),
+        quality_status=provenance.get("quality_status", "current"),
+    )
+    return repaired
+
+
+def repair_index_artifacts(
+    index: dict,
+    *,
+    limit: int | None = None,
+    phase_callback=None,
+) -> tuple[dict, bool, str]:
+    index_id = index.get("id", "")
+    if not index_id:
+        raise SystemExit("index has no id")
+    if index_progress_running(index_id):
+        raise SystemExit(f"index {index_id} is still being built; wait for the active job to finish")
+    status, _warnings = index_staleness(index)
+    if status == "stale":
+        return index, False, f"index quality repair skipped stale index: {index_id}; refresh the source index first"
+
+    before = index_quality_gate(index)
+    repaired = dict(index)
+    changes = []
+    if index_needs_summary_provenance(repaired):
+        repaired = index_with_current_summary_provenance(repaired)
+        changes.append("summary provenance")
+    if index_needs_signal_enrichment(repaired) or quality_gate_check_failed(before, "task/date evidence preserved"):
+        repaired = index_with_current_signals(repaired)
+        repaired = index_with_current_corpus_profile(repaired)
+        changes.append("structured signals")
+
+    max_repairs = BACKGROUND_INDEX_REPAIR_LIMIT if limit is None else max(0, int(limit))
+    repaired_chunks = 0
+    affected_files: set[str] = set()
+    repaired_files = []
+    for file_item in repaired.get("files", []) or []:
+        new_file = dict(file_item)
+        new_chunks = []
+        file_changed = False
+        for chunk in file_item.get("chunks", []) or []:
+            reasons = chunk_repair_reasons(repaired, file_item, chunk)
+            if reasons and repaired_chunks < max_repairs:
+                if phase_callback is not None:
+                    phase_callback("bg-heavy: repairing index(model)")
+                new_chunk, label = repair_chunk_summary(repaired, file_item, chunk)
+                new_chunks.append(new_chunk)
+                repaired_chunks += 1
+                file_changed = True
+                affected_files.add(str(file_item.get("path", "")))
+                changes.append(f"chunk summary {label}")
+                continue
+            new_chunks.append(chunk)
+        new_file["chunks"] = new_chunks
+        file_signals = file_signals_from_chunks(new_chunks)
+        path = pathlib.Path(file_item.get("path", ""))
+        if file_signals or path_supports_structured_signals(path):
+            new_file["signals"] = file_signals
+        else:
+            new_file.pop("signals", None)
+        if file_changed or file_repair_reasons(new_file):
+            if phase_callback is not None:
+                phase_callback("bg-heavy: repairing index(model)")
+            new_file = repair_file_summary(new_file)
+            affected_files.add(str(file_item.get("path", "")))
+            changes.append(f"file summary {file_item.get('path', '')}")
+        repaired_files.append(new_file)
+    repaired["files"] = repaired_files
+
+    if affected_files or not repaired.get("corpus_summary") or not artifact_has_provenance(
+        repaired.get("corpus_summary_artifact"),
+        CORPUS_SUMMARY_SCHEMA_VERSION,
+    ):
+        if phase_callback is not None:
+            phase_callback("bg-heavy: repairing index(model)")
+        repaired = repair_corpus_summary(repaired)
+        changes.append("corpus summary")
+
+    repaired = index_with_current_signals(repaired)
+    repaired = index_with_current_corpus_profile(repaired)
+    after = index_quality_gate(repaired)
+    if not changes:
+        if before.get("status") == "pass":
+            return index, False, f"index quality already passes: {index_id}"
+        return index, False, f"index quality repair found no repairable artifacts: {index_id}"
+
+    history = list(repaired.get("repair_history", []) or [])[-19:]
+    history.append(
+        {
+            "schema": "index-repair-v1",
+            "created": now(),
+            "quality_before": before.get("status", "unknown"),
+            "quality_after": after.get("status", "unknown"),
+            "chunk_repairs": repaired_chunks,
+            "affected_files": sorted(affected_files),
+            "changes": changes[:40],
+        }
+    )
+    repaired["repair_history"] = history
+    repaired["repair_schema"] = "index-repair-v1"
+    atomic_write(index_path(index_id), json.dumps(repaired, ensure_ascii=False, indent=2) + "\n")
+    return (
+        repaired,
+        True,
+        f"index quality repaired: {index_id} ({repaired_chunks} chunk(s); {after.get('status', 'unknown')})",
+    )
+
+
+def repair_indexes_needing_quality(*, limit: int | None = None, quiet: bool = False, phase_callback=None) -> list[str]:
+    notes = []
+    remaining = BACKGROUND_INDEX_REPAIR_LIMIT if limit is None else max(0, int(limit))
+    if remaining <= 0:
+        return notes
+    for index in latest_indexes_by_family():
+        if remaining <= 0:
+            break
+        status, _warnings = index_staleness(index)
+        if status == "stale":
+            continue
+        if index_quality_gate(index).get("status") == "pass":
+            continue
+        index_id = index.get("id", "")
+        try:
+            if quiet:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                    _repaired, changed, note = repair_index_artifacts(
+                        index,
+                        limit=remaining,
+                        phase_callback=phase_callback,
+                    )
+            else:
+                _repaired, changed, note = repair_index_artifacts(
+                    index,
+                    limit=remaining,
+                    phase_callback=phase_callback,
+                )
+        except Exception as exc:
+            notes.append(f"index quality repair failed for {index_id}: {type(exc).__name__}: {exc}")
+            continue
+        notes.append(note)
+        if changed:
+            remaining -= max(1, int((_repaired.get("repair_history") or [{}])[-1].get("chunk_repairs", 1) or 1))
+    return notes
 
 
 def split_text(text: str, size: int = INDEX_CHUNK_CHARS) -> list[str]:
@@ -5618,7 +5923,7 @@ def document_index_record(
     corpus_signals = corpus_signals_from_files(files)
     if corpus_signals:
         index["signals"] = corpus_signals
-        index["signal_summary"] = format_signal_summary(corpus_signals, limit=30)
+        index["signal_summary"] = format_signal_summary(corpus_signals, limit=SIGNAL_SUMMARY_TASK_LIMIT)
     profile = build_corpus_profile(index_id, root, files, created=created)
     index["corpus_profile_schema"] = CORPUS_PROFILE_SCHEMA_VERSION
     index["corpus_profile_enriched"] = profile.get("generated", now())
@@ -6950,6 +7255,23 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     if heavy_notes:
         notes.extend(heavy_notes)
         catalog = write_context_catalog()
+    repair_limit = env_int("MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT", BACKGROUND_INDEX_REPAIR_LIMIT)
+    if env_flag("MOTOKO_BACKGROUND_INDEX_REPAIR", True) and repair_limit:
+        repair_candidates = [
+            index
+            for index in latest_indexes_by_family()
+            if index_staleness(index)[0] != "stale" and index_quality_gate(index).get("status") != "pass"
+        ]
+        if repair_candidates:
+            set_phase("bg-heavy: repairing index(model)", notes=notes)
+            repair_notes = repair_indexes_needing_quality(
+                limit=repair_limit,
+                quiet=True,
+                phase_callback=lambda phase: set_phase(phase, notes=notes),
+            )
+            if repair_notes:
+                notes.extend(repair_notes)
+                catalog = write_context_catalog()
     if env_flag("MOTOKO_BACKGROUND_PROFILE", False) and profile_refresh_due(catalog):
         set_phase("study: profile", notes=notes)
         try:
@@ -7954,6 +8276,7 @@ HELP_SECTIONS = [
             ("/attach-index [ID]", "attach an existing document index"),
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
+            ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
             ("/attach-topic [ID]", "attach an existing topic dossier"),
@@ -7978,6 +8301,7 @@ HELP_SECTIONS = [
             ("/indexes", "list document indexes"),
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
+            ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topics", "list topic dossiers"),
             ("/topic-show [ID]", "show a topic dossier"),
             ("/dossiers", "list memory dossiers"),
@@ -8018,6 +8342,7 @@ HELP_SECTIONS = [
             ("motoko index PATH --plan", "preview an index without writing derived text"),
             ("motoko corpus-profile [ID]", "show an index's corpus profile"),
             ("motoko index-quality [ID]", "show index artifact quality checks"),
+            ("motoko index-repair [ID]", "repair failed index quality artifacts"),
             ("motoko index-upgrade [ID]", "upgrade index-derived artifacts"),
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
             ("motoko deepen INDEX_ID QUERY", "build a larger topic dossier"),
@@ -8313,6 +8638,11 @@ def format_status(conv: dict | None = None) -> str:
     duplicate_chunks = sum(int(index.get("duplicate_chunk_count", 0) or 0) for index in indexes)
     derived_bytes = sum(int(index.get("derived_content_bytes", 0) or 0) for index in indexes)
     index_upgrades = sum(1 for index in current_indexes if index_needs_artifact_upgrade(index))
+    index_repairs = sum(
+        1
+        for index in current_indexes
+        if index_staleness(index)[0] != "stale" and index_quality_gate(index).get("status") != "pass"
+    )
     topics = list_topics()
     dossiers = list_dossiers()
     conversations = list_conversations()
@@ -8364,6 +8694,7 @@ def format_status(conv: dict | None = None) -> str:
             + (f", {len(superseded_partial_indexes)} superseded" if superseded_partial_indexes else "")
         ),
         f"index artifact upgrades due: {index_upgrades}",
+        f"index quality repairs due: {index_repairs}",
         f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
         f"topics: {len(topics)}",
@@ -8685,7 +9016,7 @@ def setup_readline_completion() -> None:
                 matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
-            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality"}:
+            elif parts and parts[0] in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality", "/index-repair"}:
                 matches = [item for item in completion_ids("index") if item.startswith(text)]
             elif parts and parts[0] in {"/index-resume", "/resume-work"}:
                 matches = [item for item in completion_ids("partial-index") if item.startswith(text)]
@@ -9340,6 +9671,10 @@ class MotokoTui:
             elif text == "/index-quality" or text.startswith("/index-quality "):
                 selector = text[len("/index-quality") :].strip() or None
                 self.append("system", format_index_quality_gate(index_quality_gate(load_index(selector))))
+            elif text == "/index-repair" or text.startswith("/index-repair "):
+                selector = text[len("/index-repair") :].strip() or None
+                _repaired, _changed, note = repair_index_artifacts(load_index(selector))
+                self.append("system", note)
             elif text == "/tasks" or text.startswith("/tasks "):
                 self.append("system", format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
             elif text == "/topics":
@@ -9960,7 +10295,7 @@ class MotokoTui:
                 for row in list_resumable_partial_indexes()
                 if not current or item_matches_selector(row, current)
             ][:20]
-        if first in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality"} and len(words) <= 2:
+        if first in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality", "/index-repair"} and len(words) <= 2:
             return [
                 {"kind": "index", "value": row.get("id", ""), "label": index_label(row), "description": row.get("root", "")}
                 for row in list_indexes()
@@ -10383,6 +10718,11 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/index-quality" or user_text.startswith("/index-quality "):
             selector = user_text[len("/index-quality") :].strip() or None
             print(format_index_quality_gate(index_quality_gate(load_index(selector))))
+            continue
+        if user_text == "/index-repair" or user_text.startswith("/index-repair "):
+            selector = user_text[len("/index-repair") :].strip() or None
+            _repaired, _changed, note = repair_index_artifacts(load_index(selector))
+            print(note)
             continue
         if user_text == "/tasks" or user_text.startswith("/tasks "):
             print(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
@@ -11039,6 +11379,20 @@ def command_index_upgrade(args) -> None:
     print(note)
 
 
+def command_index_repair(args) -> None:
+    limit = None if args.limit is None else max(0, args.limit)
+    if args.all:
+        notes = repair_indexes_needing_quality(limit=limit)
+        if notes:
+            print("\n".join(notes))
+        else:
+            print("no indexes needed quality repair")
+        return
+    index = load_index(args.index)
+    _repaired, _changed, note = repair_index_artifacts(index, limit=limit)
+    print(note)
+
+
 def command_index_quality(args) -> None:
     index = load_index(args.index)
     print(format_index_quality_gate(index_quality_gate(index)))
@@ -11435,6 +11789,12 @@ def main(argv: list[str]) -> int:
     index_upgrade.add_argument("--all", action="store_true", help="upgrade every index that needs it")
     index_upgrade.add_argument("--limit", type=int, help="maximum indexes to upgrade with --all")
     index_upgrade.set_defaults(func=command_index_upgrade)
+
+    index_repair = sub.add_parser("index-repair", help="repair failed quality artifacts on existing indexes")
+    index_repair.add_argument("index", nargs="?")
+    index_repair.add_argument("--all", action="store_true", help="repair every latest fresh index with quality failures")
+    index_repair.add_argument("--limit", type=int, help="maximum chunk artifacts to repair")
+    index_repair.set_defaults(func=command_index_repair)
 
     index_quality = sub.add_parser("index-quality", help="show artifact quality checks for a document index")
     index_quality.add_argument("index", nargs="?")

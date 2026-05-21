@@ -1444,6 +1444,108 @@ def test_empty_org_signal_upgrade_converges(m):
             m.quiet_model = old_quiet_model
 
 
+def test_index_repair_regenerates_failed_chunk_artifacts(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "tasks.org"
+        source.write_text(
+            "\n".join(
+                [
+                    "* TODO [#A] Repair Alvarez packet",
+                    "DEADLINE: <2026-05-22 Fri>",
+                    "Ana Alvarez needs the countersigned packet.",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        old_summarize_text = m.summarize_text
+        try:
+            m.quiet_model = lambda *args, **kwargs: "initial summary"
+            index = m.build_document_index(str(docs))
+            damaged = dict(index)
+            damaged["corpus_summary"] = ""
+            damaged["files"] = []
+            for file_item in index["files"]:
+                damaged_file = dict(file_item)
+                damaged_file["summary"] = ""
+                damaged_file["chunks"] = []
+                for chunk in file_item["chunks"]:
+                    damaged_chunk = dict(chunk)
+                    damaged_chunk["summary"] = ""
+                    damaged_file["chunks"].append(damaged_chunk)
+                damaged["files"].append(damaged_file)
+            m.atomic_write(m.index_path(damaged["id"]), json.dumps(damaged, ensure_ascii=False, indent=2) + "\n")
+
+            def repair_summary(label, text, instruction, **kwargs):
+                route = kwargs.get("route")
+                if route == m.MODEL_ROUTE_INDEX_CHUNK:
+                    return "TODO [#A] Repair Alvarez packet due 2026-05-22 for Ana Alvarez."
+                if route == m.MODEL_ROUTE_INDEX_FILE:
+                    return "tasks.org tracks the Alvarez packet repair task and deadline."
+                return "The corpus contains the Alvarez packet repair task."
+
+            m.summarize_text = repair_summary
+            repaired, changed, note = m.repair_index_artifacts(damaged, limit=4)
+            assert changed, note
+            assert "index quality repaired" in note
+            assert repaired["repair_history"][-1]["chunk_repairs"] == 1
+            assert repaired["files"][0]["summary"]
+            assert repaired["files"][0]["chunks"][0]["summary"]
+            assert repaired["corpus_summary"]
+            assert m.index_quality_gate(repaired)["status"] == "pass", m.format_index_quality_gate(m.index_quality_gate(repaired))
+        finally:
+            m.quiet_model = old_quiet_model
+            m.summarize_text = old_summarize_text
+
+
+def test_background_study_repairs_quality_failure(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "tasks.org"
+        source.write_text("* TODO [#A] Background repair task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        old_summarize_text = m.summarize_text
+        try:
+            m.quiet_model = lambda *args, **kwargs: "initial summary"
+            index = m.build_document_index(str(docs))
+            damaged = dict(index)
+            damaged["files"] = []
+            for file_item in index["files"]:
+                damaged_file = dict(file_item)
+                damaged_file["chunks"] = []
+                for chunk in file_item["chunks"]:
+                    damaged_chunk = dict(chunk)
+                    damaged_chunk["summary"] = ""
+                    damaged_file["chunks"].append(damaged_chunk)
+                damaged["files"].append(damaged_file)
+            m.atomic_write(m.index_path(damaged["id"]), json.dumps(damaged, ensure_ascii=False, indent=2) + "\n")
+
+            def repair_summary(label, text, instruction, **kwargs):
+                if kwargs.get("route") == m.MODEL_ROUTE_INDEX_CHUNK:
+                    return "TODO [#A] Background repair task."
+                if kwargs.get("route") == m.MODEL_ROUTE_INDEX_FILE:
+                    return "tasks.org contains the background repair task."
+                return "Corpus summary for the background repair task."
+
+            m.summarize_text = repair_summary
+            conv = m.new_conversation("Repair background")
+            notes = m.background_study_step(conv)
+            repaired = m.load_index_exact(index["id"])
+            assert any("index quality repaired" in note for note in notes)
+            assert m.index_quality_gate(repaired)["status"] == "pass", m.format_index_quality_gate(m.index_quality_gate(repaired))
+        finally:
+            m.quiet_model = old_quiet_model
+            m.summarize_text = old_summarize_text
+
+
 def test_index_signal_enrichment_skips_active_index(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1580,6 +1682,8 @@ def main() -> int:
         test_index_health_reports_new_files,
         test_index_signal_enrichment_upgrades_legacy_index,
         test_empty_org_signal_upgrade_converges,
+        test_index_repair_regenerates_failed_chunk_artifacts,
+        test_background_study_repairs_quality_failure,
         test_index_signal_enrichment_skips_active_index,
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,

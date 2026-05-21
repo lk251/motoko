@@ -97,6 +97,11 @@ not the easiest place to review what changed after a long work session.
 - Made context catalog/retrieval prefer the newest completed index per corpus
   family and replace older attached indexes with newer completed ones before
   starting another heavy refresh.
+- Added `motoko index-repair` and `/index-repair` for targeted quality repair
+  of fresh indexes, including empty chunk summaries and affected file/corpus
+  summaries.
+- Made idle background study run a bounded quality-repair pass on fresh indexes
+  that fail `motoko index-quality`.
 
 ## 2026-05-18
 

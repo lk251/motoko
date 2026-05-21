@@ -53,6 +53,9 @@ Design constraints:
 - Existing completed indexes can be upgraded with current structured signals
   and corpus profiles without rerunning model summaries; idle background study
   performs bounded CPU-only upgrades when it is safe to do so.
+- Fresh indexes with failed quality gates can be repaired with targeted
+  `index-repair` passes that regenerate bad chunk/file/corpus summaries instead
+  of rebuilding the whole corpus.
 - Background model work is routed by named worker role, so chunk/file summaries,
   labels/classification, corpus synthesis, memory/profile work, titles, audits,
   and chat can use different NixOS-declared local endpoints.
