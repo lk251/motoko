@@ -448,6 +448,64 @@ class SlowEmbeddingHandler(BaseHTTPRequestHandler):
         return
 
 
+class ThrottledEmbeddingHandler(BaseHTTPRequestHandler):
+    payloads = []
+    paths = []
+    active = 0
+    failures = 0
+    max_active = 0
+    max_supported = 2
+    lock = threading.Lock()
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.paths.append(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        self.__class__.payloads.append(payload)
+        with self.__class__.lock:
+            self.__class__.active += 1
+            active = self.__class__.active
+            self.__class__.max_active = max(self.__class__.max_active, active)
+        try:
+            time.sleep(0.05)
+            if active > self.__class__.max_supported:
+                with self.__class__.lock:
+                    self.__class__.failures += 1
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":{"message":"too much parallelism"}}')
+                return
+            inputs = payload.get("input", [])
+            if isinstance(inputs, str):
+                inputs = [inputs]
+            data = []
+            for idx, text in enumerate(inputs):
+                text = str(text).lower()
+                vector = [
+                    1.0 if "vector" in text else 0.0,
+                    1.0 if "task" in text else 0.0,
+                    1.0 if "fallback" in text else 0.0,
+                    0.25,
+                ]
+                data.append({"object": "embedding", "index": idx, "embedding": vector})
+            response = {"object": "list", "data": data, "model": payload.get("model", "embedding-test")}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+        finally:
+            with self.__class__.lock:
+                self.__class__.active -= 1
+
+    def log_message(self, *_args):
+        return
+
+
 class RerankHandler(BaseHTTPRequestHandler):
     payloads = []
     paths = []
@@ -1761,6 +1819,24 @@ def test_embedding_vector_store_parallelizes_batches(m):
             os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
 
 
+def test_embedding_parallelism_allows_32_cap(m):
+    old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    try:
+        os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        assert m.embedding_parallelism({"max_parallel": 32}, 64) == 32
+        assert m.embedding_parallelism({"max_parallel": 64}, 64) == 32
+        assert m.embedding_parallelism({"max_parallel": 32}, 8) == 8
+        os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "40"
+        assert m.embedding_parallelism({"max_parallel": 32}, 64) == 32
+        os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "6"
+        assert m.embedding_parallelism({"max_parallel": 32}, 64) == 6
+    finally:
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+
+
 def test_embedding_vector_store_stale_when_route_model_changes(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -1919,8 +1995,10 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             m.atomic_write(m.index_path("resume-vector-index"), json.dumps(index, ensure_ascii=False) + "\n")
 
             paused = {"requested": False}
+            progress_messages = []
 
-            def pause_after_first_batch(_message: str) -> None:
+            def pause_after_first_batch(message: str) -> None:
+                progress_messages.append(message)
                 if not paused["requested"]:
                     paused["requested"] = True
                     m.request_work_pause("test")
@@ -1939,11 +2017,113 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             assert len(progress_files) == 1
             progress = json.loads(progress_files[0].read_text(encoding="utf-8"))
             assert progress["completed_rows"] == 1
+            assert "eta_seconds" in progress
+            assert any("eta" in message for message in progress_messages)
 
             store = m.build_vector_store("resume-vector-index", method=m.EMBEDDING_VECTOR_METHOD)
             assert store["row_count"] == 3
             assert len(EmbeddingHandler.payloads) == 3
             assert list(m.vector_progress_dir().glob("*.json")) == []
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+
+
+def test_embedding_vector_store_falls_back_from_excess_parallelism(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    ThrottledEmbeddingHandler.payloads = []
+    ThrottledEmbeddingHandler.paths = []
+    ThrottledEmbeddingHandler.active = 0
+    ThrottledEmbeddingHandler.failures = 0
+    ThrottledEmbeddingHandler.max_active = 0
+    server = None
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = "1"
+        os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "4"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            files = []
+            for idx in range(8):
+                path = docs / f"fallback-{idx}.org"
+                content = f"* TODO Vector fallback task {idx}\n"
+                path.write_text(content, encoding="utf-8")
+                files.append(
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": f"Vector fallback task {idx}.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": f"Vector fallback task chunk {idx}.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                )
+            index = {
+                "id": "fallback-vector-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "files": files,
+            }
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ThrottledEmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("fallback-vector-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+            store = m.build_vector_store("fallback-vector-index", method=m.EMBEDDING_VECTOR_METHOD)
+
+            assert store["row_count"] == 8
+            assert store["embedding_requested_parallelism"] == 4
+            assert store["embedding_parallelism"] == 2
+            assert len(store["embedding_parallel_fallbacks"]) == 1
+            assert ThrottledEmbeddingHandler.failures >= 1
+            assert len(ThrottledEmbeddingHandler.payloads) > 8
     finally:
         if server is not None:
             server.shutdown()
@@ -2930,8 +3110,10 @@ def main() -> int:
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_embedding_vector_store_parallelizes_batches,
+        test_embedding_parallelism_allows_32_cap,
         test_embedding_vector_store_stale_when_route_model_changes,
         test_embedding_vector_store_resumes_saved_progress,
+        test_embedding_vector_store_falls_back_from_excess_parallelism,
         test_vector_query_can_use_catalog_reranker_route,
         test_normal_retrieval_uses_embedding_rerank_by_default,
         test_index_limits,

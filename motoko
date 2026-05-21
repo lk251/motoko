@@ -7321,7 +7321,7 @@ def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float
     return embeddings, route_info
 
 
-def route_max_parallel(route_info: dict, *, default: int = 1, maximum: int = 16) -> int:
+def route_max_parallel(route_info: dict, *, default: int = 1, maximum: int = 32) -> int:
     try:
         value = int(route_info.get("max_parallel") or default)
     except (TypeError, ValueError):
@@ -7332,7 +7332,7 @@ def route_max_parallel(route_info: dict, *, default: int = 1, maximum: int = 16)
 def embedding_parallelism(route_info: dict, batch_count: int) -> int:
     default = route_max_parallel(route_info, default=1)
     configured = env_int("MOTOKO_EMBEDDING_PARALLEL", default, minimum=1)
-    return max(1, min(configured, max(1, batch_count), 16))
+    return max(1, min(configured, max(1, batch_count), 32))
 
 
 def vector_similarity(left, right) -> float:
@@ -7633,6 +7633,8 @@ def refresh_vector_stores(
             item["rows"] = store.get("row_count", 0)
             item["batches"] = store.get("embedding_batch_count", 0)
             item["parallelism"] = store.get("embedding_parallelism", 1)
+            item["requested_parallelism"] = store.get("embedding_requested_parallelism", item["parallelism"])
+            item["fallbacks"] = len(store.get("embedding_parallel_fallbacks", []) or [])
             item["path"] = store.get("path", "")
             built += 1
         report["items"].append(item)
@@ -7660,7 +7662,9 @@ def format_vector_refresh_report(report: dict) -> str:
         if item.get("store_id"):
             lines.append(
                 f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)} "
-                f"batches={item.get('batches', 0)} parallel={item.get('parallelism', 1)}"
+                f"batches={item.get('batches', 0)} parallel={item.get('parallelism', 1)} "
+                f"requested={item.get('requested_parallelism', item.get('parallelism', 1))} "
+                f"fallbacks={item.get('fallbacks', 0)}"
             )
         if item.get("error"):
             lines.append(f"  error: {item.get('error', '')}")
@@ -7698,7 +7702,8 @@ def build_embedding_vector_store_from_index(
         (offset, candidates[offset : offset + batch_size])
         for offset in range(0, len(candidates), batch_size)
     ]
-    parallelism = embedding_parallelism(route_info, len(batches))
+    requested_parallelism = embedding_parallelism(route_info, len(batches))
+    active_parallelism = requested_parallelism
     progress_key = {
         "schema": VECTOR_PROGRESS_SCHEMA_VERSION,
         "target_schema": VECTOR_STORE_SCHEMA_VERSION,
@@ -7713,6 +7718,7 @@ def build_embedding_vector_store_from_index(
     progress_path = vector_progress_path(progress_id)
     candidate_ids = [row_id for row_id, _file_item, _chunk, _text in candidates]
     completed_rows_by_id: dict[str, dict] = {}
+    progress_created = now()
     if write and progress_path.exists():
         try:
             progress = json.loads(progress_path.read_text(encoding="utf-8"))
@@ -7729,11 +7735,27 @@ def build_embedding_vector_store_from_index(
             and route.get("model") == route_model
             and int(route.get("embedding_dimensions") or 0) == route_dims
         ):
+            progress_created = str(progress.get("created") or progress_created)
             for row in progress.get("rows", []):
                 if not isinstance(row, dict) or not row.get("id") or not row.get("vector"):
                     continue
                 if row.get("id") in candidate_ids:
                     completed_rows_by_id[str(row.get("id"))] = row
+    session_started = time.monotonic()
+    session_start_completed_rows = len(completed_rows_by_id)
+    fallback_events = []
+
+    def vector_eta_seconds() -> int | None:
+        done_this_session = len(completed_rows_by_id) - session_start_completed_rows
+        remaining = len(candidates) - len(completed_rows_by_id)
+        if done_this_session <= 0 or remaining <= 0:
+            return None
+        elapsed = max(0.001, time.monotonic() - session_started)
+        return int((elapsed / done_this_session) * remaining)
+
+    def vector_eta_text() -> str:
+        eta = vector_eta_seconds()
+        return f"eta {human_duration(eta)}" if eta is not None else "eta ?"
 
     def row_from_vector(file_item: dict, chunk: dict, vector: list[float]) -> dict:
         return {
@@ -7754,7 +7776,7 @@ def build_embedding_vector_store_from_index(
         progress = {
             "schema": VECTOR_PROGRESS_SCHEMA_VERSION,
             "id": progress_id,
-            "created": now(),
+            "created": progress_created,
             "updated": now(),
             "method": EMBEDDING_VECTOR_METHOD,
             "target_schema": VECTOR_STORE_SCHEMA_VERSION,
@@ -7774,9 +7796,12 @@ def build_embedding_vector_store_from_index(
                 "max_parallel": route_info.get("max_parallel"),
             },
             "embedding_batch_size": batch_size,
-            "embedding_parallelism": parallelism,
+            "embedding_requested_parallelism": requested_parallelism,
+            "embedding_parallelism": active_parallelism,
+            "embedding_parallel_fallbacks": fallback_events,
             "expected_rows": len(candidates),
             "completed_rows": len(completed_rows_by_id),
+            "eta_seconds": vector_eta_seconds(),
             "rows": [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id],
         }
         atomic_write(progress_path, json.dumps(progress, ensure_ascii=False, indent=2) + "\n")
@@ -7820,16 +7845,26 @@ def build_embedding_vector_store_from_index(
         if progress_callback is not None:
             progress_callback(
                 f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))} "
-                f"batch {completed_batches}/{len(batches)} parallel {parallelism} "
-                f"rows {len(completed_rows_by_id)}/{len(candidates)}"
+                f"batch {completed_batches}/{len(batches)} parallel {active_parallelism} "
+                f"rows {len(completed_rows_by_id)}/{len(candidates)} {vector_eta_text()}"
             )
 
-    if pending_batches and parallelism > 1:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=parallelism) as executor:
-            batch_iter = iter(pending_batches)
+    def current_pending_batches() -> list[tuple[int, list[tuple[str, dict, dict, str]]]]:
+        rows = [
+            (offset, [item for item in batch if item[0] not in completed_rows_by_id])
+            for offset, batch in batches
+        ]
+        return [(offset, batch) for offset, batch in rows if batch]
+
+    def run_parallel_batches(run_batches, run_parallelism: int) -> None:
+        failure = None
+        with concurrent.futures.ThreadPoolExecutor(max_workers=run_parallelism) as executor:
+            batch_iter = iter(run_batches)
             futures = {}
 
             def submit_next() -> bool:
+                if failure is not None:
+                    return False
                 if work_pause_requested():
                     return False
                 try:
@@ -7839,9 +7874,9 @@ def build_embedding_vector_store_from_index(
                 futures[executor.submit(embed_batch, batch)] = (offset, batch)
                 return True
 
-            for _slot in range(parallelism):
+            for _slot in range(run_parallelism):
                 submit_next()
-            if not futures and pending_batches:
+            if not futures and run_batches:
                 pause_vectorization()
             while futures:
                 done, _pending = concurrent.futures.wait(
@@ -7850,17 +7885,56 @@ def build_embedding_vector_store_from_index(
                 )
                 for future in done:
                     _offset, _batch = futures.pop(future)
-                    new_rows, embedded_route = future.result()
-                    record_completed_batch(new_rows, embedded_route)
-                    submit_next()
-            if len(completed_rows_by_id) < len(candidates):
-                pause_vectorization()
-    else:
-        for _offset, batch in pending_batches:
-            if work_pause_requested():
-                pause_vectorization()
-            new_rows, embedded_route = embed_batch(batch)
-            record_completed_batch(new_rows, embedded_route)
+                    try:
+                        new_rows, embedded_route = future.result()
+                    except SystemExit as exc:
+                        if failure is None:
+                            failure = exc
+                    except Exception as exc:  # pragma: no cover - defensive around worker threads.
+                        if failure is None:
+                            failure = SystemExit(f"embedding request failed: {exc}")
+                    else:
+                        record_completed_batch(new_rows, embedded_route)
+                        submit_next()
+            if failure is not None:
+                raise failure
+
+    while True:
+        pending_batches = current_pending_batches()
+        if not pending_batches:
+            break
+        if active_parallelism > 1:
+            try:
+                run_parallel_batches(pending_batches, active_parallelism)
+            except SystemExit as exc:
+                write_progress()
+                if active_parallelism <= 1:
+                    raise
+                next_parallelism = max(1, active_parallelism // 2)
+                fallback_events.append(
+                    {
+                        "at": now(),
+                        "from": active_parallelism,
+                        "to": next_parallelism,
+                        "error": compact_text(str(exc), 240),
+                    }
+                )
+                active_parallelism = next_parallelism
+                write_progress()
+                if progress_callback is not None:
+                    progress_callback(
+                        f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))} "
+                        f"retrying remaining rows at parallel {active_parallelism} after embedding error; "
+                        f"rows {len(completed_rows_by_id)}/{len(candidates)} {vector_eta_text()}"
+                    )
+                continue
+        else:
+            for _offset, batch in pending_batches:
+                if work_pause_requested():
+                    pause_vectorization()
+                new_rows, embedded_route = embed_batch(batch)
+                record_completed_batch(new_rows, embedded_route)
+        break
 
     rows = [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id]
     store = {
@@ -7881,7 +7955,9 @@ def build_embedding_vector_store_from_index(
         },
         "embedding_batch_size": batch_size,
         "embedding_batch_count": len(batches),
-        "embedding_parallelism": parallelism,
+        "embedding_requested_parallelism": requested_parallelism,
+        "embedding_parallelism": active_parallelism,
+        "embedding_parallel_fallbacks": fallback_events,
         "source_index": {
             "id": index.get("id", ""),
             "name": index.get("name", ""),
@@ -8242,7 +8318,9 @@ def format_vector_store(store: dict) -> str:
         f"rows: {store.get('row_count', len(store.get('rows', [])))}  dims: {store.get('dims', '')}",
         f"embedding batches: {store.get('embedding_batch_count', 0)}  "
         f"batch size: {store.get('embedding_batch_size', '')}  "
-        f"parallel: {store.get('embedding_parallelism', '')}",
+        f"parallel: {store.get('embedding_parallelism', '')}  "
+        f"requested: {store.get('embedding_requested_parallelism', store.get('embedding_parallelism', ''))}  "
+        f"fallbacks: {len(store.get('embedding_parallel_fallbacks', []) or [])}",
         f"path: {store.get('path', '')}",
         f"note: {store.get('note', '')}",
     ]

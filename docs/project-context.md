@@ -283,9 +283,11 @@ Current sequencing notes:
   actually selected.
 - Bg-heavy vectorization should use the approved embedding route efficiently:
   batch source chunks, issue concurrent embedding requests up to the
-  NixOS-declared route `maxParallel`, expose batch/parallel metadata in status
-  or reports, and remain bounded by the per-realm local-model service rather
-  than managing llama.cpp directly.
+  NixOS-declared route `maxParallel` with a Motoko-side cap of 32, expose
+  batch/row/parallel/ETA metadata in status or reports, and remain bounded by
+  the per-realm local-model service rather than managing llama.cpp directly.
+  If a route cannot sustain the requested parallelism, save completed rows and
+  retry remaining work at lower parallelism before failing.
 - Dense embedding stores should be invalidated and rebuilt from saved
   source/index material when their vector schema, source fingerprint,
   embedding route, model, or dimensions change. Do not try to mathematically

@@ -131,6 +131,9 @@ not the easiest place to review what changed after a long work session.
 - Made embedding vector refresh route-aware and parallel across batches up to
   the NixOS-declared `maxParallel`, with batch/parallel metadata shown in
   vector refresh/store reports.
+- Raised the embedding refresh cap to 32, added row-throughput ETA messages,
+  and made excessive parallelism degrade by checkpointing completed rows and
+  retrying remaining batches at lower parallelism.
 - Added realm-local embedding vector progress checkpoints so interrupted
   vector refreshes can resume from completed rows when the source and
   embedding route/model/dimensions still match.
