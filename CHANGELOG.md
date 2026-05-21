@@ -177,6 +177,14 @@ not the easiest place to review what changed after a long work session.
 - Added `/feedback-eval` and `motoko feedback-eval` to convert private answer
   feedback into per-realm evaluation fixtures without directly changing
   retrieval or ranking behavior.
+- Made Unix-socket model calls retry transient connection resets while the
+  NixOS-declared backend is activating, so chat requests are less likely to
+  fail during model socket activation or route churn.
+- Kept bg-heavy elapsed-time display stable across vectorization progress-line
+  updates, instead of resetting the counter on every batch status update.
+- Made the Nix flake wrapper export `MOTOKO_REVISION`, so `/about` can show the
+  packaged source revision even when the executable lives outside a Git
+  checkout.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.

@@ -783,6 +783,9 @@ def current_git_branch() -> str:
 
 
 def app_revision() -> str:
+    env_revision = os.environ.get("MOTOKO_REVISION", "").strip()
+    if env_revision:
+        return env_revision
     source = pathlib.Path(__file__).resolve()
     try:
         result = subprocess.run(
@@ -822,6 +825,17 @@ def human_duration(seconds: int | float | None) -> str:
     if minutes:
         return f"{minutes}m{secs:02d}s"
     return f"{secs}s"
+
+
+def phase_timer_key(phase: str) -> str:
+    phase = str(phase or "")
+    phase = re.sub(r"\s+batch\s+\d+/\d+.*$", "", phase)
+    phase = re.sub(r"\s+rows\s+\d+/\d+.*$", "", phase)
+    phase = re.sub(r"\s+file\s+\d+/\d+.*$", "", phase)
+    phase = re.sub(r"\s+chunk\s+\d+/\d+.*$", "", phase)
+    phase = re.sub(r"\s+eta\s+\S+.*$", "", phase)
+    phase = re.sub(r"\s+call\s+\S+.*$", "", phase)
+    return phase.strip()
 
 
 def parse_byte_count(value: str) -> int:
@@ -13632,6 +13646,27 @@ def model_loading_response(status: int, body: str) -> bool:
     return "loading model" in lowered or "model loading" in lowered
 
 
+def local_model_status_activating(route_info: dict) -> bool:
+    status = local_model_status_text(route_info).lower()
+    if not status:
+        return False
+    if "backend=activating" in status or "proxy=activating" in status:
+        return True
+    return "loading model" in status or "model loading" in status
+
+
+def transient_model_connection_error(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        return True
+    text = str(exc).lower()
+    return (
+        "connection reset by peer" in text
+        or "remote end closed connection" in text
+        or "broken pipe" in text
+        or "connection aborted" in text
+    )
+
+
 def local_model_verify_hint(route_info: dict) -> str:
     endpoint_text = str(route_info.get("endpoint", ""))
     if not endpoint_is_unix(endpoint_text):
@@ -13695,6 +13730,7 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
         request_path = str(route_info.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH)
         deadline = time.monotonic() + request_timeout
         loading_attempts = 0
+        transient_attempts = 0
         while True:
             remaining = max(1.0, deadline - time.monotonic())
             conn = UnixSocketHTTPConnection(socket_path, timeout=remaining)
@@ -13721,6 +13757,26 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
                 finally:
                     resp.close()
                 return
+            except (OSError, http.client.HTTPException) as exc:
+                if (
+                    transient_model_connection_error(exc)
+                    and time.monotonic() < deadline
+                    and local_model_status_activating(route_info)
+                ):
+                    transient_attempts += 1
+                    loading_attempts += 1
+                    sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
+                    time.sleep(sleep_for)
+                    continue
+                suffix = (
+                    f" after {transient_attempts} transient "
+                    f"{'retry' if transient_attempts == 1 else 'retries'}"
+                    if transient_attempts
+                    else ""
+                )
+                if suffix:
+                    raise OSError(f"{exc}{suffix}") from exc
+                raise
             finally:
                 conn.close()
         return
@@ -15992,8 +16048,10 @@ class MotokoTui:
                 if self.cwd_indexing:
                     continue
                 self.study_running = True
-                self.study_status = event[1]
-                self.study_phase_started = time.monotonic()
+                new_phase = event[1]
+                if phase_timer_key(new_phase) != phase_timer_key(self.study_status):
+                    self.study_phase_started = time.monotonic()
+                self.study_status = new_phase
                 changed = True
             elif kind == "study_done":
                 if self.cwd_indexing:

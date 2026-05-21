@@ -236,6 +236,14 @@ def test_spinner_and_input_wrapping(m):
     assert col == 7
 
 
+def test_phase_timer_key_ignores_progress_counters(m):
+    left = "bg-heavy: vectorizing(model) orgfiles batch 29/129 parallel 32 rows 2700/10525 eta 1m50s"
+    right = "bg-heavy: vectorizing(model) orgfiles batch 30/129 parallel 32 rows 2780/10525 eta 1m45s"
+    assert m.phase_timer_key(left) == m.phase_timer_key(right)
+    assert m.phase_timer_key(left) == "bg-heavy: vectorizing(model) orgfiles"
+    assert m.phase_timer_key("study: planning") != m.phase_timer_key(left)
+
+
 def test_generated_title(m):
     with isolated_state():
         conv = m.new_conversation()
@@ -353,6 +361,27 @@ class LoadingThenOkHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"error":{"message":"Loading model","type":"unavailable_error","code":503}}')
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        event = {"choices": [{"delta": {"content": "OK"}}]}
+        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *_args):
+        return
+
+
+class ResetThenOkHandler(BaseHTTPRequestHandler):
+    calls = 0
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.calls += 1
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        if self.__class__.calls == 1:
+            self.connection.close()
             return
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -601,6 +630,57 @@ def test_unix_socket_model_loading_retries(m):
             m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
             assert m.quiet_model([{"role": "user", "content": "hello"}], timeout=2) == "OK"
             assert LoadingThenOkHandler.calls == 2
+            server.shutdown()
+            server.server_close()
+    finally:
+        m.MODEL_LOADING_RETRY_SECONDS = old_retry
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_unix_socket_connection_reset_retries_while_activating(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_retry = m.MODEL_LOADING_RETRY_SECONDS
+    socket_path = None
+    ResetThenOkHandler.calls = 0
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        m.MODEL_LOADING_RETRY_SECONDS = 0.01
+        with isolated_state() as tmp:
+            socket_path = tmp / "chat-reset.sock"
+            server = UnixHTTPServer(str(socket_path), ResetThenOkHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "chat": {
+                        "endpoint": f"unix://{socket_path}",
+                        "model": "qwen-reset-test",
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            old_status = m.local_model_status_text
+            try:
+                m.local_model_status_text = lambda _route_info: "realm=mares\nroute=chat\nbackend=activating\n"
+                assert m.quiet_model([{"role": "user", "content": "hello"}], timeout=2) == "OK"
+            finally:
+                m.local_model_status_text = old_status
+            assert ResetThenOkHandler.calls == 2
             server.shutdown()
             server.server_close()
     finally:
@@ -3562,6 +3642,7 @@ def main() -> int:
         test_profile_dossier,
         test_memory_dossier,
         test_spinner_and_input_wrapping,
+        test_phase_timer_key_ignores_progress_counters,
         test_generated_title,
         test_dropdown_scrolls_without_header,
         test_wall_timeout,
@@ -3569,6 +3650,7 @@ def main() -> int:
         test_help_overlay_closes,
         test_fake_openai_stream,
         test_unix_socket_model_loading_retries,
+        test_unix_socket_connection_reset_retries_while_activating,
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,

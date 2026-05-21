@@ -26,6 +26,7 @@
         {
           default = self.packages.${system}.motoko;
           motoko = pkgs.writeShellScriptBin "motoko" ''
+            export MOTOKO_REVISION="${self.rev or self.dirtyRev or "unknown"}"
             exec ${pkgs.python312}/bin/python3 ${./motoko} "$@"
           '';
         }
