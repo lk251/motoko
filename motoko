@@ -92,6 +92,8 @@ MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
 RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
 RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
+VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
+VECTOR_STORE_SCHEMA_VERSION = "vector-store-v1"
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
 MODEL_CACHEABLE_SUMMARY_ROUTES = {
     MODEL_ROUTE_INDEX_CHUNK,
@@ -144,6 +146,7 @@ DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
 DEFAULT_PERMISSION_MODE = "repo-read"
 REPO_COMMAND_OUTPUT_CHARS = 24000
 RETRIEVAL_PREVIEW_CHARS = 12000
+DEFAULT_VECTOR_DIMS = 1024
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -363,6 +366,7 @@ SLASH_COMMANDS = [
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
     ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
     ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
+    ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
     ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
@@ -426,6 +430,7 @@ SHELL_COMMANDS = [
     "retrieval-eval",
     "retrieval-debug",
     "retrieval-preview",
+    "vector-plan",
     "identity",
     "permissions",
     "repo",
@@ -447,6 +452,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/retrieval-eval",
     "/retrieval-debug",
     "/retrieval-preview",
+    "/vector-plan",
     "/identity",
     "/permissions",
     "/personality",
@@ -933,6 +939,10 @@ def retrieval_evals_dir() -> pathlib.Path:
 def retrieval_debug_dir() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return ensure_private_dir(root / "retrieval-debug")
+
+
+def vector_stores_dir() -> pathlib.Path:
+    return state_root() / "vector-stores"
 
 
 def conversation_path(conversation_id: str) -> pathlib.Path:
@@ -1859,6 +1869,60 @@ def local_model_catalog_models(catalog: dict | None = None) -> dict:
     return models if isinstance(models, dict) else {}
 
 
+def normalize_route_cache_policy(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    policy = {}
+    if isinstance(raw.get("prompt"), bool):
+        policy["prompt"] = raw["prompt"]
+    for key in ("reuseMinTokens", "cacheRamMiB"):
+        if key not in raw:
+            continue
+        try:
+            value = int(raw.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            policy[key] = value
+    if "slotPromptSimilarity" in raw:
+        try:
+            value = float(raw.get("slotPromptSimilarity"))
+        except (TypeError, ValueError):
+            pass
+        else:
+            if 0.0 <= value <= 1.0:
+                policy["slotPromptSimilarity"] = value
+    for key in ("metrics", "persistentSlotCache"):
+        if isinstance(raw.get(key), bool):
+            policy[key] = raw[key]
+    for key in ("slotsEndpoint", "note"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            policy[key] = value.strip()[:1000]
+    return policy
+
+
+def local_model_routes_for_tasks(task_names: set[str], catalog: dict | None = None) -> list[dict]:
+    catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
+    rows = []
+    for route_id, raw in local_model_catalog_routes(catalog).items():
+        if not isinstance(route_id, str) or not isinstance(raw, dict):
+            continue
+        tasks = raw.get("tasks")
+        task_set = {str(item) for item in tasks} if isinstance(tasks, list) else set()
+        if not (task_names & task_set):
+            continue
+        rows.append(
+            {
+                "route": route_id,
+                "model": str(raw.get("model") or raw.get("modelId") or raw.get("model_id") or ""),
+                "endpoint": str(raw.get("endpoint") or ""),
+                "tasks": sorted(task_set),
+            }
+        )
+    return rows
+
+
 def local_model_route_entry_for_task(route: str, routes: dict) -> tuple[str, dict] | None:
     aliases = set(LOCAL_MODEL_ROUTE_TASK_ALIASES.get(route, (route,)))
     candidates: list[tuple[str, dict]] = []
@@ -1965,6 +2029,8 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
     route_endpoint = env_endpoint or configured.get("endpoint") or global_env_endpoint or local_route.get("endpoint") or DEFAULT_ENDPOINT
     route_model = env_model or configured.get("model") or global_env_model or local_route.get("model") or DEFAULT_MODEL
     request_path = local_route.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH
+    local_endpoint = str(local_route.get("endpoint") or "")
+    uses_catalog_endpoint = bool(local_endpoint) and str(route_endpoint) == local_endpoint
     return {
         "route": route,
         "endpoint": str(route_endpoint),
@@ -1976,6 +2042,9 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "max_parallel": local_route.get("maxParallel") or local_route.get("max_parallel") or 1,
         "download_url": str(local_route.get("download_url") or local_route.get("url") or ""),
         "download_hash": str(local_route.get("sha256") or local_route.get("hash") or ""),
+        "cache": normalize_route_cache_policy(local_route.get("cache")) if uses_catalog_endpoint else {},
+        "metrics_endpoint": str(local_route.get("metrics_endpoint") or "") if uses_catalog_endpoint else "",
+        "metrics_path": str(local_route.get("metrics_path") or "") if uses_catalog_endpoint else "",
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
     }
 
@@ -2012,6 +2081,29 @@ def model_route_badge(route: str = MODEL_ROUTE_CHAT) -> str:
     return "-".join(pieces) + model_endpoint_suffix(info["endpoint"])
 
 
+def format_route_cache_policy(route_info: dict) -> str:
+    policy = route_info.get("cache") if isinstance(route_info.get("cache"), dict) else {}
+    pieces = []
+    if "prompt" in policy:
+        pieces.append("prompt-cache=on" if policy.get("prompt") else "prompt-cache=off")
+    if "reuseMinTokens" in policy:
+        pieces.append(f"reuse>={policy.get('reuseMinTokens')}tok")
+    if "cacheRamMiB" in policy:
+        pieces.append(f"cache-ram={policy.get('cacheRamMiB')}MiB")
+    if "slotPromptSimilarity" in policy:
+        pieces.append(f"similarity={policy.get('slotPromptSimilarity')}")
+    if "metrics" in policy:
+        pieces.append("metrics=on" if policy.get("metrics") else "metrics=off")
+    if policy.get("persistentSlotCache"):
+        pieces.append("persistent-slots=declared")
+    elif "persistentSlotCache" in policy:
+        pieces.append("persistent-slots=off")
+    if route_info.get("metrics_endpoint"):
+        metrics_path = route_info.get("metrics_path") or "/metrics"
+        pieces.append(f"metrics-endpoint={route_info.get('metrics_endpoint')} path={metrics_path}")
+    return "; cache " + ", ".join(pieces) if pieces else ""
+
+
 def configured_model_routes() -> list[str]:
     routes = list(MODEL_ROUTE_DESCRIPTIONS)
     candidate = config_root() / "config.json"
@@ -2038,9 +2130,10 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
         marker = "default" if is_default else "configured"
         manager = f"; manager={info['manager_kind']}" if info.get("manager_kind") else ""
         catalog_route = f"; catalog={info['catalog_route']}" if info.get("catalog_route") else ""
+        cache = format_route_cache_policy(info)
         lines.append(
             f"  {route}: {info['model']} endpoint={info['endpoint']} "
-            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}; {info['description']})"
+            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}{cache}; {info['description']})"
         )
     return "\n".join(lines)
 
@@ -6379,6 +6472,263 @@ def format_index_storage_audit(audit: dict) -> str:
     return "\n".join(lines)
 
 
+def vector_plan_indexes(index_id: str | None = None) -> list[dict]:
+    if index_id:
+        return [load_index_exact(index_id)]
+    return latest_indexes_by_family()
+
+
+def index_vector_stats(indexes: list[dict]) -> dict:
+    chunk_count = 0
+    file_count = 0
+    unique_digests: set[str] = set()
+    duplicate_refs = 0
+    chunk_summaries = 0
+    file_summaries = 0
+    logical_bytes = 0
+    for index in indexes:
+        files = index.get("files", [])
+        file_count += len(files)
+        for file_item in files:
+            if str(file_item.get("summary", "")).strip():
+                file_summaries += 1
+            for chunk in file_item.get("chunks", []):
+                chunk_count += 1
+                digest = str(chunk.get("content_sha256", "")).strip()
+                if digest:
+                    unique_digests.add(digest)
+                if chunk.get("duplicate_of_existing_index"):
+                    duplicate_refs += 1
+                if str(chunk.get("summary", "")).strip():
+                    chunk_summaries += 1
+                logical_bytes += safe_int(chunk.get("content_bytes"))
+    return {
+        "index_count": len(indexes),
+        "file_count": file_count,
+        "chunk_count": chunk_count,
+        "unique_chunk_bodies": len(unique_digests) or chunk_count,
+        "duplicate_reference_chunks": duplicate_refs,
+        "chunk_summary_count": chunk_summaries,
+        "file_summary_count": file_summaries,
+        "logical_content_bytes": logical_bytes,
+    }
+
+
+def vector_row_plan(kind: str, rows: int, dims: int, *, source: str, invalidates_on: list[str]) -> dict:
+    rows = max(0, int(rows or 0))
+    dims = max(1, int(dims or DEFAULT_VECTOR_DIMS))
+    vector_bytes = rows * dims * 4
+    metadata_bytes = rows * 768
+    return {
+        "kind": kind,
+        "rows": rows,
+        "dims": dims,
+        "vector_bytes": vector_bytes,
+        "metadata_bytes": metadata_bytes,
+        "estimated_bytes": vector_bytes + metadata_bytes,
+        "source": source,
+        "invalidates_on": invalidates_on,
+    }
+
+
+def vector_plan(index_id: str | None = None, *, dims: int = DEFAULT_VECTOR_DIMS, include_eval: bool = True) -> dict:
+    dims = max(1, int(dims or DEFAULT_VECTOR_DIMS))
+    indexes = vector_plan_indexes(index_id)
+    stats = index_vector_stats(indexes)
+    memories = read_memory_rows()
+    conversations = list_conversations()
+    topics = list_topics()
+    dossiers = list_dossiers()
+    row_plans = [
+        vector_row_plan(
+            "raw_chunk_embedding",
+            stats["unique_chunk_bodies"],
+            dims,
+            source="unique chunk text bodies by content_sha256",
+            invalidates_on=["content_sha256", "embedding_model", "embedding_schema", "source_realm"],
+        ),
+        vector_row_plan(
+            "chunk_summary_embedding",
+            stats["chunk_summary_count"],
+            dims,
+            source="model-derived chunk summaries",
+            invalidates_on=["artifact_schema", "summary_prompt_version", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "file_summary_embedding",
+            stats["file_summary_count"],
+            dims,
+            source="model-derived file summaries",
+            invalidates_on=["artifact_schema", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "file_label_embedding",
+            stats["file_count"],
+            dims,
+            source="file paths, labels, roles, and deterministic signals",
+            invalidates_on=["file_path", "signal_schema", "label_schema", "embedding_model"],
+        ),
+        vector_row_plan(
+            "memory_embedding",
+            len(memories),
+            dims,
+            source="durable memories in this Motoko realm",
+            invalidates_on=["memory_id", "memory_updated", "embedding_model", "source_realm"],
+        ),
+        vector_row_plan(
+            "conversation_summary_embedding",
+            len(conversations),
+            dims,
+            source="saved conversation summaries and titles",
+            invalidates_on=["conversation_id", "conversation_updated", "summary_schema", "embedding_model"],
+        ),
+        vector_row_plan(
+            "topic_dossier_embedding",
+            len(topics),
+            dims,
+            source="topic dossiers over indexed evidence",
+            invalidates_on=["topic_id", "topic_schema", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "memory_dossier_embedding",
+            len(dossiers),
+            dims,
+            source="memory/conversation dossiers",
+            invalidates_on=["dossier_id", "dossier_schema", "memory_updated", "conversation_updated", "embedding_model"],
+        ),
+    ]
+    storage_audit = index_storage_audit()
+    retrieval_eval = run_retrieval_eval() if include_eval else {}
+    embedding_routes = local_model_routes_for_tasks({"embedding", "embed", "vector", "vector_embedding"})
+    reranker_routes = local_model_routes_for_tasks({"rerank", "reranker"})
+    gates = [
+        {
+            "name": "retrieval_eval",
+            "status": retrieval_eval.get("status", "not-run") if retrieval_eval else "not-run",
+            "detail": f"{retrieval_eval.get('passed', 0)}/{retrieval_eval.get('total', 0)} synthetic fixtures pass"
+            if retrieval_eval
+            else "not run for this report",
+        },
+        {
+            "name": "index_storage_audit",
+            "status": "pass"
+            if not storage_audit.get("missing_duplicate_target_count") and not storage_audit.get("missing_stored_chunk_count")
+            else "warn",
+            "detail": (
+                f"{storage_audit.get('missing_duplicate_target_count', 0)} missing duplicate target(s), "
+                f"{storage_audit.get('missing_stored_chunk_count', 0)} missing stored chunk(s)"
+            ),
+        },
+        {
+            "name": "embedding_route",
+            "status": "available" if embedding_routes else "not-configured",
+            "detail": ", ".join(row.get("route", "") for row in embedding_routes) or "no catalog route advertises embedding tasks yet",
+        },
+        {
+            "name": "reranker_route",
+            "status": "available" if reranker_routes else "not-configured",
+            "detail": ", ".join(row.get("route", "") for row in reranker_routes) or "no catalog route advertises reranker tasks yet",
+        },
+        {
+            "name": "privacy_boundary",
+            "status": "pass",
+            "detail": f"store remains realm-local under {identity_realm()} Motoko state",
+        },
+    ]
+    return {
+        "schema": VECTOR_PLAN_SCHEMA_VERSION,
+        "target_vector_schema": VECTOR_STORE_SCHEMA_VERSION,
+        "created": now(),
+        "status": "planned-not-enabled",
+        "production_enabled": False,
+        "realm": identity_realm(),
+        "store_root": str(vector_stores_dir()),
+        "dims": dims,
+        "float": "float32 estimate",
+        "indexes": [
+            {
+                "id": index.get("id", ""),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "created": index.get("created", ""),
+            }
+            for index in indexes
+        ],
+        "source_stats": stats,
+        "row_plans": row_plans,
+        "estimated_vector_bytes": sum(row.get("vector_bytes", 0) for row in row_plans),
+        "estimated_metadata_bytes": sum(row.get("metadata_bytes", 0) for row in row_plans),
+        "estimated_total_bytes": sum(row.get("estimated_bytes", 0) for row in row_plans),
+        "embedding_routes": embedding_routes,
+        "reranker_routes": reranker_routes,
+        "gates": gates,
+        "provenance_fields": [
+            "artifact_schema",
+            "artifact_kind",
+            "builder",
+            "model",
+            "model_quant",
+            "prompt_version",
+            "source_fingerprint",
+            "input_hash",
+            "source_realm",
+            "security_context",
+            "source_spans",
+            "created_at",
+            "quality_status",
+        ],
+        "migration_policy": "deterministic schema changes are light-lane upgrades; missing information requires resumable source reprocessing",
+        "security_policy": "vectors, metadata, prompts, summaries, filenames, memories, and conversations stay under the current user's Motoko state; no shared cross-realm store",
+    }
+
+
+def format_vector_plan(plan: dict) -> str:
+    stats = plan.get("source_stats", {})
+    lines = [
+        f"vector plan: {plan.get('schema', VECTOR_PLAN_SCHEMA_VERSION)} -> {plan.get('target_vector_schema', VECTOR_STORE_SCHEMA_VERSION)}",
+        f"status: {plan.get('status', 'unknown')} (production enabled: {str(bool(plan.get('production_enabled'))).lower()})",
+        f"created: {plan.get('created', '')}",
+        f"realm: {plan.get('realm', '')}",
+        f"store root: {plan.get('store_root', '')}",
+        f"estimate: {plan.get('dims', DEFAULT_VECTOR_DIMS)} dims {plan.get('float', 'float32 estimate')}",
+        (
+            "sources: "
+            f"{stats.get('index_count', 0)} index(es), "
+            f"{stats.get('file_count', 0)} file(s), "
+            f"{stats.get('chunk_count', 0)} chunk(s), "
+            f"{stats.get('unique_chunk_bodies', 0)} unique body/bodies, "
+            f"{stats.get('duplicate_reference_chunks', 0)} duplicate ref(s)"
+        ),
+        (
+            "estimated storage: "
+            f"{human_bytes(plan.get('estimated_total_bytes', 0))} total "
+            f"({human_bytes(plan.get('estimated_vector_bytes', 0))} vectors, "
+            f"{human_bytes(plan.get('estimated_metadata_bytes', 0))} metadata)"
+        ),
+        "",
+        "planned stores:",
+    ]
+    for row in plan.get("row_plans", []):
+        lines.append(
+            f"- {row.get('kind', '')}: {row.get('rows', 0)} row(s), "
+            f"{human_bytes(row.get('estimated_bytes', 0))}; {row.get('source', '')}"
+        )
+    lines.extend(["", "readiness gates:"])
+    for gate in plan.get("gates", []):
+        lines.append(f"- {gate.get('status', '')}: {gate.get('name', '')} - {gate.get('detail', '')}")
+    lines.extend(
+        [
+            "",
+            "provenance fields: " + ", ".join(plan.get("provenance_fields", [])[:14]),
+            f"migration: {plan.get('migration_policy', '')}",
+            f"security: {plan.get('security_policy', '')}",
+            "",
+            "next: add NixOS-declared embedding/reranker routes, then store only schema-versioned realm-local vectors after evals pass.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def reserve_index_bytes(
     budget: dict,
     next_bytes: int,
@@ -9409,6 +9759,7 @@ HELP_SECTIONS = [
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
             ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
             ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
+            ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
@@ -9426,6 +9777,7 @@ HELP_SECTIONS = [
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
+            ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
@@ -9452,6 +9804,7 @@ HELP_SECTIONS = [
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
+            ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topics", "list topic dossiers"),
             ("/topic-show [ID]", "show a topic dossier"),
@@ -9494,6 +9847,7 @@ HELP_SECTIONS = [
             ("motoko corpus-profile [ID]", "show an index's corpus profile"),
             ("motoko index-quality [ID]", "show index artifact quality checks"),
             ("motoko index-storage", "audit index storage and safe cleanup opportunities"),
+            ("motoko vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("motoko index-repair [ID]", "repair failed index quality artifacts"),
             ("motoko index-upgrade [ID]", "upgrade index-derived artifacts"),
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
@@ -10856,6 +11210,9 @@ class MotokoTui:
                 self.append("system", format_index_quality_gate(index_quality_gate(load_index(selector))))
             elif text == "/index-storage":
                 self.append("system", format_index_storage_audit(index_storage_audit()))
+            elif text == "/vector-plan" or text.startswith("/vector-plan "):
+                selector = text[len("/vector-plan") :].strip() or None
+                self.append("system", format_vector_plan(vector_plan(selector)))
             elif text == "/index-repair" or text.startswith("/index-repair "):
                 selector = text[len("/index-repair") :].strip() or None
                 _repaired, _changed, note = repair_index_artifacts(load_index(selector))
@@ -11909,6 +12266,10 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/index-storage":
             print_report(format_index_storage_audit(index_storage_audit()))
             continue
+        if user_text == "/vector-plan" or user_text.startswith("/vector-plan "):
+            selector = user_text[len("/vector-plan") :].strip() or None
+            print_report(format_vector_plan(vector_plan(selector)))
+            continue
         if user_text == "/index-repair" or user_text.startswith("/index-repair "):
             selector = user_text[len("/index-repair") :].strip() or None
             _repaired, _changed, note = repair_index_artifacts(load_index(selector))
@@ -12613,6 +12974,14 @@ def command_index_storage(args) -> None:
         print_report(format_index_storage_audit(audit))
 
 
+def command_vector_plan(args) -> None:
+    plan = vector_plan(args.index, dims=args.dims, include_eval=not args.no_eval)
+    if args.json:
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_vector_plan(plan))
+
+
 def command_indexes_text() -> None:
     rows = list_indexes()
     jobs = active_index_progress()
@@ -13091,6 +13460,13 @@ def main(argv: list[str]) -> int:
     index_storage = sub.add_parser("index-storage", help="audit index storage and safe cleanup opportunities")
     index_storage.add_argument("--json", action="store_true", help="print JSON audit")
     index_storage.set_defaults(func=command_index_storage)
+
+    vector_plan_cmd = sub.add_parser("vector-plan", help="inspect vector/reranker storage readiness")
+    vector_plan_cmd.add_argument("index", nargs="?", help="optional document index to size; defaults to latest indexes")
+    vector_plan_cmd.add_argument("--dims", type=int, default=DEFAULT_VECTOR_DIMS, help="embedding dimensions for storage estimates")
+    vector_plan_cmd.add_argument("--no-eval", action="store_true", help="skip the synthetic retrieval eval gate")
+    vector_plan_cmd.add_argument("--json", action="store_true", help="print JSON plan")
+    vector_plan_cmd.set_defaults(func=command_vector_plan)
 
     tasks = sub.add_parser("tasks", help="show ranked Org task candidates from indexes")
     tasks.add_argument("query", nargs="*")

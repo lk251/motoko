@@ -101,6 +101,12 @@ not the easiest place to review what changed after a long work session.
 - Added `/index-storage` and `motoko index-storage` to audit derived index
   storage, duplicate chunk references, missing duplicate targets, orphan chunk
   files, and safe cleanup opportunities without deleting anything.
+- Added `/vector-plan` and `motoko vector-plan` as a read-only readiness report
+  for future embedding/reranker storage, including sizing, provenance,
+  invalidation, privacy, and eval gates.
+- Made `/model-routes` display NixOS-declared route cache policy and
+  content-free metrics endpoints from `local-models.json` while keeping prompt
+  and KV caching service-owned.
 - Documented a tentative roadmap candidate for future retrieval components,
   including embedding stores, rerankers, token accounting, richer lexical
   retrieval, deterministic extractors, parser-backed artifacts, deduplication,

@@ -474,6 +474,7 @@ Useful in-chat commands:
 /retrieval-debug QUERY
 /retrieval-preview QUERY
 /index-storage
+/vector-plan [INDEX_ID]
 /identity
 /permissions
 /permissions set MODE
@@ -697,6 +698,15 @@ instead of an immediate failure. She reports the active route/lane in visible
 background status. If a declared model file is missing, run
 `motoko-model verify <route>`; Motoko also includes catalog download URL/hash
 details in socket connection diagnostics when they are available.
+
+If NixOS declares a route cache policy in
+`~/.config/motoko/local-models.json`, `/model-routes` and
+`motoko model-routes` display those content-free capabilities, including prompt
+cache enablement, reuse threshold, cache RAM, slot prompt similarity, metrics
+availability, and metrics endpoint. Motoko reads those fields as service-owned
+capabilities. She keeps prompts stable and explicit, but does not call `/slots`,
+does not persist KV cache files, and does not fake prompt/KV caching in user
+state.
 
 When the NixOS catalog is keyed by worker service name instead of Motoko route
 name, Motoko resolves routes through each catalog entry's `tasks` list. For
@@ -943,6 +953,14 @@ indexes, duplicate reference chunks, unique stored chunk bodies, logical corpus
 bytes versus physical stored bytes, missing duplicate targets, orphan chunk
 files, and cleanup opportunities. It is intentionally read-only: safe cleanup
 starts as an inspectable plan, not automatic deletion.
+
+Use `motoko vector-plan` or `/vector-plan [INDEX_ID]` before enabling embedding
+or reranker storage. The report is also read-only: it sizes planned
+realm-local vector stores for raw chunk text, chunk summaries, file summaries,
+labels, memories, conversations, and dossiers; lists provenance and
+invalidation fields; checks retrieval-eval and storage-audit gates; and reports
+whether the local model catalog advertises embedding or reranker routes. This
+is a contract and readiness report, not production vector indexing.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

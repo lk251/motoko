@@ -571,6 +571,16 @@ def test_local_model_catalog_task_routes(m):
                         "endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
                         "modelId": "qwen3.5-2b-q4-k-m",
                         "tasks": ["index_chunk", "index_label", "memory_maintenance"],
+                        "cache": {
+                            "prompt": True,
+                            "reuseMinTokens": 256,
+                            "cacheRamMiB": 512,
+                            "slotPromptSimilarity": 0.5,
+                            "metrics": True,
+                            "persistentSlotCache": False,
+                        },
+                        "metrics_endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
+                        "metrics_path": "/metrics",
                     },
                     "ministral-3b-worker": {
                         "endpoint": "unix:///run/motoko-llm/mares/ministral-3b-worker.sock",
@@ -609,9 +619,13 @@ def test_local_model_catalog_task_routes(m):
             assert file_route["catalog_route"] == "qwen3-4b-instruct-worker"
             assert corpus["catalog_route"] == "qwen35-9b-worker"
             assert memory["catalog_route"] == "qwen35-2b-worker"
+            assert chunk["cache"]["prompt"] is True
+            assert chunk["cache"]["reuseMinTokens"] == 256
             text = m.format_model_routes(include_defaults=True)
             assert "index_chunk: qwen3.5-2b-q4-k-m" in text
             assert "catalog=qwen35-2b-worker" in text
+            assert "prompt-cache=on" in text
+            assert "metrics-endpoint=unix:///run/motoko-llm/mares/qwen35-2b-worker.sock path=/metrics" in text
     finally:
         if old_endpoint is None:
             os.environ.pop("MOTOKO_ENDPOINT", None)
@@ -1257,6 +1271,80 @@ def test_index_storage_audit_reports_duplicates_and_cleanup_plan(m):
         assert "index storage audit:" in text
         assert "duplicate reference(s)" in text
         assert "safe cleanup plan:" in text
+
+
+def test_vector_plan_reports_storage_and_readiness_gates(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        content = "* TODO [#A] Finish vector readiness plan\nDEADLINE: <2026-05-22 Fri>\n"
+        digest = m.sha256_hex(content.encode("utf-8"))
+        index = {
+            "id": "vector-index",
+            "name": "docs",
+            "root": str(docs),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-21T10:00:00+00:00",
+            "corpus_summary": "Vector readiness test corpus.",
+            "files": [
+                {
+                    "path": str(docs / "tasks.org"),
+                    "summary": "Task file with current priorities.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Task to finish the vector readiness plan.",
+                            "content": content,
+                            "content_bytes": len(content.encode("utf-8")),
+                            "content_sha256": digest,
+                        }
+                    ],
+                }
+            ],
+        }
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "embed-worker": {
+                    "endpoint": "unix:///run/motoko-llm/mares/embed-worker.sock",
+                    "modelId": "embedding-test",
+                    "tasks": ["embedding"],
+                },
+                "rerank-worker": {
+                    "endpoint": "unix:///run/motoko-llm/mares/rerank-worker.sock",
+                    "modelId": "reranker-test",
+                    "tasks": ["reranker"],
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+        m.atomic_write(m.index_path("vector-index"), json.dumps(index, ensure_ascii=False) + "\n")
+        m.atomic_write(
+            m.memories_path(),
+            json.dumps({"id": "mem-1", "text": "Remember vector readiness.", "created": "2026-05-21T10:01:00+00:00"}, ensure_ascii=False)
+            + "\n",
+        )
+        conv = m.new_conversation("Vector plan")
+        conv["id"] = "conv-vector"
+        write_conversation(m, conv)
+
+        plan = m.vector_plan(dims=8)
+        assert plan["schema"] == m.VECTOR_PLAN_SCHEMA_VERSION
+        assert plan["target_vector_schema"] == m.VECTOR_STORE_SCHEMA_VERSION
+        assert plan["production_enabled"] is False
+        assert plan["source_stats"]["chunk_count"] == 1
+        assert plan["estimated_total_bytes"] > 0
+        gate_status = {gate["name"]: gate["status"] for gate in plan["gates"]}
+        assert gate_status["retrieval_eval"] == "pass"
+        assert gate_status["embedding_route"] == "available"
+        assert gate_status["reranker_route"] == "available"
+        text = m.format_vector_plan(plan)
+        assert "vector plan:" in text
+        assert "planned stores:" in text
+        assert "raw_chunk_embedding" in text
+        assert "readiness gates:" in text
 
 
 def test_index_limits(m):
@@ -1984,6 +2072,7 @@ def main() -> int:
         test_tui_report_commands_do_not_persist_system_output,
         test_retrieval_preview_shows_context_without_model_call,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
+        test_vector_plan_reports_storage_and_readiness_gates,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

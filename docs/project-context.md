@@ -255,12 +255,14 @@ Current sequencing notes:
   bounded summary, label, dossier, and audit tasks that pass evals.
 - Prompt and output caching already exists for deterministic model-derived
   background artifacts. The remaining prompt/KV-cache work belongs mostly to
-  the NixOS llama.cpp service layer, while Motoko should keep prompts stable,
-  explicit, and easy to cache.
+  the NixOS llama.cpp service layer. Motoko reads declared route cache policy
+  from `~/.config/motoko/local-models.json`, reports it in `/model-routes`,
+  and keeps prompts stable, explicit, and easy to cache.
 - Before embedding/reranker production work, Motoko should implement the
-  storage-audit and safe-cleanup report above. The same accounting will inform
+  storage-audit and safe-cleanup report above. The same accounting informs
   vector-store sizing, invalidation, and migration. The initial read-only
-  surface is `motoko index-storage` / `/index-storage`.
+  surfaces are `motoko index-storage` / `/index-storage` and
+  `motoko vector-plan` / `/vector-plan`.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended
@@ -318,3 +320,10 @@ selection, provenance, quality gates, private output-cache hits, and graceful
 user-visible handling of queued/loading/missing-model states. Do not fake
 server-side KV caching inside Motoko; prompt-prefix/KV reuse belongs in the
 deployed local model service if measurement shows it is worthwhile.
+
+When NixOS declares route cache fields such as `route.cache.prompt`,
+`reuseMinTokens`, `cacheRamMiB`, `slotPromptSimilarity`, `metrics`, and
+`metrics_endpoint`, Motoko should treat them as declared service capabilities
+for display and measurement. Motoko must not call `/slots`, use persistent slot
+files, log request/response content, or write corpus-derived data outside the
+current user's Motoko state.
