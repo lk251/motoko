@@ -647,7 +647,7 @@ def test_unix_socket_model_loading_retries(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
-def test_unix_socket_connection_reset_retries_while_activating(m):
+def assert_unix_socket_connection_reset_retries(m, status_text):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
     old_retry = m.MODEL_LOADING_RETRY_SECONDS
@@ -676,7 +676,7 @@ def test_unix_socket_connection_reset_retries_while_activating(m):
             m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
             old_status = m.local_model_status_text
             try:
-                m.local_model_status_text = lambda _route_info: "realm=mares\nroute=chat\nbackend=activating\n"
+                m.local_model_status_text = lambda _route_info: status_text
                 assert m.quiet_model([{"role": "user", "content": "hello"}], timeout=2) == "OK"
             finally:
                 m.local_model_status_text = old_status
@@ -696,6 +696,14 @@ def test_unix_socket_connection_reset_retries_while_activating(m):
             os.environ.pop("MOTOKO_MODEL", None)
         else:
             os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_unix_socket_connection_reset_retries_while_activating(m):
+    assert_unix_socket_connection_reset_retries(m, "realm=mares\nroute=chat\nbackend=activating\n")
+
+
+def test_unix_socket_connection_reset_retries_while_active(m):
+    assert_unix_socket_connection_reset_retries(m, "realm=mares\nroute=chat\nbackend=active\n")
 
 
 def test_model_route_config_and_summary_cache(m):
@@ -3651,6 +3659,7 @@ def main() -> int:
         test_fake_openai_stream,
         test_unix_socket_model_loading_retries,
         test_unix_socket_connection_reset_retries_while_activating,
+        test_unix_socket_connection_reset_retries_while_active,
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,

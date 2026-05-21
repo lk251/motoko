@@ -177,9 +177,9 @@ not the easiest place to review what changed after a long work session.
 - Added `/feedback-eval` and `motoko feedback-eval` to convert private answer
   feedback into per-realm evaluation fixtures without directly changing
   retrieval or ranking behavior.
-- Made Unix-socket model calls retry transient connection resets while the
-  NixOS-declared backend is activating, so chat requests are less likely to
-  fail during model socket activation or route churn.
+- Made Unix-socket model calls retry transient connection resets whether the
+  NixOS-declared backend reports activating or active, so chat requests are
+  less likely to fail during model socket activation, handoff, or route churn.
 - Kept bg-heavy elapsed-time display stable across vectorization progress-line
   updates, instead of resetting the counter on every batch status update.
 - Made the Nix flake wrapper export `MOTOKO_REVISION`, so `/about` can show the

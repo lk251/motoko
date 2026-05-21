@@ -13758,11 +13758,7 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
                     resp.close()
                 return
             except (OSError, http.client.HTTPException) as exc:
-                if (
-                    transient_model_connection_error(exc)
-                    and time.monotonic() < deadline
-                    and local_model_status_activating(route_info)
-                ):
+                if transient_model_connection_error(exc) and time.monotonic() < deadline:
                     transient_attempts += 1
                     loading_attempts += 1
                     sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
