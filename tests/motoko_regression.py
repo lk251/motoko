@@ -31,9 +31,11 @@ def load_motoko():
 def isolated_state():
     old_state = os.environ.get("MOTOKO_STATE_HOME")
     old_config = os.environ.get("MOTOKO_CONFIG_HOME")
+    old_alias_color = os.environ.get("MOTOKO_ALIAS_COLOR")
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
         os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
+        os.environ.pop("MOTOKO_ALIAS_COLOR", None)
         try:
             yield pathlib.Path(tmp)
         finally:
@@ -45,6 +47,10 @@ def isolated_state():
                 os.environ.pop("MOTOKO_CONFIG_HOME", None)
             else:
                 os.environ["MOTOKO_CONFIG_HOME"] = old_config
+            if old_alias_color is None:
+                os.environ.pop("MOTOKO_ALIAS_COLOR", None)
+            else:
+                os.environ["MOTOKO_ALIAS_COLOR"] = old_alias_color
 
 
 def write_conversation(m, conv):
@@ -1054,6 +1060,55 @@ def test_assistant_color_config(m):
         assert m.assistant_color() == "purple"
         assert "assistant_color" in m.load_config()["ui"]
 
+        config = m.load_config()
+        config["ui"] = {"assistant_color": "pink"}
+        m.save_config(config)
+        os.environ["MOTOKO_ALIAS_COLOR"] = "cyan"
+        assert m.assistant_color() == "cyan"
+        assert "assistant color: cyan" in m.format_identity()
+
+        os.environ["MOTOKO_ALIAS_COLOR"] = "not-a-color"
+        assert m.assistant_color() == "purple"
+
+
+def test_report_highlighting_is_render_only(m):
+    class FakeTty:
+        def isatty(self):
+            return True
+
+    with isolated_state():
+        old_stdout = m.sys.stdout
+        old_real_stdout = m.sys.__stdout__
+        old_term = os.environ.get("TERM")
+        old_no_color = os.environ.get("NO_COLOR")
+        try:
+            os.environ["TERM"] = "xterm-256color"
+            os.environ.pop("NO_COLOR", None)
+            m.sys.stdout = m.io.StringIO()
+            m.sys.__stdout__ = FakeTty()
+            plain = "identity: Motoko\n  warning: stale index\n     why: attached index\n    1. total=10 path=notes.org"
+            highlighted = m.highlight_report_text(plain)
+            assert "\033[" in highlighted
+            assert m.strip_ansi(highlighted) == plain
+            assert "\033[" not in m.format_status()
+
+            ui = object.__new__(m.MotokoTui)
+            ui.messages = [{"role": "system", "content": "identity: Motoko"}]
+            rows = ui.body_display(80)
+            assert "\033[" in rows[0]
+            assert m.strip_ansi(rows[0]).startswith("sys identity: Motoko")
+        finally:
+            m.sys.stdout = old_stdout
+            m.sys.__stdout__ = old_real_stdout
+            if old_term is None:
+                os.environ.pop("TERM", None)
+            else:
+                os.environ["TERM"] = old_term
+            if old_no_color is None:
+                os.environ.pop("NO_COLOR", None)
+            else:
+                os.environ["NO_COLOR"] = old_no_color
+
 
 def test_index_limits(m):
     with isolated_state() as tmp:
@@ -1430,7 +1485,7 @@ def test_org_task_signals_drive_retrieval(m):
             buf = m.io.StringIO()
             with contextlib.redirect_stdout(buf):
                 m.command_index_quality(args)
-            assert "index quality: pass" in buf.getvalue()
+            assert "index quality: pass" in m.strip_ansi(buf.getvalue())
         finally:
             m.quiet_model = old_quiet_model
 
@@ -1776,6 +1831,7 @@ def main() -> int:
         test_permissions_config,
         test_identity_config,
         test_assistant_color_config,
+        test_report_highlighting_is_render_only,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

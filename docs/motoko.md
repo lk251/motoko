@@ -72,6 +72,8 @@ Motoko separates structured identity from conversational style:
 
 - `~/.config/motoko/config.json` says who she is in this Unix account: name,
   realm, role, and small UI defaults such as Motoko's assistant label color.
+  NixOS may override only the assistant label color for a realm by setting
+  `MOTOKO_ALIAS_COLOR`.
 - `~/.config/motoko/personality.md` says how she should speak: tone, warmth,
   directness, enthusiasm, and style.
 
@@ -362,8 +364,12 @@ If the raw terminal UI is not available or you want the older behavior, use
 
 The TUI uses a compact `>` input prompt. Motoko's assistant label is shown as
 `Motoko`, without a `>` suffix, and uses per-user `ui.assistant_color` from
-`~/.config/motoko/config.json` with `purple` as the default. System/status lines
-use compact `sys`.
+`~/.config/motoko/config.json` with `purple` as the default. If
+`MOTOKO_ALIAS_COLOR` is set to a valid Motoko color, it takes precedence; if it
+is invalid, Motoko falls back to `purple`. System/status lines use compact
+`sys`, and report-like output such as `/sources`, `/status`, `/model-routes`,
+`/identity`, `/permissions`, and `/retrieval-debug` highlights labels and
+warnings only at render time. Saved conversation and artifact text stays plain.
 Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.

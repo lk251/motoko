@@ -137,7 +137,8 @@ Avoid for now:
 Current UI direction:
 
 - Motoko's name in chat should use per-user `ui.assistant_color` from
-  `~/.config/motoko/config.json`; the default remains purple.
+  `~/.config/motoko/config.json`, with `MOTOKO_ALIAS_COLOR` allowed as the
+  NixOS-managed per-realm override; the default remains purple.
 - Motoko's assistant label is `Motoko`, without a `>` suffix; color carries
   the role distinction.
 - System/status lines use compact `sys`, not `System>`.
@@ -181,6 +182,10 @@ Current UI direction:
   study jobs should use the same ledger to resume at a finer granularity.
 - `/sources` should explain why context was included and show context planning
   lanes, not merely list raw source objects.
+- Report-like output such as `/sources`, `/status`, `/model-routes`,
+  `/identity`, `/permissions`, and retrieval diagnostics should be syntax
+  highlighted at terminal render time without storing ANSI escapes in
+  conversation state.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
 - The default spinner should be ASCII everywhere. Braille is an explicit opt-in

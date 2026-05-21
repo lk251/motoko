@@ -81,6 +81,11 @@ not the easiest place to review what changed after a long work session.
   follow-up.
 - Added per-user `ui.assistant_color` config so each account can give Motoko's
   assistant label its own validated terminal color.
+- Added `MOTOKO_ALIAS_COLOR` as a NixOS-managed per-realm override for the
+  assistant label color, falling back to purple when unset or invalid.
+- Added render-time syntax highlighting for report-like output such as
+  `/sources`, `/status`, `/model-routes`, `/identity`, `/permissions`, and
+  retrieval diagnostics while keeping saved state and artifacts plain.
 - Added deterministic answer-grounding audits to `/sources`, so each answer
   reports whether it had excerpt-level evidence, summary/memory context, stale
   context, or no usable grounding for a source-shaped question.

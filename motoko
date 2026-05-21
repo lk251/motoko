@@ -537,6 +537,9 @@ def normalize_ui_color(value, default: str = DEFAULT_ASSISTANT_COLOR) -> str:
 
 
 def assistant_color() -> str:
+    env_color = os.environ.get("MOTOKO_ALIAS_COLOR", "")
+    if env_color.strip():
+        return normalize_ui_color(env_color)
     return normalize_ui_color(load_config().get("ui", {}).get("assistant_color"))
 
 
@@ -547,6 +550,60 @@ def assistant_label(text: str = "Motoko") -> str:
 def command_label(text: str) -> str:
     command, sep, rest = text.partition(" ")
     return style(command, "turquoise", "bold") + (sep + style(rest, "dim") if sep else "")
+
+
+REPORT_LABEL_RE = re.compile(r"^(\s*)([A-Za-z][A-Za-z0-9 _./_-]{0,48}:)(\s*)(.*)$")
+REPORT_ROW_RE = re.compile(r"^(\s*)(\d+\.?)(\s+)(.*)$")
+
+
+def highlight_report_line(line: str) -> str:
+    if not line:
+        return line
+    stripped = line.lstrip()
+    indent = line[: len(line) - len(stripped)]
+    lower = stripped.lower()
+    if stripped.startswith(("/", "motoko ")):
+        return indent + style(stripped, "turquoise", "bold")
+    if lower.startswith(("error:", "error ")):
+        return indent + style(stripped, "red", "bold")
+    if lower.startswith(("warning:", "warning ")):
+        return indent + style(stripped, "yellow", "bold")
+    row_match = REPORT_ROW_RE.match(line)
+    if row_match:
+        return (
+            row_match.group(1)
+            + style(row_match.group(2), "turquoise", "bold")
+            + row_match.group(3)
+            + row_match.group(4)
+        )
+    label_match = REPORT_LABEL_RE.match(line)
+    if label_match:
+        label = label_match.group(2)
+        label_key = label[:-1].strip().lower()
+        color = "yellow" if label_key in {"warning", "warnings"} else "turquoise"
+        if label_key in {"error", "failed", "failure"}:
+            color = "red"
+        elif label_key in {"reflection", "diagnosis", "action", "guide"}:
+            color = "magenta"
+        return (
+            label_match.group(1)
+            + style(label, color, "bold")
+            + label_match.group(3)
+            + label_match.group(4)
+        )
+    if stripped.endswith(":") and len(stripped) <= 72:
+        return indent + style(stripped, "turquoise", "bold")
+    if stripped.startswith(("- ", "* ")):
+        return indent + style(stripped[:2], "dim") + stripped[2:]
+    return line
+
+
+def highlight_report_text(text: str) -> str:
+    return "\n".join(highlight_report_line(line) for line in text.splitlines())
+
+
+def print_report(text: str) -> None:
+    print(highlight_report_text(text))
 
 
 def slash_command_value(command: str) -> str:
@@ -9288,7 +9345,7 @@ def format_conversation_sources(conv: dict) -> str:
 
 
 def print_sources(conv: dict) -> None:
-    print(format_conversation_sources(conv))
+    print_report(format_conversation_sources(conv))
 
 
 def format_status(conv: dict | None = None) -> str:
@@ -9391,7 +9448,7 @@ def format_status(conv: dict | None = None) -> str:
 
 
 def print_status(conv: dict | None = None) -> None:
-    print(format_status(conv))
+    print_report(format_status(conv))
 
 
 def maybe_set_title(conv: dict, text: str) -> None:
@@ -11185,6 +11242,8 @@ class MotokoTui:
                     continue
                 if code:
                     wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix))))
+                elif role == "system":
+                    wrapped.extend(wrap_display_line(highlight_report_line(raw_line), width - len(strip_ansi(prefix))))
                 elif raw_line.startswith(("/", "motoko ")):
                     wrapped.extend(wrap_display_line(style(raw_line, "turquoise"), width - len(strip_ansi(prefix))))
                 elif raw_line.startswith(("- ", "* ", "  /", "  motoko")):
@@ -11293,7 +11352,7 @@ def chat_loop(conv: dict) -> None:
             print_command_menu()
             continue
         if user_text == "/about":
-            print(format_about())
+            print_report(format_about())
             continue
         if user_text == "/exit":
             save_conversation(conv)
@@ -11394,7 +11453,7 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/index-quality" or user_text.startswith("/index-quality "):
             selector = user_text[len("/index-quality") :].strip() or None
-            print(format_index_quality_gate(index_quality_gate(load_index(selector))))
+            print_report(format_index_quality_gate(index_quality_gate(load_index(selector))))
             continue
         if user_text == "/index-repair" or user_text.startswith("/index-repair "):
             selector = user_text[len("/index-repair") :].strip() or None
@@ -11402,7 +11461,7 @@ def chat_loop(conv: dict) -> None:
             print(note)
             continue
         if user_text == "/tasks" or user_text.startswith("/tasks "):
-            print(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
+            print_report(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
             continue
         if user_text == "/topics":
             command_topics_text()
@@ -11452,23 +11511,23 @@ def chat_loop(conv: dict) -> None:
             print_status(conv)
             continue
         if user_text == "/model-routes":
-            print(format_model_routes(include_defaults=True))
+            print_report(format_model_routes(include_defaults=True))
             continue
         if user_text == "/retrieval-eval":
-            print(format_retrieval_eval_report(run_retrieval_eval()))
+            print_report(format_retrieval_eval_report(run_retrieval_eval()))
             continue
         if user_text == "/retrieval-debug" or user_text.startswith("/retrieval-debug "):
             query = user_text[len("/retrieval-debug") :].strip() or context_query_text(conv, conv.get("title", ""))
             try:
-                print(format_retrieval_debug_report(run_retrieval_debug(query, conv=conv)))
+                print_report(format_retrieval_debug_report(run_retrieval_debug(query, conv=conv)))
             except SystemExit as exc:
                 print(exc)
             continue
         if user_text == "/identity":
-            print(format_identity())
+            print_report(format_identity())
             continue
         if user_text == "/permissions":
-            print(format_permissions())
+            print_report(format_permissions())
             continue
         if user_text.startswith("/permissions set "):
             command_permissions_set(user_text[len("/permissions set ") :].strip())
@@ -12026,7 +12085,7 @@ def command_tasks(args) -> None:
     for index_id in args.index or []:
         index = load_index_exact(index_id)
         conv["context_items"].append(context_item_from_index(index))
-    print(format_task_candidates_from_chat(conv, " ".join(args.query)))
+    print_report(format_task_candidates_from_chat(conv, " ".join(args.query)))
 
 
 def print_corpus_profile(index: dict) -> None:
@@ -12082,7 +12141,7 @@ def command_index_repair(args) -> None:
 
 def command_index_quality(args) -> None:
     index = load_index(args.index)
-    print(format_index_quality_gate(index_quality_gate(index)))
+    print_report(format_index_quality_gate(index_quality_gate(index)))
 
 
 def command_indexes_text() -> None:
@@ -12288,13 +12347,16 @@ def command_profile(args) -> None:
         raise SystemExit("unknown profile command")
 
 
+def command_about(_args) -> None:
+    print_report(format_about())
+
+
 def command_status(_args) -> None:
     print_status()
 
 
 def command_model_routes(_args) -> None:
-    print(format_model_routes(include_defaults=True))
-    print(background_lanes_text())
+    print_report(format_model_routes(include_defaults=True) + "\n" + background_lanes_text())
 
 
 def command_model_eval(args) -> None:
@@ -12304,7 +12366,7 @@ def command_model_eval(args) -> None:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(format_worker_model_eval_report(report))
+        print_report(format_worker_model_eval_report(report))
 
 
 def command_retrieval_eval(args) -> None:
@@ -12314,7 +12376,7 @@ def command_retrieval_eval(args) -> None:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(format_retrieval_eval_report(report))
+        print_report(format_retrieval_eval_report(report))
 
 
 def command_retrieval_debug(args) -> None:
@@ -12328,12 +12390,12 @@ def command_retrieval_debug(args) -> None:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(format_retrieval_debug_report(report))
+        print_report(format_retrieval_debug_report(report))
 
 
 def command_identity(args) -> None:
     if args.identity_command in (None, "show"):
-        print(format_identity())
+        print_report(format_identity())
     elif args.identity_command == "path":
         print(config_path())
     else:
@@ -12342,7 +12404,7 @@ def command_identity(args) -> None:
 
 def command_permissions(args) -> None:
     if args.permissions_command in (None, "show"):
-        print(format_permissions())
+        print_report(format_permissions())
     elif args.permissions_command == "set":
         command_permissions_set(args.mode)
     elif args.permissions_command == "path":
@@ -12377,7 +12439,7 @@ def main(argv: list[str]) -> int:
     help_cmd.set_defaults(func=lambda _args: print(format_help()))
 
     about_cmd = sub.add_parser("about", help="show Motoko version and runtime details")
-    about_cmd.set_defaults(func=lambda _args: print(format_about()))
+    about_cmd.set_defaults(func=command_about)
 
     chat = sub.add_parser("chat", help="start a new chat")
     chat.add_argument("--title")
