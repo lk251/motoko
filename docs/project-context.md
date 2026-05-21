@@ -224,6 +224,11 @@ The implementation path is:
 - make prompts cache-friendly and reuse Motoko-owned compressed context and
   output caches, while leaving true prompt/KV reuse to the NixOS llama.cpp
   service layer;
+- audit derived index storage before adding a vector store: report duplicate
+  reference chunks, unique stored chunk bodies, logical corpus bytes, stored
+  bytes, missing duplicate targets, and superseded partial/index cleanup
+  opportunities. Cleanup should start as inspectable safe-GC planning, not
+  aggressive deletion.
 - add embedding and reranker storage only after the schema, provenance,
   invalidation, migration, privacy boundaries, eval fixtures, and NixOS service
   shape are explicit.
@@ -242,6 +247,23 @@ an evaluation harness for study reuse, context sufficiency, and background
 study state, so Motoko can test streaming, maintenance, recall, profile, TUI,
 and study behavior without requiring Qwen, llama.cpp, or Javier's personal
 documents to be available to Codex.
+
+Current sequencing notes:
+
+- The strongest-chat-route rule is an operating constraint, not a large pending
+  implementation. Keep enforcing it while routing smaller worker models only to
+  bounded summary, label, dossier, and audit tasks that pass evals.
+- Prompt and output caching already exists for deterministic model-derived
+  background artifacts. The remaining prompt/KV-cache work belongs mostly to
+  the NixOS llama.cpp service layer, while Motoko should keep prompts stable,
+  explicit, and easy to cache.
+- Before embedding/reranker production work, Motoko should implement the
+  storage-audit and safe-cleanup report above. The same accounting will inform
+  vector-store sizing, invalidation, and migration.
+- Reflection should grow as specific inspectable audits: answer grounding,
+  retrieval preview/debug, index storage health, memory maintenance health, and
+  later model-assisted audit passes. Do not build an opaque open-ended
+  self-reflection loop.
 
 ## Roadmap Candidates
 
@@ -274,6 +296,9 @@ efficiency. The likely shape is:
   normalized-text comparison, simhash/minhash-style fingerprints, email
   quote/signature stripping, and later embedding similarity if an embedding
   store exists;
+- consider a content-addressed derived-text store once the storage audit proves
+  it is worthwhile, so chunk text can be stored once by SHA256 while indexes
+  keep per-file/per-chunk provenance references;
 - use lightweight classifiers or routing models only for uncertain cases after
   deterministic file/path/content heuristics are exhausted.
 
