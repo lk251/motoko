@@ -121,6 +121,38 @@ def test_maintenance_state_and_phases(m):
             m.propose_memories_bounded = old_propose
 
 
+def test_memory_proposal_sends_transcript_not_assistant_prefill(m):
+    with isolated_state():
+        conv = m.new_conversation("Memory proposal")
+        conv["id"] = "memory-prefill"
+        conv["messages"] = [
+            {"role": "user", "content": "I prefer concise terminal output."},
+            {"role": "assistant", "content": "Understood."},
+            {"role": "user", "content": "Motoko should preserve privacy boundaries."},
+            {"role": "assistant", "content": "I will keep that in mind."},
+        ]
+
+        calls = []
+        old_call_model = m.call_model
+        try:
+            def fake_call_model(messages, **kwargs):
+                calls.append((messages, kwargs))
+                return "MEMORY: Javier prefers concise terminal output."
+
+            m.call_model = fake_call_model
+            proposals = m.propose_memories(conv)
+        finally:
+            m.call_model = old_call_model
+
+        assert proposals == ["Javier prefers concise terminal output."]
+        messages, kwargs = calls[0]
+        assert [item["role"] for item in messages] == ["system", "user"]
+        assert "Conversation transcript:" in messages[-1]["content"]
+        assert "assistant: I will keep that in mind." in messages[-1]["content"]
+        assert messages[-1]["role"] != "assistant"
+        assert kwargs["route"] == m.MODEL_ROUTE_MEMORY
+
+
 def test_interrupted_maintenance_resume(m):
     with isolated_state():
         conv = m.new_conversation("Resume")
@@ -3892,6 +3924,7 @@ def main() -> int:
     tests = [
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
+        test_memory_proposal_sends_transcript_not_assistant_prefill,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

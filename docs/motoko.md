@@ -583,6 +583,10 @@ visible immediately after `/study`.
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to
 herself and saves them automatically with provenance `auto-model-proposed`.
+For model compatibility, memory proposal sends recent turns as a quoted
+conversation transcript inside a user request instead of replaying raw
+assistant turns as chat history; this avoids assistant-prefill behavior on
+thinking-mode local worker routes while preserving source text for extraction.
 Duplicate detection reinforces existing similar memories by updating their
 `seen_count`, tags, and last-seen metadata instead of creating many copies of
 the same fact. Stored memories remain inspectable with `motoko memory review`,

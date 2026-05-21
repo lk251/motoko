@@ -17508,9 +17508,10 @@ def propose_memories(
         memories, say exactly: NO_MEMORY
         """
     ).strip()
+    transcript = conversation_transcript_for_model(conv)
     messages = [
         {"role": "system", "content": prompt},
-        *conv.get("messages", [])[-MAX_RECENT_MESSAGES:],
+        {"role": "user", "content": f"Conversation transcript:\n{transcript}"},
     ]
     proposal = call_model(
         messages,
@@ -17621,6 +17622,20 @@ def maybe_generate_conversation_title(
     conv["title_generated"] = now()
     save_conversation(conv)
     return title
+
+
+def conversation_transcript_for_model(conv: dict, *, limit: int = MAX_RECENT_MESSAGES, max_chars: int = 12000) -> str:
+    lines = []
+    for msg in conv.get("messages", [])[-limit:]:
+        role = str(msg.get("role", "message") or "message")
+        if role not in {"user", "assistant", "system", "summary", "error", "queued"}:
+            role = "message"
+        content = str(msg.get("content", "") or "").strip()
+        if not content:
+            continue
+        lines.append(f"{role}: {content}")
+    transcript = "\n\n".join(lines).strip()
+    return compact_text(transcript, max_chars) if max_chars > 0 else transcript
 
 
 def memorize_conversation(conv: dict) -> None:

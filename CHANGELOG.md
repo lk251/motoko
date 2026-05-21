@@ -5,6 +5,9 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Changed memory proposal requests to pass recent conversation turns as a
+  quoted transcript inside a user message, avoiding assistant-prefill failures
+  on Qwen thinking-mode worker routes.
 - Changed TUI chat role labels to compact colored glyph markers, added
   phase-aware `Preparing`/`Answering` elapsed rows plus a final `Worked for`
   separator, and made prose wrapping prefer word boundaries while leaving code
