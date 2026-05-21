@@ -1070,6 +1070,89 @@ def test_list_indexes_ignores_progress_files(m):
         assert "phase" not in rows[0]
 
 
+def test_superseded_partials_do_not_look_unfinished(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "tasks.org"
+        source.write_text("* TODO Fresh task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        partial = {
+            "id": "old-partial",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-21T12:00:00+00:00",
+            "updated": "2026-05-21T12:30:00+00:00",
+            "status": "failed",
+            "completed_files": 1,
+            "total_files": 1,
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        index = dict(partial)
+        index["id"] = "new-complete"
+        index["created"] = "2026-05-21T13:00:00+00:00"
+        index.pop("updated", None)
+        index.pop("status", None)
+        m.atomic_write(m.index_partial_path(partial["id"]), json.dumps(partial, ensure_ascii=False, indent=2) + "\n")
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+
+        assert [row["id"] for row in m.list_partial_indexes()] == ["old-partial"]
+        assert [row["id"] for row in m.list_superseded_partial_indexes()] == ["old-partial"]
+        assert m.list_resumable_partial_indexes() == []
+        assert m.unfinished_work_notice() == ""
+        assert m.completion_ids("partial-index") == []
+        assert m.select_partial_index("old-partial")["id"] == "old-partial"
+
+
+def test_context_catalog_prefers_latest_index_per_family(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "logbook.org"
+        source.write_text("* TODO Fresh logbook task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        base = {
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        old_index = {
+            **base,
+            "id": "old-index",
+            "created": "2026-05-21T12:00:00+00:00",
+            "corpus_summary": "old stale logbook map",
+        }
+        new_index = {
+            **base,
+            "id": "new-index",
+            "created": "2026-05-21T13:00:00+00:00",
+            "corpus_summary": "new fresh logbook map",
+        }
+        m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
+        m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
+
+        catalog = m.build_context_catalog()
+        catalog_ids = [row["id"] for row in catalog["indexes"]]
+        assert "new-index" in catalog_ids
+        assert "old-index" not in catalog_ids
+        ranked = m.ranked_indexes_for_query("logbook")
+        assert [row["id"] for row in ranked] == ["new-index"]
+
+
 def test_index_resume_after_model_timeout(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1453,6 +1536,8 @@ def main() -> int:
         test_index_progress_eta_tracks_model_timing,
         test_summary_block_estimates_expand_progress_total,
         test_list_indexes_ignores_progress_files,
+        test_superseded_partials_do_not_look_unfinished,
+        test_context_catalog_prefers_latest_index_per_family,
         test_index_resume_after_model_timeout,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
         test_org_task_signals_drive_retrieval,

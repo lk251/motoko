@@ -914,8 +914,37 @@ def list_partial_indexes() -> list[dict]:
             continue
         if isinstance(row, dict):
             rows.append(row)
-    rows.sort(key=lambda row: row.get("updated", row.get("created", "")), reverse=True)
+    rows.sort(key=stored_record_sort_key, reverse=True)
     return rows
+
+
+def partial_index_superseded(partial: dict, indexes: list[dict] | None = None) -> bool:
+    partial_id = str(partial.get("id", "")).strip()
+    partial_time = stored_record_timestamp(partial)
+    if partial_time is None and not partial_id:
+        return False
+    key = index_family_key(partial)
+    for index in indexes if indexes is not None else list_indexes():
+        if index_family_key(index) != key:
+            continue
+        if partial_id and str(index.get("id", "")).strip() == partial_id:
+            return True
+        index_time = stored_record_timestamp(index)
+        if index_time is not None and partial_time is not None and index_time >= partial_time:
+            return True
+    return False
+
+
+def list_resumable_partial_indexes() -> list[dict]:
+    partials = list_partial_indexes()
+    indexes = list_indexes()
+    return [partial for partial in partials if not partial_index_superseded(partial, indexes)]
+
+
+def list_superseded_partial_indexes() -> list[dict]:
+    partials = list_partial_indexes()
+    indexes = list_indexes()
+    return [partial for partial in partials if partial_index_superseded(partial, indexes)]
 
 
 def request_work_pause(reason: str = "manual") -> dict:
@@ -3476,9 +3505,59 @@ def load_index_exact(index_id: str) -> dict:
     return load_index(index_id)
 
 
+def stored_record_timestamp(row: dict) -> _dt.datetime | None:
+    for key in ("updated", "created"):
+        parsed = parse_timestamp(str(row.get(key, "")))
+        if parsed is not None:
+            return parsed.astimezone(_dt.timezone.utc)
+    return None
+
+
+def stored_record_sort_key(row: dict) -> tuple[float, str]:
+    parsed = stored_record_timestamp(row)
+    timestamp = parsed.timestamp() if parsed is not None else 0.0
+    return (timestamp, str(row.get("id", "")))
+
+
+def index_family_key(index: dict) -> str:
+    raw = "\0".join(
+        [
+            str(index.get("root", "")),
+            str(index.get("glob") or AUTO_INDEX_GLOB),
+            str(index.get("name", "")),
+        ]
+    )
+    return sha256_hex(raw.encode("utf-8"))[:16]
+
+
+def latest_indexes_by_family(indexes: list[dict] | None = None) -> list[dict]:
+    latest: dict[str, dict] = {}
+    for index in indexes if indexes is not None else list_indexes():
+        key = index_family_key(index)
+        current = latest.get(key)
+        if current is None or stored_record_sort_key(index) > stored_record_sort_key(current):
+            latest[key] = index
+    rows = list(latest.values())
+    rows.sort(key=stored_record_sort_key, reverse=True)
+    return rows
+
+
+def latest_index_for_family(index: dict, indexes: list[dict] | None = None) -> dict | None:
+    key = index_family_key(index)
+    candidates = [
+        candidate
+        for candidate in (indexes if indexes is not None else list_indexes())
+        if index_family_key(candidate) == key
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=stored_record_sort_key, reverse=True)
+    return candidates[0]
+
+
 def select_partial_index(index_id: str | None = None) -> dict:
     return prompt_for_selection(
-        list_partial_indexes(),
+        list_partial_indexes() if index_id else list_resumable_partial_indexes(),
         kind="partial index",
         label_func=partial_index_label,
         selector=index_id,
@@ -3532,7 +3611,7 @@ def safe_load_json(path: pathlib.Path) -> dict | None:
 
 def build_context_catalog() -> dict:
     indexes = []
-    for index in list_indexes()[:CONTEXT_CATALOG_INDEX_LIMIT]:
+    for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
         status, warnings = index_staleness(index)
         indexes.append(
             {
@@ -3715,7 +3794,7 @@ def ranked_topics_for_query(query: str) -> list[dict]:
 
 def ranked_indexes_for_query(query: str) -> list[dict]:
     rows = rank_items_by_query(
-        list_indexes(),
+        latest_indexes_by_family(),
         query,
         ["name", "root", "corpus_summary", "signal_summary", "corpus_profile_text"],
     )
@@ -6261,14 +6340,7 @@ def write_heavy_study_state(state: dict) -> None:
 
 
 def heavy_index_key(index: dict) -> str:
-    raw = "\0".join(
-        [
-            index.get("root", ""),
-            index.get("glob", AUTO_INDEX_GLOB),
-            index.get("name", ""),
-        ]
-    )
-    return sha256_hex(raw.encode("utf-8"))[:16]
+    return index_family_key(index)
 
 
 def heavy_index_cooldown_active(index: dict, state: dict) -> bool:
@@ -6413,6 +6485,7 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
         return ["heavy index refresh paused by request"]
     state = read_heavy_study_state()
     notes = []
+    available_indexes = list_indexes()
     for item in list(conv.get("context_items", [])):
         if item.get("kind") != "index" or not item.get("id"):
             continue
@@ -6421,6 +6494,11 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
         except SystemExit as exc:
             notes.append(f"heavy index refresh skipped: {exc}")
             continue
+        latest = latest_index_for_family(index, available_indexes)
+        if latest and latest.get("id") != index.get("id"):
+            replace_attached_index(conv, index.get("id", ""), latest)
+            notes.append(f"attached newer index {index.get('id')} -> {latest.get('id')}")
+            index = latest
         summary = index_change_summary(index)
         reason = heavy_index_refresh_reason(summary)
         if reason is None:
@@ -6513,10 +6591,10 @@ def matching_cwd_partial_indexes(root: pathlib.Path, pattern: str = AUTO_INDEX_G
     glob_text = pattern or AUTO_INDEX_GLOB
     rows = [
         index
-        for index in list_partial_indexes()
+        for index in list_resumable_partial_indexes()
         if index.get("root") == root_text and (index.get("glob") or AUTO_INDEX_GLOB) == glob_text
     ]
-    rows.sort(key=lambda index: index.get("updated", index.get("created", "")), reverse=True)
+    rows.sort(key=stored_record_sort_key, reverse=True)
     return rows
 
 
@@ -6598,7 +6676,7 @@ def resume_partial_index(index_id: str | None = None, *, progress_callback=None)
 
 
 def unfinished_work_notice(limit: int = 3) -> str:
-    partials = list_partial_indexes()
+    partials = list_resumable_partial_indexes()
     if not partials:
         return ""
     lines = ["Unfinished Motoko work:"]
@@ -8236,7 +8314,8 @@ def format_status(conv: dict | None = None) -> str:
     study_state = read_study_state()
     study_jobs = read_study_jobs(limit=1)
     index_jobs = active_index_progress()
-    partial_indexes = list_partial_indexes()
+    partial_indexes = list_resumable_partial_indexes()
+    superseded_partial_indexes = list_superseded_partial_indexes()
     catalog = read_context_catalog()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
@@ -8273,7 +8352,10 @@ def format_status(conv: dict | None = None) -> str:
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
         f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
         f"active index jobs: {len(index_jobs)}",
-        f"partial indexes: {len(partial_indexes)}",
+        (
+            f"partial indexes: {len(partial_indexes)} resumable"
+            + (f", {len(superseded_partial_indexes)} superseded" if superseded_partial_indexes else "")
+        ),
         f"index artifact upgrades due: {index_upgrades}",
         f"context catalog: {'updated ' + relative_time(catalog.get('updated', '')) if catalog else 'not built'}",
         f"indexes: {len(indexes)} ({index_files} file(s), {index_chunks} chunk(s), {duplicate_chunks} duplicate chunk(s), {human_bytes(derived_bytes)} stored text)",
@@ -8565,7 +8647,7 @@ def completion_ids(kind: str) -> list[str]:
     if kind == "index":
         return [row.get("id", "") for row in list_indexes()]
     if kind == "partial-index":
-        return [row.get("id", "") for row in list_partial_indexes()]
+        return [row.get("id", "") for row in list_resumable_partial_indexes()]
     if kind == "topic":
         return [row.get("id", "") for row in list_topics()]
     if kind == "dossier":
@@ -9868,7 +9950,7 @@ class MotokoTui:
                     ),
                     "description": row.get("root", ""),
                 }
-                for row in list_partial_indexes()
+                for row in list_resumable_partial_indexes()
                 if not current or item_matches_selector(row, current)
             ][:20]
         if first in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality"} and len(words) <= 2:
@@ -10958,8 +11040,9 @@ def command_index_quality(args) -> None:
 def command_indexes_text() -> None:
     rows = list_indexes()
     jobs = active_index_progress()
-    partials = list_partial_indexes()
-    if not rows and not jobs and not partials:
+    partials = list_resumable_partial_indexes()
+    superseded_partials = list_superseded_partial_indexes()
+    if not rows and not jobs and not partials and not superseded_partials:
         print("No document indexes yet.")
         return
     for job in jobs:
@@ -10977,6 +11060,11 @@ def command_indexes_text() -> None:
         if partial.get("error"):
             print(f"  error: {partial.get('error')}")
         print(f"  resume: motoko index-resume {partial.get('id', '')}")
+    if superseded_partials:
+        print(
+            f"superseded partials: {len(superseded_partials)} "
+            "(newer completed index exists for the same corpus)"
+        )
     for index in rows:
         files = len(index.get("files", []))
         chunks = sum(len(file_item.get("chunks", [])) for file_item in index.get("files", []))

@@ -255,6 +255,54 @@ def test_heavy_index_refresh_replaces_attached_index(m):
     assert conv["context_items"][0]["id"] == "new-index"
 
 
+def test_heavy_index_refresh_attaches_newer_completed_index(m):
+    docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
+    docs.mkdir()
+    source = docs / "logbook.org"
+    source.write_text("* TODO Current log entry\n", encoding="utf-8")
+    m.add_allowed_dir(str(docs))
+
+    old_index = {
+        "id": "old-index",
+        "name": "orgfiles",
+        "root": str(docs),
+        "glob": "*.org",
+        "created": "2026-05-21T12:00:00+00:00",
+        "corpus_summary": "old org index",
+        "files": [
+            {
+                "path": str(source),
+                "source_fingerprint": m.source_fingerprint(source),
+                "chunks": [],
+            }
+        ],
+    }
+    new_index = dict(old_index)
+    new_index["id"] = "new-index"
+    new_index["created"] = "2026-05-21T13:00:00+00:00"
+    new_index["corpus_summary"] = "new org index"
+    write_json(m.index_path(old_index["id"]), old_index)
+    write_json(m.index_path(new_index["id"]), new_index)
+
+    conv = m.new_conversation("Heavy index")
+    conv["id"] = "heavy-index"
+    conv["context_items"] = [m.context_item_from_index(old_index)]
+    m.save_conversation(conv)
+
+    old_build = m.build_document_index
+    try:
+        def fail_build(*_args, **_kwargs):
+            raise AssertionError("fresh newer index should be attached without rebuilding")
+
+        m.build_document_index = fail_build
+        notes = m.refresh_heavy_attached_indexes(conv)
+    finally:
+        m.build_document_index = old_build
+
+    assert any("attached newer index old-index -> new-index" in note for note in notes)
+    assert conv["context_items"][0]["id"] == "new-index"
+
+
 def test_routed_index_quality_gate_preserves_org_evidence(m):
     docs = pathlib.Path(tempfile.mkdtemp()) / "docs"
     docs.mkdir()
@@ -454,12 +502,14 @@ def main() -> int:
     with isolated_state():
         test_heavy_index_refresh_replaces_attached_index(m)
     with isolated_state():
+        test_heavy_index_refresh_attaches_newer_completed_index(m)
+    with isolated_state():
         test_routed_index_quality_gate_preserves_org_evidence(m)
     with isolated_state():
         test_worker_model_eval_scores_routes_and_json_artifacts(m)
     with isolated_state():
         test_worker_model_eval_flags_missing_facts(m)
-    print("10 motoko evaluation checks passed")
+    print("11 motoko evaluation checks passed")
     return 0
 
 

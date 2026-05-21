@@ -91,6 +91,12 @@ not the easiest place to review what changed after a long work session.
 - Made heavy corpus indexing checkpoint completed files into partial indexes,
   resume after timeout/pause/interruption, rescan for newly added files, and
   expose `/pause`, `/resume-work`, and `motoko index-resume`.
+- Suppressed superseded failed partial indexes from unfinished-work prompts,
+  completions, and current-directory learning offers when a newer completed
+  index exists for the same corpus.
+- Made context catalog/retrieval prefer the newest completed index per corpus
+  family and replace older attached indexes with newer completed ones before
+  starting another heavy refresh.
 
 ## 2026-05-18
 
