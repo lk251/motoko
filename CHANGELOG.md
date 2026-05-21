@@ -95,6 +95,9 @@ not the easiest place to review what changed after a long work session.
 - Added `/retrieval-debug QUERY` and `motoko retrieval-debug QUERY` to explain
   file/chunk retrieval scoring, path boosts, task-signal boosts, freshness, and
   diagnosis notes before moving to embedding/reranker work.
+- Added `/retrieval-preview QUERY` and `motoko retrieval-preview QUERY` to show
+  the selected source context before a model is called, making prompt-use
+  failures easier to distinguish from retrieval failures.
 - Documented a tentative roadmap candidate for future retrieval components,
   including embedding stores, rerankers, token accounting, richer lexical
   retrieval, deterministic extractors, parser-backed artifacts, deduplication,

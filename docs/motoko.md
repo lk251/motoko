@@ -472,6 +472,7 @@ Useful in-chat commands:
 /model-routes
 /retrieval-eval
 /retrieval-debug QUERY
+/retrieval-preview QUERY
 /identity
 /permissions
 /permissions set MODE
@@ -733,6 +734,15 @@ ranking failure, stale data, missing chunk text, weak summaries, or final
 prompt/synthesis failure. In chat, `/retrieval-debug QUERY` uses attached
 indexes first; from the shell, `motoko retrieval-debug QUERY` uses the best
 matching current indexes unless `--index INDEX_ID` is supplied.
+
+`retrieval-preview QUERY` is the no-model companion to `retrieval-debug`. It
+shows the source audit, source list, context plan, and the attached
+document/dossier context excerpt that Motoko would send for a question, without
+asking any LLM to answer. Use it when deciding whether the right evidence was
+retrieved at all. In chat, `/retrieval-preview QUERY` uses the current
+conversation attachments; from the shell, `motoko retrieval-preview QUERY`
+auto-selects the best matching current index unless `--conversation` or
+`--index INDEX_ID` is supplied.
 
 `model-eval` uses synthetic, source-grounded fixtures for chunk summaries, file
 summaries, lightweight labels/classification, and corpus synthesis. It asks

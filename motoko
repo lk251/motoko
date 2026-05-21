@@ -142,6 +142,7 @@ MAX_CONTEXT_FILES = 24
 DEFAULT_MAX_DERIVED_INDEX_BYTES = 200 * 1024 * 1024 * 1024
 DEFAULT_PERMISSION_MODE = "repo-read"
 REPO_COMMAND_OUTPUT_CHARS = 24000
+RETRIEVAL_PREVIEW_CHARS = 12000
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -359,6 +360,7 @@ SLASH_COMMANDS = [
     ("/model-routes", "show model worker routes"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
     ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
+    ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
     ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
@@ -420,6 +422,7 @@ SHELL_COMMANDS = [
     "model-eval",
     "retrieval-eval",
     "retrieval-debug",
+    "retrieval-preview",
     "identity",
     "permissions",
     "repo",
@@ -440,6 +443,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/model-routes",
     "/retrieval-eval",
     "/retrieval-debug",
+    "/retrieval-preview",
     "/identity",
     "/permissions",
     "/personality",
@@ -8556,6 +8560,69 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     ).strip(), sources
 
 
+def extract_prompt_section(prompt: str, heading: str, stop_headings: list[str]) -> str:
+    start_marker = f"{heading}:\n"
+    start = prompt.find(start_marker)
+    if start < 0:
+        return ""
+    start += len(start_marker)
+    stop = len(prompt)
+    for stop_heading in stop_headings:
+        marker = f"\n\n{stop_heading}:"
+        found = prompt.find(marker, start)
+        if found >= 0:
+            stop = min(stop, found)
+    return prompt[start:stop].strip()
+
+
+def format_source_kind_counts(source_kinds: dict) -> str:
+    if not source_kinds:
+        return "-"
+    return ", ".join(f"{kind}={count}" for kind, count in sorted(source_kinds.items()))
+
+
+def format_retrieval_preview(conv: dict, query: str = "", *, max_chars: int = RETRIEVAL_PREVIEW_CHARS) -> str:
+    query = query.strip() or context_query_text(conv, conv.get("title", ""))
+    if not query.strip():
+        raise SystemExit("usage: /retrieval-preview QUERY")
+    prompt, sources = build_system_prompt_and_sources(conv, query)
+    audit = answer_grounding_audit(query, "", sources)
+    context_plan = next((source for source in sources if source.get("kind") == "context-plan"), None)
+    attached_context = extract_prompt_section(
+        prompt,
+        "Attached documents and dossiers",
+        ["Available private context catalog", "Context selection plan"],
+    )
+    lines = [
+        f"retrieval preview: {compact_text(query, 180)}",
+        (
+            f"source audit: {audit.get('status', 'unknown')}  "
+            f"strong {audit.get('strong_evidence_sources', 0)}  "
+            f"context {audit.get('context_sources', 0)}  "
+            f"total {audit.get('total_sources', 0)}"
+        ),
+        f"source kinds: {format_source_kind_counts(audit.get('source_kinds', {}))}",
+    ]
+    if audit.get("warnings"):
+        for warning in audit.get("warnings", [])[:4]:
+            lines.append(f"warning: {warning}")
+    if context_plan:
+        lines.extend(["", format_context_plan(context_plan)])
+    lines.extend(
+        [
+            "",
+            "sources:",
+            format_sources([source for source in sources if source.get("kind") != "context-plan"][:40]),
+            "",
+            "attached context excerpt:",
+            bounded_output(attached_context or "No explicit documents, indexes, topics, or dossiers were selected.", max_chars),
+            "",
+            "diagnosis guide: if the right excerpt is absent, investigate recall/ranking/staleness with /retrieval-debug. If it is present but the answer was weak, investigate prompt/final synthesis.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]:
     prompt, sources = build_system_prompt_and_sources(conv, query)
     messages = [{"role": "system", "content": prompt}]
@@ -8967,6 +9034,7 @@ HELP_SECTIONS = [
             ("/model-routes", "show chat and background worker model routes"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
             ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
+            ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
             ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
@@ -9061,6 +9129,7 @@ HELP_SECTIONS = [
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
             ("motoko retrieval-eval", "evaluate retrieval grounding on synthetic corpus fixtures"),
             ("motoko retrieval-debug QUERY", "explain file/chunk retrieval scoring for a query"),
+            ("motoko retrieval-preview QUERY", "show retrieved context without calling a model"),
             ("motoko identity", "show active account/realm identity"),
             ("motoko permissions", "show feature permissions and index defaults"),
             ("motoko permissions set MODE", "set default feature permission mode"),
@@ -10379,6 +10448,9 @@ class MotokoTui:
                     self.append("system", format_retrieval_debug_report(report))
                 except SystemExit as exc:
                     self.append("error", str(exc))
+            elif text == "/retrieval-preview" or text.startswith("/retrieval-preview "):
+                query = text[len("/retrieval-preview") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
+                self.append("system", format_retrieval_preview(self.conv, query))
             elif text == "/identity":
                 self.append("system", format_identity())
             elif text == "/permissions":
@@ -11523,6 +11595,13 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
+        if user_text == "/retrieval-preview" or user_text.startswith("/retrieval-preview "):
+            query = user_text[len("/retrieval-preview") :].strip() or context_query_text(conv, conv.get("title", ""))
+            try:
+                print_report(format_retrieval_preview(conv, query))
+            except SystemExit as exc:
+                print(exc)
+            continue
         if user_text == "/identity":
             print_report(format_identity())
             continue
@@ -12393,6 +12472,32 @@ def command_retrieval_debug(args) -> None:
         print_report(format_retrieval_debug_report(report))
 
 
+def conversation_for_retrieval_preview(query: str, *, conversation_id: str | None = None, index_ids: list[str] | None = None) -> dict:
+    if conversation_id:
+        conv = load_conversation(conversation_id)
+        conv = dict(conv)
+        conv["context_items"] = list(conv.get("context_items", []))
+    else:
+        conv = new_conversation(f"retrieval preview: {slug_title(query)}")
+    for index_id in index_ids or []:
+        conv.setdefault("context_items", []).append(context_item_from_index(load_index_exact(index_id)))
+    if not conv.get("context_items"):
+        best = best_relevant_index(query)
+        if best is not None:
+            conv.setdefault("context_items", []).append(context_item_from_index(best))
+    return conv
+
+
+def command_retrieval_preview(args) -> None:
+    query = " ".join(args.query)
+    conv = conversation_for_retrieval_preview(
+        query,
+        conversation_id=args.conversation,
+        index_ids=args.index,
+    )
+    print_report(format_retrieval_preview(conv, query, max_chars=max(1000, args.max_chars)))
+
+
 def command_identity(args) -> None:
     if args.identity_command in (None, "show"):
         print_report(format_identity())
@@ -12499,6 +12604,13 @@ def main(argv: list[str]) -> int:
     retrieval_debug.add_argument("--write", action="store_true", help="save JSON report under Motoko state")
     retrieval_debug.add_argument("--json", action="store_true", help="print JSON report")
     retrieval_debug.set_defaults(func=command_retrieval_debug)
+
+    retrieval_preview = sub.add_parser("retrieval-preview", help="show retrieved context without calling a model")
+    retrieval_preview.add_argument("query", nargs="+")
+    retrieval_preview.add_argument("--conversation", help="preview retrieval in a saved conversation")
+    retrieval_preview.add_argument("--index", action="append", help="attach a specific document index for preview")
+    retrieval_preview.add_argument("--max-chars", type=int, default=RETRIEVAL_PREVIEW_CHARS, help="maximum attached context characters to show")
+    retrieval_preview.set_defaults(func=command_retrieval_preview)
 
     identity = sub.add_parser("identity", help="show account/realm identity")
     identity_sub = identity.add_subparsers(dest="identity_command")

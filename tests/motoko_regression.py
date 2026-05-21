@@ -1110,6 +1110,70 @@ def test_report_highlighting_is_render_only(m):
                 os.environ["NO_COLOR"] = old_no_color
 
 
+def test_tui_report_commands_do_not_persist_system_output(m):
+    with isolated_state():
+        conv = m.new_conversation("Reports")
+        conv["id"] = "reports"
+        conv["messages"] = [
+            {"role": "user", "content": "What did sources use?"},
+            {"role": "assistant", "content": "A short answer."},
+        ]
+        conv["last_sources"] = [
+            {
+                "kind": "answer-audit",
+                "status": "grounded",
+                "reflection": "Used excerpt evidence.",
+                "recommended_action": "none",
+            }
+        ]
+        write_conversation(m, conv)
+        saved_before = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+
+        ui.handle_command("/status")
+        ui.handle_command("/sources")
+
+        assert any(row.get("role") == "system" and "identity:" in row.get("content", "") for row in ui.messages)
+        assert any(row.get("role") == "system" and "answer audit" in row.get("content", "") for row in ui.messages)
+        assert conv["messages"] == saved_before["messages"]
+        saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved_after["messages"] == saved_before["messages"]
+
+
+def test_retrieval_preview_shows_context_without_model_call(m):
+    with isolated_state():
+        conv = m.new_conversation("Preview")
+        conv["context_items"] = [
+            {
+                "kind": "file",
+                "path": "/tmp/tasks.org",
+                "content": "* TODO Prepare tomorrow plan\nDEADLINE: <2026-05-22 Fri>\n",
+                "bytes": 60,
+            }
+        ]
+        report = m.format_retrieval_preview(conv, "tomorrow plan")
+        assert "retrieval preview:" in report
+        assert "source audit:" in report
+        assert "attached context excerpt:" in report
+        assert "Prepare tomorrow plan" in report
+        assert "/tmp/tasks.org" in report
+        assert "\033[" not in report
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.handle_command("/retrieval-preview tomorrow plan")
+        assert any("Prepare tomorrow plan" in row.get("content", "") for row in ui.messages)
+        assert conv["messages"] == []
+
+
 def test_index_limits(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1832,6 +1896,8 @@ def main() -> int:
         test_identity_config,
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
+        test_tui_report_commands_do_not_persist_system_output,
+        test_retrieval_preview_shows_context_without_model_call,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

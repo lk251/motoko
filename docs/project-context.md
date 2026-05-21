@@ -216,6 +216,8 @@ The implementation path is:
 - add `retrieval-debug` before embeddings/rerankers, so real-use failures can
   be separated into recall, ranking, stale data, chunking, summary, or
   prompt/final-synthesis problems quickly;
+- add no-model retrieval previews that show the exact selected context before
+  generation, so users can tell whether the right evidence reached the prompt;
 - keep final user-facing chat on the strongest configured chat route while
   smaller routes continue to help with summaries, labels, dossiers, and other
   bounded background work after they pass evals;

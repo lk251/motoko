@@ -68,6 +68,9 @@ Design constraints:
 - `motoko retrieval-debug QUERY` explains deterministic file/chunk retrieval
   scores, boosts, freshness, and diagnosis notes before adding embedding or
   reranker machinery.
+- `motoko retrieval-preview QUERY` shows the source context Motoko would send
+  for a question without calling a model, so retrieval failures can be separated
+  from final synthesis failures.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under
