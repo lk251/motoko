@@ -235,6 +235,11 @@ def test_spinner_and_input_wrapping(m):
     assert row_offset == 0
     assert col == 7
 
+    rows, row_offset, col = m.fixed_prompt_input_display("alpha beta gamma", 16, 14)
+    assert [m.strip_ansi(row).rstrip() for row in rows] == ["> alpha beta", "  gamma"]
+    assert row_offset == 1
+    assert col == 8
+
 
 def test_phase_timer_key_ignores_progress_counters(m):
     left = "bg-heavy: vectorizing(model) orgfiles batch 29/129 parallel 32 rows 2700/10525 eta 1m50s"
@@ -1754,9 +1759,11 @@ def test_report_highlighting_is_render_only(m):
 
             ui = object.__new__(m.MotokoTui)
             ui.messages = [{"role": "system", "content": "identity: Motoko"}]
+            ui.answer_entry = None
+            ui.generating = False
             rows = ui.body_display(80)
             assert "\033[" in rows[0]
-            assert m.strip_ansi(rows[0]).startswith("sys identity: Motoko")
+            assert m.strip_ansi(rows[0]).startswith("› identity: Motoko")
         finally:
             m.sys.stdout = old_stdout
             m.sys.__stdout__ = old_real_stdout
@@ -1768,6 +1775,30 @@ def test_report_highlighting_is_render_only(m):
                 os.environ.pop("NO_COLOR", None)
             else:
                 os.environ["NO_COLOR"] = old_no_color
+
+
+def test_tui_role_markers_working_and_worked_line(m):
+    with isolated_state():
+        ui = object.__new__(m.MotokoTui)
+        active = {"role": "assistant", "content": ""}
+        ui.messages = [
+            {"role": "system", "content": "identity: Motoko"},
+            {"role": "assistant", "content": "Done answer."},
+            active,
+            {"role": "worked", "content": "6m 32s"},
+        ]
+        ui.answer_entry = active
+        ui.generating = True
+        ui.answer_started_monotonic = time.monotonic() - 173
+        ui.answer_phase_started_monotonic = time.monotonic() - 32
+        ui.answer_phase = "answering"
+
+        rows = [m.strip_ansi(row) for row in ui.body_display(60) if row.strip()]
+        assert rows[0].startswith("› identity: Motoko")
+        assert rows[1].startswith("› Done answer.")
+        assert rows[2].startswith("● Answering (32s)")
+        assert rows[3].startswith("Worked for 6m 32s ")
+        assert "─" in rows[3]
 
 
 def test_tui_report_commands_do_not_persist_system_output(m):
@@ -3898,6 +3929,7 @@ def main() -> int:
         test_identity_config,
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
+        test_tui_role_markers_working_and_worked_line,
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,
         test_tui_prompt_is_saved_before_context_preparation,

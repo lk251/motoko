@@ -139,9 +139,12 @@ Current UI direction:
 - Motoko's name in chat should use per-user `ui.assistant_color` from
   `~/.config/motoko/config.json`, with `MOTOKO_ALIAS_COLOR` allowed as the
   NixOS-managed per-realm override; the default remains purple.
-- Motoko's assistant label is `Motoko`, without a `>` suffix; color carries
-  the role distinction.
-- System/status lines use compact `sys`, not `System>`.
+- Chat body assistant and system rows use compact `›` markers instead of text
+  labels; the active answer status row uses `● Preparing (...)` or
+  `● Answering (...)`, and completed answers leave a dim `Worked for ...`
+  separator across the chat width.
+- Prose in the prompt and main chat should wrap on word boundaries when
+  possible; code/preformatted text should remain literal and easy to copy.
 - User input prompt should be just `>`, not `You>`.
 - Titles, command text, and supporting UI can be turquoise.
 - Raw TTY usability matters as much as graphical terminals.

@@ -835,6 +835,19 @@ def human_duration(seconds: int | float | None) -> str:
     return f"{secs}s"
 
 
+def human_duration_words(seconds: int | float | None) -> str:
+    if seconds is None:
+        return "?"
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
 def phase_timer_key(phase: str) -> str:
     phase = str(phase or "")
     phase = re.sub(r"\s+batch\s+\d+/\d+.*$", "", phase)
@@ -15188,10 +15201,42 @@ def display_width(text: str) -> int:
     return sum(cell_width(char) for char in strip_ansi(text))
 
 
-def split_cells(text: str, width: int) -> list[tuple[str, int, int]]:
+def split_cells(text: str, width: int, *, word_wrap: bool = False) -> list[tuple[str, int, int]]:
     width = max(1, width)
     if not text:
         return [("", 0, 0)]
+    if word_wrap:
+        segments: list[tuple[str, int, int]] = []
+        start = 0
+        length = len(text)
+        while start < length:
+            idx = start
+            current_width = 0
+            last_break = None
+            while idx < length:
+                char = text[idx]
+                char_width = cell_width(char)
+                if idx > start and current_width + char_width > width:
+                    break
+                if idx == start and char_width > width:
+                    idx += 1
+                    break
+                current_width += char_width
+                idx += 1
+                if char.isspace():
+                    last_break = idx
+                if current_width >= width:
+                    break
+            if idx >= length:
+                segments.append((text[start:length], start, length))
+                break
+            if last_break is not None and last_break > start:
+                end = last_break
+            else:
+                end = max(start + 1, idx)
+            segments.append((text[start:end], start, end))
+            start = end
+        return segments or [("", 0, 0)]
     segments: list[tuple[str, int, int]] = []
     start = 0
     current: list[str] = []
@@ -15222,41 +15267,103 @@ def cursor_segment_index(segments: list[tuple[str, int, int]], cursor: int) -> i
     return len(segments) - 1
 
 
-def wrap_display_line(text: str, width: int) -> list[str]:
+def ansi_tokens(text: str) -> list[tuple[str, str, int]]:
+    tokens = []
+    ansi_re = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    idx = 0
+    while idx < len(text):
+        match = ansi_re.match(text, idx)
+        if match:
+            tokens.append(("ansi", match.group(0), 0))
+            idx = match.end()
+            continue
+        char = text[idx]
+        tokens.append(("char", char, cell_width(char)))
+        idx += 1
+    return tokens
+
+
+def active_sgr_before(tokens: list[tuple[str, str, int]], end: int) -> str:
+    active = ""
+    for kind, value, _width in tokens[:end]:
+        if kind == "ansi" and value.endswith("m"):
+            active = "" if value == "\033[0m" else value
+    return active
+
+
+def trim_trailing_space_tokens(tokens: list[tuple[str, str, int]], start: int, end: int) -> int:
+    while end > start and tokens[end - 1][0] == "char" and tokens[end - 1][1].isspace():
+        end -= 1
+    return end
+
+
+def skip_leading_space_tokens(tokens: list[tuple[str, str, int]], start: int) -> int:
+    while start < len(tokens) and tokens[start][0] == "char" and tokens[start][1].isspace():
+        start += 1
+    return start
+
+
+def render_ansi_token_segment(tokens: list[tuple[str, str, int]], start: int, end: int) -> str:
+    end = trim_trailing_space_tokens(tokens, start, end)
+    if start >= end:
+        return ""
+    active = active_sgr_before(tokens, start)
+    line = active
+    for _kind, value, _width in tokens[start:end]:
+        line += value
+    if active and not line.endswith("\033[0m"):
+        line += "\033[0m"
+    return line
+
+
+def wrap_display_part(text: str, width: int, *, word_wrap: bool) -> list[str]:
+    tokens = ansi_tokens(text)
+    if not tokens:
+        return [""]
+    lines = []
+    start = 0
+    while start < len(tokens):
+        idx = start
+        current_width = 0
+        last_break = None
+        while idx < len(tokens):
+            kind, value, char_width = tokens[idx]
+            if kind == "ansi":
+                idx += 1
+                continue
+            if idx > start and current_width + char_width > width:
+                break
+            if idx == start and char_width > width:
+                idx += 1
+                break
+            current_width += char_width
+            idx += 1
+            if value.isspace():
+                last_break = idx
+            if current_width >= width:
+                break
+        if idx >= len(tokens):
+            lines.append(render_ansi_token_segment(tokens, start, len(tokens)))
+            break
+        if word_wrap and last_break is not None and last_break > start:
+            end = last_break
+            lines.append(render_ansi_token_segment(tokens, start, end))
+            start = skip_leading_space_tokens(tokens, end)
+        else:
+            end = max(start + 1, idx)
+            lines.append(render_ansi_token_segment(tokens, start, end))
+            start = end
+    return lines or [""]
+
+
+def wrap_display_line(text: str, width: int, *, word_wrap: bool = True) -> list[str]:
     if width <= 4:
         return [strip_ansi(text)[:width]]
     if not text:
         return [""]
     chunks = []
-    ansi_re = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
     for part in str(text).splitlines() or [""]:
-        line = ""
-        line_width = 0
-        active_sgr = ""
-        idx = 0
-        while idx < len(part):
-            match = ansi_re.match(part, idx)
-            if match:
-                escape = match.group(0)
-                line += escape
-                if escape.endswith("m"):
-                    active_sgr = "" if escape == "\033[0m" else escape
-                idx = match.end()
-                continue
-            char = part[idx]
-            char_width = cell_width(char)
-            if line and line_width + char_width > width:
-                if active_sgr:
-                    line += "\033[0m"
-                chunks.append(line)
-                line = active_sgr
-                line_width = 0
-            line += char
-            line_width += char_width
-            idx += 1
-        if active_sgr and not line.endswith("\033[0m"):
-            line += "\033[0m"
-        chunks.append(line)
+        chunks.extend(wrap_display_part(part, width, word_wrap=word_wrap))
     return chunks or [""]
 
 
@@ -15271,7 +15378,7 @@ def fixed_prompt_input_display(
     prompt_width = display_width(prompt)
     usable = max(10, width - prompt_width)
     cursor = max(0, min(cursor, len(input_buffer)))
-    segments = split_cells(input_buffer, usable)
+    segments = split_cells(input_buffer, usable, word_wrap=True)
     if (
         cursor == len(input_buffer)
         and segments
@@ -15295,6 +15402,30 @@ def fixed_prompt_input_display(
         prefix = style(prompt, "turquoise", "bold") if segment_index == 0 else " " * prompt_width
         rows.append(prefix + line)
     return rows, cursor_row_offset, cursor_col
+
+
+def tui_marker(color: str, *, active: bool = False) -> str:
+    return style(("●" if active else "›") + " ", color, "bold")
+
+
+def chat_phase_label(phase: str) -> str:
+    phase = str(phase or "").strip().lower()
+    if phase.startswith("chat:"):
+        phase = phase.split(":", 1)[1].strip()
+    return {
+        "preparing": "Preparing",
+        "answering": "Answering",
+    }.get(phase, "Working")
+
+
+def working_text(phase: str, elapsed_seconds: float) -> str:
+    return chat_phase_label(phase) + " " + style(f"({human_duration_words(int(max(0, elapsed_seconds)))})", "dim")
+
+
+def worked_line(duration: str, width: int) -> str:
+    label = f"Worked for {duration} "
+    filler = "─" * max(0, width - display_width(label))
+    return style(label, "dim") + style(filler, "dim")
 
 
 def utf8_key_from_first_byte(fd: int, first: bytes) -> str:
@@ -15353,6 +15484,8 @@ class MotokoTui:
         self.cancel_event = threading.Event()
         self.pending_prompts: collections.deque[str] = collections.deque()
         self.answer_entry: dict | None = None
+        self.answer_started_monotonic = 0.0
+        self.answer_phase_started_monotonic = 0.0
         self.last_render = 0.0
         self.tui_spinner_frames = spinner_frames() or ["*"]
         self.tui_spinner_index = 0
@@ -16198,6 +16331,9 @@ class MotokoTui:
         if explicit_saved:
             self.append("system", f"memory saved from this prompt ({explicit_saved})")
         self.answer_entry = self.append("assistant", "")
+        now = time.monotonic()
+        self.answer_started_monotonic = now
+        self.answer_phase_started_monotonic = now
         self.answer_phase = "preparing"
         chat_route = model_route(MODEL_ROUTE_CHAT)
         if endpoint_is_unix(chat_route.get("endpoint", "")):
@@ -16270,7 +16406,10 @@ class MotokoTui:
                     self.answer_entry["content"] += event[1]
                     changed = True
             elif kind == "answer_phase":
-                self.answer_phase = event[1]
+                new_phase = event[1]
+                if new_phase != self.answer_phase:
+                    self.answer_phase_started_monotonic = time.monotonic()
+                self.answer_phase = new_phase
                 changed = True
             elif kind == "done":
                 reply, sources = event[1], event[2]
@@ -16281,6 +16420,10 @@ class MotokoTui:
                 self.answer_phase = ""
                 self.answer_entry = None
                 self.status = "ready"
+                if self.answer_started_monotonic:
+                    self.append("worked", human_duration_words(int(time.monotonic() - self.answer_started_monotonic)))
+                self.answer_started_monotonic = 0.0
+                self.answer_phase_started_monotonic = 0.0
                 changed = True
                 if self.pending_prompts:
                     next_prompt = self.pending_prompts.popleft()
@@ -16301,12 +16444,16 @@ class MotokoTui:
                 self.generating = False
                 self.answer_phase = ""
                 self.answer_entry = None
+                self.answer_started_monotonic = 0.0
+                self.answer_phase_started_monotonic = 0.0
                 self.status = "answer stopped"
                 changed = True
             elif kind == "error":
                 self.generating = False
                 self.answer_phase = ""
                 self.answer_entry = None
+                self.answer_started_monotonic = 0.0
+                self.answer_phase_started_monotonic = 0.0
                 self.append("error", event[1])
                 self.status = "ready"
                 changed = True
@@ -16754,10 +16901,24 @@ class MotokoTui:
         for entry in self.messages:
             role = entry.get("role", "?")
             content = entry.get("content", "")
+            active_answer = bool(role == "assistant" and entry is self.answer_entry and self.generating)
+            if active_answer:
+                phase_started = self.answer_phase_started_monotonic or self.answer_started_monotonic or time.monotonic()
+                lines.append(
+                    tui_marker(assistant_color(), active=True)
+                    + working_text(self.answer_phase, time.monotonic() - phase_started)
+                )
+                lines.append("")
+            if role == "worked":
+                lines.append(worked_line(str(content), width))
+                lines.append("")
+                continue
+            if active_answer and not content:
+                continue
             if role == "user":
                 prefix = style("> ", "turquoise", "bold")
             elif role == "assistant":
-                prefix = assistant_label("Motoko ")
+                prefix = tui_marker(assistant_color())
             elif role == "queued":
                 prefix = style("queued ", "yellow", "bold")
             elif role == "error":
@@ -16765,15 +16926,15 @@ class MotokoTui:
             elif role == "summary":
                 prefix = style("summary ", "magenta", "bold")
             else:
-                prefix = style("sys ", "yellow", "bold")
+                prefix = tui_marker("yellow")
             wrapped = []
             for raw_line in content.splitlines() or [""]:
                 if raw_line.startswith("```"):
                     code = not code
-                    wrapped.extend(wrap_display_line(style(raw_line, "magenta"), width - len(strip_ansi(prefix))))
+                    wrapped.extend(wrap_display_line(style(raw_line, "magenta"), width - len(strip_ansi(prefix)), word_wrap=False))
                     continue
                 if code:
-                    wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix))))
+                    wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix)), word_wrap=False))
                 elif role == "system":
                     wrapped.extend(wrap_display_line(highlight_report_line(raw_line), width - len(strip_ansi(prefix))))
                 elif raw_line.startswith(("/", "motoko ")):

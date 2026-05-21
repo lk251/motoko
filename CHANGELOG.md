@@ -5,6 +5,10 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Changed TUI chat role labels to compact colored glyph markers, added
+  phase-aware `Preparing`/`Answering` elapsed rows plus a final `Worked for`
+  separator, and made prose wrapping prefer word boundaries while leaving code
+  blocks literal.
 - Added this changelog as the durable home for the short "what changed" lists
   from accepted Motoko work.
 - Quieted stale maintenance from a different conversation on startup. Motoko
