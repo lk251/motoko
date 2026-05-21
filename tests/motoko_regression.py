@@ -365,6 +365,73 @@ class LoadingThenOkHandler(BaseHTTPRequestHandler):
         return
 
 
+class EmbeddingHandler(BaseHTTPRequestHandler):
+    payloads = []
+    paths = []
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.paths.append(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        self.__class__.payloads.append(payload)
+        inputs = payload.get("input", [])
+        if isinstance(inputs, str):
+            inputs = [inputs]
+        data = []
+        for idx, text in enumerate(inputs):
+            text = str(text).lower()
+            vector = [
+                1.0 if "vector" in text else 0.0,
+                1.0 if "deadline" in text else 0.0,
+                1.0 if "task" in text else 0.0,
+                0.25,
+            ]
+            data.append({"object": "embedding", "index": idx, "embedding": vector})
+        response = {"object": "list", "data": data, "model": payload.get("model", "embedding-test")}
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode("utf-8"))
+
+    def log_message(self, *_args):
+        return
+
+
+class RerankHandler(BaseHTTPRequestHandler):
+    payloads = []
+    paths = []
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.paths.append(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            payload = {}
+        self.__class__.payloads.append(payload)
+        documents = payload.get("documents", [])
+        if not isinstance(documents, list):
+            documents = []
+        results = []
+        for idx, document in enumerate(documents):
+            text = str(document).lower()
+            score = 0.95 if "deadline" in text and "priority" in text else 0.15
+            results.append({"index": idx, "relevance_score": score})
+        response = {"object": "list", "results": results, "model": payload.get("model", "rerank-test")}
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(response).encode("utf-8"))
+
+    def log_message(self, *_args):
+        return
+
+
 class UnixHTTPServer(socketserver.UnixStreamServer):
     allow_reuse_address = True
 
@@ -1402,6 +1469,202 @@ def test_vector_build_and_query_lexical_baseline(m):
         assert "vector eval:" in m.format_vector_eval_report(vector_eval)
 
 
+def test_embedding_vector_store_uses_catalog_route(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            content = "* TODO [#A] Finish vector deadline task\nDEADLINE: <2026-05-22 Fri>\n"
+            (docs / "tasks.org").write_text(content, encoding="utf-8")
+            digest = m.sha256_hex(content.encode("utf-8"))
+            index = {
+                "id": "embedding-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "corpus_summary": "Embedding route test corpus.",
+                "files": [
+                    {
+                        "path": str(docs / "tasks.org"),
+                        "source_fingerprint": m.source_fingerprint(docs / "tasks.org"),
+                        "summary": "Task file with current priorities.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Task to finish the vector deadline work.",
+                                "content": content,
+                                "content_bytes": len(content.encode("utf-8")),
+                                "content_sha256": digest,
+                            }
+                        ],
+                    }
+                ],
+            }
+            socket_path = tmp / "embed.sock"
+            server = UnixHTTPServer(str(socket_path), EmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"unix://{socket_path}",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("embedding-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+            routes = m.local_model_routes_for_capability(
+                kind="embedding",
+                tasks=m.EMBEDDING_TASKS,
+                endpoint_path="/v1/embeddings",
+            )
+            assert routes[0]["route"] == "qwen3-embedding-0b6"
+            assert routes[0]["embedding_dimensions"] == 4
+            store = m.build_vector_store("embedding-index", method=m.EMBEDDING_VECTOR_METHOD)
+            assert store["method"] == m.EMBEDDING_VECTOR_METHOD
+            assert store["production_embedding"] is True
+            assert store["dims"] == 4
+            assert store["embedding_route"]["catalog_route"] == "qwen3-embedding-0b6"
+            assert store["rows"][0]["vector"]
+            report = m.query_vector_store(store, "vector deadline task", limit=3)
+            assert report["rows"]
+            assert EmbeddingHandler.paths == ["/v1/embeddings", "/v1/embeddings"]
+            assert EmbeddingHandler.payloads[0]["model"] == "qwen3-embedding-0.6b-q8-0"
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_vector_query_can_use_catalog_reranker_route(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    RerankHandler.payloads = []
+    RerankHandler.paths = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            first = "* Notes\nAlpha notes about errands.\n"
+            second = "* TODO [#A] Priority deadline task\nDEADLINE: <2026-05-22 Fri>\nAlpha notes.\n"
+            first_path = docs / "notes.org"
+            second_path = docs / "priority.org"
+            first_path.write_text(first, encoding="utf-8")
+            second_path.write_text(second, encoding="utf-8")
+            index = {
+                "id": "rerank-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "corpus_summary": "Rerank route test corpus.",
+                "files": [
+                    {
+                        "path": str(first_path),
+                        "summary": "General alpha notes.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "General alpha notes.",
+                                "content": first,
+                                "content_sha256": m.sha256_hex(first.encode("utf-8")),
+                            }
+                        ],
+                    },
+                    {
+                        "path": str(second_path),
+                        "summary": "Priority deadline task notes.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Priority deadline task.",
+                                "content": second,
+                                "content_sha256": m.sha256_hex(second.encode("utf-8")),
+                            }
+                        ],
+                    },
+                ],
+            }
+            socket_path = tmp / "rerank.sock"
+            server = UnixHTTPServer(str(socket_path), RerankHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-reranker-0b6": {
+                        "kind": "reranker",
+                        "endpoint": f"unix://{socket_path}",
+                        "modelId": "qwen3-reranker-0.6b-q6-k",
+                        "tasks": ["reranker", "rerank", "vector_rerank"],
+                        "endpoint_paths": ["/v1/rerank"],
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("rerank-index"), json.dumps(index, ensure_ascii=False) + "\n")
+            store = m.build_vector_store_from_index(index, method=m.LEXICAL_VECTOR_METHOD, write=False)
+
+            report = m.query_vector_store(store, "alpha notes", limit=2, rerank=True)
+            assert report["rerank"] is True
+            assert report["rerank_route"]["catalog_route"] == "qwen3-reranker-0b6"
+            assert report["rows"][0]["path"].endswith("priority.org")
+            assert report["rows"][0]["rerank_score"] == 0.95
+            assert RerankHandler.paths == ["/v1/rerank"]
+            assert RerankHandler.payloads[0]["model"] == "qwen3-reranker-0.6b-q6-k"
+            assert len(RerankHandler.payloads[0]["documents"]) == 2
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
 def test_index_limits(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -2129,6 +2392,8 @@ def main() -> int:
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,
+        test_embedding_vector_store_uses_catalog_route,
+        test_vector_query_can_use_catalog_reranker_route,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

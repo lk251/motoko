@@ -476,7 +476,7 @@ Useful in-chat commands:
 /index-storage
 /vector-plan [INDEX_ID]
 /vector-build [INDEX_ID]
-/vector-query QUERY
+/vector-query [--rerank] QUERY
 /vector-eval
 /identity
 /permissions
@@ -957,22 +957,30 @@ bytes versus physical stored bytes, missing duplicate targets, orphan chunk
 files, and cleanup opportunities. It is intentionally read-only: safe cleanup
 starts as an inspectable plan, not automatic deletion.
 
-Use `motoko vector-plan` or `/vector-plan [INDEX_ID]` before enabling embedding
+Use `motoko vector-plan` or `/vector-plan [INDEX_ID]` before trusting embedding
 or reranker storage. The report is also read-only: it sizes planned
 realm-local vector stores for raw chunk text, chunk summaries, file summaries,
 labels, memories, conversations, and dossiers; lists provenance and
 invalidation fields; checks retrieval-eval and storage-audit gates; and reports
-whether the local model catalog advertises embedding or reranker routes. This
-is a contract and readiness report, not production vector indexing.
+whether the local model catalog advertises embedding or reranker routes by
+`kind`, `tasks`, and `endpoint_paths`. This is a contract and readiness report,
+not an automatic trust decision.
 
-Use `motoko vector-build [INDEX_ID]` to build the current deterministic
-`lexical-hash-v1` vector baseline for an index, and `motoko vector-query QUERY`
-to inspect its ranked rows. This writes only Motoko-owned derived state under
-`~/.local/state/motoko/vector-stores/`. It is not a semantic embedding model;
-it exists so vector-store schemas, invalidation, source provenance, query
-inspection, and future eval plumbing can be tested before NixOS exposes real
-embedding/reranker workers. Use `motoko vector-eval` to run the same synthetic
-retrieval fixtures through this baseline without writing a store.
+Use `motoko vector-build [INDEX_ID]` to build a realm-local vector store for an
+index, and `motoko vector-query QUERY` to inspect its ranked rows. This writes
+only Motoko-owned derived state under `~/.local/state/motoko/vector-stores/`.
+The default `--method auto` uses a NixOS-declared `/v1/embeddings` route when
+one is present in `~/.config/motoko/local-models.json`; otherwise it falls back
+to the deterministic `lexical-hash-v1` store. Use
+`motoko vector-build --method lexical-hash-v1 [INDEX_ID]` when you want the
+no-model control path, or `motoko vector-build --method embedding-v1 [INDEX_ID]`
+when you want to require the approved embedding route. Use
+`motoko vector-eval` for the lexical synthetic fixtures, and
+`motoko vector-eval --method embedding-v1` to measure the configured embedding
+route without writing a store. Use `motoko vector-query --rerank QUERY` to
+rerank the top vector candidates through the configured `/v1/rerank` route; it
+is explicit so normal queries do not pay the extra model-call cost until
+reranker quality has been measured.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

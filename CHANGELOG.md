@@ -102,15 +102,22 @@ not the easiest place to review what changed after a long work session.
   storage, duplicate chunk references, missing duplicate targets, orphan chunk
   files, and safe cleanup opportunities without deleting anything.
 - Added `/vector-plan` and `motoko vector-plan` as a read-only readiness report
-  for future embedding/reranker storage, including sizing, provenance,
+  for embedding/reranker storage, including sizing, provenance,
   invalidation, privacy, and eval gates.
 - Added `/vector-build`, `/vector-query`, `motoko vector-build`, and
   `motoko vector-query` for a deterministic `lexical-hash-v1` vector baseline
-  that tests vector storage and query plumbing before semantic embedding routes
-  are deployed.
+  that tests vector storage and query plumbing without starting model workers.
 - Added `motoko vector-eval` and `/vector-eval` so the deterministic vector
   baseline is checked against the synthetic retrieval fixtures without calling
   a model.
+- Added catalog-discovered `embedding-v1` vector stores. When
+  `local-models.json` exposes a realm-local `/v1/embeddings` route,
+  `motoko vector-build --method auto` uses it; `lexical-hash-v1` remains the
+  no-model control path, and `motoko vector-eval --method embedding-v1` can
+  measure the embedding route explicitly.
+- Added explicit `motoko vector-query --rerank QUERY` support for
+  catalog-discovered `/v1/rerank` routes, keeping reranker precision testing
+  opt-in until measured.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.

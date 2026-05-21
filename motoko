@@ -96,6 +96,10 @@ VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
+EMBEDDING_VECTOR_METHOD = "embedding-v1"
+VECTOR_METHOD_AUTO = "auto"
+EMBEDDING_TASKS = {"embedding", "embed", "vector", "vector_embedding", "vector_index", "vector_query"}
+RERANKER_TASKS = {"reranker", "rerank", "vector_rerank"}
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
 MODEL_CACHEABLE_SUMMARY_ROUTES = {
     MODEL_ROUTE_INDEX_CHUNK,
@@ -150,7 +154,9 @@ REPO_COMMAND_OUTPUT_CHARS = 24000
 RETRIEVAL_PREVIEW_CHARS = 12000
 DEFAULT_VECTOR_DIMS = 1024
 DEFAULT_LEXICAL_VECTOR_DIMS = 256
+EMBEDDING_BATCH_SIZE = 32
 VECTOR_QUERY_LIMIT = 8
+RERANK_CANDIDATE_LIMIT = 24
 INDEX_CHUNK_CHARS = 12000
 SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
@@ -371,9 +377,9 @@ SLASH_COMMANDS = [
     ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
     ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
     ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
-    ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
-    ("/vector-query QUERY", "query the deterministic vector baseline"),
-    ("/vector-eval", "evaluate the deterministic vector baseline"),
+    ("/vector-build [ID]", "build a realm-local vector store for an index"),
+    ("/vector-query [--rerank] QUERY", "query the latest vector store"),
+    ("/vector-eval", "evaluate vector retrieval fixtures"),
     ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
@@ -1924,6 +1930,100 @@ def normalize_route_cache_policy(raw) -> dict:
     return policy
 
 
+def normalize_endpoint_paths(raw) -> list[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    paths = []
+    for item in raw:
+        value = str(item).strip()
+        if value.startswith("/") and value not in paths:
+            paths.append(value)
+    return paths
+
+
+def route_model_name(raw: dict, catalog: dict | None = None) -> str:
+    catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
+    model_ref = raw.get("model_id") or raw.get("modelId") or raw.get("model") or raw.get("model_name")
+    model_record = {}
+    if isinstance(model_ref, str):
+        candidate = local_model_catalog_models(catalog).get(model_ref)
+        if isinstance(candidate, dict):
+            model_record = candidate
+    for key in ("model", "model_name", "modelId", "model_id", "displayName", "id", "name"):
+        value = raw.get(key) or model_record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def route_int_value(raw: dict, key: str, fallback_key: str | None = None) -> int | None:
+    for candidate in [key, fallback_key]:
+        if not candidate or candidate not in raw:
+            continue
+        try:
+            value = int(raw.get(candidate))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def route_string_value(raw: dict, *keys: str) -> str:
+    for key in keys:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def local_model_route_summary(route_id: str, raw: dict, catalog: dict | None = None) -> dict:
+    catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
+    tasks = raw.get("tasks")
+    task_set = {str(item) for item in tasks} if isinstance(tasks, list) else set()
+    endpoint_paths = normalize_endpoint_paths(
+        raw.get("endpoint_paths") or raw.get("endpointPaths") or raw.get("paths")
+    )
+    model_ref = raw.get("model_id") or raw.get("modelId") or raw.get("model")
+    model_record = local_model_catalog_models(catalog).get(model_ref) if isinstance(model_ref, str) else {}
+    if not isinstance(model_record, dict):
+        model_record = {}
+    manager = catalog.get("manager") if isinstance(catalog.get("manager"), dict) else {}
+    realm = catalog.get("realm") or manager.get("realm") or load_config().get("identity", {}).get("realm")
+    endpoint = str(raw.get("endpoint") or "")
+    if not endpoint and manager.get("kind") == "systemd-socket-worker" and isinstance(realm, str) and realm.strip():
+        endpoint = f"unix:///run/motoko-llm/{realm.strip()}/{route_id}.sock"
+    dimensions = (
+        route_int_value(raw, "embedding_dimensions", "embeddingDimensions")
+        or route_int_value(model_record, "embedding_dimensions", "embeddingDimensions")
+        or route_int_value(raw, "dimensions")
+        or route_int_value(model_record, "dimensions")
+    )
+    return {
+        "route": route_id,
+        "catalog_route": route_id,
+        "kind": str(raw.get("kind") or ""),
+        "model": route_model_name(raw, catalog),
+        "endpoint": endpoint,
+        "endpoint_paths": endpoint_paths,
+        "request_path": endpoint_paths[0] if endpoint_paths else "",
+        "tasks": sorted(task_set),
+        "max_parallel": raw.get("maxParallel") or raw.get("max_parallel") or 1,
+        "embedding_dimensions": dimensions,
+        "manager_kind": str(manager.get("kind") or ""),
+        "model_path": route_string_value(raw, "model_path", "modelPath", "model_file", "modelFile")
+        or route_string_value(model_record, "model_path", "modelPath", "model_file", "modelFile", "path"),
+        "download_url": route_string_value(raw, "download_url", "downloadUrl", "url")
+        or route_string_value(model_record, "download_url", "downloadUrl", "url"),
+        "download_hash": route_string_value(raw, "sha256", "hash")
+        or route_string_value(model_record, "sha256", "hash"),
+        "openai_compatible": bool(raw.get("openai_compatible") or raw.get("openaiCompatible")),
+        "reranker_endpoint_status": str(raw.get("reranker_endpoint_status") or ""),
+    }
+
+
 def local_model_routes_for_tasks(task_names: set[str], catalog: dict | None = None) -> list[dict]:
     catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
     rows = []
@@ -1934,14 +2034,36 @@ def local_model_routes_for_tasks(task_names: set[str], catalog: dict | None = No
         task_set = {str(item) for item in tasks} if isinstance(tasks, list) else set()
         if not (task_names & task_set):
             continue
-        rows.append(
-            {
-                "route": route_id,
-                "model": str(raw.get("model") or raw.get("modelId") or raw.get("model_id") or ""),
-                "endpoint": str(raw.get("endpoint") or ""),
-                "tasks": sorted(task_set),
-            }
+        rows.append(local_model_route_summary(route_id, raw, catalog))
+    return rows
+
+
+def local_model_routes_for_capability(
+    *,
+    kind: str = "",
+    tasks: set[str] | None = None,
+    endpoint_path: str = "",
+    catalog: dict | None = None,
+) -> list[dict]:
+    catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
+    task_set = tasks or set()
+    rows = []
+    for route_id, raw in local_model_catalog_routes(catalog).items():
+        if not isinstance(route_id, str) or not isinstance(raw, dict):
+            continue
+        summary = local_model_route_summary(route_id, raw, catalog)
+        matches_kind = bool(kind) and summary.get("kind") == kind
+        matches_tasks = bool(task_set & set(summary.get("tasks", [])))
+        matches_path = bool(endpoint_path) and endpoint_path in summary.get("endpoint_paths", [])
+        if matches_kind or matches_tasks or matches_path:
+            rows.append(summary)
+    rows.sort(
+        key=lambda row: (
+            0 if endpoint_path and endpoint_path in row.get("endpoint_paths", []) else 1,
+            0 if kind and row.get("kind") == kind else 1,
+            str(row.get("route", "")),
         )
+    )
     return rows
 
 
@@ -1984,15 +2106,21 @@ def merged_local_model_route(route: str) -> dict:
         return {}
     info = {key: value for key, value in raw.items() if isinstance(key, str)}
     info.setdefault("catalog_route", route_id)
-    model_ref = info.get("model_id") or info.get("model") or info.get("model_name")
+    model_ref = info.get("model_id") or info.get("modelId") or info.get("model") or info.get("model_name")
     model_record = {}
     if isinstance(model_ref, str):
         candidate = local_model_catalog_models(catalog).get(model_ref)
         if isinstance(candidate, dict):
             model_record = candidate
-    for key in ("download_url", "url", "sha256", "hash", "model_path"):
+    for key in ("download_url", "url", "sha256", "hash", "model_path", "modelPath", "model_file", "modelFile"):
         if key not in info and isinstance(model_record.get(key), str):
             info[key] = model_record[key]
+    if "download_url" not in info:
+        info["download_url"] = route_string_value(info, "downloadUrl", "url")
+    if "download_hash" not in info:
+        info["download_hash"] = route_string_value(info, "sha256", "hash")
+    if "model_path" not in info:
+        info["model_path"] = route_string_value(info, "modelPath", "model_file", "modelFile")
     if "model" not in info:
         for key in ("model_name", "modelId", "model_id", "displayName", "id", "name"):
             value = raw.get(key) or model_record.get(key)
@@ -2005,6 +2133,12 @@ def merged_local_model_route(route: str) -> dict:
         if manager.get("kind") == "systemd-socket-worker" and isinstance(realm, str) and realm.strip():
             info["endpoint"] = f"unix:///run/motoko-llm/{realm.strip()}/{route}.sock"
     if "request_path" not in info:
+        endpoint_paths = normalize_endpoint_paths(
+            raw.get("endpoint_paths") or raw.get("endpointPaths") or raw.get("paths")
+        )
+        if endpoint_paths:
+            info["endpoint_paths"] = endpoint_paths
+            info["request_path"] = endpoint_paths[0]
         for key in ("path", "http_path", "openai_path"):
             value = raw.get(key)
             if isinstance(value, str) and value.startswith("/"):
@@ -2058,12 +2192,13 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "endpoint": str(route_endpoint),
         "model": str(route_model),
         "request_path": str(request_path),
+        "endpoint_paths": normalize_endpoint_paths(local_route.get("endpoint_paths")),
         "manager_kind": str(local_route.get("manager_kind") or ""),
         "catalog_route": str(local_route.get("catalog_route") or ""),
         "model_path": str(local_route.get("model_path") or ""),
         "max_parallel": local_route.get("maxParallel") or local_route.get("max_parallel") or 1,
         "download_url": str(local_route.get("download_url") or local_route.get("url") or ""),
-        "download_hash": str(local_route.get("sha256") or local_route.get("hash") or ""),
+        "download_hash": str(local_route.get("download_hash") or local_route.get("sha256") or local_route.get("hash") or ""),
         "cache": normalize_route_cache_policy(local_route.get("cache")) if uses_catalog_endpoint else {},
         "metrics_endpoint": str(local_route.get("metrics_endpoint") or "") if uses_catalog_endpoint else "",
         "metrics_path": str(local_route.get("metrics_path") or "") if uses_catalog_endpoint else "",
@@ -6621,8 +6756,16 @@ def vector_plan(index_id: str | None = None, *, dims: int = DEFAULT_VECTOR_DIMS,
     ]
     storage_audit = index_storage_audit()
     retrieval_eval = run_retrieval_eval() if include_eval else {}
-    embedding_routes = local_model_routes_for_tasks({"embedding", "embed", "vector", "vector_embedding"})
-    reranker_routes = local_model_routes_for_tasks({"rerank", "reranker"})
+    embedding_routes = local_model_routes_for_capability(
+        kind="embedding",
+        tasks=EMBEDDING_TASKS,
+        endpoint_path="/v1/embeddings",
+    )
+    reranker_routes = local_model_routes_for_capability(
+        kind="reranker",
+        tasks=RERANKER_TASKS,
+        endpoint_path="/v1/rerank",
+    )
     gates = [
         {
             "name": "retrieval_eval",
@@ -6644,12 +6787,20 @@ def vector_plan(index_id: str | None = None, *, dims: int = DEFAULT_VECTOR_DIMS,
         {
             "name": "embedding_route",
             "status": "available" if embedding_routes else "not-configured",
-            "detail": ", ".join(row.get("route", "") for row in embedding_routes) or "no catalog route advertises embedding tasks yet",
+            "detail": ", ".join(
+                f"{row.get('route', '')} dims={row.get('embedding_dimensions') or '?'} paths={','.join(row.get('endpoint_paths', [])) or '-'}"
+                for row in embedding_routes
+            )
+            or "no catalog route advertises embedding tasks yet",
         },
         {
             "name": "reranker_route",
             "status": "available" if reranker_routes else "not-configured",
-            "detail": ", ".join(row.get("route", "") for row in reranker_routes) or "no catalog route advertises reranker tasks yet",
+            "detail": ", ".join(
+                f"{row.get('route', '')} paths={','.join(row.get('endpoint_paths', [])) or '-'}"
+                for row in reranker_routes
+            )
+            or "no catalog route advertises reranker tasks yet",
         },
         {
             "name": "privacy_boundary",
@@ -6745,10 +6896,257 @@ def format_vector_plan(plan: dict) -> str:
             f"migration: {plan.get('migration_policy', '')}",
             f"security: {plan.get('security_policy', '')}",
             "",
-            "next: add NixOS-declared embedding/reranker routes, then store only schema-versioned realm-local vectors after evals pass.",
+            "next: build schema-versioned realm-local embedding stores, keep lexical evals as the control, then gate reranker use on measured retrieval quality.",
         ]
     )
     return "\n".join(lines)
+
+
+def select_capability_route(
+    *,
+    route_id: str | None = None,
+    kind: str,
+    tasks: set[str],
+    endpoint_path: str,
+) -> dict:
+    rows = local_model_routes_for_capability(kind=kind, tasks=tasks, endpoint_path=endpoint_path)
+    if route_id:
+        route_id = route_id.strip()
+        matches = [
+            row
+            for row in rows
+            if row.get("route") == route_id
+            or str(row.get("route", "")).startswith(route_id)
+            or row.get("catalog_route") == route_id
+        ]
+        if len(matches) != 1:
+            raise SystemExit(f"{kind} route selector must match exactly one route; matched {len(matches)}")
+        return matches[0]
+    if not rows:
+        raise SystemExit(f"No local model route advertises {kind} at {endpoint_path}.")
+    return rows[0]
+
+
+def capability_route_request_info(row: dict, *, default_path: str) -> dict:
+    endpoint_paths = normalize_endpoint_paths(row.get("endpoint_paths"))
+    request_path = default_path if default_path in endpoint_paths else (endpoint_paths[0] if endpoint_paths else default_path)
+    return {
+        "route": str(row.get("route") or row.get("catalog_route") or ""),
+        "catalog_route": str(row.get("catalog_route") or row.get("route") or ""),
+        "endpoint": str(row.get("endpoint") or ""),
+        "request_path": request_path,
+        "model": str(row.get("model") or ""),
+        "manager_kind": str(row.get("manager_kind") or ""),
+        "max_parallel": row.get("max_parallel") or 1,
+        "model_path": str(row.get("model_path") or ""),
+        "download_url": str(row.get("download_url") or ""),
+        "download_hash": str(row.get("download_hash") or ""),
+    }
+
+
+def select_embedding_route(route_id: str | None = None) -> dict:
+    return select_capability_route(
+        route_id=route_id,
+        kind="embedding",
+        tasks=EMBEDDING_TASKS,
+        endpoint_path="/v1/embeddings",
+    )
+
+
+def embedding_route_info(route_id: str | None = None) -> dict:
+    row = select_embedding_route(route_id)
+    info = capability_route_request_info(row, default_path="/v1/embeddings")
+    info["embedding_dimensions"] = row.get("embedding_dimensions")
+    info["endpoint_paths"] = row.get("endpoint_paths", [])
+    return info
+
+
+def select_reranker_route(route_id: str | None = None) -> dict:
+    return select_capability_route(
+        route_id=route_id,
+        kind="reranker",
+        tasks=RERANKER_TASKS,
+        endpoint_path="/v1/rerank",
+    )
+
+
+def reranker_route_info(route_id: str | None = None) -> dict:
+    row = select_reranker_route(route_id)
+    info = capability_route_request_info(row, default_path="/v1/rerank")
+    info["endpoint_paths"] = row.get("endpoint_paths", [])
+    return info
+
+
+def dense_normalize(values) -> list[float]:
+    vector = []
+    for value in values if isinstance(values, list) else []:
+        try:
+            vector.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    norm = sum(value * value for value in vector) ** 0.5
+    if norm <= 0:
+        return []
+    return [round(value / norm, 6) for value in vector]
+
+
+def parse_embedding_response(payload: dict, expected_count: int) -> list[list[float]]:
+    if isinstance(payload.get("embedding"), list):
+        embeddings = [dense_normalize(payload.get("embedding"))]
+    else:
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            raise RuntimeError("embedding response did not contain data")
+        indexed = []
+        for ordinal, row in enumerate(rows):
+            if not isinstance(row, dict):
+                continue
+            embedding = dense_normalize(row.get("embedding"))
+            if not embedding:
+                continue
+            try:
+                index = int(row.get("index", ordinal))
+            except (TypeError, ValueError):
+                index = ordinal
+            indexed.append((index, embedding))
+        indexed.sort(key=lambda item: item[0])
+        embeddings = [embedding for _index, embedding in indexed]
+    if len(embeddings) != expected_count:
+        raise RuntimeError(f"embedding response count mismatch: expected {expected_count}, got {len(embeddings)}")
+    return embeddings
+
+
+def parse_rerank_response(payload, expected_count: int) -> list[float]:
+    if isinstance(payload, dict) and isinstance(payload.get("scores"), list):
+        scores = []
+        for value in payload.get("scores", [])[:expected_count]:
+            try:
+                scores.append(float(value))
+            except (TypeError, ValueError):
+                scores.append(0.0)
+        if len(scores) == expected_count:
+            return scores
+    rows = []
+    if isinstance(payload, dict):
+        raw_rows = payload.get("results")
+        if raw_rows is None:
+            raw_rows = payload.get("data")
+    else:
+        raw_rows = payload
+    if not isinstance(raw_rows, list):
+        raise RuntimeError("rerank response did not contain results")
+    scores_by_index: dict[int, float] = {}
+    for ordinal, row in enumerate(raw_rows):
+        if not isinstance(row, dict):
+            continue
+        try:
+            index = int(row.get("index", row.get("document_index", ordinal)))
+        except (TypeError, ValueError):
+            index = ordinal
+        value = (
+            row.get("relevance_score")
+            if "relevance_score" in row
+            else row.get("score", row.get("rank_score", row.get("logit")))
+        )
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            score = 0.0
+        if 0 <= index < expected_count:
+            scores_by_index[index] = score
+    if not scores_by_index:
+        raise RuntimeError("rerank response did not contain scores")
+    for index in range(expected_count):
+        rows.append(scores_by_index.get(index, 0.0))
+    return rows
+
+
+def rerank_documents(
+    query: str,
+    documents: list[str],
+    *,
+    route_id: str | None = None,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> tuple[list[float], dict]:
+    if not documents:
+        return [], reranker_route_info(route_id)
+    route_info = reranker_route_info(route_id)
+    payload = {
+        "model": route_info["model"],
+        "query": query,
+        "documents": documents,
+        "top_n": len(documents),
+    }
+    try:
+        with open_model_response(route_info, payload, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        hint = local_model_verify_hint(route_info)
+        detail = f"rerank request failed: {exc}"
+        if hint:
+            detail += "\n" + hint
+        raise SystemExit(detail) from exc
+    try:
+        scores = parse_rerank_response(data, len(documents))
+    except RuntimeError as exc:
+        raise SystemExit(f"rerank request failed: {exc}") from exc
+    return scores, route_info
+
+
+def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float = MODEL_TIMEOUT_SECONDS) -> tuple[list[list[float]], dict]:
+    if not texts:
+        return [], embedding_route_info(route_id)
+    route_info = embedding_route_info(route_id)
+    payload = {
+        "model": route_info["model"],
+        "input": texts,
+        "encoding_format": "float",
+    }
+    try:
+        with open_model_response(route_info, payload, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        hint = local_model_verify_hint(route_info)
+        detail = f"embedding request failed: {exc}"
+        if hint:
+            detail += "\n" + hint
+        raise SystemExit(detail) from exc
+    try:
+        embeddings = parse_embedding_response(data, len(texts))
+    except RuntimeError as exc:
+        raise SystemExit(f"embedding request failed: {exc}") from exc
+    return embeddings, route_info
+
+
+def vector_similarity(left, right) -> float:
+    if isinstance(left, dict) and isinstance(right, dict):
+        return sparse_dot(left, right)
+    if isinstance(left, list) and isinstance(right, list):
+        total = 0.0
+        for lval, rval in zip(left, right):
+            try:
+                total += float(lval) * float(rval)
+            except (TypeError, ValueError):
+                continue
+        return total
+    return 0.0
+
+
+def resolve_vector_method(method: str = VECTOR_METHOD_AUTO) -> str:
+    method = str(method or VECTOR_METHOD_AUTO).strip()
+    if method == VECTOR_METHOD_AUTO:
+        try:
+            select_embedding_route()
+        except SystemExit:
+            return LEXICAL_VECTOR_METHOD
+        return EMBEDDING_VECTOR_METHOD
+    if method not in {LEXICAL_VECTOR_METHOD, EMBEDDING_VECTOR_METHOD}:
+        raise SystemExit(
+            f"unsupported vector method {method!r}; choose {VECTOR_METHOD_AUTO}, {LEXICAL_VECTOR_METHOD}, or {EMBEDDING_VECTOR_METHOD}"
+        )
+    if method == EMBEDDING_VECTOR_METHOD:
+        select_embedding_route()
+    return method
 
 
 def vector_store_source_fingerprint(index: dict) -> str:
@@ -6834,12 +7232,13 @@ def build_vector_store_from_index(
     index: dict,
     *,
     dims: int = DEFAULT_LEXICAL_VECTOR_DIMS,
-    method: str = LEXICAL_VECTOR_METHOD,
+    method: str = VECTOR_METHOD_AUTO,
     store_id: str | None = None,
     write: bool = True,
 ) -> dict:
-    if method != LEXICAL_VECTOR_METHOD:
-        raise SystemExit(f"unsupported vector method {method!r}; supported: {LEXICAL_VECTOR_METHOD}")
+    method = resolve_vector_method(method)
+    if method == EMBEDDING_VECTOR_METHOD:
+        return build_embedding_vector_store_from_index(index, store_id=store_id, write=write)
     dims = max(8, int(dims or DEFAULT_LEXICAL_VECTOR_DIMS))
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
@@ -6893,6 +7292,13 @@ def build_vector_store_from_index(
         "row_count": len(rows),
         "note": "Deterministic lexical vector baseline. This validates storage and query plumbing; it is not a semantic embedding model.",
     }
+    store["provenance"].update(
+        {
+            "source_realm": identity_realm(),
+            "security_context": permission_mode(),
+            "input_hash": source_fingerprint,
+        }
+    )
     if write:
         path = vector_store_path(store_id)
         store["path"] = str(path)
@@ -6904,10 +7310,100 @@ def build_vector_store(
     index_id: str | None = None,
     *,
     dims: int = DEFAULT_LEXICAL_VECTOR_DIMS,
-    method: str = LEXICAL_VECTOR_METHOD,
+    method: str = VECTOR_METHOD_AUTO,
 ) -> dict:
     index = load_index(index_id) if index_id else default_vector_index()
     return build_vector_store_from_index(index, dims=dims, method=method)
+
+
+def build_embedding_vector_store_from_index(
+    index: dict,
+    *,
+    store_id: str | None = None,
+    write: bool = True,
+) -> dict:
+    route_info = embedding_route_info()
+    store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    source_fingerprint = vector_store_source_fingerprint(index)
+    candidates = []
+    for file_item in index.get("files", []):
+        for chunk in file_item.get("chunks", []):
+            text = vector_store_row_text(index, file_item, chunk)
+            if not text.strip():
+                continue
+            candidates.append((file_item, chunk, text))
+    rows = []
+    batch_size = max(1, min(env_int("MOTOKO_EMBEDDING_BATCH_SIZE", EMBEDDING_BATCH_SIZE), 128))
+    dimensions = int(route_info.get("embedding_dimensions") or 0)
+    for offset in range(0, len(candidates), batch_size):
+        batch = candidates[offset : offset + batch_size]
+        embeddings, route_info = embed_texts([text for _file_item, _chunk, text in batch])
+        for (file_item, chunk, _text), vector in zip(batch, embeddings):
+            if not vector:
+                continue
+            dimensions = dimensions or len(vector)
+            rows.append(
+                {
+                    "id": f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
+                    "kind": "raw_chunk_embedding",
+                    "index": index.get("id", ""),
+                    "path": file_item.get("path", ""),
+                    "chunk": chunk.get("chunk", ""),
+                    "content_sha256": chunk.get("content_sha256", ""),
+                    "source_fingerprint": chunk.get("content_sha256", ""),
+                    "vector": vector,
+                    "summary": compact_text(chunk.get("summary", "") or file_item.get("summary", ""), 280),
+                }
+            )
+    store = {
+        "schema": VECTOR_STORE_SCHEMA_VERSION,
+        "id": store_id,
+        "created": now(),
+        "realm": identity_realm(),
+        "method": EMBEDDING_VECTOR_METHOD,
+        "vector_format": "dense-json-normalized",
+        "production_embedding": True,
+        "dims": dimensions or int(route_info.get("embedding_dimensions") or 0),
+        "embedding_route": {
+            "catalog_route": route_info.get("catalog_route") or route_info.get("route", ""),
+            "model": route_info.get("model", ""),
+            "request_path": route_info.get("request_path", "/v1/embeddings"),
+            "embedding_dimensions": route_info.get("embedding_dimensions"),
+        },
+        "source_index": {
+            "id": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "created": index.get("created", ""),
+            "fingerprint": source_fingerprint,
+        },
+        "provenance": {
+            "artifact_kind": "vector-store",
+            "artifact_schema": VECTOR_STORE_SCHEMA_VERSION,
+            "schema": VECTOR_STORE_SCHEMA_VERSION,
+            "builder": "motoko",
+            "builder_version": APP_VERSION,
+            "created": now(),
+            "quality_status": "needs-eval",
+            "mode": "model",
+            "route": route_info.get("catalog_route") or route_info.get("route", ""),
+            "model": route_info.get("model", ""),
+            "endpoint": route_info.get("endpoint", ""),
+            "source_realm": identity_realm(),
+            "security_context": permission_mode(),
+            "input_hash": source_fingerprint,
+            "source_sha256": source_fingerprint,
+            "source_fingerprint": {"sha256": source_fingerprint},
+        },
+        "rows": rows,
+        "row_count": len(rows),
+        "note": "Semantic embedding vector store built from the NixOS-declared realm-local embedding route.",
+    }
+    if write:
+        path = vector_store_path(store_id)
+        store["path"] = str(path)
+        atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+    return store
 
 
 def list_vector_stores() -> list[dict]:
@@ -6971,25 +7467,70 @@ def vector_store_freshness(store: dict) -> tuple[str, list[str]]:
     return "fresh", []
 
 
+def vector_store_chunk_lookup(store: dict) -> tuple[dict | None, dict]:
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    index_id = str(source.get("id", ""))
+    if not index_id:
+        return None, {}
+    try:
+        index = load_index_exact(index_id)
+    except SystemExit:
+        return None, {}
+    lookup: dict[tuple[str, str], tuple[dict, dict]] = {}
+    for file_item in index.get("files", []):
+        if not isinstance(file_item, dict):
+            continue
+        path = str(file_item.get("path", ""))
+        for chunk in file_item.get("chunks", []):
+            if isinstance(chunk, dict):
+                lookup[(path, str(chunk.get("chunk", "")))] = (file_item, chunk)
+    return index, lookup
+
+
+def vector_query_document_text(index: dict | None, lookup: dict, row: dict) -> str:
+    path = str(row.get("path", ""))
+    chunk_id = str(row.get("chunk", ""))
+    if index and lookup:
+        found = lookup.get((path, chunk_id))
+        if found:
+            file_item, chunk = found
+            content = read_chunk_content(index, chunk)
+            text = retrieval_chunk_haystack(file_item, chunk, content)
+            if text.strip():
+                return compact_text(text, 6000)
+    return "\n".join(
+        part
+        for part in [path, f"chunk {chunk_id}" if chunk_id else "", str(row.get("summary", ""))]
+        if part
+    )
+
+
 def query_vector_store(
     store: dict,
     query: str,
     *,
     limit: int = VECTOR_QUERY_LIMIT,
     check_freshness: bool = True,
+    rerank: bool = False,
 ) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("usage: vector-query QUERY")
     limit = max(1, min(int(limit or VECTOR_QUERY_LIMIT), 50))
-    dims = int(store.get("dims", DEFAULT_LEXICAL_VECTOR_DIMS) or DEFAULT_LEXICAL_VECTOR_DIMS)
-    query_vector = lexical_sparse_vector(query, dims=dims)
+    method = str(store.get("method") or LEXICAL_VECTOR_METHOD)
+    if method == EMBEDDING_VECTOR_METHOD:
+        route = store.get("embedding_route") if isinstance(store.get("embedding_route"), dict) else {}
+        query_vectors, _route_info = embed_texts([query], route_id=route.get("catalog_route") or None)
+        query_vector = query_vectors[0] if query_vectors else []
+    else:
+        dims = int(store.get("dims", DEFAULT_LEXICAL_VECTOR_DIMS) or DEFAULT_LEXICAL_VECTOR_DIMS)
+        query_vector = lexical_sparse_vector(query, dims=dims)
     query_counts = token_counts(query)
     rows = []
     for row in store.get("rows", []):
         if not isinstance(row, dict):
             continue
-        vector_score = sparse_dot(query_vector, row.get("vector") if isinstance(row.get("vector"), dict) else {})
+        vector_score = vector_similarity(query_vector, row.get("vector"))
         lexical = score_text(query_counts, "\n".join([row.get("path", ""), row.get("summary", "")]))
         path_boost = query_path_match_boost(query, row.get("path", ""))
         total = round(vector_score * 1000) + lexical + path_boost
@@ -7008,6 +7549,17 @@ def query_vector_store(
             }
         )
     rows.sort(key=lambda item: item.get("score", 0), reverse=True)
+    rerank_route = {}
+    if rerank and rows:
+        candidates = rows[: min(len(rows), max(limit, RERANK_CANDIDATE_LIMIT))]
+        source_index, lookup = vector_store_chunk_lookup(store)
+        documents = [vector_query_document_text(source_index, lookup, row) for row in candidates]
+        rerank_scores, rerank_route = rerank_documents(query, documents)
+        for row, rerank_score in zip(candidates, rerank_scores):
+            row["rerank_score"] = round(rerank_score, 6)
+            row["score"] = round((float(row.get("score", 0)) * 0.2) + (float(rerank_score) * 1000))
+        candidates.sort(key=lambda item: (item.get("rerank_score", 0.0), item.get("score", 0)), reverse=True)
+        rows = candidates + rows[len(candidates) :]
     if check_freshness:
         freshness, warnings = vector_store_freshness(store)
     else:
@@ -7018,10 +7570,25 @@ def query_vector_store(
         "query": query,
         "store_id": store.get("id", ""),
         "method": store.get("method", ""),
+        "rerank": bool(rerank),
+        "rerank_route": {
+            "catalog_route": rerank_route.get("catalog_route") or rerank_route.get("route", ""),
+            "model": rerank_route.get("model", ""),
+        }
+        if rerank_route
+        else {},
         "freshness": freshness,
         "warnings": warnings,
         "rows": rows[:limit],
     }
+
+
+def parse_vector_query_input(text: str) -> tuple[str, bool]:
+    pieces = str(text or "").split()
+    rerank = "--rerank" in pieces
+    if rerank:
+        pieces = [piece for piece in pieces if piece != "--rerank"]
+    return " ".join(pieces).strip(), rerank
 
 
 def format_vector_store(store: dict) -> str:
@@ -7049,6 +7616,9 @@ def format_vector_query_report(report: dict) -> str:
         f"vector query: {report.get('query', '')}",
         f"store: {report.get('store_id', '')}  method={report.get('method', '')}  freshness={report.get('freshness', '')}",
     ]
+    if report.get("rerank"):
+        route = report.get("rerank_route") if isinstance(report.get("rerank_route"), dict) else {}
+        lines.append(f"rerank: {route.get('catalog_route', '') or 'enabled'} {route.get('model', '')}".rstrip())
     for warning in report.get("warnings", [])[:5]:
         lines.append(f"warning: {warning}")
     if not report.get("rows"):
@@ -7060,17 +7630,24 @@ def format_vector_query_report(report: dict) -> str:
             f"lex={row.get('lexical', 0)} path={row.get('path_boost', 0)}  "
             f"{row.get('path', '')} chunk {row.get('chunk', '')}"
         )
+        if "rerank_score" in row:
+            lines.append(f"   rerank_score: {row.get('rerank_score', 0)}")
         if row.get("summary"):
             lines.append(f"   summary: {row.get('summary', '')}")
     return "\n".join(lines)
 
 
-def run_vector_eval(*, dims: int = DEFAULT_LEXICAL_VECTOR_DIMS) -> dict:
+def run_vector_eval(
+    *,
+    dims: int = DEFAULT_LEXICAL_VECTOR_DIMS,
+    method: str = LEXICAL_VECTOR_METHOD,
+) -> dict:
+    method = resolve_vector_method(method)
     report = {
         "schema": VECTOR_EVAL_SCHEMA_VERSION,
         "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
         "created": now(),
-        "method": LEXICAL_VECTOR_METHOD,
+        "method": method,
         "dims": max(8, int(dims or DEFAULT_LEXICAL_VECTOR_DIMS)),
         "fixtures": [],
     }
@@ -7080,6 +7657,7 @@ def run_vector_eval(*, dims: int = DEFAULT_LEXICAL_VECTOR_DIMS) -> dict:
         store = build_vector_store_from_index(
             index,
             dims=report["dims"],
+            method=method,
             store_id=f"vector-eval-{fixture.get('id', 'fixture')}",
             write=False,
         )
@@ -10158,9 +10736,9 @@ HELP_SECTIONS = [
             ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
             ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
-            ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
-            ("/vector-query QUERY", "query the deterministic vector baseline"),
-            ("/vector-eval", "evaluate the deterministic vector baseline"),
+            ("/vector-build [ID]", "build a realm-local vector store for an index"),
+            ("/vector-query [--rerank] QUERY", "query the latest vector store"),
+            ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
@@ -10179,9 +10757,9 @@ HELP_SECTIONS = [
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
-            ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
-            ("/vector-query QUERY", "query the deterministic vector baseline"),
-            ("/vector-eval", "evaluate the deterministic vector baseline"),
+            ("/vector-build [ID]", "build a realm-local vector store for an index"),
+            ("/vector-query [--rerank] QUERY", "query the latest vector store"),
+            ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
@@ -10209,9 +10787,9 @@ HELP_SECTIONS = [
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
-            ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
-            ("/vector-query QUERY", "query the deterministic vector baseline"),
-            ("/vector-eval", "evaluate the deterministic vector baseline"),
+            ("/vector-build [ID]", "build a realm-local vector store for an index"),
+            ("/vector-query [--rerank] QUERY", "query the latest vector store"),
+            ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topics", "list topic dossiers"),
             ("/topic-show [ID]", "show a topic dossier"),
@@ -10255,9 +10833,9 @@ HELP_SECTIONS = [
             ("motoko index-quality [ID]", "show index artifact quality checks"),
             ("motoko index-storage", "audit index storage and safe cleanup opportunities"),
             ("motoko vector-plan [ID]", "inspect vector/reranker storage readiness"),
-            ("motoko vector-build [ID]", "build a deterministic vector baseline for an index"),
-            ("motoko vector-query QUERY", "query the deterministic vector baseline"),
-            ("motoko vector-eval", "evaluate the deterministic vector baseline"),
+            ("motoko vector-build [ID]", "build a realm-local vector store for an index"),
+            ("motoko vector-query [--rerank] QUERY", "query the latest vector store"),
+            ("motoko vector-eval", "evaluate vector retrieval fixtures"),
             ("motoko index-repair [ID]", "repair failed index quality artifacts"),
             ("motoko index-upgrade [ID]", "upgrade index-derived artifacts"),
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
@@ -11628,9 +12206,10 @@ class MotokoTui:
                 store = build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(self.conv))
                 self.append("system", format_vector_store(store))
             elif text == "/vector-query" or text.startswith("/vector-query "):
-                query = text[len("/vector-query") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
+                query, rerank = parse_vector_query_input(text[len("/vector-query") :].strip())
+                query = query or context_query_text(self.conv, self.conv.get("title", ""))
                 try:
-                    self.append("system", format_vector_query_report(query_vector_store(latest_vector_store(), query)))
+                    self.append("system", format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank)))
                 except SystemExit as exc:
                     self.append("error", str(exc))
             elif text == "/vector-eval":
@@ -12698,9 +13277,10 @@ def chat_loop(conv: dict) -> None:
             print_report(format_vector_store(store))
             continue
         if user_text == "/vector-query" or user_text.startswith("/vector-query "):
-            query = user_text[len("/vector-query") :].strip() or context_query_text(conv, conv.get("title", ""))
+            query, rerank = parse_vector_query_input(user_text[len("/vector-query") :].strip())
+            query = query or context_query_text(conv, conv.get("title", ""))
             try:
-                print_report(format_vector_query_report(query_vector_store(latest_vector_store(), query)))
+                print_report(format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank)))
             except SystemExit as exc:
                 print(exc)
             continue
@@ -13429,7 +14009,7 @@ def command_vector_build(args) -> None:
 
 def command_vector_query(args) -> None:
     store = load_vector_store(args.store) if args.store else latest_vector_store()
-    report = query_vector_store(store, " ".join(args.query), limit=args.limit)
+    report = query_vector_store(store, " ".join(args.query), limit=args.limit, rerank=args.rerank)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -13437,7 +14017,7 @@ def command_vector_query(args) -> None:
 
 
 def command_vector_eval(args) -> None:
-    report = run_vector_eval(dims=args.dims)
+    report = run_vector_eval(dims=args.dims, method=args.method)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -13930,22 +14510,34 @@ def main(argv: list[str]) -> int:
     vector_plan_cmd.add_argument("--json", action="store_true", help="print JSON plan")
     vector_plan_cmd.set_defaults(func=command_vector_plan)
 
-    vector_build = sub.add_parser("vector-build", help="build a deterministic vector baseline for an index")
+    vector_build = sub.add_parser("vector-build", help="build a realm-local vector store for an index")
     vector_build.add_argument("index", nargs="?", help="optional document index; picker if omitted")
-    vector_build.add_argument("--method", default=LEXICAL_VECTOR_METHOD, choices=[LEXICAL_VECTOR_METHOD], help="vector builder method")
+    vector_build.add_argument(
+        "--method",
+        default=VECTOR_METHOD_AUTO,
+        choices=[VECTOR_METHOD_AUTO, LEXICAL_VECTOR_METHOD, EMBEDDING_VECTOR_METHOD],
+        help="vector builder method",
+    )
     vector_build.add_argument("--dims", type=int, default=DEFAULT_LEXICAL_VECTOR_DIMS, help="hashed lexical vector dimensions")
     vector_build.add_argument("--json", action="store_true", help="print JSON store")
     vector_build.set_defaults(func=command_vector_build)
 
-    vector_query = sub.add_parser("vector-query", help="query the deterministic vector baseline")
+    vector_query = sub.add_parser("vector-query", help="query the latest vector store")
     vector_query.add_argument("query", nargs="+")
     vector_query.add_argument("--store", help="specific vector store id; picker if omitted")
     vector_query.add_argument("--limit", type=int, default=VECTOR_QUERY_LIMIT, help="number of rows to show")
+    vector_query.add_argument("--rerank", action="store_true", help="rerank top vector candidates with the configured reranker route")
     vector_query.add_argument("--json", action="store_true", help="print JSON report")
     vector_query.set_defaults(func=command_vector_query)
 
-    vector_eval = sub.add_parser("vector-eval", help="evaluate the deterministic vector baseline")
+    vector_eval = sub.add_parser("vector-eval", help="evaluate vector retrieval fixtures")
     vector_eval.add_argument("--dims", type=int, default=DEFAULT_LEXICAL_VECTOR_DIMS, help="hashed lexical vector dimensions")
+    vector_eval.add_argument(
+        "--method",
+        default=LEXICAL_VECTOR_METHOD,
+        choices=[LEXICAL_VECTOR_METHOD, EMBEDDING_VECTOR_METHOD],
+        help="vector method to evaluate",
+    )
     vector_eval.add_argument("--json", action="store_true", help="print JSON report")
     vector_eval.set_defaults(func=command_vector_eval)
 

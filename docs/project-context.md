@@ -258,12 +258,12 @@ Current sequencing notes:
   the NixOS llama.cpp service layer. Motoko reads declared route cache policy
   from `~/.config/motoko/local-models.json`, reports it in `/model-routes`,
   and keeps prompts stable, explicit, and easy to cache.
-- Before embedding/reranker production work, Motoko should implement the
-  storage-audit and safe-cleanup report above. The same accounting informs
-  vector-store sizing, invalidation, and migration. The initial surfaces are
-  `motoko index-storage` / `/index-storage`, `motoko vector-plan` /
-  `/vector-plan`, and the deterministic `lexical-hash-v1` baseline exposed by
-  `motoko vector-build`, `motoko vector-query`, and `motoko vector-eval`.
+- Embedding and reranker routes are now expected to be discovered from
+  NixOS-owned `~/.config/motoko/local-models.json` by `kind`, `tasks`,
+  `endpoint_paths`, dimensions, and advertised parallelism. Motoko stores
+  vectors only in the current user's state, keeps `lexical-hash-v1` as the
+  deterministic control path, and should gate reranker use on measured quality
+  after embedding recall is working.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended
@@ -273,8 +273,8 @@ Current sequencing notes:
 
 The following path looks attractive, but it is not mandatory and should remain
 subject to measurement: design a retrieval layer that combines lexical search,
-embedding recall, reranker precision, and deterministic extraction before
-adding extra model services to HB3.
+embedding recall, reranker precision, and deterministic extraction through
+NixOS-declared local model routes and Motoko-owned derived state.
 
 This could improve more than index construction. Embeddings, rerankers, and
 better token/accounting machinery could help artifact formation, memory recall,
@@ -306,11 +306,11 @@ efficiency. The likely shape is:
 - use lightweight classifiers or routing models only for uncertain cases after
   deterministic file/path/content heuristics are exhausted.
 
-Before installing embedding or reranker services for production use, Motoko
-should specify the storage format, artifact provenance, versioning,
-invalidation, migration, eval fixtures, privacy/realm boundaries, and NixOS
-deployment shape. The point is to make the retrieval layer measurably smarter,
-not to accumulate infrastructure.
+As embedding and reranker services become available, Motoko should keep the
+storage format, artifact provenance, versioning, invalidation, migration, eval
+fixtures, privacy/realm boundaries, and NixOS deployment shape explicit. The
+point is to make the retrieval layer measurably smarter, not to accumulate
+infrastructure.
 
 ## NixOS-Facing Model Boundary
 

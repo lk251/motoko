@@ -74,14 +74,19 @@ Design constraints:
 - `motoko index-storage` audits derived index storage, duplicate chunk
   references, missing duplicate targets, orphan chunk files, and safe cleanup
   opportunities without deleting anything.
-- `motoko vector-plan` reports the planned vector/reranker storage contract,
-  realm-local privacy boundary, invalidation keys, sizing estimate, and
-  readiness gates before any embedding store is enabled.
-- `motoko vector-build` and `motoko vector-query` provide a deterministic
-  lexical-vector baseline so vector storage, invalidation, and query plumbing
-  can be tested before real embedding/reranker routes are deployed.
-- `motoko vector-eval` runs the same no-model synthetic retrieval fixtures
-  through that baseline so vector work stays measurable.
+- `motoko vector-plan` reports the vector/reranker storage contract,
+  realm-local privacy boundary, invalidation keys, sizing estimate, route
+  discovery, and readiness gates before vector retrieval is trusted.
+- `motoko vector-build` and `motoko vector-query` build and inspect a
+  realm-local vector store. The default `auto` method uses a NixOS-declared
+  `/v1/embeddings` route when the local catalog exposes one, and falls back to
+  the deterministic `lexical-hash-v1` baseline otherwise.
+- `motoko vector-eval` runs the synthetic retrieval fixtures through the
+  lexical baseline by default, with `--method embedding-v1` available for
+  measuring the approved embedding route.
+- `motoko vector-query --rerank QUERY` explicitly reranks the top vector
+  candidates through the NixOS-declared `/v1/rerank` route, so reranker
+  precision can be tested without making every vector query slower.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under
