@@ -175,7 +175,11 @@ MAX_RETRIEVAL_CHARS = 56000
 SPAN_SELECTION_MAX_CANDIDATES = 32
 SPAN_SELECTION_EMBED_CANDIDATES = 16
 SPAN_SELECTION_RERANK_CANDIDATES = 10
+SPAN_SELECTION_EMBED_SUBSPANS = 96
+SPAN_SELECTION_RERANK_SUBSPANS = 80
 SPAN_MODEL_MAX_CHUNKS = 2
+SPAN_MODEL_INPUT_CHARS = 900
+SPAN_MODEL_MAX_SUBSPANS_PER_PARENT = 18
 TOPIC_DEFAULT_CHUNKS = 24
 TOPIC_MAX_CHUNKS = 80
 TOPIC_EXCERPT_CHARS = 6000
@@ -723,6 +727,18 @@ def compact_text_middle(text: str, limit: int) -> str:
     if limit <= 12:
         return text[:limit].rstrip()
     marker = " ... "
+    side = max(1, (limit - len(marker)) // 2)
+    tail = max(1, limit - len(marker) - side)
+    return (text[:side].rstrip() + marker + text[-tail:].lstrip())[:limit]
+
+
+def compact_source_text_middle(text: str, limit: int) -> str:
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 12:
+        return text[:limit].rstrip()
+    marker = "\n...\n"
     side = max(1, (limit - len(marker)) // 2)
     tail = max(1, limit - len(marker) - side)
     return (text[:side].rstrip() + marker + text[-tail:].lstrip())[:limit]
@@ -3068,11 +3084,43 @@ def org_dated_section_spans(content: str) -> list[dict]:
     return spans
 
 
+def prune_nested_same_date_spans(spans: list[dict]) -> list[dict]:
+    rows = sorted(
+        [dict(span) for span in spans if span.get("date")],
+        key=lambda span: (
+            str(span.get("date", "")),
+            int(span.get("start", 0) or 0),
+            -(int(span.get("end", 0) or 0) - int(span.get("start", 0) or 0)),
+        ),
+    )
+    kept = []
+    for span in rows:
+        date = str(span.get("date", ""))
+        start = int(span.get("start", 0) or 0)
+        end = int(span.get("end", 0) or 0)
+        nested = False
+        for existing in kept:
+            if str(existing.get("date", "")) != date:
+                continue
+            existing_start = int(existing.get("start", 0) or 0)
+            existing_end = int(existing.get("end", 0) or 0)
+            if start >= existing_start and end <= existing_end:
+                nested = True
+                break
+        if not nested:
+            kept.append(span)
+    return sorted(kept, key=lambda span: int(span.get("start", 0) or 0))
+
+
 def org_dated_sections_excerpt(content: str, dates: list[str], *, max_chars: int) -> str:
     if not dates:
         return ""
     wanted = set(dates)
-    spans = [span for span in org_dated_section_spans(content) if span.get("date") in wanted]
+    spans = [
+        span
+        for span in prune_nested_same_date_spans(org_dated_section_spans(content))
+        if span.get("date") in wanted
+    ]
     if not spans:
         return ""
     spans.sort(key=lambda span: (str(span.get("date", "")), int(span.get("start", 0))))
@@ -3094,6 +3142,53 @@ def recent_org_dated_sections_excerpt(content: str, count: int, *, max_chars: in
     dates = sorted({str(span.get("date", "")) for span in spans if span.get("date")})
     selected = dates[-max(1, min(count, len(dates))) :]
     return org_dated_sections_excerpt(content, selected, max_chars=max_chars)
+
+
+def mandatory_date_evidence_spans(query: str, content: str) -> list[dict]:
+    dated_spans = prune_nested_same_date_spans(org_dated_section_spans(content))
+    if not dated_spans:
+        return []
+    exact_dates = query_date_mentions(query)
+    rows = []
+    if exact_dates:
+        wanted = set(exact_dates)
+        for span in dated_spans:
+            date = str(span.get("date", ""))
+            if date not in wanted:
+                continue
+            text = content[int(span["start"]) : int(span["end"])].strip()
+            item = make_evidence_span(
+                kind="org-date-exact",
+                label=date,
+                start=int(span["start"]),
+                end=int(span["end"]),
+                text=text,
+                base_score=4000,
+            )
+            if item:
+                rows.append(item)
+        return sorted(rows, key=lambda row: int(row.get("start", 0) or 0))
+    recent_count = query_requested_recent_section_count(query)
+    if not recent_count:
+        return []
+    dates_in_content = sorted({str(span.get("date", "")) for span in dated_spans if span.get("date")})
+    recent_dates = set(dates_in_content[-max(1, min(recent_count, len(dates_in_content))) :])
+    for span in dated_spans:
+        date = str(span.get("date", ""))
+        if date not in recent_dates:
+            continue
+        text = content[int(span["start"]) : int(span["end"])].strip()
+        item = make_evidence_span(
+            kind="org-date-recent",
+            label=date,
+            start=int(span["start"]),
+            end=int(span["end"]),
+            text=text,
+            base_score=3500,
+        )
+        if item:
+            rows.append(item)
+    return sorted(rows, key=lambda row: int(row.get("start", 0) or 0))
 
 
 def query_term_window_excerpt(query: str, content: str, *, max_chars: int) -> str:
@@ -3321,14 +3416,28 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
     rows = [dict(row) for row in spans]
     if not rows:
         return rows, warnings
+    by_parent = {}
+    for row in rows:
+        key = (
+            int(row.get("start", 0) or 0),
+            int(row.get("end", 0) or 0),
+            str(row.get("kind", "")),
+            str(row.get("label", "")),
+        )
+        by_parent[key] = row
+    model_query = span_model_text({"kind": "query", "label": "query", "text": query})
     if env_flag("MOTOKO_SPAN_EMBEDDING", True) and local_model_routes_for_capability(
         kind="embedding",
         tasks=EMBEDDING_TASKS,
         endpoint_path="/v1/embeddings",
     ):
-        embed_rows = rows[: min(len(rows), SPAN_SELECTION_EMBED_CANDIDATES)]
+        embed_rows = model_span_rows_for_candidates(
+            rows,
+            limit=SPAN_SELECTION_EMBED_CANDIDATES,
+            max_subspans=SPAN_SELECTION_EMBED_SUBSPANS,
+        )
         try:
-            vectors, route_info = embed_texts([query] + [str(row.get("text", "")) for row in embed_rows])
+            vectors, route_info = embed_texts([model_query] + [str(row.get("model_text", "")) for row in embed_rows])
         except SystemExit as exc:
             warnings.append(f"span embedding skipped: {str(exc).splitlines()[0][:220]}")
         else:
@@ -3338,15 +3447,33 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
                 row["span_vector_score"] = round(vector_score, 6)
                 row["span_embedding_route"] = route_info.get("catalog_route") or route_info.get("route", "")
                 row["score"] = float(row.get("score", 0) or 0) + (vector_score * 1000)
+                parent_key = (
+                    int(row.get("parent_start", row.get("start", 0)) or 0),
+                    int(row.get("parent_end", row.get("end", 0)) or 0),
+                    str(row.get("parent_kind", row.get("kind", "")) or ""),
+                    str(row.get("parent_label", row.get("label", "")) or ""),
+                )
+                parent = by_parent.get(parent_key)
+                if parent is not None and float(row.get("score", 0) or 0) > float(parent.get("score", 0) or 0):
+                    parent["score"] = row["score"]
+                    parent["span_vector_score"] = row["span_vector_score"]
+                    parent["span_embedding_route"] = row["span_embedding_route"]
+                    parent["selected_sub_start"] = row.get("sub_start")
+                    parent["selected_sub_end"] = row.get("sub_end")
+                    parent["selected_subspan_text"] = row.get("text")
     rows.sort(key=lambda row: float(row.get("score", 0) or 0), reverse=True)
     if env_flag("MOTOKO_SPAN_RERANK", True) and local_model_routes_for_capability(
         kind="reranker",
         tasks=RERANKER_TASKS,
         endpoint_path="/v1/rerank",
     ):
-        rerank_rows = rows[: min(len(rows), SPAN_SELECTION_RERANK_CANDIDATES)]
+        rerank_rows = model_span_rows_for_candidates(
+            rows,
+            limit=SPAN_SELECTION_RERANK_CANDIDATES,
+            max_subspans=SPAN_SELECTION_RERANK_SUBSPANS,
+        )
         try:
-            scores, route_info = rerank_documents(query, [str(row.get("text", "")) for row in rerank_rows])
+            scores, route_info = rerank_documents(model_query, [str(row.get("model_text", "")) for row in rerank_rows])
         except SystemExit as exc:
             warnings.append(f"span rerank skipped: {str(exc).splitlines()[0][:220]}")
         else:
@@ -3354,34 +3481,188 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
                 row["span_rerank_score"] = round(float(score), 6)
                 row["span_rerank_route"] = route_info.get("catalog_route") or route_info.get("route", "")
                 row["score"] = (float(row.get("score", 0) or 0) * 0.2) + (float(score) * 1000)
+                parent_key = (
+                    int(row.get("parent_start", row.get("start", 0)) or 0),
+                    int(row.get("parent_end", row.get("end", 0)) or 0),
+                    str(row.get("parent_kind", row.get("kind", "")) or ""),
+                    str(row.get("parent_label", row.get("label", "")) or ""),
+                )
+                parent = by_parent.get(parent_key)
+                if parent is not None and float(row.get("score", 0) or 0) > float(parent.get("score", 0) or 0):
+                    parent["score"] = row["score"]
+                    parent["span_rerank_score"] = row["span_rerank_score"]
+                    parent["span_rerank_route"] = row["span_rerank_route"]
+                    parent["selected_sub_start"] = row.get("sub_start")
+                    parent["selected_sub_end"] = row.get("sub_end")
+                    parent["selected_subspan_text"] = row.get("text")
     rows.sort(key=lambda row: float(row.get("score", 0) or 0), reverse=True)
     return rows, warnings
+
+
+def span_model_input_chars_limit() -> int:
+    value = env_int("MOTOKO_SPAN_MODEL_INPUT_CHARS", SPAN_MODEL_INPUT_CHARS, minimum=300)
+    return min(value, 3000)
+
+
+def span_model_max_subspans_per_parent() -> int:
+    return max(
+        1,
+        min(
+            env_int(
+                "MOTOKO_SPAN_MODEL_MAX_SUBSPANS_PER_PARENT",
+                SPAN_MODEL_MAX_SUBSPANS_PER_PARENT,
+                minimum=1,
+            ),
+            24,
+        ),
+    )
+
+
+def span_model_text(span: dict) -> str:
+    kind = str(span.get("kind", "") or "").strip()
+    label = str(span.get("label", "") or "").strip()
+    text = str(span.get("text", "") or "").strip()
+    limit = span_model_input_chars_limit()
+    prefix = ": ".join(part for part in [kind, label] if part)
+    if not prefix:
+        return compact_text_middle(text, limit)
+    budget = max(120, limit - len(prefix) - 1)
+    return (prefix + "\n" + compact_text_middle(text, budget))[:limit].strip()
+
+
+def span_model_subspans(span: dict) -> list[dict]:
+    text = str(span.get("text", "") or "").strip()
+    if not text:
+        return []
+    limit = span_model_input_chars_limit()
+    prefix = ": ".join(
+        part
+        for part in [
+            str(span.get("kind", "") or "").strip(),
+            str(span.get("label", "") or "").strip(),
+        ]
+        if part
+    )
+    budget = max(180, limit - len(prefix) - 20)
+    start_offset = int(span.get("start", 0) or 0)
+    if len(text) <= budget:
+        row = dict(span)
+        row["model_text"] = span_model_text(span)
+        row["parent_start"] = start_offset
+        row["parent_end"] = int(span.get("end", 0) or 0)
+        row["sub_start"] = start_offset
+        row["sub_end"] = start_offset + len(text)
+        return [row]
+    rows = []
+    step = max(1, int(budget * 0.75))
+    local_start = 0
+    max_rows = span_model_max_subspans_per_parent()
+    loop_limit = max(1, max_rows - 1)
+    while local_start < len(text) and len(rows) < loop_limit:
+        local_end = min(len(text), local_start + budget)
+        boundary = text.rfind("\n\n", local_start, local_end)
+        if boundary > local_start + budget // 2:
+            local_end = boundary
+        fragment = text[local_start:local_end].strip()
+        if fragment:
+            row = dict(span)
+            row["kind"] = f"{span.get('kind', '')}-subspan".strip("-")
+            row["parent_kind"] = span.get("kind")
+            row["parent_label"] = span.get("label")
+            row["parent_start"] = int(span.get("start", 0) or 0)
+            row["parent_end"] = int(span.get("end", 0) or 0)
+            row["label"] = str(span.get("label", "") or "")
+            row["text"] = fragment
+            row["sub_start"] = start_offset + local_start
+            row["sub_end"] = start_offset + local_end
+            row["model_text"] = span_model_text(row)
+            rows.append(row)
+        if local_end >= len(text):
+            break
+        local_start = max(local_start + step, local_end - budget // 4)
+    if rows and int(rows[-1].get("sub_end", 0) or 0) < start_offset + len(text) and len(rows) < max_rows:
+        tail_start = max(0, len(text) - budget)
+        row = dict(span)
+        row["kind"] = f"{span.get('kind', '')}-subspan".strip("-")
+        row["parent_kind"] = span.get("kind")
+        row["parent_label"] = span.get("label")
+        row["parent_start"] = int(span.get("start", 0) or 0)
+        row["parent_end"] = int(span.get("end", 0) or 0)
+        row["label"] = str(span.get("label", "") or "")
+        row["text"] = text[tail_start:].strip()
+        row["sub_start"] = start_offset + tail_start
+        row["sub_end"] = start_offset + len(text)
+        row["model_text"] = span_model_text(row)
+        rows.append(row)
+    return rows
+
+
+def model_span_rows_for_candidates(spans: list[dict], *, limit: int, max_subspans: int) -> list[dict]:
+    rows = []
+    for span in spans[: max(0, int(limit or 0))]:
+        for row in span_model_subspans(span):
+            if len(rows) >= max(0, int(max_subspans or 0)):
+                return rows
+            rows.append(row)
+    return rows
 
 
 def span_model_chunk_limit() -> int:
     return max(0, min(env_int("MOTOKO_SPAN_MODEL_MAX_CHUNKS", SPAN_MODEL_MAX_CHUNKS, minimum=0), 12))
 
 
+def fit_evidence_spans_to_budget(spans: list[dict], *, max_chars: int) -> list[dict]:
+    rows = [dict(span) for span in spans if str(span.get("text", "")).strip()]
+    rows.sort(key=lambda row: int(row.get("start", 0) or 0))
+    if not rows:
+        return []
+    max_chars = max(1, int(max_chars or 1))
+    separator_chars = 2 * max(0, len(rows) - 1)
+    total_chars = separator_chars + sum(len(str(row.get("text", "")).strip()) for row in rows)
+    if total_chars <= max_chars:
+        return rows
+    per_span = max(180, (max_chars - separator_chars) // max(1, len(rows)))
+    fitted = []
+    for row in rows:
+        text = str(row.get("text", "")).strip()
+        item = dict(row)
+        item["text"] = compact_source_text_middle(text, per_span)
+        fitted.append(item)
+    return fitted
+
+
+def effective_evidence_span(span: dict) -> dict:
+    row = dict(span)
+    selected_text = str(row.get("selected_subspan_text", "") or "").strip()
+    if selected_text:
+        row["text"] = selected_text
+        if row.get("selected_sub_start") is not None:
+            row["start"] = int(row.get("selected_sub_start", row.get("start", 0)) or 0)
+        if row.get("selected_sub_end") is not None:
+            row["end"] = int(row.get("selected_sub_end", row.get("end", 0)) or 0)
+    return row
+
+
 def select_non_overlapping_spans(spans: list[dict], *, max_chars: int) -> list[dict]:
     selected = []
     used = 0
     for span in spans:
-        start = int(span.get("start", 0) or 0)
-        end = int(span.get("end", 0) or 0)
+        row = effective_evidence_span(span)
+        start = int(row.get("start", 0) or 0)
+        end = int(row.get("end", 0) or 0)
         overlaps = any(start < int(row.get("end", 0) or 0) and end > int(row.get("start", 0) or 0) for row in selected)
         if overlaps:
             continue
-        text = str(span.get("text", "")).strip()
+        text = str(row.get("text", "")).strip()
         if not text:
             continue
         separator = 2 if selected else 0
         if selected and used + len(text) + separator > max_chars:
             continue
         if not selected and len(text) > max_chars:
-            row = dict(span)
-            row["text"] = compact_text_middle(text, max_chars)
+            row["text"] = compact_source_text_middle(text, max_chars)
             return [row]
-        selected.append(span)
+        selected.append(row)
         used += len(text) + separator
         if used >= max_chars or len(selected) >= 4:
             break
@@ -3401,6 +3682,23 @@ def query_aware_content_selection(
     if not content:
         return {"excerpt": "", "spans": [], "warnings": [], "method": "empty"}
     max_chars = max(1, int(max_chars or 1))
+    mandatory_spans = mandatory_date_evidence_spans(query, content)
+    if mandatory_spans:
+        selected = fit_evidence_spans_to_budget(mandatory_spans, max_chars=max_chars)
+        excerpt = "\n\n".join(str(span.get("text", "")).strip() for span in selected if span.get("text"))
+        return {
+            "excerpt": excerpt[:max_chars].strip(),
+            "spans": [
+                {
+                    key: row.get(key)
+                    for key in ["kind", "label", "start", "end", "score", "lexical_score"]
+                    if row.get(key) is not None
+                }
+                for row in selected
+            ],
+            "warnings": [],
+            "method": "date-span",
+        }
     spans = score_evidence_spans(query, base_evidence_spans(query, content, max_chars=max_chars))
     warnings = []
     if use_models:
@@ -3434,6 +3732,8 @@ def query_aware_content_selection(
                     "span_embedding_route",
                     "span_rerank_score",
                     "span_rerank_route",
+                    "selected_sub_start",
+                    "selected_sub_end",
                 ]
                 if row.get(key) is not None
             }
@@ -12611,6 +12911,16 @@ def format_about() -> str:
     )
 
 
+def format_source_span_detail(span: dict) -> str:
+    detail = f"{span.get('kind', '')}:{span.get('label', '')}".strip(":")
+    if span.get("selected_sub_start") is not None and span.get("selected_sub_end") is not None:
+        detail += (
+            f"@{span.get('selected_sub_start')}-"
+            f"{span.get('selected_sub_end')}"
+        )
+    return detail
+
+
 def format_sources(sources: list[dict]) -> str:
     if not sources:
         return "No recorded sources for the last answer."
@@ -12777,11 +13087,14 @@ def format_sources(sources: list[dict]) -> str:
             if source.get("excerpt_selection"):
                 spans = source.get("excerpt_spans") or []
                 span_bits = [
-                    f"{span.get('kind', '')}:{span.get('label', '')}".strip(":")
-                    for span in spans[:3]
+                    format_source_span_detail(span)
+                    for span in spans[:6]
                     if isinstance(span, dict)
                 ]
                 detail = ", ".join(bit for bit in span_bits if bit)
+                if len(spans) > 6:
+                    more = f"+{len(spans) - 6} more"
+                    detail = f"{detail}, {more}" if detail else more
                 lines.append(
                     "     span: "
                     + str(source.get("excerpt_selection", ""))

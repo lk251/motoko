@@ -1036,7 +1036,8 @@ and source excerpts remain visible in `/retrieval-debug` and `/sources`. Set
 Retrieval excerpts are query-aware after a chunk is selected. If the query
 mentions exact dates, or asks for the last/latest/recent dated entries, Motoko
 looks inside Org chunks for dated headings and extracts the matching sections
-before building `/retrieval-preview`, chat context, topic evidence, or rerank
+as mandatory evidence before generic heading/window competition. Those sections
+are then used for `/retrieval-preview`, chat context, topic evidence, or rerank
 documents. This is specifically important for chronological files such as
 `logbook.org`, where the relevant `** do` and `** log` subsections may live
 near the end of a large chunk rather than near the beginning.
@@ -1044,12 +1045,17 @@ near the end of a large chunk rather than near the beginning.
 This is implemented as evidence-span selection, not as a `logbook.org`
 special case. Motoko builds candidate spans from dated Org sections, Org and
 Markdown headings, query-term windows, and overlapping text windows. She scores
-those spans deterministically first, then, for a bounded number of large
-top-ranked chunks, can call the configured embedding and reranker routes to
-choose better spans before passing source text to the final chat model. The
-chosen span method and labels are shown in `/sources`. Set
+those spans deterministically first. For a bounded number of large top-ranked
+chunks, long candidate spans are split into bounded worker-sized subspans with
+parent provenance, scored through the configured embedding and reranker routes,
+then reassembled into the best source evidence before passing text to the
+final chat model. The chosen span method, labels, and subspan offsets are shown
+in `/sources`. Set
 `MOTOKO_SPAN_EMBEDDING=0`, `MOTOKO_SPAN_RERANK=0`, or
 `MOTOKO_SPAN_MODEL_MAX_CHUNKS=N` when diagnosing latency or routing behavior.
+Set `MOTOKO_SPAN_MODEL_INPUT_CHARS=N` or
+`MOTOKO_SPAN_MODEL_MAX_SUBSPANS_PER_PARENT=N` only when diagnosing worker
+context limits.
 
 Use `/feedback up|down|ok [TEXT]` after an answer to record whether it helped
 and what was wrong or right. The shorthand commands `/up [TEXT]` and

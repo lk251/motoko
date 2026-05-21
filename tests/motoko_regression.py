@@ -1163,12 +1163,16 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
             ],
         }
         query = "summarize the last two days present in logbook.org"
-        excerpt = m.query_aware_content_excerpt(query, content, 1200)
+        selection = m.query_aware_content_selection(query, content, 1200, use_models=True)
+        excerpt = selection["excerpt"]
         assert "2026-05-18" in excerpt
         assert "2026-05-19" in excerpt
         assert "2026-04-09" not in excerpt
         assert "** do" in excerpt
         assert "** log" in excerpt
+        assert selection["method"] == "date-span"
+        labels = {span.get("label") for span in selection["spans"]}
+        assert {"2026-05-18", "2026-05-19"} <= labels
 
         text, sources = m.retrieve_from_index(index, query)
         assert "2026-05-18" in text
@@ -1183,6 +1187,7 @@ def test_span_selection_uses_embedding_and_rerank_routes(m):
     old_model = os.environ.get("MOTOKO_MODEL")
     old_span_embedding = os.environ.get("MOTOKO_SPAN_EMBEDDING")
     old_span_rerank = os.environ.get("MOTOKO_SPAN_RERANK")
+    old_span_model_input = os.environ.get("MOTOKO_SPAN_MODEL_INPUT_CHARS")
     embed_socket = None
     rerank_socket = None
     embed_server = None
@@ -1196,6 +1201,7 @@ def test_span_selection_uses_embedding_and_rerank_routes(m):
         os.environ.pop("MOTOKO_MODEL", None)
         os.environ["MOTOKO_SPAN_EMBEDDING"] = "1"
         os.environ["MOTOKO_SPAN_RERANK"] = "1"
+        os.environ["MOTOKO_SPAN_MODEL_INPUT_CHARS"] = "500"
         with isolated_state() as tmp:
             embed_socket = tmp / "embed.sock"
             embed_server = UnixHTTPServer(str(embed_socket), EmbeddingHandler)
@@ -1249,6 +1255,35 @@ def test_span_selection_uses_embedding_and_rerank_routes(m):
             assert EmbeddingHandler.payloads
             assert RerankHandler.payloads
             assert any(span.get("span_rerank_score") == 0.95 for span in selection["spans"])
+            long_text = (
+                "* Large heading\n"
+                + ("background planning filler without the target words.\n" * 80)
+                + "Priority deadline task: preserve the local source passage.\n"
+                + ("more filler after the target.\n" * 80)
+            )
+            long_span = m.make_evidence_span(
+                kind="org-heading",
+                label="Large heading",
+                start=0,
+                end=len(long_text),
+                text=long_text,
+                base_score=1,
+            )
+            scored, warnings = m.model_score_evidence_spans("priority deadline task", [long_span])
+            assert not warnings
+            selected = m.select_non_overlapping_spans(scored, max_chars=600)
+            assert selected
+            assert "Priority deadline task" in selected[0]["text"]
+            assert selected[0].get("selected_sub_start") is not None
+            for payload in EmbeddingHandler.payloads:
+                inputs = payload.get("input", [])
+                if isinstance(inputs, str):
+                    inputs = [inputs]
+                assert inputs
+                assert max(len(str(item)) for item in inputs) <= 500
+            for payload in RerankHandler.payloads:
+                assert len(str(payload.get("query", ""))) <= 500
+                assert max(len(str(item)) for item in payload.get("documents", [])) <= 500
     finally:
         if embed_server is not None:
             embed_server.shutdown()
@@ -1276,6 +1311,10 @@ def test_span_selection_uses_embedding_and_rerank_routes(m):
             os.environ.pop("MOTOKO_SPAN_RERANK", None)
         else:
             os.environ["MOTOKO_SPAN_RERANK"] = old_span_rerank
+        if old_span_model_input is None:
+            os.environ.pop("MOTOKO_SPAN_MODEL_INPUT_CHARS", None)
+        else:
+            os.environ["MOTOKO_SPAN_MODEL_INPUT_CHARS"] = old_span_model_input
 
 
 def test_study_focus_recent_is_parsed_and_bounded(m):
