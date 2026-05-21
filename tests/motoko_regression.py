@@ -988,6 +988,82 @@ def test_local_model_status_diagnostic_uses_catalog_route_without_hashing(m):
             m.shutil.which = old_which
 
 
+def test_model_service_status_and_stop_use_motoko_model_helper(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                        "tasks": ["chat", "deep_synthesis"],
+                        "maxParallel": 1,
+                    },
+                    "qwen35-2b-worker": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
+                        "modelId": "qwen3.5-2b-q4-k-m",
+                        "tasks": ["index_chunk", "memory_maintenance"],
+                        "maxParallel": 8,
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            calls = []
+            old_run_helper = m.run_local_model_helper
+
+            def fake_run_helper(command, info, *, timeout=m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS):
+                route = m.local_model_helper_route(info)
+                calls.append((command, route))
+                if command == "status":
+                    backend = "inactive" if calls and calls[-2:] == [("stop", route), ("status", route)] else "active"
+                    return "\n".join(
+                        [
+                            "realm=mares",
+                            f"route={route}",
+                            "socket=active",
+                            "proxy=active",
+                            f"backend={backend}",
+                            "cache=prompt:1 reuse_min_tokens:1024",
+                        ]
+                    )
+                if command == "stop":
+                    return f"stopped {route}"
+                raise AssertionError(f"unexpected helper command: {command}")
+
+            try:
+                m.run_local_model_helper = fake_run_helper
+                report = m.format_model_services("chat")
+                assert "status source: motoko-model status ROUTE" in report
+                assert "- qwen36-chat: qwen3.6-27b-mtp-ud-q5-k-xl" in report
+                assert "logical routes: chat" in report
+                assert "state: socket=active proxy=active backend=active" in report
+                assert "backend=active is service/process state" in report
+
+                stopped = m.stop_model_service("qwen36-chat")
+                assert "model stop requested: qwen36-chat" in stopped
+                assert "control source: motoko-model stop qwen36-chat" in stopped
+                assert "helper: stopped qwen36-chat" in stopped
+                assert ("stop", "qwen36-chat") in calls
+            finally:
+                m.run_local_model_helper = old_run_helper
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
 def test_summary_reductions_fan_out_across_worker_routes(m):
     old_summary_input = m.SUMMARY_INPUT_CHARS
     old_summarize_text = m.summarize_text
@@ -3729,6 +3805,7 @@ def main() -> int:
         test_local_model_catalog_task_routes,
         test_embedding_route_fails_fast_when_model_file_missing,
         test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
+        test_model_service_status_and_stop_use_motoko_model_helper,
         test_summary_reductions_fan_out_across_worker_routes,
         test_sources_fallback_lists_attached_topic_context,
         test_answer_grounding_audit_sources,

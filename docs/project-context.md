@@ -182,7 +182,7 @@ Current UI direction:
   study jobs should use the same ledger to resume at a finer granularity.
 - `/sources` should explain why context was included and show context planning
   lanes, not merely list raw source objects.
-- Report-like output such as `/sources`, `/status`, `/model-routes`,
+- Report-like output such as `/sources`, `/status`, `/model-routes`, `/models`,
   `/identity`, `/permissions`, and retrieval diagnostics should be syntax
   highlighted at terminal render time without storing ANSI escapes in
   conversation state.
@@ -262,7 +262,8 @@ Current sequencing notes:
   background artifacts. The remaining prompt/KV-cache work belongs mostly to
   the NixOS llama.cpp service layer. Motoko reads declared route cache policy
   from `~/.config/motoko/local-models.json`, reports it in `/model-routes`,
-  and keeps prompts stable, explicit, and easy to cache.
+  exposes content-free worker state through `/models`, and keeps prompts
+  stable, explicit, and easy to cache.
 - Embedding and reranker routes are now expected to be discovered from
   NixOS-owned `~/.config/motoko/local-models.json` by `kind`, `tasks`,
   `endpoint_paths`, dimensions, and advertised parallelism. Motoko stores

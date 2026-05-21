@@ -406,6 +406,9 @@ motoko show
 motoko show CONVERSATION_ID
 motoko status
 motoko model-routes
+motoko models
+motoko models qwen36-chat
+motoko model-stop qwen36-chat
 motoko model-eval
 motoko index-enrich INDEX_ID
 motoko index-enrich --all
@@ -473,6 +476,9 @@ Useful in-chat commands:
 /down [TEXT]
 /status
 /model-routes
+/models [ROUTE]
+/model-status [ROUTE]
+/model-stop ROUTE
 /retrieval-eval
 /retrieval-debug QUERY
 /retrieval-preview QUERY
@@ -668,6 +674,29 @@ feature is safe before smaller worker models are deployed. Inspect routes with
 ```bash
 motoko model-routes
 ```
+
+Inspect live local model service state with `/models` or:
+
+```bash
+motoko models
+motoko models qwen36-chat
+```
+
+This uses the approved `motoko-model status ROUTE` helper and is intentionally
+content-free: it reports service lifecycle fields such as socket/proxy/backend
+state when NixOS exposes them, not prompts, responses, filenames, retrieved
+context, summaries, or memory content. `backend=active` is service/process
+state; it is not proof that the full model weights are currently resident in
+VRAM.
+
+Release a worker explicitly with `/model-stop ROUTE` or:
+
+```bash
+motoko model-stop qwen36-chat
+```
+
+This calls `motoko-model stop ROUTE`; Motoko still does not call `systemctl`
+directly and does not stop models automatically when the TUI exits.
 
 Route overrides can live in `~/.config/motoko/config.json`:
 

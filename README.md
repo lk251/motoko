@@ -142,6 +142,9 @@ Design constraints:
   improvement work; it does not directly change ranking behavior.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
+- `motoko models` shows content-free local model service state from the
+  approved `motoko-model` helper, and `motoko model-stop ROUTE` explicitly
+  releases a worker without giving Motoko direct systemd control.
 - Source documents are read-only; reusable indexes store derived chunks under
   Motoko state, not in the repo and not by editing source files.
 - Duplicate-aware indexing reuses exact chunks already present in Motoko state

@@ -183,6 +183,10 @@ not the easiest place to review what changed after a long work session.
 - Made TUI prompt submission append and save the user turn immediately, then
   run topic/dossier attachment and retrieval preparation inside the answer
   worker so slow pre-answer context work does not make Enter feel ignored.
+- Added `/models`, `/model-status`, `/model-stop ROUTE`, `motoko models`, and
+  `motoko model-stop` so local model worker state and explicit release can be
+  inspected or controlled through the approved `motoko-model` helper, without
+  direct systemd access or automatic stop-on-exit.
 - Kept bg-heavy elapsed-time display stable across vectorization progress-line
   updates, instead of resetting the counter on every batch status update.
 - Made the Nix flake wrapper export `MOTOKO_REVISION`, so `/about` can show the
