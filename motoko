@@ -93,13 +93,14 @@ RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
 RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
-VECTOR_STORE_SCHEMA_VERSION = "vector-store-v1"
+VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
 VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
 RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
+EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v1"
 EMBEDDING_TASKS = {"embedding", "embed", "vector", "vector_embedding", "vector_index", "vector_query"}
 RERANKER_TASKS = {"reranker", "rerank", "vector_rerank"}
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
@@ -159,6 +160,8 @@ DEFAULT_LEXICAL_VECTOR_DIMS = 256
 EMBEDDING_BATCH_SIZE = 32
 EMBEDDING_MAX_BATCH_SIZE = 128
 EMBEDDING_TARGET_BATCHES_PER_WORKER = 4
+EMBEDDING_INPUT_CHARS = 1800
+EMBEDDING_MAX_PARTS_PER_CHUNK = 12
 VECTOR_QUERY_LIMIT = 8
 RERANK_CANDIDATE_LIMIT = 24
 HYBRID_STRUCTURED_CANDIDATE_LIMIT = 8
@@ -707,6 +710,18 @@ def compact_text(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def compact_text_middle(text: str, limit: int) -> str:
+    text = re.sub(r"\s+", " ", text.strip())
+    if len(text) <= limit:
+        return text
+    if limit <= 12:
+        return text[:limit].rstrip()
+    marker = " ... "
+    side = max(1, (limit - len(marker)) // 2)
+    tail = max(1, limit - len(marker) - side)
+    return (text[:side].rstrip() + marker + text[-tail:].lstrip())[:limit]
 
 
 def current_git_branch() -> str:
@@ -6848,6 +6863,10 @@ def index_vector_stats(indexes: list[dict]) -> dict:
     chunk_summaries = 0
     file_summaries = 0
     logical_bytes = 0
+    raw_embedding_rows = 0
+    input_chars = embedding_input_chars_limit()
+    max_parts = embedding_max_parts_per_chunk()
+    estimated_body_budget = max(120, int(input_chars * 0.55))
     for index in indexes:
         files = index.get("files", [])
         file_count += len(files)
@@ -6863,13 +6882,17 @@ def index_vector_stats(indexes: list[dict]) -> dict:
                     duplicate_refs += 1
                 if str(chunk.get("summary", "")).strip():
                     chunk_summaries += 1
-                logical_bytes += safe_int(chunk.get("content_bytes"))
+                content_bytes = safe_int(chunk.get("content_bytes"))
+                logical_bytes += content_bytes
+                estimated_rows = (max(content_bytes, 1) + estimated_body_budget - 1) // estimated_body_budget
+                raw_embedding_rows += max(1, min(max_parts, estimated_rows))
     return {
         "index_count": len(indexes),
         "file_count": file_count,
         "chunk_count": chunk_count,
         "unique_chunk_bodies": len(unique_digests) or chunk_count,
         "duplicate_reference_chunks": duplicate_refs,
+        "raw_embedding_row_estimate": raw_embedding_rows,
         "chunk_summary_count": chunk_summaries,
         "file_summary_count": file_summaries,
         "logical_content_bytes": logical_bytes,
@@ -6904,10 +6927,10 @@ def vector_plan(index_id: str | None = None, *, dims: int = DEFAULT_VECTOR_DIMS,
     row_plans = [
         vector_row_plan(
             "raw_chunk_embedding",
-            stats["unique_chunk_bodies"],
+            stats["raw_embedding_row_estimate"],
             dims,
-            source="unique chunk text bodies by content_sha256",
-            invalidates_on=["content_sha256", "embedding_model", "embedding_schema", "source_realm"],
+            source="bounded source-linked chunk/subchunk embedding rows",
+            invalidates_on=["content_sha256", "embedding_model", "embedding_input_schema", "embedding_split_policy", "source_realm"],
         ),
         vector_row_plan(
             "chunk_summary_embedding",
@@ -7075,6 +7098,7 @@ def format_vector_plan(plan: dict) -> str:
             f"{stats.get('file_count', 0)} file(s), "
             f"{stats.get('chunk_count', 0)} chunk(s), "
             f"{stats.get('unique_chunk_bodies', 0)} unique body/bodies, "
+            f"{stats.get('raw_embedding_row_estimate', 0)} bounded embedding row(s), "
             f"{stats.get('duplicate_reference_chunks', 0)} duplicate ref(s)"
         ),
         (
@@ -7392,6 +7416,24 @@ def embedding_batch_size(route_info: dict, candidate_count: int) -> int:
     return max(1, min(batch_size, EMBEDDING_MAX_BATCH_SIZE))
 
 
+def embedding_input_chars_limit() -> int:
+    return max(400, min(env_int("MOTOKO_EMBEDDING_INPUT_CHARS", EMBEDDING_INPUT_CHARS, minimum=400), 8000))
+
+
+def embedding_max_parts_per_chunk() -> int:
+    return max(
+        1,
+        min(
+            env_int(
+                "MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK",
+                EMBEDDING_MAX_PARTS_PER_CHUNK,
+                minimum=1,
+            ),
+            64,
+        ),
+    )
+
+
 def vector_similarity(left, right) -> float:
     if isinstance(left, dict) and isinstance(right, dict):
         return sparse_dot(left, right)
@@ -7489,6 +7531,101 @@ def sparse_dot(left: dict, right: dict) -> float:
 def vector_store_row_text(index: dict, file_item: dict, chunk: dict) -> str:
     content = read_chunk_content(index, chunk)
     return retrieval_chunk_haystack(file_item, chunk, content)
+
+
+def split_embedding_content_parts(content: str, budget: int, max_parts: int) -> list[str]:
+    text = re.sub(r"\s+", " ", content.strip())
+    if not text:
+        return []
+    budget = max(120, int(budget or 0))
+    max_parts = max(1, int(max_parts or 1))
+    if len(text) <= budget:
+        return [text]
+    step = max(1, int(budget * 0.85))
+    parts = []
+    start = 0
+    while start < len(text) and len(parts) < max_parts:
+        end = min(len(text), start + budget)
+        parts.append(text[start:end].strip())
+        if end >= len(text):
+            break
+        start += step
+    if start < len(text) and len(parts) >= max_parts:
+        parts[-1] = text[-budget:].strip()
+    return [part for part in parts if part]
+
+
+def vector_embedding_header(file_item: dict, chunk: dict, *, part_label: str = "") -> str:
+    file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
+    chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
+    return "\n".join(
+        part
+        for part in [
+            f"path: {compact_text(file_item.get('path', ''), 360)}",
+            f"file_summary: {compact_text(file_item.get('summary', ''), 360)}",
+            f"file_signals: {compact_text(file_signal_text, 360)}" if file_signal_text else "",
+            f"chunk_summary: {compact_text(chunk.get('summary', ''), 560)}",
+            f"chunk_signals: {compact_text(chunk_signal_text, 360)}" if chunk_signal_text else "",
+            f"embedding_part: {part_label}" if part_label else "",
+        ]
+        if part.strip()
+    )
+
+
+def bounded_vector_embedding_text(header: str, body: str, *, limit: int) -> str:
+    if len(header) >= limit and body.strip():
+        header = compact_text(header, max(120, int(limit * 0.45)))
+    elif len(header) >= limit:
+        return compact_text(header, limit)
+    remaining = max(0, limit - len(header) - len("\ncontent: "))
+    if body.strip() and remaining:
+        return f"{header}\ncontent: {compact_text_middle(body, remaining)}"
+    return header
+
+
+def vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> list[tuple[str, str, dict]]:
+    limit = embedding_input_chars_limit()
+    max_parts = embedding_max_parts_per_chunk()
+    content = read_chunk_content(index, chunk)
+    base_id = f"{file_item.get('path', '')}#{chunk.get('chunk', '')}"
+    base_header = vector_embedding_header(file_item, chunk)
+    base_budget = max(120, limit - len(base_header) - len("\ncontent: "))
+    content_parts = split_embedding_content_parts(content, base_budget, max_parts)
+    if not content_parts:
+        text = compact_text(base_header, limit)
+        metadata = {
+            "id": f"{base_id}:metadata",
+            "embedding_kind": "chunk_metadata",
+            "embedding_part": 1,
+            "embedding_part_count": 1,
+            "embedding_input_chars": len(text),
+            "embedding_input_sha256": sha256_hex(text.encode("utf-8")),
+        }
+        return [(metadata["id"], text, metadata)] if text.strip() else []
+    rows = []
+    part_count = len(content_parts)
+    for idx, part in enumerate(content_parts, start=1):
+        part_label = f"{idx}/{part_count}" if part_count > 1 else "1/1"
+        header = vector_embedding_header(file_item, chunk, part_label=part_label)
+        text = bounded_vector_embedding_text(header, part, limit=limit)
+        if not text.strip():
+            continue
+        row_id = base_id if part_count == 1 else f"{base_id}:content:{idx}"
+        rows.append(
+            (
+                row_id,
+                text,
+                {
+                    "id": row_id,
+                    "embedding_kind": "chunk_content",
+                    "embedding_part": idx,
+                    "embedding_part_count": part_count,
+                    "embedding_input_chars": len(text),
+                    "embedding_input_sha256": sha256_hex(text.encode("utf-8")),
+                },
+            )
+        )
+    return rows
 
 
 def default_vector_index(conv: dict | None = None) -> dict:
@@ -7748,11 +7885,9 @@ def build_embedding_vector_store_from_index(
     candidates = []
     for file_item in index.get("files", []):
         for chunk in file_item.get("chunks", []):
-            text = vector_store_row_text(index, file_item, chunk)
-            if not text.strip():
-                continue
-            row_id = f"{file_item.get('path', '')}#{chunk.get('chunk', '')}"
-            candidates.append((row_id, file_item, chunk, text))
+            for row_id, text, row_meta in vector_embedding_input_rows(index, file_item, chunk):
+                if text.strip():
+                    candidates.append((row_id, file_item, chunk, text, row_meta))
     batch_size = embedding_batch_size(route_info, len(candidates))
     dimensions = route_dims
     batches = [
@@ -7770,10 +7905,13 @@ def build_embedding_vector_store_from_index(
         "route": route_id,
         "model": route_model,
         "embedding_dimensions": route_dims,
+        "embedding_input_schema": EMBEDDING_INPUT_SCHEMA_VERSION,
+        "embedding_input_chars": embedding_input_chars_limit(),
+        "embedding_max_parts_per_chunk": embedding_max_parts_per_chunk(),
     }
     progress_id = "embedding-" + sha256_hex(json.dumps(progress_key, sort_keys=True).encode("utf-8"))[:16]
     progress_path = vector_progress_path(progress_id)
-    candidate_ids = [row_id for row_id, _file_item, _chunk, _text in candidates]
+    candidate_ids = [row_id for row_id, _file_item, _chunk, _text, _row_meta in candidates]
     completed_rows_by_id: dict[str, dict] = {}
     progress_created = now()
     if write and progress_path.exists():
@@ -7791,6 +7929,10 @@ def build_embedding_vector_store_from_index(
             and route.get("catalog_route") == route_id
             and route.get("model") == route_model
             and int(route.get("embedding_dimensions") or 0) == route_dims
+            and progress.get("target_schema") == VECTOR_STORE_SCHEMA_VERSION
+            and progress.get("embedding_input_schema") == EMBEDDING_INPUT_SCHEMA_VERSION
+            and int(progress.get("embedding_input_chars") or 0) == embedding_input_chars_limit()
+            and int(progress.get("embedding_max_parts_per_chunk") or 0) == embedding_max_parts_per_chunk()
         ):
             progress_created = str(progress.get("created") or progress_created)
             for row in progress.get("rows", []):
@@ -7814,10 +7956,16 @@ def build_embedding_vector_store_from_index(
         eta = vector_eta_seconds()
         return f"eta {human_duration(eta)}" if eta is not None else "eta ?"
 
-    def row_from_vector(file_item: dict, chunk: dict, vector: list[float]) -> dict:
+    def row_from_vector(file_item: dict, chunk: dict, vector: list[float], row_meta: dict) -> dict:
         return {
-            "id": f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
+            "id": row_meta.get("id") or f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
             "kind": "raw_chunk_embedding",
+            "embedding_kind": row_meta.get("embedding_kind", "chunk_content"),
+            "embedding_input_schema": EMBEDDING_INPUT_SCHEMA_VERSION,
+            "embedding_input_chars": row_meta.get("embedding_input_chars", 0),
+            "embedding_input_sha256": row_meta.get("embedding_input_sha256", ""),
+            "embedding_part": row_meta.get("embedding_part", 1),
+            "embedding_part_count": row_meta.get("embedding_part_count", 1),
             "index": index.get("id", ""),
             "path": file_item.get("path", ""),
             "chunk": chunk.get("chunk", ""),
@@ -7852,6 +8000,9 @@ def build_embedding_vector_store_from_index(
                 "embedding_dimensions": route_dims,
                 "max_parallel": route_info.get("max_parallel"),
             },
+            "embedding_input_schema": EMBEDDING_INPUT_SCHEMA_VERSION,
+            "embedding_input_chars": embedding_input_chars_limit(),
+            "embedding_max_parts_per_chunk": embedding_max_parts_per_chunk(),
             "embedding_batch_size": batch_size,
             "embedding_requested_parallelism": requested_parallelism,
             "embedding_parallelism": active_parallelism,
@@ -7874,13 +8025,13 @@ def build_embedding_vector_store_from_index(
 
     def embed_batch(batch):
         embeddings, embedded_route = embed_texts(
-            [text for _row_id, _file_item, _chunk, text in batch],
+            [text for _row_id, _file_item, _chunk, text, _row_meta in batch],
             route_id=route_id or None,
         )
         rows = []
-        for (_row_id, file_item, chunk, _text), vector in zip(batch, embeddings):
+        for (_row_id, file_item, chunk, _text, row_meta), vector in zip(batch, embeddings):
             if vector:
-                rows.append(row_from_vector(file_item, chunk, vector))
+                rows.append(row_from_vector(file_item, chunk, vector, row_meta))
         return rows, embedded_route
 
     pending_batches = [
@@ -7906,7 +8057,7 @@ def build_embedding_vector_store_from_index(
                 f"rows {len(completed_rows_by_id)}/{len(candidates)} {vector_eta_text()}"
             )
 
-    def current_pending_batches() -> list[tuple[int, list[tuple[str, dict, dict, str]]]]:
+    def current_pending_batches() -> list[tuple[int, list[tuple[str, dict, dict, str, dict]]]]:
         rows = [
             (offset, [item for item in batch if item[0] not in completed_rows_by_id])
             for offset, batch in batches
@@ -8015,6 +8166,9 @@ def build_embedding_vector_store_from_index(
         "embedding_requested_parallelism": requested_parallelism,
         "embedding_parallelism": active_parallelism,
         "embedding_parallel_fallbacks": fallback_events,
+        "embedding_input_schema": EMBEDDING_INPUT_SCHEMA_VERSION,
+        "embedding_input_chars": embedding_input_chars_limit(),
+        "embedding_max_parts_per_chunk": embedding_max_parts_per_chunk(),
         "source_index": {
             "id": index.get("id", ""),
             "name": index.get("name", ""),
@@ -8168,6 +8322,23 @@ def vector_store_freshness(store: dict) -> tuple[str, list[str]]:
             return "stale", [f"embedding dimensions changed from {stored_route_dims} to {current_dims}; rebuild this vector store"]
         if current_dims and store_dims and current_dims != store_dims:
             return "stale", [f"vector dimensions are {store_dims}, embedding route expects {current_dims}; rebuild this vector store"]
+        stored_input_schema = str(store.get("embedding_input_schema") or "")
+        if stored_input_schema != EMBEDDING_INPUT_SCHEMA_VERSION:
+            return "stale", [
+                f"embedding input schema is {stored_input_schema or 'missing'}; rebuild for {EMBEDDING_INPUT_SCHEMA_VERSION}"
+            ]
+        stored_input_chars = int_or_zero(store.get("embedding_input_chars"))
+        current_input_chars = embedding_input_chars_limit()
+        if stored_input_chars != current_input_chars:
+            return "stale", [
+                f"embedding input size changed from {stored_input_chars or 'missing'} to {current_input_chars}; rebuild this vector store"
+            ]
+        stored_max_parts = int_or_zero(store.get("embedding_max_parts_per_chunk"))
+        current_max_parts = embedding_max_parts_per_chunk()
+        if stored_max_parts != current_max_parts:
+            return "stale", [
+                f"embedding chunk split policy changed from {stored_max_parts or 'missing'} to {current_max_parts}; rebuild this vector store"
+            ]
     source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
     index_id = str(source.get("id", ""))
     if not index_id:
@@ -8262,12 +8433,29 @@ def query_vector_store(
                 "vector_score": round(vector_score, 6),
                 "lexical": lexical,
                 "path_boost": path_boost,
+                "row_id": row.get("id", ""),
+                "embedding_kind": row.get("embedding_kind", ""),
+                "embedding_part": row.get("embedding_part", 1),
+                "embedding_part_count": row.get("embedding_part_count", 1),
                 "path": row.get("path", ""),
                 "chunk": row.get("chunk", ""),
                 "content_sha256": row.get("content_sha256", ""),
                 "summary": row.get("summary", ""),
             }
         )
+    deduped_rows: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        key = (str(row.get("path", "")), str(row.get("chunk", "")))
+        previous = deduped_rows.get(key)
+        if previous is None or row.get("score", 0) > previous.get("score", 0):
+            new_row = dict(row)
+            new_row["vector_hit_count"] = (
+                1 if previous is None else previous.get("vector_hit_count", 1) + 1
+            )
+            deduped_rows[key] = new_row
+        elif previous is not None:
+            previous["vector_hit_count"] = previous.get("vector_hit_count", 1) + 1
+    rows = list(deduped_rows.values())
     rows.sort(key=lambda item: item.get("score", 0), reverse=True)
     rerank_route = {}
     if rerank and rows:
@@ -8405,6 +8593,12 @@ def format_vector_query_report(report: dict) -> str:
             f"lex={row.get('lexical', 0)} path={row.get('path_boost', 0)}  "
             f"{row.get('path', '')} chunk {row.get('chunk', '')}"
         )
+        if row.get("vector_hit_count", 1) > 1 or row.get("embedding_part_count", 1) > 1:
+            lines.append(
+                f"   vector row: {row.get('row_id', '')} "
+                f"part {row.get('embedding_part', 1)}/{row.get('embedding_part_count', 1)} "
+                f"hits={row.get('vector_hit_count', 1)}"
+            )
         if "rerank_score" in row:
             lines.append(f"   rerank_score: {row.get('rerank_score', 0)}")
         if row.get("summary"):

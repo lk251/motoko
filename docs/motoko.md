@@ -1004,6 +1004,14 @@ route fails under the requested concurrency, Motoko checkpoints completed rows
 and retries the remaining work at half the parallelism until it reaches one
 request at a time or the work succeeds. Progress messages include a row-based
 ETA once the current run has enough completed rows to estimate throughput.
+Embedding inputs are bounded before they are sent to the route. Long source
+chunks are split into several source-linked subchunk rows rather than being
+compressed into one lossy truncated embedding; each row keeps the original
+file path, chunk id, content hash, input schema, input hash, and part count so
+retrieval can map the vector hit back to the real source chunk. Tune
+`MOTOKO_EMBEDDING_INPUT_CHARS=N` only for diagnosis or after route limits are
+verified, and `MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK=N` when testing the
+recall/storage tradeoff for unusually long chunks.
 Embedding and reranker routes fail fast when their declared local model files
 are missing, and the diagnostic includes the `motoko-model verify ROUTE`
 command plus the catalog download URL/hash when available.
@@ -1011,10 +1019,10 @@ Completed embedding batches are checkpointed under
 `~/.local/state/motoko/vector-progress/`, and a later `vector-refresh` for the
 same source fingerprint plus embedding route/model/dimensions resumes from
 those saved rows. Embedding stores are considered stale and rebuilt from the
-saved source index when the vector schema, source fingerprint, embedding route,
-model, or dimensions change. Dense vector coordinates are not migrated across
-incompatible embedding models; source re-vectorization is the correct upgrade
-path. A fresh embedding
+saved source index when the vector schema, embedding input schema/split
+policy, source fingerprint, embedding route, model, or dimensions change.
+Dense vector coordinates are not migrated across incompatible embedding
+models; source re-vectorization is the correct upgrade path. A fresh embedding
 store participates in true hybrid retrieval: lexical/path candidates,
 deterministic Org/task candidates, and fresh embedding candidates are unioned
 and deduplicated before final context selection. When a catalog-discovered

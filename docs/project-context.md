@@ -290,15 +290,22 @@ Current sequencing notes:
   enough requests to fill approved route slots. If a route cannot sustain the
   requested parallelism, save completed rows and retry remaining work at lower
   parallelism before failing.
+  Embedding inputs should be bounded at the Motoko layer as well as by the
+  model service. Long chunks should be split into bounded, overlapping,
+  source-linked subchunk rows that retain the parent file/chunk/hash
+  provenance, instead of relying on one oversized request or lossy whole-chunk
+  truncation.
 - Dense embedding stores should be invalidated and rebuilt from saved
   source/index material when their vector schema, source fingerprint,
-  embedding route, model, or dimensions change. Do not try to mathematically
-  upgrade old embedding coordinates across incompatible models; treat
+  embedding input schema/split policy, embedding route, model, or dimensions
+  change. Do not try to mathematically upgrade old embedding coordinates
+  across incompatible models or incompatible input semantics; treat
   re-vectorization as the inspectable heavy-work migration path.
 - Embedding vector refresh should checkpoint completed rows under realm-local
   Motoko state and resume from that progress when the source fingerprint and
-  embedding route/model/dimensions still match. If those keys change, discard
-  the partial vector progress and rebuild from source/index material.
+  embedding route/model/dimensions/input policy still match. If those keys
+  change, discard the partial vector progress and rebuild from source/index
+  material.
 - User feedback should accumulate as private per-realm evaluation data. Store
   ratings and notes under the active user's Motoko state, keep them out of the
   conversation transcript, and use them to guide future retrieval/rerank/prompt

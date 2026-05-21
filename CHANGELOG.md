@@ -142,10 +142,13 @@ not the easiest place to review what changed after a long work session.
 - Added realm-local embedding vector progress checkpoints so interrupted
   vector refreshes can resume from completed rows when the source and
   embedding route/model/dimensions still match.
+- Changed embedding inputs to bounded source-linked subchunk rows, so long
+  chunks stay inside the embedding route context limit while preserving parent
+  file/chunk provenance and head/tail recall.
 - Marked embedding vector stores stale when the vector schema, source
-  fingerprint, embedding route, model, or dimensions change, so background
-  refresh rebuilds incompatible dense vectors from source/index material
-  instead of treating them as migratable.
+  fingerprint, embedding input schema/split policy, embedding route, model, or
+  dimensions change, so background refresh rebuilds incompatible dense vectors
+  from source/index material instead of treating them as migratable.
 - Added `/feedback up|down|ok [TEXT]`, `/up`, `/down`, and `motoko feedback`
   to record private per-realm answer feedback outside the conversation
   transcript for future retrieval/rerank/prompt evaluation.

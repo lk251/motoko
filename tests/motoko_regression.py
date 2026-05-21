@@ -1767,6 +1767,114 @@ def test_embedding_vector_store_uses_catalog_route(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_input_chars = os.environ.get("MOTOKO_EMBEDDING_INPUT_CHARS")
+    old_max_parts = os.environ.get("MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    server = None
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ["MOTOKO_EMBEDDING_INPUT_CHARS"] = "700"
+        os.environ["MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK"] = "6"
+        os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = "2"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            content = "alpha start " + ("middle planning context " * 120) + " omega tail deadline"
+            path = docs / "long.org"
+            path.write_text(content, encoding="utf-8")
+            index = {
+                "id": "long-embedding-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": "Long planning note with a deadline near the tail.",
+                        "chunks": [
+                            {
+                                "chunk": 7,
+                                "summary": "Long chunk that must preserve head and tail retrieval evidence.",
+                                "content": content,
+                                "content_bytes": len(content.encode("utf-8")),
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+            server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 2,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("long-embedding-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+            store = m.build_vector_store("long-embedding-index", method=m.EMBEDDING_VECTOR_METHOD)
+
+            payload_inputs = []
+            for payload in EmbeddingHandler.payloads:
+                inputs = payload.get("input", [])
+                payload_inputs.extend(inputs if isinstance(inputs, list) else [inputs])
+            assert store["row_count"] > 1
+            assert store["embedding_input_schema"] == m.EMBEDDING_INPUT_SCHEMA_VERSION
+            assert all(len(str(text)) <= 700 for text in payload_inputs)
+            assert any("alpha start" in str(text).lower() for text in payload_inputs)
+            assert any("omega tail deadline" in str(text).lower() for text in payload_inputs)
+            assert all(row["path"] == str(path) and row["chunk"] == 7 for row in store["rows"])
+            assert all(row["embedding_kind"] == "chunk_content" for row in store["rows"])
+            assert max(row["embedding_part"] for row in store["rows"]) == store["row_count"]
+            assert m.vector_store_freshness(store)[0] == "fresh"
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_input_chars is None:
+            os.environ.pop("MOTOKO_EMBEDDING_INPUT_CHARS", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_INPUT_CHARS"] = old_input_chars
+        if old_max_parts is None:
+            os.environ.pop("MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK"] = old_max_parts
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+
+
 def test_embedding_vector_store_parallelizes_batches(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -3175,6 +3283,7 @@ def main() -> int:
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
+        test_embedding_vector_store_splits_long_chunks_with_parent_mapping,
         test_embedding_vector_store_parallelizes_batches,
         test_embedding_parallelism_allows_32_cap,
         test_embedding_vector_store_stale_when_route_model_changes,
