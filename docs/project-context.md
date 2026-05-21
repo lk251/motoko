@@ -288,12 +288,12 @@ Current sequencing notes:
   preview/chat/topic/rerank context contains the relevant `** do`/`** log`
   material rather than only the start of the file.
 - Treat that as one instance of a broader "right container, wrong span" class.
-  Motoko should prefer an evidence-span layer after chunk retrieval: generate
-  deterministic spans from structure and windows, score them, and split long
-  candidate spans into bounded worker-sized subspans with parent provenance
-  before embedding/rerank scoring. Span choices and subspan offsets should
-  remain visible in `/sources` so failures can be diagnosed as retrieval, span
-  selection, rerank, or final synthesis problems.
+  Motoko now has a deterministic `evidence-store-v1` layer for indexed corpora:
+  Org days, Org tasks, headings, paragraphs, and bounded text windows become
+  first-class source-linked evidence rows. Retrieval should keep using these
+  rows in the hybrid candidate set, vectorizing them alongside raw chunks, and
+  surfacing selected evidence ids/spans in `/sources` so failures can be
+  diagnosed as retrieval, span selection, rerank, or final synthesis problems.
 - Bg-heavy vectorization should use the approved embedding route efficiently:
   batch source chunks, issue concurrent embedding requests up to the
   NixOS-declared route `maxParallel` with a Motoko-side cap of 32, expose
@@ -321,9 +321,10 @@ Current sequencing notes:
   material.
 - User feedback should accumulate as private per-realm evaluation data. Store
   ratings and notes under the active user's Motoko state, keep them out of the
-  conversation transcript, and use them to guide future retrieval/rerank/prompt
-  evals. Do not let feedback directly mutate ranking behavior without an
-  inspectable evaluation gate.
+  conversation transcript, expose `motoko feedback-eval` as the inspectable
+  fixture-export path, and use those fixtures to guide future
+  retrieval/rerank/prompt evals. Do not let feedback directly mutate ranking
+  behavior without an inspectable evaluation gate.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended

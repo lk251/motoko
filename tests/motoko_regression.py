@@ -1182,6 +1182,73 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
 
 
+def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
+    with isolated_state() as tmp:
+        docs = tmp / "orgfiles"
+        docs.mkdir()
+        path = docs / "logbook.org"
+        content = (
+            "* [2026-05-18 Mon 11:14]\n"
+            "** do\n"
+            "*** TODO Review repaste plan\n"
+            "** log\n"
+            "Repasting was discussed as part of the Personal LLM Architecture work.\n\n"
+            "* [2026-05-19 Tue 12:34]\n"
+            "** do\n"
+            "*** TODO Continue Personal LLM Architecture\n"
+            "** log\n"
+            "The word repaste appeared again with the model-service plan.\n"
+        )
+        path.write_text(content, encoding="utf-8")
+        index = {
+            "id": "evidence-index",
+            "name": "orgfiles",
+            "root": str(docs),
+            "created": "2026-05-21T10:00:00+00:00",
+            "files": [
+                {
+                    "path": str(path),
+                    "source_fingerprint": m.source_fingerprint(path),
+                    "summary": "Daily logbook entries.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Recent logbook notes.",
+                            "content": content,
+                            "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            "content_bytes": len(content.encode("utf-8")),
+                        }
+                    ],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+
+        store = m.build_evidence_store_from_index(index, write=False)
+        kinds = {row.get("kind") for row in store["rows"]}
+        assert "org_day" in kinds
+        assert "org_task" in kinds
+        report = m.query_evidence_store(store, "repaste Personal LLM Architecture logbook.org")
+        assert report["rows"]
+        assert report["rows"][0]["path"].endswith("logbook.org")
+        assert "Personal LLM Architecture" in report["rows"][0]["text"]
+
+        text, sources = m.retrieve_from_index(index, "repaste Personal LLM Architecture logbook.org")
+        assert "Personal LLM Architecture" in text
+        assert "repaste" in text.lower()
+        chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
+        assert chunk_sources
+        assert "evidence" in chunk_sources[0].get("retrieval_methods", [])
+        assert chunk_sources[0].get("excerpt_selection") == "evidence-store"
+        assert chunk_sources[0].get("evidence_id")
+        assert "evidence" in m.format_retrieval_debug_report(
+            m.run_retrieval_debug(
+                "repaste Personal LLM Architecture logbook.org",
+                index_ids=[index["id"]],
+            )
+        )
+
+
 def test_span_selection_uses_embedding_and_rerank_routes(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -1613,6 +1680,42 @@ def test_response_feedback_is_private_and_does_not_pollute_conversation(m):
         assert feedback_rows[-1]["id"] == row["id"]
 
 
+def test_feedback_eval_exports_private_retrieval_fixtures(m):
+    with isolated_state():
+        conv = m.new_conversation("Feedback eval")
+        conv["id"] = "feedback-eval-conv"
+        conv["messages"] = [
+            {"role": "user", "content": "summarize logbook.org"},
+            {"role": "assistant", "content": "A weak answer."},
+        ]
+        conv["last_sources"] = [
+            {
+                "kind": "chunk",
+                "index": "idx",
+                "path": "/tmp/logbook.org",
+                "chunk": 1,
+                "evidence_id": "ev-abc",
+                "evidence_kind": "org_day",
+                "evidence_date": "2026-05-19",
+                "evidence_score": 4000,
+            }
+        ]
+        row = m.record_response_feedback(conv, "down", "Wrong source and stale summary.")
+        report = m.run_feedback_eval()
+        assert report["schema"] == m.FEEDBACK_EVAL_SCHEMA_VERSION
+        assert report["fixture_count"] == 1
+        fixture = report["fixtures"][0]
+        assert fixture["id"] == row["id"]
+        assert fixture["quality_status"] == "needs-review"
+        assert "ranking" in fixture["focus"] or "staleness" in fixture["focus"]
+        assert fixture["source_evidence_count"] == 1
+        text = m.format_feedback_eval_report(report)
+        assert "feedback eval:" in text
+        assert "Wrong source" in text
+        path = m.save_feedback_eval_report(report)
+        assert path.exists()
+
+
 def test_retrieval_preview_shows_context_without_model_call(m):
     with isolated_state():
         conv = m.new_conversation("Preview")
@@ -1840,7 +1943,8 @@ def test_vector_build_and_query_lexical_baseline(m):
         assert store["schema"] == m.VECTOR_STORE_SCHEMA_VERSION
         assert store["method"] == m.LEXICAL_VECTOR_METHOD
         assert store["production_embedding"] is False
-        assert store["row_count"] == 1
+        assert store["row_count"] >= 2
+        assert any(row.get("kind") == "evidence_embedding" for row in store["rows"])
         assert pathlib.Path(store["path"]).exists()
         assert m.vector_store_freshness(store)[0] == "fresh"
         report = m.query_vector_store(store, "finish vector readiness deadline", limit=3)
@@ -2043,8 +2147,11 @@ def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
             assert any("alpha start" in str(text).lower() for text in payload_inputs)
             assert any("omega tail deadline" in str(text).lower() for text in payload_inputs)
             assert all(row["path"] == str(path) and row["chunk"] == 7 for row in store["rows"])
-            assert all(row["embedding_kind"] == "chunk_content" for row in store["rows"])
-            assert max(row["embedding_part"] for row in store["rows"]) == store["row_count"]
+            raw_rows = [row for row in store["rows"] if row["kind"] == "raw_chunk_embedding"]
+            assert raw_rows
+            assert all(row["embedding_kind"] == "chunk_content" for row in raw_rows)
+            assert max(row["embedding_part"] for row in raw_rows) == len(raw_rows)
+            assert any(row["kind"] == "evidence_embedding" for row in store["rows"])
             assert m.vector_store_freshness(store)[0] == "fresh"
     finally:
         if server is not None:
@@ -2143,11 +2250,13 @@ def test_embedding_vector_store_parallelizes_batches(m):
 
             store = m.build_vector_store("parallel-embedding-index", method=m.EMBEDDING_VECTOR_METHOD)
 
-            assert store["row_count"] == 12
-            assert store["embedding_batch_count"] == 6
+            raw_rows = [row for row in store["rows"] if row["kind"] == "raw_chunk_embedding"]
+            assert len(raw_rows) == 12
+            assert store["row_count"] >= 12
+            assert store["embedding_batch_count"] >= 6
             assert store["embedding_parallelism"] == 3
             assert SlowEmbeddingHandler.max_active >= 2
-            assert len(SlowEmbeddingHandler.payloads) == 6
+            assert len(SlowEmbeddingHandler.payloads) >= 6
             server.shutdown()
             server.server_close()
     finally:
@@ -2391,8 +2500,10 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             assert any("eta" in message for message in progress_messages)
 
             store = m.build_vector_store("resume-vector-index", method=m.EMBEDDING_VECTOR_METHOD)
-            assert store["row_count"] == 3
-            assert len(EmbeddingHandler.payloads) == 3
+            raw_rows = [row for row in store["rows"] if row["kind"] == "raw_chunk_embedding"]
+            assert len(raw_rows) == 3
+            assert store["row_count"] >= 3
+            assert len(EmbeddingHandler.payloads) >= 3
             assert list(m.vector_progress_dir().glob("*.json")) == []
     finally:
         if server is not None:
@@ -2488,12 +2599,14 @@ def test_embedding_vector_store_falls_back_from_excess_parallelism(m):
 
             store = m.build_vector_store("fallback-vector-index", method=m.EMBEDDING_VECTOR_METHOD)
 
-            assert store["row_count"] == 8
+            raw_rows = [row for row in store["rows"] if row["kind"] == "raw_chunk_embedding"]
+            assert len(raw_rows) == 8
+            assert store["row_count"] >= 8
             assert store["embedding_requested_parallelism"] == 4
             assert store["embedding_parallelism"] == 2
             assert len(store["embedding_parallel_fallbacks"]) == 1
             assert ThrottledEmbeddingHandler.failures >= 1
-            assert len(ThrottledEmbeddingHandler.payloads) > 8
+            assert len(ThrottledEmbeddingHandler.payloads) > len(raw_rows)
     finally:
         if server is not None:
             server.shutdown()
@@ -3467,6 +3580,7 @@ def main() -> int:
         test_named_file_query_boosts_matching_path,
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
+        test_hierarchical_evidence_store_retrieves_org_day_and_terms,
         test_span_selection_uses_embedding_and_rerank_routes,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
@@ -3478,6 +3592,7 @@ def main() -> int:
         test_report_highlighting_is_render_only,
         test_tui_report_commands_do_not_persist_system_output,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
+        test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_preview_shows_context_without_model_call,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_vector_plan_reports_storage_and_readiness_gates,

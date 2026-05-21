@@ -96,11 +96,15 @@ VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
 VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
+EVIDENCE_STORE_SCHEMA_VERSION = "evidence-store-v1"
+EVIDENCE_QUERY_SCHEMA_VERSION = "evidence-query-v1"
+FEEDBACK_EVAL_SCHEMA_VERSION = "feedback-eval-v1"
 RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
-EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v1"
+EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v2"
+EVIDENCE_INPUT_SCHEMA_VERSION = "evidence-input-v1"
 EMBEDDING_TASKS = {"embedding", "embed", "vector", "vector_embedding", "vector_index", "vector_query"}
 RERANKER_TASKS = {"reranker", "rerank", "vector_rerank"}
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
@@ -164,7 +168,14 @@ EMBEDDING_INPUT_CHARS = 1800
 EMBEDDING_MAX_PARTS_PER_CHUNK = 12
 VECTOR_QUERY_LIMIT = 8
 RERANK_CANDIDATE_LIMIT = 24
+EVIDENCE_QUERY_LIMIT = 16
+EVIDENCE_CONTEXT_LIMIT = 8
+EVIDENCE_TEXT_LIMIT = 6000
+EVIDENCE_PARAGRAPH_LIMIT_PER_CHUNK = 32
+EVIDENCE_WINDOW_CHARS = 1400
+EVIDENCE_WINDOW_LIMIT_PER_CHUNK = 12
 HYBRID_STRUCTURED_CANDIDATE_LIMIT = 8
+BACKGROUND_EVIDENCE_REFRESH_LIMIT = 1
 BACKGROUND_VECTOR_REFRESH_LIMIT = 1
 BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS = 1000
 INDEX_CHUNK_CHARS = 12000
@@ -395,8 +406,11 @@ SLASH_COMMANDS = [
     ("/status", "show model, memory, and context state"),
     ("/model-routes", "show model worker routes"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
+    ("/feedback-eval", "turn private feedback into eval fixtures"),
     ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
     ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
+    ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
+    ("/evidence-query QUERY", "query the latest evidence store"),
     ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
     ("/vector-build [ID]", "build a realm-local vector store for an index"),
     ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -464,8 +478,12 @@ SHELL_COMMANDS = [
     "model-routes",
     "model-eval",
     "retrieval-eval",
+    "feedback-eval",
     "retrieval-debug",
     "retrieval-preview",
+    "evidence-build",
+    "evidence-query",
+    "evidence-refresh",
     "vector-plan",
     "vector-build",
     "vector-refresh",
@@ -493,8 +511,12 @@ SIMPLE_SLASH_COMMANDS = {
     "/status",
     "/model-routes",
     "/retrieval-eval",
+    "/feedback-eval",
     "/retrieval-debug",
     "/retrieval-preview",
+    "/evidence-build",
+    "/evidence-query",
+    "/evidence-refresh",
     "/vector-plan",
     "/vector-build",
     "/vector-refresh",
@@ -1015,6 +1037,29 @@ def retrieval_debug_dir() -> pathlib.Path:
 def response_feedback_path() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return root / "response-feedback.jsonl"
+
+
+def feedback_evals_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "feedback-evals")
+
+
+def feedback_eval_path(eval_id: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(eval_id)).strip("-") or "feedback-eval"
+    return feedback_evals_dir() / f"{safe}.json"
+
+
+def evidence_stores_dir() -> pathlib.Path:
+    return state_root() / "evidence-stores"
+
+
+def ensure_evidence_stores_dir() -> pathlib.Path:
+    return ensure_private_dir(evidence_stores_dir())
+
+
+def evidence_store_path(store_id: str) -> pathlib.Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(store_id)).strip("-") or "evidence-store"
+    return ensure_evidence_stores_dir() / f"{safe}.json"
 
 
 def vector_stores_dir() -> pathlib.Path:
@@ -3923,13 +3968,27 @@ def run_retrieval_debug(
             "name": index.get("name", ""),
             "root": index.get("root", ""),
             "freshness": status,
-            "production_retrieval": "hybrid lexical+structured+embedding -> rerank",
+            "production_retrieval": "hybrid lexical+structured+evidence+embedding -> rerank",
             "warnings": warnings[:8],
             "files_considered": len(file_rows),
             "chunks_considered": len(chunk_rows),
             "files": file_rows[:limit],
             "chunks": chunk_rows[:limit],
         }
+        if env_flag("MOTOKO_EVIDENCE_RETRIEVAL", True):
+            try:
+                evidence_store = evidence_store_for_retrieval(index)
+                evidence_report = query_evidence_store(evidence_store, query, limit=limit)
+            except SystemExit as exc:
+                index_report["evidence_error"] = str(exc).splitlines()[0][:240]
+            else:
+                index_report["evidence_store"] = {
+                    "id": evidence_report.get("store_id", ""),
+                    "freshness": evidence_report.get("freshness", ""),
+                }
+                if evidence_report.get("warnings"):
+                    index_report["evidence_warnings"] = evidence_report.get("warnings", [])[:4]
+                index_report["evidence_rows"] = evidence_report.get("rows", [])[:limit]
         if env_flag("MOTOKO_VECTOR_RETRIEVAL", True):
             vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
             if vector_store is not None:
@@ -4022,6 +4081,38 @@ def format_retrieval_debug_report(report: dict) -> str:
                 lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
             if row.get("summary"):
                 lines.append("       summary: " + row.get("summary", ""))
+        if index.get("evidence_store"):
+            store = index.get("evidence_store", {})
+            lines.append(
+                f"  evidence store: {store.get('id', '')} freshness={store.get('freshness', '')}"
+            )
+        for warning in index.get("evidence_warnings", [])[:3]:
+            lines.append(f"  evidence warning: {warning}")
+        if index.get("evidence_error"):
+            lines.append(f"  evidence error: {index.get('evidence_error')}")
+        if index.get("evidence_rows"):
+            lines.append("  top evidence rows:")
+            for idx, row in enumerate(index.get("evidence_rows", [])[:8], 1):
+                lines.append(
+                    f"    {idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+                    f"path={row.get('path_boost', 0)} structured={row.get('structured', 0)} "
+                    f"{row.get('kind', '')}  {row.get('path', '')} chunk {row.get('chunk', '')}"
+                )
+                labels = []
+                if row.get("date"):
+                    labels.append(f"date={row.get('date')}")
+                if row.get("todo"):
+                    labels.append(f"todo={row.get('todo')}")
+                if row.get("priority"):
+                    labels.append(f"priority={row.get('priority')}")
+                if row.get("title"):
+                    labels.append(f"title={row.get('title')}")
+                if labels:
+                    lines.append("       " + "  ".join(labels))
+                if row.get("matched_terms"):
+                    lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+                if row.get("text"):
+                    lines.append("       text: " + compact_text(row.get("text", ""), 220))
         if index.get("vector_store"):
             store = index.get("vector_store", {})
             lines.append(
@@ -5479,6 +5570,29 @@ def append_jsonl(path: pathlib.Path, row: dict) -> None:
     path.chmod(0o600)
 
 
+def read_jsonl(path: pathlib.Path, *, limit: int | None = None) -> list[dict]:
+    if not path.exists():
+        return []
+    rows = []
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
+    except OSError:
+        return []
+    if limit is not None and limit >= 0:
+        return rows[-limit:]
+    return rows
+
+
 def append_study_job_event(job_id: str, event: str, **fields) -> None:
     append_jsonl(
         study_jobs_path(),
@@ -5549,6 +5663,12 @@ def compact_feedback_sources(sources: list[dict], *, limit: int = 16) -> list[di
                     "vector_method",
                     "vector_rerank_route",
                     "hybrid_rerank_route",
+                    "evidence_rows",
+                    "evidence_id",
+                    "evidence_kind",
+                    "evidence_title",
+                    "evidence_date",
+                    "evidence_score",
                 ]
                 if source.get(key) not in (None, "", [])
             }
@@ -5588,6 +5708,174 @@ def format_feedback_saved(row: dict) -> str:
         f"path: {response_feedback_path()}\n"
         "use: private per-realm signal for retrieval/rerank/prompt evaluation"
     )
+
+
+def read_response_feedback_rows(limit: int | None = None) -> list[dict]:
+    rows = [
+        row
+        for row in read_jsonl(response_feedback_path(), limit=limit)
+        if row.get("schema") == RESPONSE_FEEDBACK_SCHEMA_VERSION
+    ]
+    rows.sort(key=lambda row: str(row.get("created", "")))
+    return rows
+
+
+def feedback_eval_focus(row: dict) -> list[str]:
+    text = " ".join(
+        [
+            str(row.get("rating", "")),
+            str(row.get("note", "")),
+            str(row.get("user_prompt", "")),
+        ]
+    ).lower()
+    focus = []
+    for label, words in [
+        ("recall", {"missing", "didn't find", "did not find", "not found", "absent", "sources"}),
+        ("ranking", {"wrong source", "wrong file", "irrelevant", "ranking", "top result"}),
+        ("evidence", {"citation", "source", "excerpt", "ground", "quote"}),
+        ("prompt_use", {"ignored", "didn't use", "did not use", "answer"}),
+        ("staleness", {"stale", "old", "outdated", "changed"}),
+        ("synthesis", {"summary", "prioritize", "todo", "plan"}),
+    ]:
+        if any(word in text for word in words):
+            focus.append(label)
+    return list(dict.fromkeys(focus or ["answer_quality"]))
+
+
+def feedback_eval_source_hints(row: dict) -> list[dict]:
+    hints = []
+    seen = set()
+    for source in row.get("sources", []) if isinstance(row.get("sources"), list) else []:
+        if not isinstance(source, dict):
+            continue
+        key = (
+            source.get("kind", ""),
+            source.get("index", ""),
+            source.get("path", ""),
+            str(source.get("chunk", "")),
+            source.get("evidence_id", ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        hints.append(
+            {
+                item_key: source.get(item_key)
+                for item_key in [
+                    "kind",
+                    "index",
+                    "path",
+                    "chunk",
+                    "evidence_id",
+                    "evidence_kind",
+                    "evidence_title",
+                    "evidence_date",
+                    "score",
+                    "hybrid_score",
+                    "rerank_score",
+                    "vector_score",
+                    "evidence_score",
+                    "status",
+                ]
+                if source.get(item_key) not in (None, "", [])
+            }
+        )
+    return hints
+
+
+def feedback_eval_fixture(row: dict) -> dict:
+    rating = str(row.get("rating", ""))
+    quality_status = {
+        "up": "accepted-good",
+        "ok": "accepted-mixed",
+        "down": "needs-review",
+    }.get(rating, "needs-review")
+    source_hints = feedback_eval_source_hints(row)
+    return {
+        "id": row.get("id", ""),
+        "created": row.get("created", ""),
+        "realm": row.get("realm", identity_realm()),
+        "rating": rating,
+        "quality_status": quality_status,
+        "focus": feedback_eval_focus(row),
+        "conversation_id": row.get("conversation_id", ""),
+        "conversation_title": row.get("conversation_title", ""),
+        "query": row.get("user_prompt", ""),
+        "note": row.get("note", ""),
+        "assistant_reply_sha256": sha256_hex(str(row.get("assistant_reply", "")).encode("utf-8")),
+        "source_hints": source_hints,
+        "source_path_count": len({hint.get("path", "") for hint in source_hints if hint.get("path")}),
+        "source_evidence_count": len([hint for hint in source_hints if hint.get("evidence_id")]),
+        "use": (
+            "Private per-realm eval fixture. Use for retrieval/rerank/prompt "
+            "evaluation and audits; do not directly mutate ranking behavior."
+        ),
+    }
+
+
+def run_feedback_eval(*, limit: int | None = None) -> dict:
+    rows = read_response_feedback_rows(limit=limit)
+    fixtures = [feedback_eval_fixture(row) for row in rows]
+    ratings = collections.Counter(row.get("rating", "unknown") for row in fixtures)
+    focus_counts = collections.Counter(focus for row in fixtures for focus in row.get("focus", []))
+    return {
+        "schema": FEEDBACK_EVAL_SCHEMA_VERSION,
+        "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+        "created": now(),
+        "realm": identity_realm(),
+        "source": str(response_feedback_path()),
+        "fixture_count": len(fixtures),
+        "ratings": dict(sorted(ratings.items())),
+        "focus": dict(sorted(focus_counts.items())),
+        "fixtures": fixtures,
+        "privacy": "Stored under the current user's Motoko state; no cross-realm sharing.",
+    }
+
+
+def save_feedback_eval_report(report: dict) -> pathlib.Path:
+    path = feedback_eval_path(str(report.get("id", "feedback-eval")))
+    atomic_write(path, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    path.chmod(0o600)
+    return path
+
+
+def format_feedback_eval_report(report: dict) -> str:
+    lines = [
+        f"feedback eval: {report.get('fixture_count', 0)} fixture(s)",
+        f"id: {report.get('id', '')}",
+        f"created: {report.get('created', '')}",
+        f"realm: {report.get('realm', '')}",
+        f"source: {report.get('source', '')}",
+        "ratings: "
+        + (
+            ", ".join(f"{key}={value}" for key, value in (report.get("ratings") or {}).items())
+            or "-"
+        ),
+        "focus: "
+        + (
+            ", ".join(f"{key}={value}" for key, value in (report.get("focus") or {}).items())
+            or "-"
+        ),
+    ]
+    for row in report.get("fixtures", [])[:12]:
+        lines.append(
+            f"- {row.get('rating', '')} {row.get('id', '')} "
+            f"{row.get('quality_status', '')}: {compact_text(row.get('query', ''), 120)}"
+        )
+        if row.get("note"):
+            lines.append(f"  note: {compact_text(row.get('note', ''), 160)}")
+        if row.get("focus"):
+            lines.append(f"  focus: {', '.join(row.get('focus', []))}")
+        if row.get("source_hints"):
+            first = row["source_hints"][0]
+            label = first.get("path") or first.get("kind") or "-"
+            if first.get("evidence_id"):
+                label += f" evidence={first.get('evidence_kind', '')}:{first.get('evidence_id', '')[:12]}"
+            lines.append(f"  first source: {label}")
+    if report.get("fixture_count", 0) > 12:
+        lines.append(f"... {report.get('fixture_count', 0) - 12} more fixture(s)")
+    lines.append(f"privacy: {report.get('privacy', '')}")
+    return "\n".join(lines)
 
 
 def parse_feedback_command(text: str) -> tuple[str, str]:
@@ -7609,6 +7897,681 @@ def format_index_storage_audit(audit: dict) -> str:
     return "\n".join(lines)
 
 
+def index_is_persisted(index: dict) -> bool:
+    index_id = str(index.get("id", ""))
+    return bool(re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", index_id) and index_path(index_id).exists())
+
+
+def evidence_store_source_fingerprint(index: dict) -> str:
+    items = [
+        {
+            "id": index.get("id", ""),
+            "root": index.get("root", ""),
+            "created": index.get("created", ""),
+            "schema": EVIDENCE_INPUT_SCHEMA_VERSION,
+        }
+    ]
+    for file_item in index.get("files", []):
+        chunks = []
+        for chunk in file_item.get("chunks", []):
+            chunks.append(
+                {
+                    "chunk": chunk.get("chunk", ""),
+                    "content_sha256": chunk.get("content_sha256", ""),
+                    "signals_sha256": sha256_hex(json.dumps(chunk.get("signals", {}), sort_keys=True).encode("utf-8")),
+                }
+            )
+        items.append(
+            {
+                "path": file_item.get("path", ""),
+                "signals_sha256": sha256_hex(json.dumps(file_item.get("signals", {}), sort_keys=True).encode("utf-8")),
+                "chunks": chunks,
+            }
+        )
+    return sha256_hex(json.dumps(items, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+
+
+def org_heading_metadata(title: str) -> dict:
+    title = title.strip()
+    parts = title.split()
+    todo = ""
+    priority = ""
+    if parts and parts[0].upper() in ORG_TODO_KEYWORDS:
+        todo = parts.pop(0).upper()
+    if parts and re.fullmatch(r"\[#([A-Z])\]", parts[0]):
+        priority = parts.pop(0)[2]
+    clean_title = " ".join(parts).strip() or title
+    return {
+        "title": clean_title,
+        "todo": todo,
+        "priority": priority,
+        "date": org_date_from_line(title),
+    }
+
+
+def org_heading_sections(content: str) -> list[dict]:
+    headings = []
+    stack = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.rstrip()
+        match = re.match(r"^(\*+)\s+(.*)$", stripped)
+        if match:
+            level = len(match.group(1))
+            raw_title = match.group(2).strip()
+            meta = org_heading_metadata(raw_title)
+            while stack and int(stack[-1].get("level", 0) or 0) >= level:
+                stack.pop()
+            parent_titles = [str(row.get("title", "")) for row in stack if row.get("title")]
+            heading = {
+                "start": offset,
+                "level": level,
+                "raw_title": raw_title,
+                "title": meta.get("title", raw_title),
+                "todo": meta.get("todo", ""),
+                "priority": meta.get("priority", ""),
+                "date": meta.get("date", ""),
+                "parent_titles": parent_titles,
+            }
+            headings.append(heading)
+            stack.append(heading)
+        offset += len(line)
+    sections = []
+    for idx, heading in enumerate(headings):
+        level = int(heading.get("level", 1) or 1)
+        end = len(content)
+        for next_heading in headings[idx + 1 :]:
+            if int(next_heading.get("level", 1) or 1) <= level:
+                end = int(next_heading.get("start", end))
+                break
+        row = dict(heading)
+        row["end"] = end
+        row["text"] = content[int(row["start"]) : end].strip()
+        if row["text"]:
+            sections.append(row)
+    return sections
+
+
+def markdown_heading_sections(content: str) -> list[dict]:
+    headings = []
+    stack = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.rstrip()
+        match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if match:
+            level = len(match.group(1))
+            title = match.group(2).strip()
+            while stack and int(stack[-1].get("level", 0) or 0) >= level:
+                stack.pop()
+            heading = {
+                "start": offset,
+                "level": level,
+                "title": title,
+                "parent_titles": [str(row.get("title", "")) for row in stack if row.get("title")],
+            }
+            headings.append(heading)
+            stack.append(heading)
+        offset += len(line)
+    sections = []
+    for idx, heading in enumerate(headings):
+        level = int(heading.get("level", 1) or 1)
+        end = len(content)
+        for next_heading in headings[idx + 1 :]:
+            if int(next_heading.get("level", 1) or 1) <= level:
+                end = int(next_heading.get("start", end))
+                break
+        row = dict(heading)
+        row["end"] = end
+        row["text"] = content[int(row["start"]) : end].strip()
+        if row["text"]:
+            sections.append(row)
+    return sections
+
+
+def paragraph_spans(content: str, *, limit: int = EVIDENCE_PARAGRAPH_LIMIT_PER_CHUNK) -> list[dict]:
+    rows = []
+    for match in re.finditer(r"\S(?:.*?\S)?(?=\n\s*\n|\Z)", content, flags=re.DOTALL):
+        text = match.group(0).strip()
+        if not text:
+            continue
+        rows.append({"start": match.start(), "end": match.end(), "text": text})
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def evidence_window_spans(content: str, *, window_chars: int = EVIDENCE_WINDOW_CHARS) -> list[dict]:
+    if len(content.strip()) <= window_chars:
+        return []
+    rows = []
+    step = max(1, int(window_chars * 0.75))
+    start = 0
+    while start < len(content) and len(rows) < EVIDENCE_WINDOW_LIMIT_PER_CHUNK:
+        end = min(len(content), start + window_chars)
+        boundary = content.rfind("\n\n", start, end)
+        if boundary > start + window_chars // 2:
+            end = boundary
+        text = content[start:end].strip()
+        if text:
+            rows.append({"start": start, "end": end, "text": text})
+        if end >= len(content):
+            break
+        start = max(start + step, end - window_chars // 4)
+    if rows and int(rows[-1].get("end", 0) or 0) < len(content):
+        tail_start = max(0, len(content) - window_chars)
+        rows.append({"start": tail_start, "end": len(content), "text": content[tail_start:].strip()})
+    return rows
+
+
+def evidence_row_id(index: dict, file_item: dict, chunk: dict, kind: str, start: int, end: int, text: str) -> str:
+    payload = "|".join(
+        [
+            str(index.get("id", "")),
+            str(file_item.get("path", "")),
+            str(chunk.get("chunk", "")),
+            kind,
+            str(start),
+            str(end),
+            sha256_hex(text.encode("utf-8")),
+        ]
+    )
+    return "ev-" + sha256_hex(payload.encode("utf-8"))[:24]
+
+
+def make_evidence_object(
+    index: dict,
+    file_item: dict,
+    chunk: dict,
+    *,
+    kind: str,
+    start: int,
+    end: int,
+    text: str,
+    title: str = "",
+    level: int = 0,
+    parent_titles: list[str] | None = None,
+    todo: str = "",
+    priority: str = "",
+    date: str = "",
+) -> dict:
+    text = text.strip()
+    if not text:
+        return {}
+    start = max(0, int(start or 0))
+    end = max(start, int(end or start))
+    row = {
+        "id": evidence_row_id(index, file_item, chunk, kind, start, end, text),
+        "kind": kind,
+        "index": index.get("id", ""),
+        "path": file_item.get("path", ""),
+        "chunk": chunk.get("chunk", ""),
+        "content_sha256": chunk.get("content_sha256", ""),
+        "source_fingerprint": chunk.get("content_sha256", ""),
+        "source_span": {"start": start, "end": end},
+        "start": start,
+        "end": end,
+        "title": compact_text(title, 180),
+        "level": level,
+        "parent_titles": [compact_text(item, 120) for item in (parent_titles or []) if str(item).strip()],
+        "todo": todo,
+        "priority": priority,
+        "date": date,
+        "text": compact_source_text_middle(text, EVIDENCE_TEXT_LIMIT),
+        "text_sha256": sha256_hex(text.encode("utf-8")),
+        "text_chars": len(text),
+    }
+    return {key: value for key, value in row.items() if value not in ("", [], {}, None)}
+
+
+def evidence_objects_for_chunk(index: dict, file_item: dict, chunk: dict) -> list[dict]:
+    content = read_chunk_content(index, chunk)
+    if not content.strip():
+        return []
+    rows = []
+    path = str(file_item.get("path", "")).lower()
+    if path.endswith(".org") or re.search(r"(?m)^\*+\s+", content):
+        for section in org_heading_sections(content):
+            kind = "org_heading"
+            if section.get("date"):
+                kind = "org_day"
+            if section.get("todo"):
+                kind = "org_task"
+            row = make_evidence_object(
+                index,
+                file_item,
+                chunk,
+                kind=kind,
+                start=int(section.get("start", 0)),
+                end=int(section.get("end", 0)),
+                text=str(section.get("text", "")),
+                title=str(section.get("title", "")),
+                level=int(section.get("level", 0) or 0),
+                parent_titles=section.get("parent_titles", []),
+                todo=str(section.get("todo", "")),
+                priority=str(section.get("priority", "")),
+                date=str(section.get("date", "")),
+            )
+            if row:
+                rows.append(row)
+    if path.endswith((".md", ".markdown")) or re.search(r"(?m)^#{1,6}\s+", content):
+        for section in markdown_heading_sections(content):
+            row = make_evidence_object(
+                index,
+                file_item,
+                chunk,
+                kind="markdown_heading",
+                start=int(section.get("start", 0)),
+                end=int(section.get("end", 0)),
+                text=str(section.get("text", "")),
+                title=str(section.get("title", "")),
+                level=int(section.get("level", 0) or 0),
+                parent_titles=section.get("parent_titles", []),
+            )
+            if row:
+                rows.append(row)
+    for span in paragraph_spans(content):
+        row = make_evidence_object(
+            index,
+            file_item,
+            chunk,
+            kind="paragraph",
+            start=int(span.get("start", 0)),
+            end=int(span.get("end", 0)),
+            text=str(span.get("text", "")),
+        )
+        if row:
+            rows.append(row)
+    for idx, span in enumerate(evidence_window_spans(content), 1):
+        row = make_evidence_object(
+            index,
+            file_item,
+            chunk,
+            kind="text_window",
+            start=int(span.get("start", 0)),
+            end=int(span.get("end", 0)),
+            text=str(span.get("text", "")),
+            title=f"window {idx}",
+        )
+        if row:
+            rows.append(row)
+    deduped = []
+    seen = set()
+    for row in rows:
+        key = (row.get("kind"), row.get("path"), str(row.get("chunk", "")), row.get("start"), row.get("end"), row.get("text_sha256"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def build_evidence_store_from_index(index: dict, *, store_id: str | None = None, write: bool = True) -> dict:
+    store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    source_fingerprint = evidence_store_source_fingerprint(index)
+    rows = []
+    for file_item in index.get("files", []):
+        for chunk in file_item.get("chunks", []):
+            rows.extend(evidence_objects_for_chunk(index, file_item, chunk))
+    kind_counts = dict(collections.Counter(row.get("kind", "unknown") for row in rows))
+    store = {
+        "schema": EVIDENCE_STORE_SCHEMA_VERSION,
+        "id": store_id,
+        "created": now(),
+        "realm": identity_realm(),
+        "evidence_input_schema": EVIDENCE_INPUT_SCHEMA_VERSION,
+        "source_index": {
+            "id": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "created": index.get("created", ""),
+            "fingerprint": source_fingerprint,
+        },
+        "provenance": artifact_provenance(
+            "evidence-store",
+            EVIDENCE_STORE_SCHEMA_VERSION,
+            deterministic=True,
+            source_sha256=source_fingerprint,
+        ),
+        "rows": rows,
+        "row_count": len(rows),
+        "kind_counts": kind_counts,
+        "note": "Deterministic hierarchical evidence objects for retrieval, vectorization, and source-grounding audits.",
+    }
+    store["provenance"].update(
+        {
+            "source_realm": identity_realm(),
+            "security_context": permission_mode(),
+            "input_hash": source_fingerprint,
+            "source_fingerprint": {"sha256": source_fingerprint},
+        }
+    )
+    if write:
+        path = evidence_store_path(store_id)
+        store["path"] = str(path)
+        atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+    return store
+
+
+def list_evidence_stores() -> list[dict]:
+    rows = []
+    root = evidence_stores_dir()
+    if not root.exists():
+        return []
+    for path in sorted(root.glob("*.json"), reverse=True):
+        try:
+            store = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(store, dict):
+            store.setdefault("path", str(path))
+            rows.append(store)
+    return rows
+
+
+def evidence_store_label(store: dict) -> str:
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    return (
+        f"{store.get('id', '')}  "
+        f"{store.get('row_count', len(store.get('rows', [])))} row(s)  "
+        f"{source.get('name', '')} {source.get('root', '')}"
+    )
+
+
+def load_evidence_store(store_id: str | None = None) -> dict:
+    return prompt_for_selection(
+        list_evidence_stores(),
+        kind="evidence store",
+        label_func=evidence_store_label,
+        selector=store_id,
+    )
+
+
+def latest_evidence_store() -> dict:
+    rows = list_evidence_stores()
+    if not rows:
+        raise SystemExit("No evidence stores yet. Run 'motoko evidence-build [INDEX_ID]' first.")
+    return rows[0]
+
+
+def evidence_store_matches_index(store: dict, index: dict) -> bool:
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    return source.get("id") == index.get("id")
+
+
+def evidence_store_freshness(store: dict) -> tuple[str, list[str]]:
+    if str(store.get("schema") or "") != EVIDENCE_STORE_SCHEMA_VERSION:
+        return "stale", [f"evidence store schema is {store.get('schema') or 'missing'}; rebuild for {EVIDENCE_STORE_SCHEMA_VERSION}"]
+    if str(store.get("evidence_input_schema") or "") != EVIDENCE_INPUT_SCHEMA_VERSION:
+        return "stale", [f"evidence input schema is {store.get('evidence_input_schema') or 'missing'}; rebuild for {EVIDENCE_INPUT_SCHEMA_VERSION}"]
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    index_id = str(source.get("id", ""))
+    if not index_id:
+        return "unknown", ["store has no source index id"]
+    try:
+        index = load_index_exact(index_id)
+    except SystemExit as exc:
+        return "stale", [f"source index unavailable: {exc}"]
+    index_status, index_warnings = index_staleness(index)
+    if index_status == "stale":
+        return "stale", [f"source index is stale: {warning}" for warning in index_warnings[:4]] or ["source index is stale"]
+    if index_status in {"unknown", "metadata-changed"}:
+        return index_status, index_warnings[:4]
+    current = evidence_store_source_fingerprint(index)
+    if current != source.get("fingerprint"):
+        return "stale", ["source index fingerprint changed; rebuild this evidence store"]
+    return "fresh", []
+
+
+def latest_evidence_store_for_index(index: dict, *, fresh_only: bool = True) -> dict | None:
+    for store in list_evidence_stores():
+        if not evidence_store_matches_index(store, index):
+            continue
+        if fresh_only:
+            freshness, _warnings = evidence_store_freshness(store)
+            if freshness != "fresh":
+                continue
+        return store
+    return None
+
+
+def evidence_store_for_retrieval(index: dict) -> dict:
+    store = latest_evidence_store_for_index(index, fresh_only=True)
+    if store is not None:
+        return store
+    return build_evidence_store_from_index(index, write=False)
+
+
+def evidence_store_due(index: dict) -> tuple[bool, str]:
+    store = latest_evidence_store_for_index(index, fresh_only=False)
+    if store is None:
+        return True, "missing"
+    freshness, warnings = evidence_store_freshness(store)
+    if freshness != "fresh":
+        detail = "; ".join(warnings[:2]) if warnings else freshness
+        return True, detail or "stale"
+    return False, "fresh"
+
+
+def evidence_refresh_candidates(*, index_id: str | None = None, force: bool = False) -> list[tuple[dict, str]]:
+    indexes = [load_index(index_id)] if index_id else latest_indexes_by_family()
+    rows = []
+    for index in indexes:
+        status, _warnings = index_staleness(index)
+        if status == "stale":
+            rows.append((index, "skip: source index stale"))
+            continue
+        due, reason = evidence_store_due(index)
+        if due or force:
+            rows.append((index, reason if due else "force"))
+    return rows
+
+
+def refresh_evidence_stores(*, index_id: str | None = None, force: bool = False, limit: int = 1) -> dict:
+    limit = max(1, int(limit or 1))
+    report = {
+        "schema": "evidence-refresh-v1",
+        "created": now(),
+        "limit": limit,
+        "items": [],
+    }
+    built = 0
+    for index, reason in evidence_refresh_candidates(index_id=index_id, force=force):
+        if built >= limit:
+            break
+        item = {
+            "index": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "reason": reason,
+        }
+        if reason.startswith("skip:"):
+            item["status"] = "skipped"
+            report["items"].append(item)
+            continue
+        try:
+            store = build_evidence_store_from_index(index, write=True)
+        except SystemExit as exc:
+            item["status"] = "failed"
+            item["error"] = str(exc)
+        else:
+            item["status"] = "built"
+            item["store_id"] = store.get("id", "")
+            item["rows"] = store.get("row_count", 0)
+            item["path"] = store.get("path", "")
+            built += 1
+        report["items"].append(item)
+    report["built"] = built
+    report["status"] = "built" if built else ("empty" if not report["items"] else "no-build")
+    return report
+
+
+def format_evidence_refresh_report(report: dict) -> str:
+    lines = [
+        f"evidence refresh: {report.get('status', 'unknown')} built={report.get('built', 0)}",
+        f"created: {report.get('created', '')}",
+    ]
+    if not report.get("items"):
+        lines.append("no evidence refresh candidates")
+        return "\n".join(lines)
+    for item in report.get("items", []):
+        lines.append(
+            f"- {item.get('status', 'unknown')}: {item.get('index', '')} "
+            f"{item.get('name', '')} ({item.get('reason', '')})"
+        )
+        if item.get("store_id"):
+            lines.append(f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)}")
+        if item.get("error"):
+            lines.append(f"  error: {item.get('error', '')}")
+    return "\n".join(lines)
+
+
+def evidence_row_haystack(row: dict) -> str:
+    return "\n".join(
+        part
+        for part in [
+            row.get("path", ""),
+            row.get("kind", ""),
+            row.get("title", ""),
+            " ".join(row.get("parent_titles", []) or []),
+            row.get("todo", ""),
+            row.get("priority", ""),
+            row.get("date", ""),
+            row.get("text", ""),
+        ]
+        if str(part).strip()
+    )
+
+
+def evidence_recent_dates(store: dict, count: int) -> set[str]:
+    dates = sorted({str(row.get("date", "")) for row in store.get("rows", []) if row.get("date")})
+    return set(dates[-max(1, min(count, len(dates))) :]) if dates else set()
+
+
+def evidence_score_parts(store: dict, query: str, query_counts: collections.Counter, row: dict) -> dict:
+    lexical = score_text(query_counts, evidence_row_haystack(row))
+    path_boost = query_path_match_boost(query, row.get("path", ""))
+    structured = 0
+    kind = str(row.get("kind", ""))
+    if kind in {"org_day", "org_task"}:
+        structured += 30
+    if kind == "org_task" and query_wants_task_context(query):
+        structured += 80
+    if row.get("priority"):
+        structured += {"A": 40, "B": 20, "C": 10}.get(str(row.get("priority")), 5)
+    exact_dates = set(query_date_mentions(query))
+    if exact_dates and row.get("date") in exact_dates:
+        structured += 4000
+    recent_count = query_requested_recent_section_count(query)
+    if recent_count and row.get("date") in evidence_recent_dates(store, recent_count):
+        structured += 3500
+    matched_terms = retrieval_haystack_terms(query_counts, evidence_row_haystack(row))
+    total = lexical + path_boost + structured
+    return {
+        "total": total,
+        "lexical": lexical,
+        "path_boost": path_boost,
+        "structured": structured,
+        "matched_terms": matched_terms[:16],
+    }
+
+
+def query_evidence_store(store: dict, query: str, *, limit: int = EVIDENCE_QUERY_LIMIT) -> dict:
+    query = query.strip()
+    if not query:
+        raise SystemExit("usage: evidence-query QUERY")
+    limit = max(1, min(int(limit or EVIDENCE_QUERY_LIMIT), 100))
+    query_counts = token_counts(query)
+    rows = []
+    for row in store.get("rows", []):
+        if not isinstance(row, dict):
+            continue
+        parts = evidence_score_parts(store, query, query_counts, row)
+        if parts.get("total", 0) <= 0:
+            continue
+        item = dict(row)
+        item.update(parts)
+        rows.append(item)
+    rows.sort(
+        key=lambda item: (
+            float(item.get("total", 0) or 0),
+            float(item.get("structured", 0) or 0),
+            -int(item.get("text_chars", 0) or 0),
+        ),
+        reverse=True,
+    )
+    freshness, warnings = evidence_store_freshness(store) if store.get("path") else ("not-persisted", [])
+    return {
+        "schema": EVIDENCE_QUERY_SCHEMA_VERSION,
+        "created": now(),
+        "query": query,
+        "store_id": store.get("id", ""),
+        "source_index": store.get("source_index", {}),
+        "freshness": freshness,
+        "warnings": warnings,
+        "rows": rows[:limit],
+    }
+
+
+def format_evidence_store(store: dict) -> str:
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    freshness, warnings = evidence_store_freshness(store) if store.get("path") else ("not-persisted", [])
+    lines = [
+        f"evidence store: {store.get('id', '')}",
+        f"schema: {store.get('schema', '')}",
+        f"status: {freshness}",
+        f"created: {store.get('created', '')}",
+        f"realm: {store.get('realm', '')}",
+        f"source index: {source.get('id', '')}  {source.get('name', '')}  {source.get('root', '')}",
+        f"rows: {store.get('row_count', len(store.get('rows', [])))}",
+        "kinds: "
+        + (
+            ", ".join(f"{kind}={count}" for kind, count in sorted((store.get("kind_counts") or {}).items()))
+            or "-"
+        ),
+        f"path: {store.get('path', '')}",
+        f"note: {store.get('note', '')}",
+    ]
+    for warning in warnings:
+        lines.append(f"warning: {warning}")
+    return "\n".join(lines)
+
+
+def format_evidence_query_report(report: dict) -> str:
+    source = report.get("source_index") if isinstance(report.get("source_index"), dict) else {}
+    lines = [
+        f"evidence query: {report.get('query', '')}",
+        f"store: {report.get('store_id', '')}  freshness={report.get('freshness', '')}  index={source.get('id', '')}",
+    ]
+    for warning in report.get("warnings", [])[:5]:
+        lines.append(f"warning: {warning}")
+    if not report.get("rows"):
+        lines.append("no evidence rows matched")
+        return "\n".join(lines)
+    for idx, row in enumerate(report.get("rows", [])[:20], 1):
+        lines.append(
+            f"{idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+            f"path={row.get('path_boost', 0)} structured={row.get('structured', 0)} "
+            f"{row.get('kind', '')}  {row.get('path', '')} chunk {row.get('chunk', '')}"
+        )
+        labels = []
+        if row.get("date"):
+            labels.append(f"date={row.get('date')}")
+        if row.get("todo"):
+            labels.append(f"todo={row.get('todo')}")
+        if row.get("priority"):
+            labels.append(f"priority={row.get('priority')}")
+        if row.get("title"):
+            labels.append(f"title={row.get('title')}")
+        if labels:
+            lines.append("   " + "  ".join(labels))
+        if row.get("matched_terms"):
+            lines.append("   matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+        if row.get("text"):
+            lines.append("   text: " + compact_text(row.get("text", ""), 260))
+    return "\n".join(lines)
+
+
 def vector_plan_indexes(index_id: str | None = None) -> list[dict]:
     if index_id:
         return [load_index_exact(index_id)]
@@ -7624,6 +8587,7 @@ def index_vector_stats(indexes: list[dict]) -> dict:
     file_summaries = 0
     logical_bytes = 0
     raw_embedding_rows = 0
+    evidence_rows = 0
     input_chars = embedding_input_chars_limit()
     max_parts = embedding_max_parts_per_chunk()
     estimated_body_budget = max(120, int(input_chars * 0.55))
@@ -7646,6 +8610,8 @@ def index_vector_stats(indexes: list[dict]) -> dict:
                 logical_bytes += content_bytes
                 estimated_rows = (max(content_bytes, 1) + estimated_body_budget - 1) // estimated_body_budget
                 raw_embedding_rows += max(1, min(max_parts, estimated_rows))
+                with contextlib.suppress(Exception):
+                    evidence_rows += len(evidence_objects_for_chunk(index, file_item, chunk))
     return {
         "index_count": len(indexes),
         "file_count": file_count,
@@ -7653,6 +8619,7 @@ def index_vector_stats(indexes: list[dict]) -> dict:
         "unique_chunk_bodies": len(unique_digests) or chunk_count,
         "duplicate_reference_chunks": duplicate_refs,
         "raw_embedding_row_estimate": raw_embedding_rows,
+        "evidence_row_estimate": evidence_rows,
         "chunk_summary_count": chunk_summaries,
         "file_summary_count": file_summaries,
         "logical_content_bytes": logical_bytes,
@@ -7691,6 +8658,13 @@ def vector_plan(index_id: str | None = None, *, dims: int = DEFAULT_VECTOR_DIMS,
             dims,
             source="bounded source-linked chunk/subchunk embedding rows",
             invalidates_on=["content_sha256", "embedding_model", "embedding_input_schema", "embedding_split_policy", "source_realm"],
+        ),
+        vector_row_plan(
+            "evidence_embedding",
+            stats["evidence_row_estimate"],
+            dims,
+            source="hierarchical evidence objects: Org days, tasks, headings, paragraphs, and source windows",
+            invalidates_on=["evidence_schema", "evidence_input_schema", "content_sha256", "source_fingerprint", "embedding_model"],
         ),
         vector_row_plan(
             "chunk_summary_embedding",
@@ -7859,6 +8833,7 @@ def format_vector_plan(plan: dict) -> str:
             f"{stats.get('chunk_count', 0)} chunk(s), "
             f"{stats.get('unique_chunk_bodies', 0)} unique body/bodies, "
             f"{stats.get('raw_embedding_row_estimate', 0)} bounded embedding row(s), "
+            f"{stats.get('evidence_row_estimate', 0)} evidence row(s), "
             f"{stats.get('duplicate_reference_chunks', 0)} duplicate ref(s)"
         ),
         (
@@ -7885,7 +8860,7 @@ def format_vector_plan(plan: dict) -> str:
             f"migration: {plan.get('migration_policy', '')}",
             f"security: {plan.get('security_policy', '')}",
             "",
-            "next: build schema-versioned realm-local embedding stores, keep lexical evals as the control, then gate reranker use on measured retrieval quality.",
+            "next: keep lexical/evidence evals as the control, refresh stale vector stores, then measure reranker quality on real feedback fixtures.",
         ]
     )
     return "\n".join(lines)
@@ -8388,6 +9363,59 @@ def vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> li
     return rows
 
 
+def evidence_embedding_text(file_item: dict, row: dict, *, limit: int) -> str:
+    header = "\n".join(
+        part
+        for part in [
+            f"path: {compact_text(file_item.get('path', ''), 360)}",
+            f"evidence_kind: {row.get('kind', '')}",
+            f"title: {compact_text(row.get('title', ''), 240)}" if row.get("title") else "",
+            f"parents: {compact_text(' / '.join(row.get('parent_titles', []) or []), 240)}" if row.get("parent_titles") else "",
+            f"date: {row.get('date', '')}" if row.get("date") else "",
+            f"todo: {row.get('todo', '')}" if row.get("todo") else "",
+            f"priority: {row.get('priority', '')}" if row.get("priority") else "",
+        ]
+        if part.strip()
+    )
+    return bounded_vector_embedding_text(header, str(row.get("text", "")), limit=limit)
+
+
+def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> list[tuple[str, str, dict]]:
+    limit = embedding_input_chars_limit()
+    rows = []
+    for item in evidence_objects_for_chunk(index, file_item, chunk):
+        text = evidence_embedding_text(file_item, item, limit=limit)
+        if not text.strip():
+            continue
+        row_id = f"{file_item.get('path', '')}#{chunk.get('chunk', '')}:evidence:{item.get('id', '')}"
+        rows.append(
+            (
+                row_id,
+                text,
+                {
+                    "id": row_id,
+                    "vector_row_kind": "evidence_embedding",
+                    "embedding_kind": "evidence_object",
+                    "embedding_part": 1,
+                    "embedding_part_count": 1,
+                    "embedding_input_chars": len(text),
+                    "embedding_input_sha256": sha256_hex(text.encode("utf-8")),
+                    "evidence_id": item.get("id", ""),
+                    "evidence_kind": item.get("kind", ""),
+                    "evidence_title": item.get("title", ""),
+                    "evidence_date": item.get("date", ""),
+                    "evidence_todo": item.get("todo", ""),
+                    "evidence_priority": item.get("priority", ""),
+                    "evidence_start": item.get("start", 0),
+                    "evidence_end": item.get("end", 0),
+                    "evidence_excerpt": compact_source_text_middle(str(item.get("text", "")), 1000),
+                    "evidence_text_sha256": item.get("text_sha256", ""),
+                },
+            )
+        )
+    return rows
+
+
 def default_vector_index(conv: dict | None = None) -> dict:
     if conv:
         attached = attached_index_ids(conv)
@@ -8443,6 +9471,38 @@ def build_vector_store_from_index(
                     "summary": compact_text(chunk.get("summary", "") or file_item.get("summary", ""), 280),
                 }
             )
+            for item in evidence_objects_for_chunk(index, file_item, chunk):
+                evidence_text = evidence_row_haystack(item)
+                vector = lexical_sparse_vector(evidence_text, dims=dims)
+                if not vector:
+                    continue
+                rows.append(
+                    {
+                        "id": f"{file_item.get('path', '')}#{chunk.get('chunk', '')}:evidence:{item.get('id', '')}",
+                        "kind": "evidence_embedding",
+                        "embedding_kind": "evidence_object",
+                        "index": index.get("id", ""),
+                        "path": file_item.get("path", ""),
+                        "chunk": chunk.get("chunk", ""),
+                        "content_sha256": chunk.get("content_sha256", ""),
+                        "source_fingerprint": item.get("source_fingerprint", chunk.get("content_sha256", "")),
+                        "vector": vector,
+                        "terms": retrieval_haystack_terms(
+                            token_counts(file_item.get("path", "") + " " + item.get("title", "") + " " + item.get("text", "")),
+                            evidence_text,
+                        )[:16],
+                        "summary": compact_text(item.get("text", "") or item.get("title", ""), 280),
+                        "evidence_id": item.get("id", ""),
+                        "evidence_kind": item.get("kind", ""),
+                        "evidence_title": item.get("title", ""),
+                        "evidence_date": item.get("date", ""),
+                        "evidence_todo": item.get("todo", ""),
+                        "evidence_priority": item.get("priority", ""),
+                        "evidence_start": item.get("start", 0),
+                        "evidence_end": item.get("end", 0),
+                        "evidence_excerpt": compact_source_text_middle(str(item.get("text", "")), 1000),
+                    }
+                )
     store = {
         "schema": VECTOR_STORE_SCHEMA_VERSION,
         "id": store_id,
@@ -8648,6 +9708,9 @@ def build_embedding_vector_store_from_index(
             for row_id, text, row_meta in vector_embedding_input_rows(index, file_item, chunk):
                 if text.strip():
                     candidates.append((row_id, file_item, chunk, text, row_meta))
+            for row_id, text, row_meta in evidence_vector_embedding_input_rows(index, file_item, chunk):
+                if text.strip():
+                    candidates.append((row_id, file_item, chunk, text, row_meta))
     batch_size = embedding_batch_size(route_info, len(candidates))
     dimensions = route_dims
     batches = [
@@ -8717,9 +9780,9 @@ def build_embedding_vector_store_from_index(
         return f"eta {human_duration(eta)}" if eta is not None else "eta ?"
 
     def row_from_vector(file_item: dict, chunk: dict, vector: list[float], row_meta: dict) -> dict:
-        return {
+        row = {
             "id": row_meta.get("id") or f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
-            "kind": "raw_chunk_embedding",
+            "kind": row_meta.get("vector_row_kind", "raw_chunk_embedding"),
             "embedding_kind": row_meta.get("embedding_kind", "chunk_content"),
             "embedding_input_schema": EMBEDDING_INPUT_SCHEMA_VERSION,
             "embedding_input_chars": row_meta.get("embedding_input_chars", 0),
@@ -8734,6 +9797,23 @@ def build_embedding_vector_store_from_index(
             "vector": vector,
             "summary": compact_text(chunk.get("summary", "") or file_item.get("summary", ""), 280),
         }
+        for key in [
+            "evidence_id",
+            "evidence_kind",
+            "evidence_title",
+            "evidence_date",
+            "evidence_todo",
+            "evidence_priority",
+            "evidence_start",
+            "evidence_end",
+            "evidence_excerpt",
+            "evidence_text_sha256",
+        ]:
+            if row_meta.get(key) not in (None, "", []):
+                row[key] = row_meta.get(key)
+        if row.get("evidence_excerpt"):
+            row["summary"] = compact_text(str(row.get("evidence_excerpt", "")), 280)
+        return row
 
     def write_progress() -> None:
         if not write:
@@ -9139,6 +10219,17 @@ def vector_store_chunk_lookup(store: dict) -> tuple[dict | None, dict]:
 
 
 def vector_query_document_text(index: dict | None, lookup: dict, row: dict, query: str = "") -> str:
+    if row.get("evidence_excerpt"):
+        return "\n".join(
+            part
+            for part in [
+                row.get("path", ""),
+                f"chunk {row.get('chunk', '')}",
+                f"evidence {row.get('evidence_kind', '')} {row.get('evidence_title', '')}".strip(),
+                str(row.get("evidence_excerpt", "")),
+            ]
+            if str(part).strip()
+        )
     path = str(row.get("path", ""))
     chunk_id = str(row.get("chunk", ""))
     if index and lookup:
@@ -9182,7 +10273,21 @@ def query_vector_store(
         if not isinstance(row, dict):
             continue
         vector_score = vector_similarity(query_vector, row.get("vector"))
-        lexical = score_text(query_counts, "\n".join([row.get("path", ""), row.get("summary", "")]))
+        lexical = score_text(
+            query_counts,
+            "\n".join(
+                [
+                    row.get("path", ""),
+                    row.get("summary", ""),
+                    row.get("evidence_kind", ""),
+                    row.get("evidence_title", ""),
+                    row.get("evidence_date", ""),
+                    row.get("evidence_todo", ""),
+                    row.get("evidence_priority", ""),
+                    row.get("evidence_excerpt", ""),
+                ]
+            ),
+        )
         path_boost = query_path_match_boost(query, row.get("path", ""))
         total = round(vector_score * 1000) + lexical + path_boost
         if total <= 0:
@@ -9201,6 +10306,13 @@ def query_vector_store(
                 "chunk": row.get("chunk", ""),
                 "content_sha256": row.get("content_sha256", ""),
                 "summary": row.get("summary", ""),
+                "evidence_id": row.get("evidence_id", ""),
+                "evidence_kind": row.get("evidence_kind", ""),
+                "evidence_title": row.get("evidence_title", ""),
+                "evidence_date": row.get("evidence_date", ""),
+                "evidence_start": row.get("evidence_start"),
+                "evidence_end": row.get("evidence_end"),
+                "evidence_excerpt": row.get("evidence_excerpt", ""),
             }
         )
     deduped_rows: dict[tuple[str, str], dict] = {}
@@ -9361,6 +10473,11 @@ def format_vector_query_report(report: dict) -> str:
             )
         if "rerank_score" in row:
             lines.append(f"   rerank_score: {row.get('rerank_score', 0)}")
+        if row.get("evidence_id"):
+            lines.append(
+                f"   evidence: {row.get('evidence_kind', '')} {row.get('evidence_title', '')} "
+                f"{row.get('evidence_date', '')}".strip()
+            )
         if row.get("summary"):
             lines.append(f"   summary: {row.get('summary', '')}")
     return "\n".join(lines)
@@ -11388,6 +12505,21 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     if heavy_notes:
         notes.extend(heavy_notes)
         catalog = write_context_catalog()
+    evidence_limit = env_int("MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT", BACKGROUND_EVIDENCE_REFRESH_LIMIT)
+    if env_flag("MOTOKO_BACKGROUND_EVIDENCE_REFRESH", True) and evidence_limit:
+        evidence_candidates = evidence_refresh_candidates()
+        if evidence_candidates:
+            set_phase("study: evidence-store", notes=notes)
+            evidence_report = refresh_evidence_stores(limit=evidence_limit)
+            built = int(evidence_report.get("built", 0) or 0)
+            if built:
+                notes.append(f"evidence store(s) refreshed: {built}")
+                catalog = write_context_catalog()
+            for item in evidence_report.get("items", [])[:3]:
+                if item.get("status") in {"skipped", "failed"}:
+                    label = item.get("name") or item.get("index", "")
+                    detail = item.get("error") or item.get("reason", "")
+                    notes.append(f"evidence refresh {item.get('status')}: {label} {detail}".strip())
     repair_limit = env_int("MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT", BACKGROUND_INDEX_REPAIR_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_INDEX_REPAIR", True) and repair_limit:
         repair_candidates = [
@@ -11473,6 +12605,7 @@ def hybrid_candidate_base_score(candidate: dict) -> float:
         float(candidate.get("lexical_score", 0) or 0),
         float(candidate.get("vector_rank_score", 0) or 0),
         float(candidate.get("structured_score", 0) or 0),
+        float(candidate.get("evidence_score", 0) or 0),
     )
 
 
@@ -11498,6 +12631,8 @@ def add_hybrid_candidate(
             "structured_score": 0,
             "path_boost": 0,
             "task_boost": 0,
+            "evidence_score": 0,
+            "evidence_rows": [],
             "score": 0,
         }
         candidates[key] = row
@@ -11519,6 +12654,15 @@ def add_hybrid_candidate(
         row["task_boost"] = max(float(row.get("task_boost", 0) or 0), numeric_score)
         if details.get("task"):
             row["structured_task"] = details.get("task")
+    elif method == "evidence":
+        row["evidence_score"] = max(float(row.get("evidence_score", 0) or 0), numeric_score)
+        row["structured_score"] = max(float(row.get("structured_score", 0) or 0), float(details.get("structured", 0) or 0))
+        row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))
+        if details:
+            current = list(row.get("evidence_rows", []) or [])
+            current.append(details)
+            current.sort(key=lambda item: float(item.get("total", 0) or 0), reverse=True)
+            row["evidence_rows"] = current[:EVIDENCE_CONTEXT_LIMIT]
     row["score"] = max(float(row.get("score", 0) or 0), hybrid_candidate_base_score(row))
     return row
 
@@ -11608,6 +12752,47 @@ def rerank_hybrid_candidates(index: dict, query: str, candidates: dict[tuple[str
     return rows, report
 
 
+def selected_evidence_excerpt(rows: list[dict], *, max_chars: int) -> tuple[str, list[dict]]:
+    selected = []
+    used = 0
+    seen = set()
+    for row in rows:
+        text = str(row.get("text", "")).strip()
+        if not text:
+            continue
+        key = (row.get("id"), row.get("start"), row.get("end"))
+        if key in seen:
+            continue
+        seen.add(key)
+        separator = 2 if selected else 0
+        if selected and used + len(text) + separator > max_chars:
+            continue
+        item = dict(row)
+        if not selected and len(text) > max_chars:
+            item["text"] = compact_source_text_middle(text, max_chars)
+            selected.append(item)
+            break
+        selected.append(item)
+        used += len(text) + separator
+        if len(selected) >= EVIDENCE_CONTEXT_LIMIT or used >= max_chars:
+            break
+    excerpt = "\n\n".join(str(row.get("text", "")).strip() for row in selected)
+    spans = [
+        {
+            "kind": row.get("kind", "evidence"),
+            "label": row.get("title") or row.get("date") or row.get("id", ""),
+            "start": row.get("start"),
+            "end": row.get("end"),
+            "evidence_id": row.get("id"),
+            "date": row.get("date", ""),
+            "todo": row.get("todo", ""),
+            "priority": row.get("priority", ""),
+        }
+        for row in selected
+    ]
+    return excerpt[:max_chars].strip(), spans
+
+
 def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     query_counts = token_counts(query)
     top_files, top_chunks, max_retrieval_chars = retrieval_limits(query)
@@ -11646,6 +12831,29 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     for score, file_item, chunk, score_parts in lexical_candidates:
         add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
     add_structured_task_candidates(index, query, candidates)
+    evidence_report = None
+    evidence_warning = ""
+    if env_flag("MOTOKO_EVIDENCE_RETRIEVAL", True):
+        try:
+            evidence_store = evidence_store_for_retrieval(index)
+            evidence_report = query_evidence_store(
+                evidence_store,
+                query,
+                limit=max(top_chunks * 3, EVIDENCE_QUERY_LIMIT),
+            )
+        except SystemExit as exc:
+            evidence_warning = str(exc).splitlines()[0][:240]
+        else:
+            lookup: dict[tuple[str, str], tuple[dict, dict]] = {}
+            for file_item in index.get("files", []):
+                for chunk in file_item.get("chunks", []):
+                    lookup[(file_item.get("path", ""), str(chunk.get("chunk", "")))] = (file_item, chunk)
+            for row in evidence_report.get("rows", [])[: max(top_chunks * 2, EVIDENCE_CONTEXT_LIMIT)]:
+                found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
+                if not found:
+                    continue
+                file_item, chunk = found
+                add_hybrid_candidate(candidates, file_item, chunk, "evidence", row.get("total", 0), row)
 
     vector_report = None
     vector_warning = ""
@@ -11687,6 +12895,8 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                 "retrieval_methods": sorted(candidate.get("methods", [])),
                 "lexical_score": candidate.get("lexical_score", 0),
                 "structured_score": candidate.get("structured_score", 0),
+                "evidence_score": candidate.get("evidence_score", 0),
+                "evidence_rows": candidate.get("evidence_rows", []),
                 "vector_score": candidate.get("vector_score"),
                 "vector_rank_score": candidate.get("vector_rank_score", 0),
                 "rerank_score": candidate.get("rerank_score"),
@@ -11734,6 +12944,13 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             index_source["hybrid_rerank_route"] = rerank_route.get("catalog_route", "")
         if hybrid_report.get("warnings"):
             index_source["warnings"] = index_source.get("warnings", []) + hybrid_report.get("warnings", [])[:4]
+    if evidence_report:
+        index_source["evidence_store"] = evidence_report.get("store_id", "")
+        index_source["evidence_rows"] = len(evidence_report.get("rows", []))
+        if evidence_report.get("warnings"):
+            index_source["warnings"] = index_source.get("warnings", []) + evidence_report.get("warnings", [])[:4]
+    elif evidence_warning:
+        index_source["warnings"] = index_source.get("warnings", []) + [f"evidence retrieval skipped: {evidence_warning}"]
     if vector_report:
         index_source["vector_store"] = vector_report.get("store_id", "")
         index_source["vector_method"] = vector_report.get("method", "")
@@ -11744,6 +12961,8 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             "Hybrid retrieval:\n"
             f"- candidates {hybrid_report.get('candidate_count', 0) if hybrid_report else 0} "
             f"rerank {bool(hybrid_report.get('rerank')) if hybrid_report else False}\n"
+            f"- evidence {evidence_report.get('store_id', '') if evidence_report else ''} "
+            f"rows {len(evidence_report.get('rows', [])) if evidence_report else 0}\n"
             f"- store {vector_report.get('store_id', '')} "
             f"method {vector_report.get('method', '')} "
             f"rows {len(vector_report.get('rows', []))}"
@@ -11754,7 +12973,9 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         parts.append(
             "Hybrid retrieval:\n"
             f"- candidates {hybrid_report.get('candidate_count', 0)} "
-            f"rerank {bool(hybrid_report.get('rerank'))}"
+            f"rerank {bool(hybrid_report.get('rerank'))}\n"
+            f"- evidence {evidence_report.get('store_id', '') if evidence_report else ''} "
+            f"rows {len(evidence_report.get('rows', [])) if evidence_report else 0}"
         )
     sources = [index_source]
     if selected_files:
@@ -11787,12 +13008,22 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
             use_span_models = span_model_uses < span_model_limit and len(content) > 4000
             if use_span_models:
                 span_model_uses += 1
-            excerpt_selection = query_aware_content_selection(
-                query,
-                content,
-                remaining,
-                use_models=use_span_models,
-            )
+            evidence_rows = retrieval_details.get("evidence_rows", []) if isinstance(retrieval_details, dict) else []
+            if evidence_rows:
+                excerpt, evidence_spans = selected_evidence_excerpt(evidence_rows, max_chars=remaining)
+                excerpt_selection = {
+                    "excerpt": excerpt,
+                    "spans": evidence_spans,
+                    "warnings": [],
+                    "method": "evidence-store",
+                }
+            else:
+                excerpt_selection = query_aware_content_selection(
+                    query,
+                    content,
+                    remaining,
+                    use_models=use_span_models,
+                )
             excerpt = excerpt_selection.get("excerpt", "")
             used += len(excerpt)
             chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
@@ -11814,11 +13045,17 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                     "retrieval_methods": retrieval_details.get("retrieval_methods", []) if isinstance(retrieval_details, dict) else [],
                     "lexical_score": retrieval_details.get("lexical_score") if isinstance(retrieval_details, dict) else None,
                     "structured_score": retrieval_details.get("structured_score") if isinstance(retrieval_details, dict) else None,
+                    "evidence_score": retrieval_details.get("evidence_score") if isinstance(retrieval_details, dict) else None,
                     "rerank_score": retrieval_details.get("rerank_score") if isinstance(retrieval_details, dict) else None,
                     "vector_score": retrieval_details.get("vector_score") if isinstance(retrieval_details, dict) else None,
                     "excerpt_selection": excerpt_selection.get("method", ""),
                     "excerpt_spans": excerpt_selection.get("spans", [])[:4],
                     "excerpt_warnings": excerpt_selection.get("warnings", [])[:4],
+                    "evidence_rows": len(evidence_rows),
+                    "evidence_id": evidence_spans[0].get("evidence_id", "") if evidence_rows and evidence_spans else "",
+                    "evidence_kind": evidence_spans[0].get("kind", "") if evidence_rows and evidence_spans else "",
+                    "evidence_title": evidence_spans[0].get("label", "") if evidence_rows and evidence_spans else "",
+                    "evidence_date": evidence_spans[0].get("date", "") if evidence_rows and evidence_spans else "",
                 }
             )
     return "\n\n".join(part for part in parts if part), sources
@@ -12728,8 +13965,11 @@ HELP_SECTIONS = [
             ("/status", "show model, memory, and context state"),
             ("/model-routes", "show chat and background worker model routes"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
+            ("/feedback-eval", "turn private feedback into eval fixtures"),
             ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
             ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
+            ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
+            ("/evidence-query QUERY", "query the latest evidence store"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -12752,6 +13992,9 @@ HELP_SECTIONS = [
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
+            ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
+            ("/evidence-refresh [ID]", "build missing or stale evidence stores"),
+            ("/evidence-query QUERY", "query the latest evidence store"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -12783,6 +14026,9 @@ HELP_SECTIONS = [
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
+            ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
+            ("/evidence-refresh [ID]", "build missing or stale evidence stores"),
+            ("/evidence-query QUERY", "query the latest evidence store"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -12847,8 +14093,12 @@ HELP_SECTIONS = [
             ("motoko model-routes", "show chat and background worker model routes"),
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
             ("motoko retrieval-eval", "evaluate retrieval grounding on synthetic corpus fixtures"),
+            ("motoko feedback-eval", "turn private feedback into eval fixtures"),
             ("motoko retrieval-debug QUERY", "explain file/chunk retrieval scoring for a query"),
             ("motoko retrieval-preview QUERY", "show retrieved context without calling a model"),
+            ("motoko evidence-build [ID]", "build a deterministic hierarchical evidence store"),
+            ("motoko evidence-refresh [ID]", "build missing or stale evidence stores"),
+            ("motoko evidence-query QUERY", "query a hierarchical evidence store"),
             ("motoko identity", "show active account/realm identity"),
             ("motoko permissions", "show feature permissions and index defaults"),
             ("motoko permissions set MODE", "set default feature permission mode"),
@@ -12913,6 +14163,8 @@ def format_about() -> str:
 
 def format_source_span_detail(span: dict) -> str:
     detail = f"{span.get('kind', '')}:{span.get('label', '')}".strip(":")
+    if span.get("evidence_id"):
+        detail += f"#{str(span.get('evidence_id'))[-8:]}"
     if span.get("selected_sub_start") is not None and span.get("selected_sub_end") is not None:
         detail += (
             f"@{span.get('selected_sub_start')}-"
@@ -13027,6 +14279,10 @@ def format_sources(sources: list[dict]) -> str:
                 if route:
                     rerank += f" via {route}"
                 lines.append(f"     hybrid: {source.get('hybrid_candidates', 0)} candidate(s), {rerank}")
+            if source.get("evidence_store"):
+                lines.append(
+                    f"     evidence: {source.get('evidence_rows', 0)} row(s) from {source.get('evidence_store', '')}"
+                )
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
         elif kind == "topic":
@@ -13079,6 +14335,8 @@ def format_sources(sources: list[dict]) -> str:
                 score_bits.append(f"rerank {source.get('rerank_score')}")
             if source.get("lexical_score") is not None:
                 score_bits.append(f"lex {source.get('lexical_score')}")
+            if source.get("evidence_score") is not None:
+                score_bits.append(f"evidence {source.get('evidence_score')}")
             lines.append(
                 "     why: relevant chunk retrieved from attached index"
                 + (f" via {methods}" if methods else "")
@@ -14216,6 +15474,8 @@ class MotokoTui:
                 self.append("system", format_model_routes(include_defaults=True))
             elif text == "/retrieval-eval":
                 self.append("system", format_retrieval_eval_report(run_retrieval_eval()))
+            elif text == "/feedback-eval":
+                self.append("system", format_feedback_eval_report(run_feedback_eval()))
             elif text == "/retrieval-debug" or text.startswith("/retrieval-debug "):
                 query = text[len("/retrieval-debug") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
                 try:
@@ -14226,6 +15486,25 @@ class MotokoTui:
             elif text == "/retrieval-preview" or text.startswith("/retrieval-preview "):
                 query = text[len("/retrieval-preview") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
                 self.append("system", format_retrieval_preview(self.conv, query))
+            elif text == "/evidence-build" or text.startswith("/evidence-build "):
+                selector = text[len("/evidence-build") :].strip() or None
+                store = build_evidence_store_from_index(load_index(selector) if selector else default_vector_index(self.conv))
+                self.append("system", format_evidence_store(store))
+            elif text == "/evidence-refresh" or text.startswith("/evidence-refresh "):
+                selector = text[len("/evidence-refresh") :].strip() or None
+                self.append("system", format_evidence_refresh_report(refresh_evidence_stores(index_id=selector, limit=1)))
+            elif text == "/evidence-query" or text.startswith("/evidence-query "):
+                query = text[len("/evidence-query") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
+                try:
+                    index_ids = attached_index_ids(self.conv)
+                    if index_ids:
+                        index = load_index_exact(index_ids[0])
+                        store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(index, write=False)
+                    else:
+                        store = latest_evidence_store()
+                    self.append("system", format_evidence_query_report(query_evidence_store(store, query)))
+                except SystemExit as exc:
+                    self.append("error", str(exc))
             elif text == "/identity":
                 self.append("system", format_identity())
             elif text == "/permissions":
@@ -15426,6 +16705,9 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/retrieval-eval":
             print_report(format_retrieval_eval_report(run_retrieval_eval()))
             continue
+        if user_text == "/feedback-eval":
+            print_report(format_feedback_eval_report(run_feedback_eval()))
+            continue
         if user_text == "/retrieval-debug" or user_text.startswith("/retrieval-debug "):
             query = user_text[len("/retrieval-debug") :].strip() or context_query_text(conv, conv.get("title", ""))
             try:
@@ -15437,6 +16719,31 @@ def chat_loop(conv: dict) -> None:
             query = user_text[len("/retrieval-preview") :].strip() or context_query_text(conv, conv.get("title", ""))
             try:
                 print_report(format_retrieval_preview(conv, query))
+            except SystemExit as exc:
+                print(exc)
+            continue
+        if user_text == "/evidence-build" or user_text.startswith("/evidence-build "):
+            selector = user_text[len("/evidence-build") :].strip() or None
+            try:
+                store = build_evidence_store_from_index(load_index(selector) if selector else default_vector_index(conv))
+                print_report(format_evidence_store(store))
+            except SystemExit as exc:
+                print(exc)
+            continue
+        if user_text == "/evidence-refresh" or user_text.startswith("/evidence-refresh "):
+            selector = user_text[len("/evidence-refresh") :].strip() or None
+            print_report(format_evidence_refresh_report(refresh_evidence_stores(index_id=selector, limit=1)))
+            continue
+        if user_text == "/evidence-query" or user_text.startswith("/evidence-query "):
+            query = user_text[len("/evidence-query") :].strip() or context_query_text(conv, conv.get("title", ""))
+            try:
+                index_ids = attached_index_ids(conv)
+                if index_ids:
+                    index = load_index_exact(index_ids[0])
+                    store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(index, write=False)
+                else:
+                    store = latest_evidence_store()
+                print_report(format_evidence_query_report(query_evidence_store(store, query)))
             except SystemExit as exc:
                 print(exc)
             continue
@@ -16069,6 +17376,49 @@ def command_index_storage(args) -> None:
         print_report(format_index_storage_audit(audit))
 
 
+def command_evidence_build(args) -> None:
+    index = load_index(args.index) if args.index else default_vector_index()
+    store = build_evidence_store_from_index(index, write=True)
+    if args.json:
+        print(json.dumps(store, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_evidence_store(store))
+
+
+def command_evidence_refresh(args) -> None:
+    report = refresh_evidence_stores(index_id=args.index, force=args.force, limit=args.limit)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_evidence_refresh_report(report))
+
+
+def command_evidence_query(args) -> None:
+    query = " ".join(args.query)
+    if args.store:
+        store = load_evidence_store(args.store)
+    elif args.index:
+        index = load_index(args.index)
+        store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(index, write=False)
+    else:
+        store = latest_evidence_store()
+    report = query_evidence_store(store, query, limit=args.limit)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_evidence_query_report(report))
+
+
+def command_feedback_eval(args) -> None:
+    report = run_feedback_eval(limit=args.limit)
+    if args.write:
+        save_feedback_eval_report(report)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_feedback_eval_report(report))
+
+
 def command_vector_plan(args) -> None:
     plan = vector_plan(args.index, dims=args.dims, include_eval=not args.no_eval)
     if args.json:
@@ -16502,6 +17852,12 @@ def main(argv: list[str]) -> int:
     retrieval_eval.add_argument("--json", action="store_true", help="print JSON report")
     retrieval_eval.set_defaults(func=command_retrieval_eval)
 
+    feedback_eval = sub.add_parser("feedback-eval", help="turn private answer feedback into eval fixtures")
+    feedback_eval.add_argument("--limit", type=int, help="maximum recent feedback rows to include")
+    feedback_eval.add_argument("--write", action="store_true", help="save JSON report under Motoko state")
+    feedback_eval.add_argument("--json", action="store_true", help="print JSON report")
+    feedback_eval.set_defaults(func=command_feedback_eval)
+
     retrieval_debug = sub.add_parser("retrieval-debug", help="explain retrieval scoring for a query")
     retrieval_debug.add_argument("query", nargs="+")
     retrieval_debug.add_argument("--index", action="append", help="restrict to a specific document index")
@@ -16516,6 +17872,26 @@ def main(argv: list[str]) -> int:
     retrieval_preview.add_argument("--index", action="append", help="attach a specific document index for preview")
     retrieval_preview.add_argument("--max-chars", type=int, default=RETRIEVAL_PREVIEW_CHARS, help="maximum attached context characters to show")
     retrieval_preview.set_defaults(func=command_retrieval_preview)
+
+    evidence_build = sub.add_parser("evidence-build", help="build a deterministic hierarchical evidence store")
+    evidence_build.add_argument("index", nargs="?", help="optional document index; picker if omitted")
+    evidence_build.add_argument("--json", action="store_true", help="print JSON store")
+    evidence_build.set_defaults(func=command_evidence_build)
+
+    evidence_refresh = sub.add_parser("evidence-refresh", help="build missing or stale evidence stores")
+    evidence_refresh.add_argument("index", nargs="?", help="optional document index; defaults to latest indexes")
+    evidence_refresh.add_argument("--limit", type=int, default=1, help="maximum stores to build")
+    evidence_refresh.add_argument("--force", action="store_true", help="rebuild even if a fresh store exists")
+    evidence_refresh.add_argument("--json", action="store_true", help="print JSON report")
+    evidence_refresh.set_defaults(func=command_evidence_refresh)
+
+    evidence_query = sub.add_parser("evidence-query", help="query a deterministic hierarchical evidence store")
+    evidence_query.add_argument("query", nargs="+")
+    evidence_query.add_argument("--index", help="use the latest evidence store for an index")
+    evidence_query.add_argument("--store", help="specific evidence store id; picker if omitted")
+    evidence_query.add_argument("--limit", type=int, default=EVIDENCE_QUERY_LIMIT, help="number of evidence rows to show")
+    evidence_query.add_argument("--json", action="store_true", help="print JSON report")
+    evidence_query.set_defaults(func=command_evidence_query)
 
     identity = sub.add_parser("identity", help="show account/realm identity")
     identity_sub = identity.add_subparsers(dest="identity_command")

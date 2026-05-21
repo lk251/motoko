@@ -101,6 +101,14 @@ not the easiest place to review what changed after a long work session.
 - Added `/index-storage` and `motoko index-storage` to audit derived index
   storage, duplicate chunk references, missing duplicate targets, orphan chunk
   files, and safe cleanup opportunities without deleting anything.
+- Added `evidence-store-v1`, a deterministic hierarchical evidence store for
+  indexed corpora. Evidence rows cover Org days, Org tasks, headings,
+  paragraphs, and bounded text windows with file/chunk/span provenance, and can
+  be built or inspected with `/evidence-build`, `/evidence-query`,
+  `motoko evidence-build`, and `motoko evidence-query`.
+- Made the light background study loop perform one bounded CPU-lane evidence
+  refresh when an index lacks a current evidence store, and added
+  `motoko evidence-refresh` for explicit refreshes.
 - Added `/vector-plan` and `motoko vector-plan` as a read-only readiness report
   for embedding/reranker storage, including sizing, provenance,
   invalidation, privacy, and eval gates.
@@ -126,8 +134,9 @@ not the easiest place to review what changed after a long work session.
   fresh embedding store and NixOS-declared `/v1/rerank` route are available,
   with an embedding-only fallback if reranking is unavailable or fails.
 - Changed normal retrieval again to use true hybrid candidate generation:
-  lexical/path matches, deterministic Org/task signals, and embedding rows are
-  unioned and deduplicated before the combined set is reranked.
+  lexical/path matches, deterministic Org/task signals, evidence rows, and
+  embedding rows are unioned and deduplicated before the combined set is
+  reranked.
 - Changed retrieval excerpts to honor exact dates and "last/latest/recent"
   Org-date queries as mandatory evidence inside a selected chunk, so
   chronological files such as `logbook.org` show the newest dated `** do`/`** log`
@@ -165,6 +174,9 @@ not the easiest place to review what changed after a long work session.
 - Added `/feedback up|down|ok [TEXT]`, `/up`, `/down`, and `motoko feedback`
   to record private per-realm answer feedback outside the conversation
   transcript for future retrieval/rerank/prompt evaluation.
+- Added `/feedback-eval` and `motoko feedback-eval` to convert private answer
+  feedback into per-realm evaluation fixtures without directly changing
+  retrieval or ranking behavior.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.

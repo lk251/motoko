@@ -73,6 +73,11 @@ Design constraints:
 - `motoko index-storage` audits derived index storage, duplicate chunk
   references, missing duplicate targets, orphan chunk files, and safe cleanup
   opportunities without deleting anything.
+- `motoko evidence-build`, `motoko evidence-refresh`, and
+  `motoko evidence-query` build and inspect a deterministic hierarchical
+  evidence store for indexed corpora. Evidence rows include Org days, Org
+  tasks, headings, paragraphs, and bounded source windows with parent
+  file/chunk provenance.
 - `motoko vector-plan` reports the vector/reranker storage contract,
   realm-local privacy boundary, invalidation keys, sizing estimate, route
   discovery, and readiness gates before vector retrieval is trusted.
@@ -107,10 +112,11 @@ Design constraints:
 - `motoko vector-query --rerank QUERY` inspects how the NixOS-declared
   `/v1/rerank` route reorders the top vector candidates.
 - Normal corpus retrieval uses true hybrid candidate generation: lexical/path
-  matches, deterministic Org/task signals, and fresh embedding rows are unioned
-  and deduplicated, then reranked together when a `/v1/rerank` route is
-  available. Exact and structured signals remain visible in `/retrieval-debug`
-  and `/sources`, and rerank failures fall back to the non-reranked hybrid set.
+  matches, deterministic Org/task signals, evidence rows, and fresh embedding
+  rows are unioned and deduplicated, then reranked together when a
+  `/v1/rerank` route is available. Exact and structured signals remain visible
+  in `/retrieval-debug` and `/sources`, and rerank failures fall back to the
+  non-reranked hybrid set.
 - For chronological Org files, exact-date queries and phrases such as "last
   two days" or "latest entries" select the matching dated sections as
   mandatory evidence inside a large chunk before preview/chat/rerank use the
@@ -131,6 +137,9 @@ Design constraints:
 - `/feedback up|down|ok [TEXT]` records private per-realm answer feedback
   under Motoko state so retrieval, rerank, prompt, and answer-quality work can
   improve from real use without writing feedback into the conversation.
+- `motoko feedback-eval` converts that private answer feedback into
+  inspectable per-realm eval fixtures for future retrieval/rerank/prompt
+  improvement work; it does not directly change ranking behavior.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

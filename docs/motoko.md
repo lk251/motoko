@@ -961,14 +961,28 @@ bytes versus physical stored bytes, missing duplicate targets, orphan chunk
 files, and cleanup opportunities. It is intentionally read-only: safe cleanup
 starts as an inspectable plan, not automatic deletion.
 
+Use `motoko evidence-build [INDEX_ID]` or `/evidence-build [INDEX_ID]` to build
+a deterministic hierarchical evidence store for an index. Evidence stores live
+under `~/.local/state/motoko/evidence-stores/` and contain source-linked rows
+for Org dated days, Org tasks, Org/Markdown headings, paragraphs, and bounded
+text windows. Each row keeps the source index id, file path, chunk id, content
+hash, source span offsets, row kind, title/date/TODO/priority metadata when
+present, and compact source text. `motoko evidence-query QUERY` or
+`/evidence-query QUERY` inspects those rows without calling a model.
+`motoko evidence-refresh [INDEX_ID]` builds missing or stale evidence stores;
+the background study loop also performs one bounded CPU-lane evidence refresh
+when `MOTOKO_BACKGROUND_EVIDENCE_REFRESH` is enabled. Evidence stores are
+rebuilt from the saved source index when the evidence schema/input policy or
+source fingerprint changes.
+
 Use `motoko vector-plan` or `/vector-plan [INDEX_ID]` before trusting embedding
 or reranker storage. The report is also read-only: it sizes planned
-realm-local vector stores for raw chunk text, chunk summaries, file summaries,
-labels, memories, conversations, and dossiers; lists provenance and
-invalidation fields; checks retrieval-eval and storage-audit gates; and reports
-whether the local model catalog advertises embedding or reranker routes by
-`kind`, `tasks`, and `endpoint_paths`. This is a contract and readiness report,
-not an automatic trust decision.
+realm-local vector stores for raw chunk text, hierarchical evidence rows, chunk
+summaries, file summaries, labels, memories, conversations, and dossiers;
+lists provenance and invalidation fields; checks retrieval-eval and
+storage-audit gates; and reports whether the local model catalog advertises
+embedding or reranker routes by `kind`, `tasks`, and `endpoint_paths`. This is
+a contract and readiness report, not an automatic trust decision.
 
 Use `motoko vector-build [INDEX_ID]` to build a realm-local vector store for an
 index, and `motoko vector-query QUERY` to inspect its ranked rows. This writes
@@ -1024,14 +1038,17 @@ policy, source fingerprint, embedding route, model, or dimensions change.
 Dense vector coordinates are not migrated across incompatible embedding
 models; source re-vectorization is the correct upgrade path. A fresh embedding
 store participates in true hybrid retrieval: lexical/path candidates,
-deterministic Org/task candidates, and fresh embedding candidates are unioned
-and deduplicated before final context selection. When a catalog-discovered
+deterministic Org/task candidates, deterministic evidence rows, and fresh
+embedding candidates are unioned and deduplicated before final context
+selection. When a catalog-discovered
 `/v1/rerank` route is available, Motoko reranks that combined candidate set;
 if reranking is missing or fails, she falls back to the non-reranked hybrid
 set. Lexical scores, path boosts, Org/task signals, vector rows, rerank state,
-and source excerpts remain visible in `/retrieval-debug` and `/sources`. Set
-`MOTOKO_VECTOR_RETRIEVAL=0` to disable semantic retrieval during diagnosis. Set
-`MOTOKO_VECTOR_RERANK=0` to disable reranking during diagnosis.
+evidence rows, and source excerpts remain visible in `/retrieval-debug` and
+`/sources`. Set `MOTOKO_EVIDENCE_RETRIEVAL=0` to disable evidence-store
+retrieval during diagnosis. Set `MOTOKO_VECTOR_RETRIEVAL=0` to disable
+semantic retrieval during diagnosis. Set `MOTOKO_VECTOR_RERANK=0` to disable
+reranking during diagnosis.
 
 Retrieval excerpts are query-aware after a chunk is selected. If the query
 mentions exact dates, or asks for the last/latest/recent dated entries, Motoko
@@ -1064,6 +1081,11 @@ Motoko state as `response-feedback.jsonl`; it is not appended to the
 conversation transcript. This is intended as a future training/evaluation
 signal for retrieval, rerank, prompt, and answer-quality improvements, not as
 an immediate unreviewed self-tuning mechanism.
+Use `motoko feedback-eval` or `/feedback-eval` to turn those private rows into
+inspectable eval fixtures. Downvotes become `needs-review` fixtures with focus
+tags such as recall, ranking, evidence, staleness, prompt use, or synthesis
+derived from the note and prompt. The report remains under the current user's
+Motoko state and is not shared across realms.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

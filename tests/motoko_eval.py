@@ -183,6 +183,55 @@ def test_background_study_enriches_legacy_index(m):
     assert "Background enrich task" in enriched["corpus_profile_text"]
 
 
+def test_background_study_builds_evidence_store(m):
+    docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
+    docs.mkdir()
+    source = docs / "logbook.org"
+    content = (
+        "* [2026-05-19 Tue 12:34]\n"
+        "** do\n"
+        "*** TODO Preserve evidence stores\n"
+        "** log\n"
+        "Evidence stores should be rebuilt deterministically in the CPU lane.\n"
+    )
+    source.write_text(content, encoding="utf-8")
+    index = {
+        "id": "evidence-bg-index",
+        "name": "docs",
+        "root": str(docs),
+        "glob": "*.org",
+        "created": m.now(),
+        "files": [
+            {
+                "path": str(source),
+                "source_fingerprint": m.source_fingerprint(source),
+                "summary": "Logbook.",
+                "chunks": [
+                    {
+                        "chunk": 1,
+                        "summary": "Evidence store note.",
+                        "content": content,
+                        "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                        "content_bytes": len(content.encode("utf-8")),
+                    }
+                ],
+            }
+        ],
+    }
+    write_json(m.index_path(index["id"]), index)
+    conv = m.new_conversation("Evidence background")
+    conv["id"] = "evidence-background"
+    with temporary_env({"MOTOKO_BACKGROUND_VECTOR_REFRESH": "0"}):
+        phases = []
+        notes = m.background_study_step(conv, phase_callback=phases.append)
+    stores = m.list_evidence_stores()
+    assert stores
+    assert any("study: evidence-store" == phase for phase in phases)
+    assert any("evidence store(s) refreshed" in note for note in notes)
+    report = m.query_evidence_store(stores[0], "Preserve evidence stores")
+    assert report["rows"]
+
+
 def test_interrupted_background_study_resume_note(m):
     conv = m.new_conversation("Interrupted")
     conv["id"] = "interrupted"
@@ -511,6 +560,8 @@ def main() -> int:
     with isolated_state():
         test_background_study_enriches_legacy_index(m)
     with isolated_state():
+        test_background_study_builds_evidence_store(m)
+    with isolated_state():
         test_interrupted_background_study_resume_note(m)
     with isolated_state():
         test_heavy_index_refresh_replaces_attached_index(m)
@@ -522,7 +573,7 @@ def main() -> int:
         test_worker_model_eval_scores_routes_and_json_artifacts(m)
     with isolated_state():
         test_worker_model_eval_flags_missing_facts(m)
-    print("12 motoko evaluation checks passed")
+    print("13 motoko evaluation checks passed")
     return 0
 
 
