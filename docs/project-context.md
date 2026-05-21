@@ -236,6 +236,11 @@ The implementation path is:
   feature: answer audits, retrieval audits, memory audits, stale-artifact
   checks, and later deeper model audits should keep running throughout Motoko's
   improvement path.
+- grow reasoning as explicit, inspectable planning and audit behavior rather
+  than hidden chain-of-thought: query decomposition, retrieval planning,
+  evidence sufficiency checks, source-conflict checks, answer-grounding review,
+  stale-artifact review, and memory/index audits. Reflection is one recurring
+  audit component of this broader reasoning layer.
 
 The highest-ROI next engineering improvement is improving the quality of
 profile dossiers and document-derived dossiers after real personal documents
@@ -263,8 +268,12 @@ Current sequencing notes:
   `endpoint_paths`, dimensions, and advertised parallelism. Motoko stores
   vectors only in the current user's state, keeps `lexical-hash-v1` as the
   deterministic control path, uses fresh embedding stores as additive semantic
-  recall, and should gate reranker use on measured quality rather than making
-  it an invisible default.
+  recall, and keeps lexical/task/path evidence visible in diagnostics.
+- Javier explicitly chose on 2026-05-21 to take the measured risk of moving
+  normal retrieval into embedding plus rerank now, rather than waiting for more
+  real-world diagnostics. Treat this as a reversible trial: if quality,
+  latency, or stability fails strongly, consider reverting to commit `44922c3`
+  (`Use embedding stores for retrieval`) and reintroducing rerank more slowly.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended
@@ -306,6 +315,11 @@ efficiency. The likely shape is:
   keep per-file/per-chunk provenance references;
 - use lightweight classifiers or routing models only for uncertain cases after
   deterministic file/path/content heuristics are exhausted.
+- add bounded reasoning passes only when they produce inspectable artifacts:
+  retrieval plans, source-grounding audits, contradiction checks, stale-context
+  warnings, memory/index health audits, and later model-assisted review passes.
+  Do not store hidden chain-of-thought; store concise decisions, evidence, and
+  audit outcomes.
 
 As embedding and reranker services become available, Motoko should keep the
 storage format, artifact provenance, versioning, invalidation, migration, eval

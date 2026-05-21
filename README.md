@@ -66,8 +66,7 @@ Design constraints:
   checks synthetic corpus fixtures before generation so retrieval quality is
   measurable without reading private documents.
 - `motoko retrieval-debug QUERY` explains deterministic file/chunk retrieval
-  scores, boosts, freshness, and diagnosis notes before adding embedding or
-  reranker machinery.
+  scores, boosts, freshness, vector/rerank state, and diagnosis notes.
 - `motoko retrieval-preview QUERY` shows the source context Motoko would send
   for a question without calling a model, so retrieval failures can be separated
   from final synthesis failures.
@@ -88,12 +87,13 @@ Design constraints:
 - `motoko vector-eval` runs the synthetic retrieval fixtures through the
   lexical baseline by default, with `--method embedding-v1` available for
   measuring the approved embedding route.
-- `motoko vector-query --rerank QUERY` explicitly reranks the top vector
-  candidates through the NixOS-declared `/v1/rerank` route, so reranker
-  precision can be tested without making every vector query slower.
+- `motoko vector-query --rerank QUERY` inspects how the NixOS-declared
+  `/v1/rerank` route reorders the top vector candidates.
 - Normal corpus retrieval uses a fresh embedding store as an additive semantic
-  recall source when one exists; lexical/task/path retrieval remains in the
-  prompt and in `/retrieval-debug` as the control path.
+  recall source when one exists, and now attempts reranking by default when a
+  `/v1/rerank` route is available. Lexical/task/path retrieval remains in the
+  prompt and in `/retrieval-debug` as the control path, and rerank failures
+  fall back to embedding-only retrieval instead of breaking chat.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

@@ -1605,6 +1605,7 @@ def test_vector_query_can_use_catalog_reranker_route(m):
                 "files": [
                     {
                         "path": str(first_path),
+                        "source_fingerprint": m.source_fingerprint(first_path),
                         "summary": "General alpha notes.",
                         "chunks": [
                             {
@@ -1617,6 +1618,7 @@ def test_vector_query_can_use_catalog_reranker_route(m):
                     },
                     {
                         "path": str(second_path),
+                        "source_fingerprint": m.source_fingerprint(second_path),
                         "summary": "Priority deadline task notes.",
                         "chunks": [
                             {
@@ -1675,6 +1677,133 @@ def test_vector_query_can_use_catalog_reranker_route(m):
             os.environ.pop("MOTOKO_MODEL", None)
         else:
             os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_normal_retrieval_uses_embedding_rerank_by_default(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_rerank = os.environ.get("MOTOKO_VECTOR_RERANK")
+    embed_socket = None
+    rerank_socket = None
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    RerankHandler.payloads = []
+    RerankHandler.paths = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ.pop("MOTOKO_VECTOR_RERANK", None)
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            first = "* Notes\nAlpha notes about errands.\n"
+            second = "* TODO [#A] Priority deadline task\nDEADLINE: <2026-05-22 Fri>\nAlpha notes.\n"
+            first_path = docs / "notes.org"
+            second_path = docs / "priority.org"
+            first_path.write_text(first, encoding="utf-8")
+            second_path.write_text(second, encoding="utf-8")
+            index = {
+                "id": "default-rerank-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "corpus_summary": "Default rerank route test corpus.",
+                "files": [
+                    {
+                        "path": str(first_path),
+                        "source_fingerprint": m.source_fingerprint(first_path),
+                        "summary": "General alpha notes.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "General alpha notes.",
+                                "content": first,
+                                "content_sha256": m.sha256_hex(first.encode("utf-8")),
+                            }
+                        ],
+                    },
+                    {
+                        "path": str(second_path),
+                        "source_fingerprint": m.source_fingerprint(second_path),
+                        "summary": "Priority deadline task notes.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Priority deadline task.",
+                                "content": second,
+                                "content_sha256": m.sha256_hex(second.encode("utf-8")),
+                            }
+                        ],
+                    },
+                ],
+            }
+            embed_socket = tmp / "embed.sock"
+            embed_server = UnixHTTPServer(str(embed_socket), EmbeddingHandler)
+            embed_thread = threading.Thread(target=embed_server.serve_forever, daemon=True)
+            embed_thread.start()
+            rerank_socket = tmp / "rerank.sock"
+            rerank_server = UnixHTTPServer(str(rerank_socket), RerankHandler)
+            rerank_thread = threading.Thread(target=rerank_server.serve_forever, daemon=True)
+            rerank_thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"unix://{embed_socket}",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    },
+                    "qwen3-reranker-0b6": {
+                        "kind": "reranker",
+                        "endpoint": f"unix://{rerank_socket}",
+                        "modelId": "qwen3-reranker-0.6b-q6-k",
+                        "tasks": ["reranker", "rerank", "vector_rerank"],
+                        "endpoint_paths": ["/v1/rerank"],
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path("default-rerank-index"), json.dumps(index, ensure_ascii=False) + "\n")
+            store = m.build_vector_store("default-rerank-index", method=m.EMBEDDING_VECTOR_METHOD)
+
+            text, sources = m.retrieve_from_index(index, "alpha notes")
+            assert "Semantic vector retrieval:" in text
+            assert RerankHandler.paths == ["/v1/rerank"]
+            index_source = next(source for source in sources if source.get("kind") == "index")
+            assert index_source["vector_store"] == store["id"]
+            assert index_source["vector_rerank_route"] == "qwen3-reranker-0b6"
+            assert not index_source.get("vector_rerank_fallback")
+            embed_server.shutdown()
+            embed_server.server_close()
+            rerank_server.shutdown()
+            rerank_server.server_close()
+    finally:
+        for socket_path in (embed_socket, rerank_socket):
+            if socket_path is not None:
+                with contextlib.suppress(OSError):
+                    pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_rerank is None:
+            os.environ.pop("MOTOKO_VECTOR_RERANK", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RERANK"] = old_rerank
 
 
 def test_index_limits(m):
@@ -2406,6 +2535,7 @@ def main() -> int:
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_query_can_use_catalog_reranker_route,
+        test_normal_retrieval_uses_embedding_rerank_by_default,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

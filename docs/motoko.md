@@ -979,9 +979,8 @@ when you want to require the approved embedding route. Use
 `motoko vector-eval` for the lexical synthetic fixtures, and
 `motoko vector-eval --method embedding-v1` to measure the configured embedding
 route without writing a store. Use `motoko vector-query --rerank QUERY` to
-rerank the top vector candidates through the configured `/v1/rerank` route; it
-is explicit so normal queries do not pay the extra model-call cost until
-reranker quality has been measured.
+inspect how the configured `/v1/rerank` route reorders the top vector
+candidates.
 
 Use `motoko vector-refresh [INDEX_ID]` to build a missing or stale embedding
 store for an index. Without an index argument it considers the latest index for
@@ -993,8 +992,11 @@ the explicit command with a larger `--max-chunks` value. A fresh embedding
 store is used as an additive semantic recall source in normal index retrieval;
 lexical scores, path boosts, Org/task signals, and source excerpts remain
 visible in `/retrieval-debug` and `/sources`. Set `MOTOKO_VECTOR_RETRIEVAL=0`
-to disable semantic retrieval during diagnosis. Set `MOTOKO_VECTOR_RERANK=1`
-only when you want fresh embedding retrieval to also use the reranker route.
+to disable semantic retrieval during diagnosis. Normal retrieval now attempts
+to rerank fresh embedding candidates by default when a catalog-discovered
+`/v1/rerank` route is available, then falls back to embedding-only retrieval if
+the reranker is missing or fails. Set `MOTOKO_VECTOR_RERANK=0` to disable
+reranking during diagnosis.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

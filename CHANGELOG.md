@@ -93,8 +93,8 @@ not the easiest place to review what changed after a long work session.
   that retrieval selects expected files, chunks, dates, TODOs, paths, and rare
   terms before generation starts.
 - Added `/retrieval-debug QUERY` and `motoko retrieval-debug QUERY` to explain
-  file/chunk retrieval scoring, path boosts, task-signal boosts, freshness, and
-  diagnosis notes before moving to embedding/reranker work.
+  file/chunk retrieval scoring, path boosts, task-signal boosts, freshness,
+  vector/rerank state, and diagnosis notes.
 - Added `/retrieval-preview QUERY` and `motoko retrieval-preview QUERY` to show
   the selected source context before a model is called, making prompt-use
   failures easier to distinguish from retrieval failures.
@@ -116,12 +116,15 @@ not the easiest place to review what changed after a long work session.
   no-model control path, and `motoko vector-eval --method embedding-v1` can
   measure the embedding route explicitly.
 - Added explicit `motoko vector-query --rerank QUERY` support for
-  catalog-discovered `/v1/rerank` routes, keeping reranker precision testing
-  opt-in until measured.
+  catalog-discovered `/v1/rerank` routes, so reranker precision can be
+  inspected directly.
 - Added `motoko vector-refresh` and bounded background vector refresh so fresh
   indexes can gradually acquire `embedding-v1` stores. Normal retrieval now
   uses a fresh embedding store as an additive semantic recall source while
   keeping lexical/task/path retrieval visible as the control path.
+- Changed normal retrieval to attempt embedding plus rerank by default when a
+  fresh embedding store and NixOS-declared `/v1/rerank` route are available,
+  with an embedding-only fallback if reranking is unavailable or fails.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.

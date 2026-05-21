@@ -3120,12 +3120,11 @@ def run_retrieval_debug(
             vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
             if vector_store is not None:
                 try:
-                    vector_report = query_vector_store(
+                    vector_report = query_vector_store_for_retrieval(
                         vector_store,
                         query,
                         limit=limit,
                         check_freshness=False,
-                        rerank=env_flag("MOTOKO_VECTOR_RERANK", False),
                     )
                 except SystemExit as exc:
                     index_report["vector_error"] = str(exc).splitlines()[0][:240]
@@ -3134,7 +3133,10 @@ def run_retrieval_debug(
                         "id": vector_report.get("store_id", ""),
                         "method": vector_report.get("method", ""),
                         "rerank": vector_report.get("rerank", False),
+                        "rerank_fallback": vector_report.get("rerank_fallback", False),
                     }
+                    if vector_report.get("warnings"):
+                        index_report["vector_warnings"] = vector_report.get("warnings", [])[:4]
                     index_report["vector_chunks"] = vector_report.get("rows", [])[:limit]
         index_report["diagnosis"] = diagnose_retrieval_debug(index_report, query)
         report["indexes"].append(index_report)
@@ -3208,8 +3210,11 @@ def format_retrieval_debug_report(report: dict) -> str:
         if index.get("vector_store"):
             store = index.get("vector_store", {})
             lines.append(
-                f"  vector store: {store.get('id', '')} method={store.get('method', '')} rerank={store.get('rerank', False)}"
+                f"  vector store: {store.get('id', '')} method={store.get('method', '')} "
+                f"rerank={store.get('rerank', False)} fallback={store.get('rerank_fallback', False)}"
             )
+        for warning in index.get("vector_warnings", [])[:3]:
+            lines.append(f"  vector warning: {warning}")
         if index.get("vector_error"):
             lines.append(f"  vector error: {index.get('vector_error')}")
         if index.get("vector_chunks"):
@@ -7780,6 +7785,55 @@ def query_vector_store(
     }
 
 
+def query_vector_store_for_retrieval(
+    store: dict,
+    query: str,
+    *,
+    limit: int,
+    check_freshness: bool = False,
+) -> dict:
+    rerank = env_flag("MOTOKO_VECTOR_RERANK", True)
+    if rerank and not local_model_routes_for_capability(
+        kind="reranker",
+        tasks=RERANKER_TASKS,
+        endpoint_path="/v1/rerank",
+    ):
+        fallback = query_vector_store(
+            store,
+            query,
+            limit=limit,
+            check_freshness=check_freshness,
+            rerank=False,
+        )
+        fallback["rerank_fallback"] = True
+        fallback["warnings"] = ["rerank fallback: no configured /v1/rerank route"] + list(
+            fallback.get("warnings", [])
+        )
+        return fallback
+    try:
+        return query_vector_store(
+            store,
+            query,
+            limit=limit,
+            check_freshness=check_freshness,
+            rerank=rerank,
+        )
+    except SystemExit as exc:
+        if not rerank:
+            raise
+        fallback = query_vector_store(
+            store,
+            query,
+            limit=limit,
+            check_freshness=check_freshness,
+            rerank=False,
+        )
+        warning = f"rerank fallback: {str(exc).splitlines()[0][:220]}"
+        fallback["rerank_fallback"] = True
+        fallback["warnings"] = [warning] + list(fallback.get("warnings", []))
+        return fallback
+
+
 def parse_vector_query_input(text: str) -> tuple[str, bool]:
     pieces = str(text or "").split()
     rerank = "--rerank" in pieces
@@ -9981,12 +10035,11 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
         if vector_store is not None:
             try:
-                vector_report = query_vector_store(
+                vector_report = query_vector_store_for_retrieval(
                     vector_store,
                     query,
                     limit=max(top_chunks, VECTOR_QUERY_LIMIT),
                     check_freshness=False,
-                    rerank=env_flag("MOTOKO_VECTOR_RERANK", False),
                 )
             except SystemExit as exc:
                 vector_warning = str(exc).splitlines()[0][:240]
@@ -10045,6 +10098,10 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         rerank_route = vector_report.get("rerank_route")
         if isinstance(rerank_route, dict) and rerank_route:
             index_source["vector_rerank_route"] = rerank_route.get("catalog_route", "")
+        if vector_report.get("rerank_fallback"):
+            index_source["vector_rerank_fallback"] = True
+        if vector_report.get("warnings"):
+            index_source["warnings"] = index_source.get("warnings", []) + vector_report.get("warnings", [])[:4]
         parts.append(
             "Semantic vector retrieval:\n"
             f"- store {vector_report.get('store_id', '')} "
