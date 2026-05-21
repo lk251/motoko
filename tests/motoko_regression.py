@@ -1729,6 +1729,70 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         assert saved_after["messages"] == saved_before["messages"]
 
 
+def test_tui_prompt_is_saved_before_context_preparation(m):
+    with isolated_state():
+        conv = m.new_conversation("Immediate prompt")
+        conv["id"] = "immediate-prompt"
+        write_conversation(m, conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.answer_phase = ""
+        ui.answer_entry = None
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.pending_prompts = m.collections.deque()
+        ui.start_maintenance = lambda *args, **kwargs: None
+
+        build_started = threading.Event()
+        release_build = threading.Event()
+        old_build_messages = m.build_messages
+        old_call_model = m.call_model_with_callback
+        try:
+            def slow_build_messages(conv_arg, query=""):
+                build_started.set()
+                assert release_build.wait(2)
+                return [{"role": "system", "content": "prompt"}] + conv_arg.get("messages", []), []
+
+            def fake_call_model(messages, *, temperature=0.7, on_token=None, route=None):
+                if on_token:
+                    on_token("ok")
+                return "ok"
+
+            m.build_messages = slow_build_messages
+            m.call_model_with_callback = fake_call_model
+
+            ui.start_generation("slow context setup")
+
+            assert any(
+                row.get("role") == "user" and row.get("content") == "slow context setup"
+                for row in ui.messages
+            )
+            saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+            assert saved["messages"] == [{"role": "user", "content": "slow context setup"}]
+            assert ui.generating
+            assert ui.answer_phase == "preparing"
+            assert build_started.wait(1)
+
+            release_build.set()
+            deadline = time.monotonic() + 2
+            while ui.generating and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+            assert not ui.generating
+            assert conv["messages"][-1] == {"role": "assistant", "content": "ok"}
+        finally:
+            release_build.set()
+            m.build_messages = old_build_messages
+            m.call_model_with_callback = old_call_model
+
+
 def test_response_feedback_is_private_and_does_not_pollute_conversation(m):
     with isolated_state():
         conv = m.new_conversation("Feedback")
@@ -3682,6 +3746,7 @@ def main() -> int:
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
         test_tui_report_commands_do_not_persist_system_output,
+        test_tui_prompt_is_saved_before_context_preparation,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
         test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_preview_shows_context_without_model_call,

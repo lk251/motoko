@@ -180,6 +180,9 @@ not the easiest place to review what changed after a long work session.
 - Made Unix-socket model calls retry transient connection resets whether the
   NixOS-declared backend reports activating or active, so chat requests are
   less likely to fail during model socket activation, handoff, or route churn.
+- Made TUI prompt submission append and save the user turn immediately, then
+  run topic/dossier attachment and retrieval preparation inside the answer
+  worker so slow pre-answer context work does not make Enter feel ignored.
 - Kept bg-heavy elapsed-time display stable across vectorization progress-line
   updates, instead of resetting the counter on every batch status update.
 - Made the Nix flake wrapper export `MOTOKO_REVISION`, so `/about` can show the

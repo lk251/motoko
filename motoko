@@ -15103,6 +15103,7 @@ class MotokoTui:
         self.events: collections.deque[tuple] = collections.deque()
         self.events_lock = threading.Lock()
         self.generating = False
+        self.answer_phase = ""
         self.maintaining = False
         self.study_running = False
         self.study_status = "study: starting"
@@ -15921,18 +15922,14 @@ class MotokoTui:
 
     def start_generation(self, user_text: str) -> None:
         maybe_set_title(self.conv, user_text)
-        topic = maybe_attach_relevant_existing_topic(self.conv, user_text)
-        if topic:
-            self.append("system", f"auto-attached topic dossier: {topic.get('id')} ({topic.get('name', '')})")
-        dossier = maybe_attach_relevant_existing_dossier(self.conv, user_text)
-        if dossier:
-            self.append("system", f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
         self.conv.setdefault("messages", []).append({"role": "user", "content": user_text})
+        save_conversation(self.conv)
         self.append("user", user_text)
         explicit_saved = save_explicit_user_memories(user_text, self.conv["id"])
         if explicit_saved:
             self.append("system", f"memory saved from this prompt ({explicit_saved})")
         self.answer_entry = self.append("assistant", "")
+        self.answer_phase = "preparing"
         chat_route = model_route(MODEL_ROUTE_CHAT)
         if endpoint_is_unix(chat_route.get("endpoint", "")):
             self.status = f"model queued/loading on {chat_route['route']} socket; you can type the next prompt below"
@@ -15940,11 +15937,29 @@ class MotokoTui:
             self.status = "Motoko is thinking; you can type the next prompt below"
         self.generating = True
         self.cancel_event = threading.Event()
-        messages, sources = build_messages(self.conv, user_text)
         cancel_event = self.cancel_event
 
         def worker() -> None:
             try:
+                topic = maybe_attach_relevant_existing_topic(self.conv, user_text)
+                if topic:
+                    self.put_event(
+                        (
+                            "system_note",
+                            f"auto-attached topic dossier: {topic.get('id')} ({topic.get('name', '')})",
+                        )
+                    )
+                dossier = maybe_attach_relevant_existing_dossier(self.conv, user_text)
+                if dossier:
+                    self.put_event(
+                        (
+                            "system_note",
+                            f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})",
+                        )
+                    )
+                messages, sources = build_messages(self.conv, user_text)
+                self.put_event(("answer_phase", "answering"))
+
                 def on_token(token: str) -> None:
                     if cancel_event.is_set():
                         raise RuntimeError("__motoko_stopped__")
@@ -15985,12 +16000,16 @@ class MotokoTui:
                 if self.answer_entry is not None:
                     self.answer_entry["content"] += event[1]
                     changed = True
+            elif kind == "answer_phase":
+                self.answer_phase = event[1]
+                changed = True
             elif kind == "done":
                 reply, sources = event[1], event[2]
                 self.conv["last_sources"] = sources
                 self.conv["messages"].append({"role": "assistant", "content": reply})
                 save_conversation(self.conv)
                 self.generating = False
+                self.answer_phase = ""
                 self.answer_entry = None
                 self.status = "ready"
                 changed = True
@@ -16011,11 +16030,13 @@ class MotokoTui:
                     )
                 save_conversation(self.conv)
                 self.generating = False
+                self.answer_phase = ""
                 self.answer_entry = None
                 self.status = "answer stopped"
                 changed = True
             elif kind == "error":
                 self.generating = False
+                self.answer_phase = ""
                 self.answer_entry = None
                 self.append("error", event[1])
                 self.status = "ready"
@@ -16336,7 +16357,8 @@ class MotokoTui:
         spinner = self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)] if self.tui_spinner_frames else ""
         status_parts = []
         if self.generating:
-            status_parts.append(style(f"{spinner} chat: answering", "turquoise"))
+            answer_phase = self.answer_phase or "answering"
+            status_parts.append(style(f"{spinner} chat: {answer_phase}", "turquoise"))
         elif not self.maintaining:
             status_parts.append(style(self.status, "turquoise"))
         if self.maintaining:
