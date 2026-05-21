@@ -123,6 +123,17 @@ def test_context_plan_and_source_reasons(m):
     assert "why:" in report
 
 
+def test_retrieval_eval_scores_grounded_fixtures(m):
+    report = m.run_retrieval_eval()
+    text = m.format_retrieval_eval_report(report)
+    assert report["status"] == "pass", text
+    assert report["passed"] == report["total"]
+    assert any(row["id"] == "named-logbook-recent" for row in report["fixtures"])
+    assert "retrieval eval: pass" in text
+    path = m.save_retrieval_eval_report(report)
+    assert path.exists()
+
+
 def test_background_study_state(m):
     conv = m.new_conversation("Background")
     conv["id"] = "background"
@@ -494,6 +505,8 @@ def main() -> int:
     with isolated_state():
         test_context_plan_and_source_reasons(m)
     with isolated_state():
+        test_retrieval_eval_scores_grounded_fixtures(m)
+    with isolated_state():
         test_background_study_state(m)
     with isolated_state():
         test_background_study_enriches_legacy_index(m)
@@ -509,7 +522,7 @@ def main() -> int:
         test_worker_model_eval_scores_routes_and_json_artifacts(m)
     with isolated_state():
         test_worker_model_eval_flags_missing_facts(m)
-    print("11 motoko evaluation checks passed")
+    print("12 motoko evaluation checks passed")
     return 0
 
 

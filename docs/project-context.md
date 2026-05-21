@@ -189,9 +189,34 @@ Current UI direction:
 
 ## Near-Term Next Improvement
 
-Immediate next step:
+Immediate retrieval-grounding plan:
 
-Bird’s-eye next step: after this indexing job finishes and you rebuild into the newer Motoko, the highest-value work is to make sure indexed corpus knowledge is actually used reliably in chat. The concrete next target should be retrieval-grounded answering and evaluation: when you ask “what are tomorrow’s highest-priority tasks?”, Motoko should retrieve the relevant Org/task artifacts, show enough source provenance to be trusted, and synthesize a useful answer. That best serves both values: it directly increases her intelligence/competence, and it is the kind of careful, end-to-end behavior that makes her feel thoughtfully crafted rather than merely full of background machinery.
+The highest-value work is to make sure indexed corpus knowledge is actually
+used reliably in chat. When Javier asks "what are tomorrow's
+highest-priority tasks?", Motoko should retrieve the relevant Org/task
+artifacts, show enough source provenance to be trusted, synthesize a useful
+answer, and then leave an inspectable answer-grounding audit. This serves both
+guiding values: it directly increases her intelligence/competence, and it is
+the kind of careful, end-to-end behavior that makes her feel thoughtfully
+crafted rather than merely full of background machinery.
+
+The implementation path is:
+
+- evaluate retrieval quality before generation, using synthetic corpus fixtures
+  that prove the right files, chunks, dates, TODOs, paths, and rare terms are
+  selected;
+- add a deterministic answer-grounding audit to `/sources`, so each answer says
+  whether it had excerpt-level evidence, only summary/memory context, stale
+  context, or no usable grounding;
+- keep final user-facing chat on the strongest configured chat route while
+  smaller routes continue to help with summaries, labels, dossiers, and other
+  bounded background work after they pass evals;
+- make prompts cache-friendly and reuse Motoko-owned compressed context and
+  output caches, while leaving true prompt/KV reuse to the NixOS llama.cpp
+  service layer;
+- add embedding and reranker storage only after the schema, provenance,
+  invalidation, migration, privacy boundaries, eval fixtures, and NixOS service
+  shape are explicit.
 
 The highest-ROI next engineering improvement is improving the quality of
 profile dossiers and document-derived dossiers after real personal documents

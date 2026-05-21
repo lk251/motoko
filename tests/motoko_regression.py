@@ -756,6 +756,40 @@ def test_sources_fallback_lists_attached_topic_context(m):
         assert "/tmp/work/logbook.org" in text
 
 
+def test_answer_grounding_audit_sources(m):
+    sources = [
+        {
+            "kind": "chunk",
+            "index": "idx",
+            "path": "/tmp/logbook.org",
+            "chunk": 1,
+        },
+        {
+            "kind": "context-plan",
+            "total_chars": 1200,
+            "budget_chars": 10000,
+            "status": "ok",
+            "lanes": [],
+        },
+    ]
+    audited = m.sources_with_answer_audit(
+        "summarize today according to logbook.org",
+        "The logbook says the retrieval audit passed.",
+        sources,
+    )
+    audit = audited[-1]
+    assert audit["kind"] == "answer-audit"
+    assert audit["status"] == "pass"
+    assert audit["strong_evidence_sources"] == 1
+    text = m.format_sources(audited)
+    assert "answer audit" in text
+    assert "paths: /tmp/logbook.org" in text
+
+    thin = m.answer_grounding_audit("summarize according to logbook.org", "No documents are attached.", [])
+    assert thin["status"] == "fail"
+    assert "attach or study" in thin["recommended_action"]
+
+
 def test_named_file_query_boosts_matching_path(m):
     index = {
         "id": "idx",
@@ -1679,6 +1713,7 @@ def main() -> int:
         test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
         test_summary_reductions_fan_out_across_worker_routes,
         test_sources_fallback_lists_attached_topic_context,
+        test_answer_grounding_audit_sources,
         test_named_file_query_boosts_matching_path,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,

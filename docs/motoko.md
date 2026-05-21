@@ -464,6 +464,7 @@ Useful in-chat commands:
 /sources
 /status
 /model-routes
+/retrieval-eval
 /identity
 /permissions
 /permissions set MODE
@@ -586,9 +587,12 @@ model prompt.
 `/sources` prints the memories, recent conversation capsules, compacted summary,
 attached files, file summaries, document chunks, index freshness state, and
 context planning lanes used for the last answer. It also prints a short `why:`
-line for each source. This is meant to make answers inspectable: Motoko should
-be able to say which stored context influenced a response instead of sounding
-like she has unbounded hidden knowledge.
+line for each source. It ends with an answer-grounding audit that reports
+whether the answer had excerpt-level evidence, only summary/memory context,
+stale context, or no usable grounding for a source-shaped question. This is
+meant to make answers inspectable: Motoko should be able to say which stored
+context influenced a response instead of sounding like she has unbounded hidden
+knowledge.
 
 `/status` prints the current model endpoint, state paths, memory/index/topic
 counts, and the amount of context attached to the active conversation.
@@ -702,10 +706,17 @@ Set `MOTOKO_SUMMARY_PARALLEL=0` to disable this fanout for a session.
 Before trusting newly installed worker models, run:
 
 ```bash
+motoko retrieval-eval
 motoko model-eval
 motoko model-eval --route index_chunk --route index_file
 motoko model-eval --write
 ```
+
+`retrieval-eval` is deterministic and does not call a model. It uses synthetic
+corpus fixtures to check whether the lexical retriever selects the expected
+files, chunks, dates, TODOs, paths, and rare terms before generation begins.
+Reports written with `--write` are stored under
+`~/.local/state/motoko/retrieval-evals/`.
 
 `model-eval` uses synthetic, source-grounded fixtures for chunk summaries, file
 summaries, lightweight labels/classification, and corpus synthesis. It asks
@@ -865,6 +876,10 @@ question: broad evidence/detail/deep-analysis prompts receive a wider slice of
 attached indexes than ordinary conversational prompts. This avoids sending every
 file on every turn while still letting the model answer from relevant source
 text.
+For document, file, task, priority, date, or "according to this corpus"
+questions, the system prompt tells Motoko to answer from retrieved excerpts,
+structured task signals, or attached source material, and to say when context is
+thin instead of inventing details from summaries.
 
 `motoko indexes` reports whether an index appears `fresh`, `stale`,
 `metadata-changed`, or `unknown`. Older indexes that predate fingerprints show
