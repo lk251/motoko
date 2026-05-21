@@ -468,6 +468,9 @@ Useful in-chat commands:
 /study QUERY [--focus recent]
 /compact
 /sources
+/feedback up|down|ok [TEXT]
+/up [TEXT]
+/down [TEXT]
 /status
 /model-routes
 /retrieval-eval
@@ -989,14 +992,23 @@ study loop also performs one bounded embedding refresh pass when
 `MOTOKO_BACKGROUND_VECTOR_REFRESH` is enabled. It skips stale source indexes
 and indexes above `MOTOKO_BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS` unless you run
 the explicit command with a larger `--max-chunks` value. A fresh embedding
-store is used as an additive semantic recall source in normal index retrieval;
-lexical scores, path boosts, Org/task signals, and source excerpts remain
-visible in `/retrieval-debug` and `/sources`. Set `MOTOKO_VECTOR_RETRIEVAL=0`
-to disable semantic retrieval during diagnosis. Normal retrieval now attempts
-to rerank fresh embedding candidates by default when a catalog-discovered
-`/v1/rerank` route is available, then falls back to embedding-only retrieval if
-the reranker is missing or fails. Set `MOTOKO_VECTOR_RERANK=0` to disable
-reranking during diagnosis.
+store participates in true hybrid retrieval: lexical/path candidates,
+deterministic Org/task candidates, and fresh embedding candidates are unioned
+and deduplicated before final context selection. When a catalog-discovered
+`/v1/rerank` route is available, Motoko reranks that combined candidate set;
+if reranking is missing or fails, she falls back to the non-reranked hybrid
+set. Lexical scores, path boosts, Org/task signals, vector rows, rerank state,
+and source excerpts remain visible in `/retrieval-debug` and `/sources`. Set
+`MOTOKO_VECTOR_RETRIEVAL=0` to disable semantic retrieval during diagnosis. Set
+`MOTOKO_VECTOR_RERANK=0` to disable reranking during diagnosis.
+
+Use `/feedback up|down|ok [TEXT]` after an answer to record whether it helped
+and what was wrong or right. The shorthand commands `/up [TEXT]` and
+`/down [TEXT]` do the same thing. Feedback is written to the current user's
+Motoko state as `response-feedback.jsonl`; it is not appended to the
+conversation transcript. This is intended as a future training/evaluation
+signal for retrieval, rerank, prompt, and answer-quality improvements, not as
+an immediate unreviewed self-tuning mechanism.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

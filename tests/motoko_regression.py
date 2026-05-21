@@ -878,42 +878,43 @@ def test_answer_grounding_audit_sources(m):
 
 
 def test_named_file_query_boosts_matching_path(m):
-    index = {
-        "id": "idx",
-        "name": "orgfiles",
-        "root": "/tmp/orgfiles",
-        "files": [
-            {
-                "path": "/tmp/orgfiles/organization/plan.org",
-                "summary": "High priority TODO planning notes with many active tasks.",
-                "signals": {"active_task_count": 10, "priorities": {"A": 2}},
-                "chunks": [
-                    {
-                        "chunk": 1,
-                        "summary": "TODO planning backlog and tomorrow tasks.",
-                        "content": "TODO many planning tasks for today and tomorrow.",
-                    }
-                ],
-            },
-            {
-                "path": "/tmp/orgfiles/logbook.org",
-                "summary": "Daily logbook entries for yesterday and today.",
-                "signals": {},
-                "chunks": [
-                    {
-                        "chunk": 1,
-                        "summary": "Yesterday and today logbook notes.",
-                        "content": "Yesterday unfinished work and today's notes.",
-                    }
-                ],
-            },
-        ],
-    }
-    rows = m.ranked_index_chunks(index, "summarize yesterday and today according to logbook.org")
-    assert rows[0][1]["path"].endswith("/logbook.org")
-    text, sources = m.retrieve_from_index(index, "summarize yesterday and today according to logbook.org")
-    assert "/tmp/orgfiles/logbook.org" in text
-    assert any(source.get("path", "").endswith("/logbook.org") for source in sources)
+    with isolated_state():
+        index = {
+            "id": "idx",
+            "name": "orgfiles",
+            "root": "/tmp/orgfiles",
+            "files": [
+                {
+                    "path": "/tmp/orgfiles/organization/plan.org",
+                    "summary": "High priority TODO planning notes with many active tasks.",
+                    "signals": {"active_task_count": 10, "priorities": {"A": 2}},
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "TODO planning backlog and tomorrow tasks.",
+                            "content": "TODO many planning tasks for today and tomorrow.",
+                        }
+                    ],
+                },
+                {
+                    "path": "/tmp/orgfiles/logbook.org",
+                    "summary": "Daily logbook entries for yesterday and today.",
+                    "signals": {},
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Yesterday and today logbook notes.",
+                            "content": "Yesterday unfinished work and today's notes.",
+                        }
+                    ],
+                },
+            ],
+        }
+        rows = m.ranked_index_chunks(index, "summarize yesterday and today according to logbook.org")
+        assert rows[0][1]["path"].endswith("/logbook.org")
+        text, sources = m.retrieve_from_index(index, "summarize yesterday and today according to logbook.org")
+        assert "/tmp/orgfiles/logbook.org" in text
+        assert any(source.get("path", "").endswith("/logbook.org") for source in sources)
 
 
 def test_retrieval_debug_explains_scores(m):
@@ -1224,6 +1225,45 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
         assert saved_after["messages"] == saved_before["messages"]
+
+
+def test_response_feedback_is_private_and_does_not_pollute_conversation(m):
+    with isolated_state():
+        conv = m.new_conversation("Feedback")
+        conv["id"] = "feedback"
+        conv["messages"] = [
+            {"role": "user", "content": "What should I do tomorrow?"},
+            {"role": "assistant", "content": "You should review the logbook."},
+        ]
+        conv["last_sources"] = [
+            {
+                "kind": "chunk",
+                "index": "idx",
+                "path": "/tmp/logbook.org",
+                "chunk": 1,
+                "retrieval": "hybrid",
+                "retrieval_methods": ["lexical", "vector"],
+                "hybrid_score": 123,
+                "rerank_score": 0.8,
+            }
+        ]
+        write_conversation(m, conv)
+        saved_before = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+
+        row = m.record_response_feedback(conv, "down", "It missed the scheduled item.")
+
+        assert row["schema"] == m.RESPONSE_FEEDBACK_SCHEMA_VERSION
+        assert row["rating"] == "down"
+        assert row["realm"] == m.identity_realm()
+        assert "scheduled item" in row["note"]
+        assert row["sources"][0]["retrieval_methods"] == ["lexical", "vector"]
+        saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved_after["messages"] == saved_before["messages"]
+        feedback_rows = [
+            json.loads(line)
+            for line in m.response_feedback_path().read_text(encoding="utf-8").splitlines()
+        ]
+        assert feedback_rows[-1]["id"] == row["id"]
 
 
 def test_retrieval_preview_shows_context_without_model_call(m):
@@ -1548,7 +1588,7 @@ def test_embedding_vector_store_uses_catalog_route(m):
             report = m.query_vector_store(store, "vector deadline task", limit=3)
             assert report["rows"]
             text, sources = m.retrieve_from_index(index, "vector deadline task")
-            assert "Semantic vector retrieval:" in text
+            assert "Hybrid retrieval:" in text
             assert any(source.get("vector_store") == store["id"] for source in sources)
             refresh = m.refresh_vector_stores(
                 index_id="embedding-index",
@@ -1777,12 +1817,17 @@ def test_normal_retrieval_uses_embedding_rerank_by_default(m):
             store = m.build_vector_store("default-rerank-index", method=m.EMBEDDING_VECTOR_METHOD)
 
             text, sources = m.retrieve_from_index(index, "alpha notes")
-            assert "Semantic vector retrieval:" in text
+            assert "Hybrid retrieval:" in text
             assert RerankHandler.paths == ["/v1/rerank"]
             index_source = next(source for source in sources if source.get("kind") == "index")
             assert index_source["vector_store"] == store["id"]
-            assert index_source["vector_rerank_route"] == "qwen3-reranker-0b6"
-            assert not index_source.get("vector_rerank_fallback")
+            assert index_source["hybrid_rerank_route"] == "qwen3-reranker-0b6"
+            assert not index_source.get("hybrid_rerank_fallback")
+            chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
+            assert chunk_sources[0]["path"].endswith("priority.org")
+            assert "lexical" in chunk_sources[0]["retrieval_methods"]
+            assert "vector" in chunk_sources[0]["retrieval_methods"]
+            assert chunk_sources[0]["rerank_score"] == 0.95
             embed_server.shutdown()
             embed_server.server_close()
             rerank_server.shutdown()
@@ -2529,6 +2574,7 @@ def main() -> int:
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
         test_tui_report_commands_do_not_persist_system_output,
+        test_response_feedback_is_private_and_does_not_pollute_conversation,
         test_retrieval_preview_shows_context_without_model_call,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_vector_plan_reports_storage_and_readiness_gates,

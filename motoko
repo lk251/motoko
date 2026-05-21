@@ -95,6 +95,7 @@ INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
+RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
@@ -157,6 +158,7 @@ DEFAULT_LEXICAL_VECTOR_DIMS = 256
 EMBEDDING_BATCH_SIZE = 32
 VECTOR_QUERY_LIMIT = 8
 RERANK_CANDIDATE_LIMIT = 24
+HYBRID_STRUCTURED_CANDIDATE_LIMIT = 8
 BACKGROUND_VECTOR_REFRESH_LIMIT = 1
 BACKGROUND_VECTOR_REFRESH_MAX_CHUNKS = 1000
 INDEX_CHUNK_CHARS = 12000
@@ -373,6 +375,9 @@ SLASH_COMMANDS = [
     ("/topic-show [ID]", "show a topic dossier"),
     ("/compact", "summarize older turns into compact context"),
     ("/sources", "show sources used for the last answer"),
+    ("/feedback up|down|ok [TEXT]", "rate the last answer with an optional note"),
+    ("/up [TEXT]", "shortcut for positive feedback on the last answer"),
+    ("/down [TEXT]", "shortcut for negative feedback on the last answer"),
     ("/status", "show model, memory, and context state"),
     ("/model-routes", "show model worker routes"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
@@ -441,6 +446,7 @@ SHELL_COMMANDS = [
     "profile",
     "remember",
     "status",
+    "feedback",
     "model-routes",
     "model-eval",
     "retrieval-eval",
@@ -467,6 +473,9 @@ SIMPLE_SLASH_COMMANDS = {
     "/new",
     "/compact",
     "/sources",
+    "/feedback",
+    "/up",
+    "/down",
     "/status",
     "/model-routes",
     "/retrieval-eval",
@@ -963,6 +972,11 @@ def retrieval_evals_dir() -> pathlib.Path:
 def retrieval_debug_dir() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return ensure_private_dir(root / "retrieval-debug")
+
+
+def response_feedback_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "response-feedback.jsonl"
 
 
 def vector_stores_dir() -> pathlib.Path:
@@ -2845,46 +2859,54 @@ def run_retrieval_eval() -> dict:
         "created": now(),
         "fixtures": [],
     }
-    for fixture in retrieval_eval_fixtures():
-        index = synthetic_retrieval_eval_index(fixture)
-        query = str(fixture.get("query", ""))
-        text, sources = retrieve_from_index(index, query)
-        selected_paths = sorted(
-            {
-                source.get("path", "")
-                for source in sources
-                if source.get("path")
-            }
-        )
-        chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
-        missing_paths = [
-            expected
-            for expected in fixture.get("expected_paths", []) or []
-            if not retrieval_eval_path_matches(selected_paths, str(expected))
-        ]
-        lowered_text = text.lower()
-        missing_terms = [
-            expected
-            for expected in fixture.get("expected_terms", []) or []
-            if str(expected).lower() not in lowered_text
-        ]
-        min_chunk_sources = int(fixture.get("min_chunk_sources", 0) or 0)
-        status = "pass" if not missing_paths and not missing_terms and len(chunk_sources) >= min_chunk_sources else "fail"
-        audit = answer_grounding_audit(query, "Synthetic answer for retrieval evaluation.", sources)
-        report["fixtures"].append(
-            {
-                "id": fixture.get("id", ""),
-                "status": status,
-                "query": query,
-                "selected_paths": selected_paths,
-                "source_kinds": dict(collections.Counter(source.get("kind", "unknown") for source in sources)),
-                "chunk_source_count": len(chunk_sources),
-                "context_chars": len(text),
-                "missing_paths": missing_paths,
-                "missing_terms": missing_terms,
-                "answer_audit_status": audit.get("status", ""),
-            }
-        )
+    old_rerank = os.environ.get("MOTOKO_VECTOR_RERANK")
+    os.environ["MOTOKO_VECTOR_RERANK"] = "0"
+    try:
+        for fixture in retrieval_eval_fixtures():
+            index = synthetic_retrieval_eval_index(fixture)
+            query = str(fixture.get("query", ""))
+            text, sources = retrieve_from_index(index, query)
+            selected_paths = sorted(
+                {
+                    source.get("path", "")
+                    for source in sources
+                    if source.get("path")
+                }
+            )
+            chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
+            missing_paths = [
+                expected
+                for expected in fixture.get("expected_paths", []) or []
+                if not retrieval_eval_path_matches(selected_paths, str(expected))
+            ]
+            lowered_text = text.lower()
+            missing_terms = [
+                expected
+                for expected in fixture.get("expected_terms", []) or []
+                if str(expected).lower() not in lowered_text
+            ]
+            min_chunk_sources = int(fixture.get("min_chunk_sources", 0) or 0)
+            status = "pass" if not missing_paths and not missing_terms and len(chunk_sources) >= min_chunk_sources else "fail"
+            audit = answer_grounding_audit(query, "Synthetic answer for retrieval evaluation.", sources)
+            report["fixtures"].append(
+                {
+                    "id": fixture.get("id", ""),
+                    "status": status,
+                    "query": query,
+                    "selected_paths": selected_paths,
+                    "source_kinds": dict(collections.Counter(source.get("kind", "unknown") for source in sources)),
+                    "chunk_source_count": len(chunk_sources),
+                    "context_chars": len(text),
+                    "missing_paths": missing_paths,
+                    "missing_terms": missing_terms,
+                    "answer_audit_status": audit.get("status", ""),
+                }
+            )
+    finally:
+        if old_rerank is None:
+            os.environ.pop("MOTOKO_VECTOR_RERANK", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RERANK"] = old_rerank
     total = len(report["fixtures"])
     passed = sum(1 for row in report["fixtures"] if row.get("status") == "pass")
     report["status"] = "pass" if passed == total else "fail"
@@ -3110,6 +3132,7 @@ def run_retrieval_debug(
             "name": index.get("name", ""),
             "root": index.get("root", ""),
             "freshness": status,
+            "production_retrieval": "hybrid lexical+structured+embedding -> rerank",
             "warnings": warnings[:8],
             "files_considered": len(file_rows),
             "chunks_considered": len(chunk_rows),
@@ -3174,6 +3197,7 @@ def format_retrieval_debug_report(report: dict) -> str:
             f"{index.get('files_considered', 0)} file(s)  {index.get('chunks_considered', 0)} chunk(s)  "
             f"{index.get('name', '')}  {index.get('root', '')}"
         )
+        lines.append(f"  production: {index.get('production_retrieval', 'hybrid retrieval')}")
         for warning in index.get("warnings", [])[:3]:
             lines.append(f"  warning: {warning}")
         for note in index.get("diagnosis", []):
@@ -4674,6 +4698,118 @@ def append_study_job_event(job_id: str, event: str, **fields) -> None:
             **fields,
         },
     )
+
+
+def normalize_feedback_rating(rating: str) -> str:
+    value = str(rating or "").strip().lower()
+    aliases = {
+        "+": "up",
+        "good": "up",
+        "yes": "up",
+        "thumbsup": "up",
+        "thumbs-up": "up",
+        "up": "up",
+        "-": "down",
+        "bad": "down",
+        "no": "down",
+        "thumbsdown": "down",
+        "thumbs-down": "down",
+        "down": "down",
+        "ok": "ok",
+        "neutral": "ok",
+    }
+    normalized = aliases.get(value)
+    if normalized is None:
+        raise SystemExit("usage: /feedback up|down|ok [note]")
+    return normalized
+
+
+def last_message_content(conv: dict, role: str) -> tuple[int, str]:
+    messages = conv.get("messages", []) if isinstance(conv.get("messages"), list) else []
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
+        if isinstance(msg, dict) and msg.get("role") == role:
+            return index, str(msg.get("content", ""))
+    return -1, ""
+
+
+def compact_feedback_sources(sources: list[dict], *, limit: int = 16) -> list[dict]:
+    rows = []
+    for source in sources[:limit]:
+        if not isinstance(source, dict):
+            continue
+        rows.append(
+            {
+                key: source.get(key)
+                for key in [
+                    "kind",
+                    "id",
+                    "index",
+                    "path",
+                    "chunk",
+                    "retrieval",
+                    "retrieval_methods",
+                    "score",
+                    "hybrid_score",
+                    "rerank_score",
+                    "vector_score",
+                    "status",
+                    "vector_store",
+                    "vector_method",
+                    "vector_rerank_route",
+                    "hybrid_rerank_route",
+                ]
+                if source.get(key) not in (None, "", [])
+            }
+        )
+    return rows
+
+
+def record_response_feedback(conv: dict, rating: str, note: str = "") -> dict:
+    normalized = normalize_feedback_rating(rating)
+    assistant_index, assistant_text = last_message_content(conv, "assistant")
+    if assistant_index < 0 or not assistant_text.strip():
+        raise SystemExit("No assistant answer is available to rate yet.")
+    user_index, user_text = last_message_content(conv, "user")
+    row = {
+        "schema": RESPONSE_FEEDBACK_SCHEMA_VERSION,
+        "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+        "created": now(),
+        "realm": identity_realm(),
+        "conversation_id": conv.get("id", ""),
+        "conversation_title": conv.get("title", ""),
+        "rating": normalized,
+        "note": compact_text(note, 2000),
+        "user_message_index": user_index,
+        "assistant_message_index": assistant_index,
+        "user_prompt": compact_text(user_text, 4000),
+        "assistant_reply": compact_text(assistant_text, 4000),
+        "sources": compact_feedback_sources(conv.get("last_sources", []) if isinstance(conv.get("last_sources"), list) else []),
+        "use": "retrieval and answer-quality training signal; do not apply automatically without eval gates",
+    }
+    append_jsonl(response_feedback_path(), row)
+    return row
+
+
+def format_feedback_saved(row: dict) -> str:
+    return (
+        f"feedback saved: {row.get('rating', '')} {row.get('id', '')}\n"
+        f"path: {response_feedback_path()}\n"
+        "use: private per-realm signal for retrieval/rerank/prompt evaluation"
+    )
+
+
+def parse_feedback_command(text: str) -> tuple[str, str]:
+    stripped = text.strip()
+    if stripped.startswith("/up"):
+        return "up", stripped[len("/up") :].strip()
+    if stripped.startswith("/down"):
+        return "down", stripped[len("/down") :].strip()
+    body = stripped[len("/feedback") :].strip()
+    if not body:
+        raise SystemExit("usage: /feedback up|down|ok [note]")
+    parts = body.split(maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
 
 
 def read_study_jobs(limit: int = 20) -> list[dict]:
@@ -7791,8 +7927,9 @@ def query_vector_store_for_retrieval(
     *,
     limit: int,
     check_freshness: bool = False,
+    rerank: bool | None = None,
 ) -> dict:
-    rerank = env_flag("MOTOKO_VECTOR_RERANK", True)
+    rerank = env_flag("MOTOKO_VECTOR_RERANK", True) if rerank is None else bool(rerank)
     if rerank and not local_model_routes_for_capability(
         kind="reranker",
         tasks=RERANKER_TASKS,
@@ -9986,6 +10123,150 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     return notes[:3]
 
 
+def retrieval_chunk_key(file_item: dict, chunk: dict) -> tuple[str, str]:
+    return file_item.get("path", ""), str(chunk.get("chunk", ""))
+
+
+def hybrid_candidate_base_score(candidate: dict) -> float:
+    return max(
+        float(candidate.get("lexical_score", 0) or 0),
+        float(candidate.get("vector_rank_score", 0) or 0),
+        float(candidate.get("structured_score", 0) or 0),
+    )
+
+
+def add_hybrid_candidate(
+    candidates: dict[tuple[str, str], dict],
+    file_item: dict,
+    chunk: dict,
+    method: str,
+    score: int | float,
+    details: dict | None = None,
+) -> dict:
+    key = retrieval_chunk_key(file_item, chunk)
+    row = candidates.get(key)
+    if row is None:
+        row = {
+            "key": key,
+            "file_item": file_item,
+            "chunk": chunk,
+            "methods": set(),
+            "lexical_score": 0,
+            "vector_score": None,
+            "vector_rank_score": 0,
+            "structured_score": 0,
+            "path_boost": 0,
+            "task_boost": 0,
+            "score": 0,
+        }
+        candidates[key] = row
+    row["methods"].add(method)
+    details = details or {}
+    numeric_score = float(score or 0)
+    if method == "lexical":
+        row["lexical_score"] = max(float(row.get("lexical_score", 0) or 0), numeric_score)
+        row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))
+        task_boost = float(details.get("file_task_boost", 0) or 0) + float(details.get("chunk_task_boost", 0) or 0)
+        row["task_boost"] = max(float(row.get("task_boost", 0) or 0), task_boost)
+    elif method == "vector":
+        row["vector_rank_score"] = max(float(row.get("vector_rank_score", 0) or 0), numeric_score)
+        if details.get("vector_score") is not None:
+            row["vector_score"] = max(float(row.get("vector_score") or 0), float(details.get("vector_score") or 0))
+        row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))
+    elif method == "structured":
+        row["structured_score"] = max(float(row.get("structured_score", 0) or 0), numeric_score)
+        row["task_boost"] = max(float(row.get("task_boost", 0) or 0), numeric_score)
+        if details.get("task"):
+            row["structured_task"] = details.get("task")
+    row["score"] = max(float(row.get("score", 0) or 0), hybrid_candidate_base_score(row))
+    return row
+
+
+def hybrid_candidate_guard_bonus(candidate: dict) -> float:
+    path_boost = min(float(candidate.get("path_boost", 0) or 0), 2000.0)
+    task_boost = min(float(candidate.get("task_boost", 0) or 0), 120.0)
+    return path_boost + task_boost
+
+
+def hybrid_candidate_document(index: dict, candidate: dict) -> str:
+    file_item = candidate.get("file_item") or {}
+    chunk = candidate.get("chunk") or {}
+    content = read_chunk_content(index, chunk)
+    return compact_text(retrieval_chunk_haystack(file_item, chunk, content), 6000)
+
+
+def add_structured_task_candidates(index: dict, query: str, candidates: dict[tuple[str, str], dict]) -> None:
+    if not query_wants_task_context(query):
+        return
+    files_by_path = {file_item.get("path", ""): file_item for file_item in index.get("files", [])}
+    for score, item in ranked_task_items_from_index(index, query, limit=HYBRID_STRUCTURED_CANDIDATE_LIMIT):
+        file_item = files_by_path.get(item.get("path", ""))
+        if not file_item:
+            continue
+        chunks = [chunk for chunk in file_item.get("chunks", []) if isinstance(chunk, dict)]
+        if not chunks:
+            continue
+        title = str(item.get("title", "")).strip().lower()
+        selected = chunks[0]
+        if title:
+            for chunk in chunks:
+                if title in read_chunk_content(index, chunk).lower():
+                    selected = chunk
+                    break
+        add_hybrid_candidate(
+            candidates,
+            file_item,
+            selected,
+            "structured",
+            max(score, 1) + 50,
+            {"task": format_task_item(item)},
+        )
+
+
+def rerank_hybrid_candidates(index: dict, query: str, candidates: dict[tuple[str, str], dict]) -> tuple[list[dict], dict]:
+    rows = list(candidates.values())
+    for row in rows:
+        row["hybrid_score"] = round(hybrid_candidate_base_score(row), 6)
+    rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_guard_bonus(row)), reverse=True)
+    report = {
+        "mode": "hybrid",
+        "candidate_count": len(rows),
+        "rerank": False,
+        "rerank_fallback": False,
+        "warnings": [],
+    }
+    if not rows or not env_flag("MOTOKO_VECTOR_RERANK", True):
+        return rows, report
+    if not local_model_routes_for_capability(kind="reranker", tasks=RERANKER_TASKS, endpoint_path="/v1/rerank"):
+        report["rerank_fallback"] = True
+        report["warnings"].append("hybrid rerank fallback: no configured /v1/rerank route")
+        return rows, report
+    rerank_rows = rows[: min(len(rows), RERANK_CANDIDATE_LIMIT)]
+    documents = [hybrid_candidate_document(index, row) for row in rerank_rows]
+    try:
+        scores, route_info = rerank_documents(query, documents)
+    except SystemExit as exc:
+        report["rerank_fallback"] = True
+        report["warnings"].append(f"hybrid rerank fallback: {str(exc).splitlines()[0][:220]}")
+        return rows, report
+    report["rerank"] = True
+    report["rerank_route"] = {
+        "catalog_route": route_info.get("catalog_route") or route_info.get("route", ""),
+        "model": route_info.get("model", ""),
+    }
+    for row, score in zip(rerank_rows, scores):
+        row["rerank_score"] = round(float(score), 6)
+        row["hybrid_score"] = round(
+            (hybrid_candidate_base_score(row) * 0.2)
+            + (float(score) * 1000)
+            + hybrid_candidate_guard_bonus(row),
+            6,
+        )
+    rerank_rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_base_score(row)), reverse=True)
+    rows = rerank_rows + rows[len(rerank_rows) :]
+    return rows, report
+
+
 def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     query_counts = token_counts(query)
     top_files, top_chunks, max_retrieval_chars = retrieval_limits(query)
@@ -10004,33 +10285,30 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         file_rows.append((file_score, file_item))
         for chunk in file_item.get("chunks", []):
             content = read_chunk_content(index, chunk)
-            chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
-            haystack = "\n".join(
-                [
-                    file_item.get("path", ""),
-                    file_item.get("summary", ""),
-                    file_signal_text,
-                    chunk.get("summary", ""),
-                    chunk_signal_text,
-                    content[:4000],
-                ]
+            score_parts = retrieval_score_parts(
+                query,
+                query_counts,
+                retrieval_chunk_haystack(file_item, chunk, content),
+                path=file_item.get("path", ""),
+                file_signals=file_item.get("signals") or {},
+                chunk_signals=chunk.get("signals") or {},
             )
-            chunk_score = score_text(query_counts, haystack)
-            chunk_score += query_path_match_boost(query, file_item.get("path", ""))
-            chunk_score += task_signal_boost(query, file_item.get("signals") or {})
-            chunk_score += task_signal_boost(query, chunk.get("signals") or {})
-            chunk_rows.append((chunk_score, file_item, chunk))
+            chunk_rows.append((score_parts.get("total", 0), file_item, chunk, score_parts))
 
     file_rows.sort(key=lambda row: row[0], reverse=True)
     chunk_rows.sort(key=lambda row: row[0], reverse=True)
     selected_files = [row[1] for row in file_rows[:top_files] if row[0] > 0]
-    selected_chunks = [row for row in chunk_rows[:top_chunks] if row[0] > 0]
-    if not selected_chunks:
-        selected_chunks = chunk_rows[: min(2, len(chunk_rows))]
-    selected_chunks = [(score, file_item, chunk, "lexical", {}) for score, file_item, chunk in selected_chunks]
+    candidates: dict[tuple[str, str], dict] = {}
+    lexical_candidates = [row for row in chunk_rows[:RERANK_CANDIDATE_LIMIT] if row[0] > 0]
+    if not lexical_candidates:
+        lexical_candidates = chunk_rows[: min(2, len(chunk_rows))]
+    for score, file_item, chunk, score_parts in lexical_candidates:
+        add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
+    add_structured_task_candidates(index, query, candidates)
 
     vector_report = None
     vector_warning = ""
+    hybrid_report = None
     if env_flag("MOTOKO_VECTOR_RETRIEVAL", True):
         vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
         if vector_store is not None:
@@ -10038,8 +10316,9 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                 vector_report = query_vector_store_for_retrieval(
                     vector_store,
                     query,
-                    limit=max(top_chunks, VECTOR_QUERY_LIMIT),
+                    limit=max(top_chunks, VECTOR_QUERY_LIMIT, RERANK_CANDIDATE_LIMIT),
                     check_freshness=False,
+                    rerank=False,
                 )
             except SystemExit as exc:
                 vector_warning = str(exc).splitlines()[0][:240]
@@ -10048,21 +10327,33 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                 for file_item in index.get("files", []):
                     for chunk in file_item.get("chunks", []):
                         lookup[(file_item.get("path", ""), str(chunk.get("chunk", "")))] = (file_item, chunk)
-                selected_keys = {
-                    (file_item.get("path", ""), str(chunk.get("chunk", "")))
-                    for _score, file_item, chunk, _method, _details in selected_chunks
-                }
-                vector_selected = []
-                for row in vector_report.get("rows", [])[:top_chunks]:
+                for row in vector_report.get("rows", [])[:RERANK_CANDIDATE_LIMIT]:
                     key = (row.get("path", ""), str(row.get("chunk", "")))
                     found = lookup.get(key)
-                    if not found or key in selected_keys:
+                    if not found:
                         continue
                     file_item, chunk = found
-                    vector_selected.append((row.get("score", 0), file_item, chunk, "vector", row))
-                    selected_keys.add(key)
-                if vector_selected:
-                    selected_chunks = (vector_selected + selected_chunks)[: max(top_chunks, len(vector_selected))]
+                    add_hybrid_candidate(candidates, file_item, chunk, "vector", row.get("score", 0), row)
+    selected_candidates, hybrid_report = rerank_hybrid_candidates(index, query, candidates)
+    selected_chunks = [
+        (
+            candidate.get("hybrid_score", candidate.get("score", 0)),
+            candidate.get("file_item", {}),
+            candidate.get("chunk", {}),
+            "hybrid",
+            {
+                "score": candidate.get("hybrid_score", candidate.get("score", 0)),
+                "retrieval_methods": sorted(candidate.get("methods", [])),
+                "lexical_score": candidate.get("lexical_score", 0),
+                "structured_score": candidate.get("structured_score", 0),
+                "vector_score": candidate.get("vector_score"),
+                "vector_rank_score": candidate.get("vector_rank_score", 0),
+                "rerank_score": candidate.get("rerank_score"),
+                "structured_task": candidate.get("structured_task", ""),
+            },
+        )
+        for candidate in selected_candidates[:top_chunks]
+    ]
 
     parts = [
         f"=== Document index: {index.get('name', index.get('id'))} ===",
@@ -10091,25 +10382,39 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         "retrieval": "deep" if wants_deep_context(query) else "normal",
         "corpus_profile_schema": index.get("corpus_profile_schema", ""),
     }
+    if hybrid_report:
+        index_source["retrieval"] = "hybrid-deep" if wants_deep_context(query) else "hybrid"
+        index_source["hybrid_candidates"] = hybrid_report.get("candidate_count", 0)
+        index_source["hybrid_rerank"] = bool(hybrid_report.get("rerank"))
+        if hybrid_report.get("rerank_fallback"):
+            index_source["hybrid_rerank_fallback"] = True
+        rerank_route = hybrid_report.get("rerank_route")
+        if isinstance(rerank_route, dict) and rerank_route:
+            index_source["hybrid_rerank_route"] = rerank_route.get("catalog_route", "")
+        if hybrid_report.get("warnings"):
+            index_source["warnings"] = index_source.get("warnings", []) + hybrid_report.get("warnings", [])[:4]
     if vector_report:
         index_source["vector_store"] = vector_report.get("store_id", "")
         index_source["vector_method"] = vector_report.get("method", "")
         index_source["vector_rows"] = len(vector_report.get("rows", []))
-        rerank_route = vector_report.get("rerank_route")
-        if isinstance(rerank_route, dict) and rerank_route:
-            index_source["vector_rerank_route"] = rerank_route.get("catalog_route", "")
-        if vector_report.get("rerank_fallback"):
-            index_source["vector_rerank_fallback"] = True
         if vector_report.get("warnings"):
             index_source["warnings"] = index_source.get("warnings", []) + vector_report.get("warnings", [])[:4]
         parts.append(
-            "Semantic vector retrieval:\n"
+            "Hybrid retrieval:\n"
+            f"- candidates {hybrid_report.get('candidate_count', 0) if hybrid_report else 0} "
+            f"rerank {bool(hybrid_report.get('rerank')) if hybrid_report else False}\n"
             f"- store {vector_report.get('store_id', '')} "
             f"method {vector_report.get('method', '')} "
             f"rows {len(vector_report.get('rows', []))}"
         )
     elif vector_warning:
         index_source["warnings"] = index_source.get("warnings", []) + [f"vector retrieval skipped: {vector_warning}"]
+    elif hybrid_report:
+        parts.append(
+            "Hybrid retrieval:\n"
+            f"- candidates {hybrid_report.get('candidate_count', 0)} "
+            f"rerank {bool(hybrid_report.get('rerank'))}"
+        )
     sources = [index_source]
     if selected_files:
         parts.append("Relevant file summaries:")
@@ -10153,6 +10458,11 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                     "chunk": chunk.get("chunk"),
                     "retrieval": retrieval_method,
                     "score": retrieval_details.get("score", _score) if isinstance(retrieval_details, dict) else _score,
+                    "hybrid_score": retrieval_details.get("score") if isinstance(retrieval_details, dict) else None,
+                    "retrieval_methods": retrieval_details.get("retrieval_methods", []) if isinstance(retrieval_details, dict) else [],
+                    "lexical_score": retrieval_details.get("lexical_score") if isinstance(retrieval_details, dict) else None,
+                    "structured_score": retrieval_details.get("structured_score") if isinstance(retrieval_details, dict) else None,
+                    "rerank_score": retrieval_details.get("rerank_score") if isinstance(retrieval_details, dict) else None,
                     "vector_score": retrieval_details.get("vector_score") if isinstance(retrieval_details, dict) else None,
                 }
             )
@@ -11058,6 +11368,8 @@ HELP_SECTIONS = [
             ("/new [TITLE]", "save this chat and start a new conversation"),
             ("/title TEXT", "rename this conversation"),
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
+            ("/feedback up|down|ok [TEXT]", "rate the last answer with an optional note"),
+            ("/up [TEXT] / /down [TEXT]", "shortcuts for feedback on the last answer"),
             ("/status", "show model, memory, and context state"),
             ("/model-routes", "show chat and background worker model routes"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
@@ -11175,6 +11487,7 @@ HELP_SECTIONS = [
             ("motoko dossier QUERY", "build a memory/conversation dossier"),
             ("motoko study QUERY [--focus recent]", "run a bounded study action in a new conversation"),
             ("motoko compact [ID]", "compact a saved conversation"),
+            ("motoko feedback up|down|ok TEXT", "rate the last answer in a saved conversation"),
             ("motoko status", "show model, memory, and state paths"),
             ("motoko model-routes", "show chat and background worker model routes"),
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
@@ -11343,6 +11656,12 @@ def format_sources(sources: list[dict]) -> str:
             profile = source.get("corpus_profile_schema", "")
             profile_note = f"; {profile} corpus profile" if profile else ""
             lines.append(f"     why: attached document index summary, retrieval root{profile_note}")
+            if source.get("hybrid_candidates") is not None:
+                route = source.get("hybrid_rerank_route", "")
+                rerank = f"rerank={source.get('hybrid_rerank', False)}"
+                if route:
+                    rerank += f" via {route}"
+                lines.append(f"     hybrid: {source.get('hybrid_candidates', 0)} candidate(s), {rerank}")
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
         elif kind == "topic":
@@ -11387,7 +11706,19 @@ def format_sources(sources: list[dict]) -> str:
                 f"{idx:3d}  chunk  {source.get('path', '')} "
                 f"chunk {source.get('chunk')}  index {source.get('index', '')}"
             )
-            lines.append("     why: relevant chunk retrieved from attached index")
+            methods = ",".join(source.get("retrieval_methods", []) or [source.get("retrieval", "")]).strip(",")
+            score_bits = []
+            if source.get("hybrid_score") is not None:
+                score_bits.append(f"hybrid {source.get('hybrid_score')}")
+            if source.get("rerank_score") is not None:
+                score_bits.append(f"rerank {source.get('rerank_score')}")
+            if source.get("lexical_score") is not None:
+                score_bits.append(f"lex {source.get('lexical_score')}")
+            lines.append(
+                "     why: relevant chunk retrieved from attached index"
+                + (f" via {methods}" if methods else "")
+                + (f"; {'; '.join(score_bits)}" if score_bits else "")
+            )
         else:
             lines.append(f"{idx:3d}  {json.dumps(source, ensure_ascii=False)}")
     return "\n".join(lines)
@@ -12486,6 +12817,16 @@ class MotokoTui:
                 self.request_pause()
             elif text == "/sources":
                 self.append("system", format_conversation_sources(self.conv))
+            elif (
+                text == "/feedback"
+                or text.startswith("/feedback ")
+                or text == "/up"
+                or text.startswith("/up ")
+                or text == "/down"
+                or text.startswith("/down ")
+            ):
+                rating, note = parse_feedback_command(text)
+                self.append("system", format_feedback_saved(record_response_feedback(self.conv, rating, note)))
             elif text == "/status":
                 self.append("system", format_status(self.conv))
             elif text == "/model-routes":
@@ -13679,6 +14020,20 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/sources":
             print_sources(conv)
             continue
+        if (
+            user_text == "/feedback"
+            or user_text.startswith("/feedback ")
+            or user_text == "/up"
+            or user_text.startswith("/up ")
+            or user_text == "/down"
+            or user_text.startswith("/down ")
+        ):
+            try:
+                rating, note = parse_feedback_command(user_text)
+                print(format_feedback_saved(record_response_feedback(conv, rating, note)))
+            except SystemExit as exc:
+                print(exc)
+            continue
         if user_text == "/status":
             print_status(conv)
             continue
@@ -14589,6 +14944,12 @@ def command_status(_args) -> None:
     print_status()
 
 
+def command_feedback(args) -> None:
+    conv = load_conversation(args.conversation)
+    row = record_response_feedback(conv, args.rating, " ".join(args.note))
+    print(format_feedback_saved(row))
+
+
 def command_model_routes(_args) -> None:
     print_report(format_model_routes(include_defaults=True) + "\n" + background_lanes_text())
 
@@ -14732,6 +15093,12 @@ def main(argv: list[str]) -> int:
 
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
+
+    feedback = sub.add_parser("feedback", help="rate the last answer in a saved conversation")
+    feedback.add_argument("rating", choices=["up", "down", "ok", "good", "bad"])
+    feedback.add_argument("note", nargs="*", help="optional note about what was right or wrong")
+    feedback.add_argument("--conversation", help="conversation id; picker if omitted")
+    feedback.set_defaults(func=command_feedback)
 
     model_routes = sub.add_parser("model-routes", help="show chat and background worker model routes")
     model_routes.set_defaults(func=command_model_routes)

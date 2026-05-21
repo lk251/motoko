@@ -270,10 +270,22 @@ Current sequencing notes:
   deterministic control path, uses fresh embedding stores as additive semantic
   recall, and keeps lexical/task/path evidence visible in diagnostics.
 - Javier explicitly chose on 2026-05-21 to take the measured risk of moving
-  normal retrieval into embedding plus rerank now, rather than waiting for more
-  real-world diagnostics. Treat this as a reversible trial: if quality,
-  latency, or stability fails strongly, consider reverting to commit `44922c3`
-  (`Use embedding stores for retrieval`) and reintroducing rerank more slowly.
+  normal retrieval into hybrid embedding/rerank retrieval now, rather than
+  waiting for more real-world diagnostics. Treat this as a reversible trial:
+  if quality, latency, or stability fails strongly, consider reverting to
+  commit `44922c3` (`Use embedding stores for retrieval`) and reintroducing
+  hybrid rerank more slowly.
+- The intended retrieval shape is hybrid candidate generation, not semantic
+  replacement: lexical/path/date/task candidates, deterministic Org/task
+  candidates, and embedding candidates should be unioned, deduplicated, and
+  then reranked together. Exact and structured signals are still first-class
+  because the big chat model can only reason over evidence that retrieval
+  actually selected.
+- User feedback should accumulate as private per-realm evaluation data. Store
+  ratings and notes under the active user's Motoko state, keep them out of the
+  conversation transcript, and use them to guide future retrieval/rerank/prompt
+  evals. Do not let feedback directly mutate ranking behavior without an
+  inspectable evaluation gate.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended

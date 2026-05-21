@@ -89,11 +89,14 @@ Design constraints:
   measuring the approved embedding route.
 - `motoko vector-query --rerank QUERY` inspects how the NixOS-declared
   `/v1/rerank` route reorders the top vector candidates.
-- Normal corpus retrieval uses a fresh embedding store as an additive semantic
-  recall source when one exists, and now attempts reranking by default when a
-  `/v1/rerank` route is available. Lexical/task/path retrieval remains in the
-  prompt and in `/retrieval-debug` as the control path, and rerank failures
-  fall back to embedding-only retrieval instead of breaking chat.
+- Normal corpus retrieval uses true hybrid candidate generation: lexical/path
+  matches, deterministic Org/task signals, and fresh embedding rows are unioned
+  and deduplicated, then reranked together when a `/v1/rerank` route is
+  available. Exact and structured signals remain visible in `/retrieval-debug`
+  and `/sources`, and rerank failures fall back to the non-reranked hybrid set.
+- `/feedback up|down|ok [TEXT]` records private per-realm answer feedback
+  under Motoko state so retrieval, rerank, prompt, and answer-quality work can
+  improve from real use without writing feedback into the conversation.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

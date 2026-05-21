@@ -125,6 +125,12 @@ not the easiest place to review what changed after a long work session.
 - Changed normal retrieval to attempt embedding plus rerank by default when a
   fresh embedding store and NixOS-declared `/v1/rerank` route are available,
   with an embedding-only fallback if reranking is unavailable or fails.
+- Changed normal retrieval again to use true hybrid candidate generation:
+  lexical/path matches, deterministic Org/task signals, and embedding rows are
+  unioned and deduplicated before the combined set is reranked.
+- Added `/feedback up|down|ok [TEXT]`, `/up`, `/down`, and `motoko feedback`
+  to record private per-realm answer feedback outside the conversation
+  transcript for future retrieval/rerank/prompt evaluation.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.
