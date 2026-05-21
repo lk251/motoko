@@ -1000,6 +1000,9 @@ route fails under the requested concurrency, Motoko checkpoints completed rows
 and retries the remaining work at half the parallelism until it reaches one
 request at a time or the work succeeds. Progress messages include a row-based
 ETA once the current run has enough completed rows to estimate throughput.
+Embedding and reranker routes fail fast when their declared local model files
+are missing, and the diagnostic includes the `motoko-model verify ROUTE`
+command plus the catalog download URL/hash when available.
 Completed embedding batches are checkpointed under
 `~/.local/state/motoko/vector-progress/`, and a later `vector-refresh` for the
 same source fingerprint plus embedding route/model/dimensions resumes from

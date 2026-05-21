@@ -134,6 +134,9 @@ not the easiest place to review what changed after a long work session.
 - Raised the embedding refresh cap to 32, added row-throughput ETA messages,
   and made excessive parallelism degrade by checkpointing completed rows and
   retrying remaining batches at lower parallelism.
+- Made embedding and reranker vector routes fail fast when their declared
+  local model files are missing, instead of sitting in socket activation while
+  appearing to vectorize.
 - Added realm-local embedding vector progress checkpoints so interrupted
   vector refreshes can resume from completed rows when the source and
   embedding route/model/dimensions still match.

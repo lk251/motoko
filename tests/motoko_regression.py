@@ -809,6 +809,51 @@ def test_local_model_catalog_task_routes(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_embedding_route_fails_fast_when_model_file_missing(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            missing = tmp / "missing-embedding.gguf"
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"unix://{tmp / 'embed.sock'}",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "model_path": str(missing),
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 1024,
+                        "maxParallel": 32,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            try:
+                m.embedding_route_info()
+                raise AssertionError("expected missing embedding model file to fail fast")
+            except SystemExit as exc:
+                text = str(exc)
+            assert "embedding route qwen3-embedding-0b6 declared model file is missing" in text
+            assert str(missing) in text
+            assert "verify declared model files" in text or "motoko-model helper is not on PATH" in text
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
 def test_local_model_status_diagnostic_uses_catalog_route_without_hashing(m):
     with isolated_state() as tmp:
         socket_dir = tmp / "sockets"
@@ -3088,6 +3133,7 @@ def main() -> int:
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
+        test_embedding_route_fails_fast_when_model_file_missing,
         test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
         test_summary_reductions_fan_out_across_worker_routes,
         test_sources_fallback_lists_attached_topic_context,

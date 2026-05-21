@@ -7147,6 +7147,34 @@ def capability_route_request_info(row: dict, *, default_path: str) -> dict:
     }
 
 
+def ensure_route_model_file_available(route_info: dict, *, capability: str = "model") -> None:
+    endpoint_text = str(route_info.get("endpoint") or "")
+    model_path = str(route_info.get("model_path") or "")
+    if not endpoint_is_unix(endpoint_text) or not model_path:
+        return
+    try:
+        missing = not pathlib.Path(model_path).exists()
+    except OSError as exc:
+        detail = (
+            f"{capability} route {local_model_helper_route(route_info)} declared model file "
+            f"could not be checked: {model_path}: {exc}"
+        )
+        hint = local_model_verify_hint(route_info)
+        if hint:
+            detail += "\n" + hint
+        raise SystemExit(detail) from exc
+    if not missing:
+        return
+    detail = (
+        f"{capability} route {local_model_helper_route(route_info)} declared model file "
+        f"is missing: {model_path}"
+    )
+    hint = local_model_verify_hint(route_info)
+    if hint:
+        detail += "\n" + hint
+    raise SystemExit(detail)
+
+
 def select_embedding_route(route_id: str | None = None) -> dict:
     return select_capability_route(
         route_id=route_id,
@@ -7161,6 +7189,7 @@ def embedding_route_info(route_id: str | None = None) -> dict:
     info = capability_route_request_info(row, default_path="/v1/embeddings")
     info["embedding_dimensions"] = row.get("embedding_dimensions")
     info["endpoint_paths"] = row.get("endpoint_paths", [])
+    ensure_route_model_file_available(info, capability="embedding")
     return info
 
 
@@ -7177,6 +7206,7 @@ def reranker_route_info(route_id: str | None = None) -> dict:
     row = select_reranker_route(route_id)
     info = capability_route_request_info(row, default_path="/v1/rerank")
     info["endpoint_paths"] = row.get("endpoint_paths", [])
+    ensure_route_model_file_available(info, capability="reranker")
     return info
 
 
