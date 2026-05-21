@@ -157,6 +157,8 @@ RETRIEVAL_PREVIEW_CHARS = 12000
 DEFAULT_VECTOR_DIMS = 1024
 DEFAULT_LEXICAL_VECTOR_DIMS = 256
 EMBEDDING_BATCH_SIZE = 32
+EMBEDDING_MAX_BATCH_SIZE = 128
+EMBEDDING_TARGET_BATCHES_PER_WORKER = 4
 VECTOR_QUERY_LIMIT = 8
 RERANK_CANDIDATE_LIMIT = 24
 HYBRID_STRUCTURED_CANDIDATE_LIMIT = 8
@@ -7360,9 +7362,34 @@ def route_max_parallel(route_info: dict, *, default: int = 1, maximum: int = 32)
 
 
 def embedding_parallelism(route_info: dict, batch_count: int) -> int:
+    limit = embedding_parallel_limit(route_info)
+    return max(1, min(limit, max(1, batch_count)))
+
+
+def embedding_parallel_limit(route_info: dict) -> int:
     default = route_max_parallel(route_info, default=1)
     configured = env_int("MOTOKO_EMBEDDING_PARALLEL", default, minimum=1)
-    return max(1, min(configured, max(1, batch_count), 32))
+    return max(1, min(configured, 32))
+
+
+def embedding_batch_size(route_info: dict, candidate_count: int) -> int:
+    override = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    if override is not None and override.strip():
+        try:
+            value = int(override)
+        except ValueError:
+            value = EMBEDDING_BATCH_SIZE
+        return max(1, min(value, EMBEDDING_MAX_BATCH_SIZE))
+    candidate_count = max(1, int(candidate_count or 1))
+    parallel_limit = embedding_parallel_limit(route_info)
+    batches_per_worker = env_int(
+        "MOTOKO_EMBEDDING_BATCHES_PER_WORKER",
+        EMBEDDING_TARGET_BATCHES_PER_WORKER,
+        minimum=1,
+    )
+    target_batches = max(1, min(candidate_count, parallel_limit * batches_per_worker))
+    batch_size = max(1, candidate_count // target_batches)
+    return max(1, min(batch_size, EMBEDDING_MAX_BATCH_SIZE))
 
 
 def vector_similarity(left, right) -> float:
@@ -7726,7 +7753,7 @@ def build_embedding_vector_store_from_index(
                 continue
             row_id = f"{file_item.get('path', '')}#{chunk.get('chunk', '')}"
             candidates.append((row_id, file_item, chunk, text))
-    batch_size = max(1, min(env_int("MOTOKO_EMBEDDING_BATCH_SIZE", EMBEDDING_BATCH_SIZE), 128))
+    batch_size = embedding_batch_size(route_info, len(candidates))
     dimensions = route_dims
     batches = [
         (offset, candidates[offset : offset + batch_size])

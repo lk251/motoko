@@ -86,15 +86,17 @@ Design constraints:
   without mutating source files. Embedding refresh uses the NixOS-declared
   route parallelism for batch requests, so bg-heavy vectorization can use more
   of the approved worker route while staying inside the per-realm service
-  boundary. Completed embedding batches are checkpointed under Motoko state so
-  an interrupted refresh can resume without redoing finished rows. Progress
-  messages include an ETA once completed rows provide enough throughput data.
-  If the route cannot sustain the requested parallelism, Motoko saves completed
-  rows and retries remaining batches at lower parallelism. Dense vectors are
-  rebuilt from the saved source index when the vector schema, source
-  fingerprint, embedding route, model, or dimensions change; Motoko does not
-  pretend old embedding coordinates can be migrated across incompatible
-  embedding models.
+  boundary. It adapts embedding batch size to produce enough requests for the
+  route's parallel slots, instead of leaving small corpora with only a handful
+  of large batches. Completed embedding batches are checkpointed under Motoko
+  state so an interrupted refresh can resume without redoing finished rows.
+  Progress messages include an ETA once completed rows provide enough
+  throughput data. If the route cannot sustain the requested parallelism,
+  Motoko saves completed rows and retries remaining batches at lower
+  parallelism. Dense vectors are rebuilt from the saved source index when the
+  vector schema, source fingerprint, embedding route, model, or dimensions
+  change; Motoko does not pretend old embedding coordinates can be migrated
+  across incompatible embedding models.
 - `motoko vector-eval` runs the synthetic retrieval fixtures through the
   lexical baseline by default, with `--method embedding-v1` available for
   measuring the approved embedding route.

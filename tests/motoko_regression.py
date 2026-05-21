@@ -1866,20 +1866,40 @@ def test_embedding_vector_store_parallelizes_batches(m):
 
 def test_embedding_parallelism_allows_32_cap(m):
     old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    old_batches_per_worker = os.environ.get("MOTOKO_EMBEDDING_BATCHES_PER_WORKER")
     try:
         os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        os.environ.pop("MOTOKO_EMBEDDING_BATCHES_PER_WORKER", None)
         assert m.embedding_parallelism({"max_parallel": 32}, 64) == 32
         assert m.embedding_parallelism({"max_parallel": 64}, 64) == 32
         assert m.embedding_parallelism({"max_parallel": 32}, 8) == 8
+        assert m.embedding_batch_size({"max_parallel": 32}, 138) == 1
+        assert m.embedding_batch_size({"max_parallel": 32}, 1000) == 7
         os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "40"
         assert m.embedding_parallelism({"max_parallel": 32}, 64) == 32
         os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "6"
         assert m.embedding_parallelism({"max_parallel": 32}, 64) == 6
+        assert m.embedding_batch_size({"max_parallel": 32}, 1000) == 41
+        os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "32"
+        os.environ["MOTOKO_EMBEDDING_BATCHES_PER_WORKER"] = "2"
+        assert m.embedding_batch_size({"max_parallel": 32}, 138) == 2
+        os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = "9"
+        assert m.embedding_batch_size({"max_parallel": 32}, 138) == 9
     finally:
         if old_parallel is None:
             os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
         else:
             os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+        if old_batches_per_worker is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCHES_PER_WORKER", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCHES_PER_WORKER"] = old_batches_per_worker
 
 
 def test_embedding_vector_store_stale_when_route_model_changes(m):

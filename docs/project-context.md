@@ -286,8 +286,10 @@ Current sequencing notes:
   NixOS-declared route `maxParallel` with a Motoko-side cap of 32, expose
   batch/row/parallel/ETA metadata in status or reports, and remain bounded by
   the per-realm local-model service rather than managing llama.cpp directly.
-  If a route cannot sustain the requested parallelism, save completed rows and
-  retry remaining work at lower parallelism before failing.
+  Batch sizing should adapt to the corpus size so small corpora still create
+  enough requests to fill approved route slots. If a route cannot sustain the
+  requested parallelism, save completed rows and retry remaining work at lower
+  parallelism before failing.
 - Dense embedding stores should be invalidated and rebuilt from saved
   source/index material when their vector schema, source fingerprint,
   embedding route, model, or dimensions change. Do not try to mathematically

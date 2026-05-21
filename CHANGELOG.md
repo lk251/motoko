@@ -134,6 +134,8 @@ not the easiest place to review what changed after a long work session.
 - Raised the embedding refresh cap to 32, added row-throughput ETA messages,
   and made excessive parallelism degrade by checkpointing completed rows and
   retrying remaining batches at lower parallelism.
+- Added adaptive embedding batch sizing so bg-heavy vector refresh creates
+  enough requests to use approved parallel worker slots even for small corpora.
 - Made embedding and reranker vector routes fail fast when their declared
   local model files are missing, instead of sitting in socket activation while
   appearing to vectorize.

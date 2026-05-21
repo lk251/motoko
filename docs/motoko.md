@@ -995,7 +995,11 @@ the explicit command with a larger `--max-chunks` value. Embedding refresh
 uses the route's NixOS-declared `maxParallel` for concurrent batch requests by
 default, capped by the number of batches. Set `MOTOKO_EMBEDDING_PARALLEL=N` to
 override this for diagnosis, and `MOTOKO_EMBEDDING_BATCH_SIZE=N` to adjust
-batch size. The route/configured parallelism is capped at 32. If the embedding
+batch size. When batch size is not explicitly set, bg-heavy vector refresh
+chooses a smaller adaptive batch size so small corpora still create enough
+requests to fill the route's parallel slots; tune
+`MOTOKO_EMBEDDING_BATCHES_PER_WORKER=N` when diagnosing throughput. The
+route/configured parallelism is capped at 32. If the embedding
 route fails under the requested concurrency, Motoko checkpoints completed rows
 and retries the remaining work at half the parallelism until it reaches one
 request at a time or the work succeeds. Progress messages include a row-based
