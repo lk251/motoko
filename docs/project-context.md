@@ -260,9 +260,10 @@ Current sequencing notes:
   and keeps prompts stable, explicit, and easy to cache.
 - Before embedding/reranker production work, Motoko should implement the
   storage-audit and safe-cleanup report above. The same accounting informs
-  vector-store sizing, invalidation, and migration. The initial read-only
-  surfaces are `motoko index-storage` / `/index-storage` and
-  `motoko vector-plan` / `/vector-plan`.
+  vector-store sizing, invalidation, and migration. The initial surfaces are
+  `motoko index-storage` / `/index-storage`, `motoko vector-plan` /
+  `/vector-plan`, and the deterministic `lexical-hash-v1` baseline exposed by
+  `motoko vector-build` and `motoko vector-query`.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended

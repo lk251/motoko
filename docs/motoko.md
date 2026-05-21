@@ -475,6 +475,8 @@ Useful in-chat commands:
 /retrieval-preview QUERY
 /index-storage
 /vector-plan [INDEX_ID]
+/vector-build [INDEX_ID]
+/vector-query QUERY
 /identity
 /permissions
 /permissions set MODE
@@ -961,6 +963,14 @@ labels, memories, conversations, and dossiers; lists provenance and
 invalidation fields; checks retrieval-eval and storage-audit gates; and reports
 whether the local model catalog advertises embedding or reranker routes. This
 is a contract and readiness report, not production vector indexing.
+
+Use `motoko vector-build [INDEX_ID]` to build the current deterministic
+`lexical-hash-v1` vector baseline for an index, and `motoko vector-query QUERY`
+to inspect its ranked rows. This writes only Motoko-owned derived state under
+`~/.local/state/motoko/vector-stores/`. It is not a semantic embedding model;
+it exists so vector-store schemas, invalidation, source provenance, query
+inspection, and future eval plumbing can be tested before NixOS exposes real
+embedding/reranker workers.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

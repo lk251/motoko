@@ -1278,6 +1278,7 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
         docs = tmp / "docs"
         docs.mkdir()
         content = "* TODO [#A] Finish vector readiness plan\nDEADLINE: <2026-05-22 Fri>\n"
+        (docs / "tasks.org").write_text(content, encoding="utf-8")
         digest = m.sha256_hex(content.encode("utf-8"))
         index = {
             "id": "vector-index",
@@ -1289,6 +1290,7 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
             "files": [
                 {
                     "path": str(docs / "tasks.org"),
+                    "source_fingerprint": m.source_fingerprint(docs / "tasks.org"),
                     "summary": "Task file with current priorities.",
                     "chunks": [
                         {
@@ -1345,6 +1347,55 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
         assert "planned stores:" in text
         assert "raw_chunk_embedding" in text
         assert "readiness gates:" in text
+
+
+def test_vector_build_and_query_lexical_baseline(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        content = "* TODO [#A] Finish vector readiness plan\nDEADLINE: <2026-05-22 Fri>\n"
+        (docs / "tasks.org").write_text(content, encoding="utf-8")
+        digest = m.sha256_hex(content.encode("utf-8"))
+        index = {
+            "id": "vector-index",
+            "name": "docs",
+            "root": str(docs),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-21T10:00:00+00:00",
+            "corpus_summary": "Vector readiness test corpus.",
+            "files": [
+                {
+                    "path": str(docs / "tasks.org"),
+                    "source_fingerprint": m.source_fingerprint(docs / "tasks.org"),
+                    "summary": "Task file with current priorities.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Task to finish the vector readiness plan.",
+                            "content": content,
+                            "content_bytes": len(content.encode("utf-8")),
+                            "content_sha256": digest,
+                        }
+                    ],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path("vector-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+        store = m.build_vector_store("vector-index", dims=16)
+        assert store["schema"] == m.VECTOR_STORE_SCHEMA_VERSION
+        assert store["method"] == m.LEXICAL_VECTOR_METHOD
+        assert store["production_embedding"] is False
+        assert store["row_count"] == 1
+        assert pathlib.Path(store["path"]).exists()
+        assert m.vector_store_freshness(store)[0] == "fresh"
+        report = m.query_vector_store(store, "finish vector readiness deadline", limit=3)
+        assert report["rows"]
+        assert report["rows"][0]["path"].endswith("tasks.org")
+        assert report["freshness"] == "fresh"
+        text = m.format_vector_query_report(report)
+        assert "vector query:" in text
+        assert "tasks.org" in text
 
 
 def test_index_limits(m):
@@ -2073,6 +2124,7 @@ def main() -> int:
         test_retrieval_preview_shows_context_without_model_call,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_vector_plan_reports_storage_and_readiness_gates,
+        test_vector_build_and_query_lexical_baseline,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

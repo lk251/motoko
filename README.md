@@ -77,6 +77,9 @@ Design constraints:
 - `motoko vector-plan` reports the planned vector/reranker storage contract,
   realm-local privacy boundary, invalidation keys, sizing estimate, and
   readiness gates before any embedding store is enabled.
+- `motoko vector-build` and `motoko vector-query` provide a deterministic
+  lexical-vector baseline so vector storage, invalidation, and query plumbing
+  can be tested before real embedding/reranker routes are deployed.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

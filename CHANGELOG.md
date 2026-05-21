@@ -104,6 +104,10 @@ not the easiest place to review what changed after a long work session.
 - Added `/vector-plan` and `motoko vector-plan` as a read-only readiness report
   for future embedding/reranker storage, including sizing, provenance,
   invalidation, privacy, and eval gates.
+- Added `/vector-build`, `/vector-query`, `motoko vector-build`, and
+  `motoko vector-query` for a deterministic `lexical-hash-v1` vector baseline
+  that tests vector storage and query plumbing before semantic embedding routes
+  are deployed.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.
