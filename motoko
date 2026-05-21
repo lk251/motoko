@@ -4641,12 +4641,14 @@ def index_with_current_signals(index: dict) -> dict:
             signals = extract_document_signals(path, content)
             if signals:
                 enriched_chunk["signals"] = signals
+            elif path_supports_structured_signals(path):
+                enriched_chunk["signals"] = {}
             else:
                 enriched_chunk.pop("signals", None)
             enriched_chunks.append(enriched_chunk)
         enriched_file["chunks"] = enriched_chunks
         file_signals = file_signals_from_chunks(enriched_chunks)
-        if file_signals:
+        if file_signals or path_supports_structured_signals(path):
             enriched_file["signals"] = file_signals
         else:
             enriched_file.pop("signals", None)
@@ -5112,7 +5114,7 @@ def dedup_chunk_from_existing(
     if existing_content is None:
         return None
     print(f"  reusing duplicate chunk {path} chunk {chunk_idx}", flush=True)
-    return {
+    item = {
         "id": f"{ordinal}.{chunk_idx}",
         "path": str(path),
         "chunk": chunk_idx,
@@ -5129,6 +5131,10 @@ def dedup_chunk_from_existing(
             source_sha256=digest,
         ),
     }
+    signals = extract_document_signals(path, content)
+    if signals or path_supports_structured_signals(path):
+        item["signals"] = signals
+    return item
 
 
 def summarize_and_store_chunk(
@@ -5191,7 +5197,7 @@ def summarize_and_store_chunk(
         ),
     }
     signals = extract_document_signals(path, content)
-    if signals:
+    if signals or path_supports_structured_signals(path):
         item["signals"] = signals
     return item
 
@@ -5557,7 +5563,7 @@ def index_file(
         "chunks": indexed_chunks,
     }
     signals = file_signals_from_chunks(indexed_chunks)
-    if signals:
+    if signals or path_supports_structured_signals(path):
         item["signals"] = signals
     return item
 

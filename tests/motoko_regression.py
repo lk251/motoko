@@ -1408,6 +1408,42 @@ def test_index_signal_enrichment_upgrades_legacy_index(m):
             m.quiet_model = old_quiet_model
 
 
+def test_empty_org_signal_upgrade_converges(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "notes.org").write_text("* Notes\nPlain note without task metadata.\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+            assert not m.index_needs_signal_enrichment(index)
+
+            legacy = dict(index)
+            legacy["files"] = []
+            for file_item in index["files"]:
+                legacy_file = dict(file_item)
+                legacy_file.pop("signals", None)
+                legacy_file["chunks"] = []
+                for chunk in file_item["chunks"]:
+                    legacy_chunk = dict(chunk)
+                    legacy_chunk.pop("signals", None)
+                    legacy_file["chunks"].append(legacy_chunk)
+                legacy["files"].append(legacy_file)
+            m.atomic_write(m.index_path(legacy["id"]), json.dumps(legacy, ensure_ascii=False, indent=2) + "\n")
+
+            upgraded, changed, note = m.upgrade_index_artifacts(legacy)
+            assert changed, note
+            assert not m.index_needs_signal_enrichment(upgraded)
+            upgraded_again, changed_again, note_again = m.upgrade_index_artifacts(upgraded)
+            assert upgraded_again["id"] == upgraded["id"]
+            assert not changed_again, note_again
+        finally:
+            m.quiet_model = old_quiet_model
+
+
 def test_index_signal_enrichment_skips_active_index(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1543,6 +1579,7 @@ def main() -> int:
         test_org_task_signals_drive_retrieval,
         test_index_health_reports_new_files,
         test_index_signal_enrichment_upgrades_legacy_index,
+        test_empty_org_signal_upgrade_converges,
         test_index_signal_enrichment_skips_active_index,
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,
