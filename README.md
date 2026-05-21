@@ -80,6 +80,8 @@ Design constraints:
 - `motoko vector-build` and `motoko vector-query` provide a deterministic
   lexical-vector baseline so vector storage, invalidation, and query plumbing
   can be tested before real embedding/reranker routes are deployed.
+- `motoko vector-eval` runs the same no-model synthetic retrieval fixtures
+  through that baseline so vector work stays measurable.
 - `motoko model-eval` runs synthetic source-grounded checks against configured
   worker routes before small models are trusted for production indexing.
 - Source documents are read-only; reusable indexes store derived chunks under

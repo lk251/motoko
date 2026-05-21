@@ -477,6 +477,7 @@ Useful in-chat commands:
 /vector-plan [INDEX_ID]
 /vector-build [INDEX_ID]
 /vector-query QUERY
+/vector-eval
 /identity
 /permissions
 /permissions set MODE
@@ -970,7 +971,8 @@ to inspect its ranked rows. This writes only Motoko-owned derived state under
 `~/.local/state/motoko/vector-stores/`. It is not a semantic embedding model;
 it exists so vector-store schemas, invalidation, source provenance, query
 inspection, and future eval plumbing can be tested before NixOS exposes real
-embedding/reranker workers.
+embedding/reranker workers. Use `motoko vector-eval` to run the same synthetic
+retrieval fixtures through this baseline without writing a store.
 
 Large directories and large files can take a long time because every indexed
 chunk is summarized through the local model. Use `--glob` to narrow very broad

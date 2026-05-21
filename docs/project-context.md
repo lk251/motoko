@@ -263,7 +263,7 @@ Current sequencing notes:
   vector-store sizing, invalidation, and migration. The initial surfaces are
   `motoko index-storage` / `/index-storage`, `motoko vector-plan` /
   `/vector-plan`, and the deterministic `lexical-hash-v1` baseline exposed by
-  `motoko vector-build` and `motoko vector-query`.
+  `motoko vector-build`, `motoko vector-query`, and `motoko vector-eval`.
 - Reflection should grow as specific inspectable audits: answer grounding,
   retrieval preview/debug, index storage health, memory maintenance health, and
   later model-assisted audit passes. Do not build an opaque open-ended

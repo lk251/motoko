@@ -94,6 +94,7 @@ RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v1"
+VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
 MODEL_CACHEABLE_SUMMARY_ROUTES = {
@@ -372,6 +373,7 @@ SLASH_COMMANDS = [
     ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
     ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
     ("/vector-query QUERY", "query the deterministic vector baseline"),
+    ("/vector-eval", "evaluate the deterministic vector baseline"),
     ("/identity", "show the active account/realm identity"),
     ("/permissions", "show current Motoko capability mode"),
     ("/permissions set MODE", "set default capability mode"),
@@ -438,6 +440,7 @@ SHELL_COMMANDS = [
     "vector-plan",
     "vector-build",
     "vector-query",
+    "vector-eval",
     "identity",
     "permissions",
     "repo",
@@ -462,6 +465,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/vector-plan",
     "/vector-build",
     "/vector-query",
+    "/vector-eval",
     "/identity",
     "/permissions",
     "/personality",
@@ -6831,11 +6835,13 @@ def build_vector_store_from_index(
     *,
     dims: int = DEFAULT_LEXICAL_VECTOR_DIMS,
     method: str = LEXICAL_VECTOR_METHOD,
+    store_id: str | None = None,
+    write: bool = True,
 ) -> dict:
     if method != LEXICAL_VECTOR_METHOD:
         raise SystemExit(f"unsupported vector method {method!r}; supported: {LEXICAL_VECTOR_METHOD}")
     dims = max(8, int(dims or DEFAULT_LEXICAL_VECTOR_DIMS))
-    store_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
     rows = []
     for file_item in index.get("files", []):
@@ -6887,9 +6893,10 @@ def build_vector_store_from_index(
         "row_count": len(rows),
         "note": "Deterministic lexical vector baseline. This validates storage and query plumbing; it is not a semantic embedding model.",
     }
-    path = vector_store_path(store_id)
-    store["path"] = str(path)
-    atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+    if write:
+        path = vector_store_path(store_id)
+        store["path"] = str(path)
+        atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
     return store
 
 
@@ -6964,7 +6971,13 @@ def vector_store_freshness(store: dict) -> tuple[str, list[str]]:
     return "fresh", []
 
 
-def query_vector_store(store: dict, query: str, *, limit: int = VECTOR_QUERY_LIMIT) -> dict:
+def query_vector_store(
+    store: dict,
+    query: str,
+    *,
+    limit: int = VECTOR_QUERY_LIMIT,
+    check_freshness: bool = True,
+) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("usage: vector-query QUERY")
@@ -6995,7 +7008,10 @@ def query_vector_store(store: dict, query: str, *, limit: int = VECTOR_QUERY_LIM
             }
         )
     rows.sort(key=lambda item: item.get("score", 0), reverse=True)
-    freshness, warnings = vector_store_freshness(store)
+    if check_freshness:
+        freshness, warnings = vector_store_freshness(store)
+    else:
+        freshness, warnings = "not-checked", []
     return {
         "schema": "vector-query-v1",
         "created": now(),
@@ -7046,6 +7062,68 @@ def format_vector_query_report(report: dict) -> str:
         )
         if row.get("summary"):
             lines.append(f"   summary: {row.get('summary', '')}")
+    return "\n".join(lines)
+
+
+def run_vector_eval(*, dims: int = DEFAULT_LEXICAL_VECTOR_DIMS) -> dict:
+    report = {
+        "schema": VECTOR_EVAL_SCHEMA_VERSION,
+        "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+        "created": now(),
+        "method": LEXICAL_VECTOR_METHOD,
+        "dims": max(8, int(dims or DEFAULT_LEXICAL_VECTOR_DIMS)),
+        "fixtures": [],
+    }
+    for fixture in retrieval_eval_fixtures():
+        index = synthetic_retrieval_eval_index(fixture)
+        query = str(fixture.get("query", ""))
+        store = build_vector_store_from_index(
+            index,
+            dims=report["dims"],
+            store_id=f"vector-eval-{fixture.get('id', 'fixture')}",
+            write=False,
+        )
+        result = query_vector_store(store, query, limit=8, check_freshness=False)
+        selected_paths = [row.get("path", "") for row in result.get("rows", []) if row.get("path")]
+        missing_paths = [
+            expected
+            for expected in fixture.get("expected_paths", []) or []
+            if not retrieval_eval_path_matches(selected_paths, str(expected))
+        ]
+        status = "pass" if not missing_paths and selected_paths else "fail"
+        report["fixtures"].append(
+            {
+                "id": fixture.get("id", ""),
+                "status": status,
+                "query": query,
+                "selected_paths": selected_paths[:8],
+                "missing_paths": missing_paths,
+                "top_score": result.get("rows", [{}])[0].get("score", 0) if result.get("rows") else 0,
+            }
+        )
+    total = len(report["fixtures"])
+    passed = sum(1 for row in report["fixtures"] if row.get("status") == "pass")
+    report["status"] = "pass" if passed == total else "fail"
+    report["passed"] = passed
+    report["total"] = total
+    return report
+
+
+def format_vector_eval_report(report: dict) -> str:
+    lines = [
+        f"vector eval: {report.get('status', 'unknown')} "
+        f"({report.get('passed', 0)}/{report.get('total', 0)})",
+        f"method: {report.get('method', '')} dims={report.get('dims', '')}",
+        f"id: {report.get('id', '')}",
+    ]
+    for row in report.get("fixtures", []):
+        lines.append(
+            f"- {row.get('status', 'unknown')}: {row.get('id', '')} "
+            f"top_score={row.get('top_score', 0)}"
+        )
+        lines.append("  selected: " + (", ".join(row.get("selected_paths", [])[:4]) or "-"))
+        if row.get("missing_paths"):
+            lines.append("  missing paths: " + ", ".join(row.get("missing_paths", [])[:6]))
     return "\n".join(lines)
 
 
@@ -10082,6 +10160,7 @@ HELP_SECTIONS = [
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
             ("/vector-query QUERY", "query the deterministic vector baseline"),
+            ("/vector-eval", "evaluate the deterministic vector baseline"),
             ("/identity", "show the active account/realm identity"),
             ("/permissions", "show current Motoko feature permissions"),
             ("/permissions set MODE", "set default feature permission mode"),
@@ -10102,6 +10181,7 @@ HELP_SECTIONS = [
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
             ("/vector-query QUERY", "query the deterministic vector baseline"),
+            ("/vector-eval", "evaluate the deterministic vector baseline"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topic [INDEX_ID] QUERY", "build and attach a topic-focused dossier"),
             ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier for deep work"),
@@ -10131,6 +10211,7 @@ HELP_SECTIONS = [
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a deterministic vector baseline for an index"),
             ("/vector-query QUERY", "query the deterministic vector baseline"),
+            ("/vector-eval", "evaluate the deterministic vector baseline"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
             ("/topics", "list topic dossiers"),
             ("/topic-show [ID]", "show a topic dossier"),
@@ -10176,6 +10257,7 @@ HELP_SECTIONS = [
             ("motoko vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("motoko vector-build [ID]", "build a deterministic vector baseline for an index"),
             ("motoko vector-query QUERY", "query the deterministic vector baseline"),
+            ("motoko vector-eval", "evaluate the deterministic vector baseline"),
             ("motoko index-repair [ID]", "repair failed index quality artifacts"),
             ("motoko index-upgrade [ID]", "upgrade index-derived artifacts"),
             ("motoko topic INDEX_ID QUERY", "build a topic dossier"),
@@ -11551,6 +11633,8 @@ class MotokoTui:
                     self.append("system", format_vector_query_report(query_vector_store(latest_vector_store(), query)))
                 except SystemExit as exc:
                     self.append("error", str(exc))
+            elif text == "/vector-eval":
+                self.append("system", format_vector_eval_report(run_vector_eval()))
             elif text == "/index-repair" or text.startswith("/index-repair "):
                 selector = text[len("/index-repair") :].strip() or None
                 _repaired, _changed, note = repair_index_artifacts(load_index(selector))
@@ -12620,6 +12704,9 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
+        if user_text == "/vector-eval":
+            print_report(format_vector_eval_report(run_vector_eval()))
+            continue
         if user_text == "/index-repair" or user_text.startswith("/index-repair "):
             selector = user_text[len("/index-repair") :].strip() or None
             _repaired, _changed, note = repair_index_artifacts(load_index(selector))
@@ -13349,6 +13436,14 @@ def command_vector_query(args) -> None:
         print_report(format_vector_query_report(report))
 
 
+def command_vector_eval(args) -> None:
+    report = run_vector_eval(dims=args.dims)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_vector_eval_report(report))
+
+
 def command_indexes_text() -> None:
     rows = list_indexes()
     jobs = active_index_progress()
@@ -13848,6 +13943,11 @@ def main(argv: list[str]) -> int:
     vector_query.add_argument("--limit", type=int, default=VECTOR_QUERY_LIMIT, help="number of rows to show")
     vector_query.add_argument("--json", action="store_true", help="print JSON report")
     vector_query.set_defaults(func=command_vector_query)
+
+    vector_eval = sub.add_parser("vector-eval", help="evaluate the deterministic vector baseline")
+    vector_eval.add_argument("--dims", type=int, default=DEFAULT_LEXICAL_VECTOR_DIMS, help="hashed lexical vector dimensions")
+    vector_eval.add_argument("--json", action="store_true", help="print JSON report")
+    vector_eval.set_defaults(func=command_vector_eval)
 
     tasks = sub.add_parser("tasks", help="show ranked Org task candidates from indexes")
     tasks.add_argument("query", nargs="*")

@@ -108,6 +108,9 @@ not the easiest place to review what changed after a long work session.
   `motoko vector-query` for a deterministic `lexical-hash-v1` vector baseline
   that tests vector storage and query plumbing before semantic embedding routes
   are deployed.
+- Added `motoko vector-eval` and `/vector-eval` so the deterministic vector
+  baseline is checked against the synthetic retrieval fixtures without calling
+  a model.
 - Made `/model-routes` display NixOS-declared route cache policy and
   content-free metrics endpoints from `local-models.json` while keeping prompt
   and KV caching service-owned.

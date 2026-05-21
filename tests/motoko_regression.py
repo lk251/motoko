@@ -1396,6 +1396,10 @@ def test_vector_build_and_query_lexical_baseline(m):
         text = m.format_vector_query_report(report)
         assert "vector query:" in text
         assert "tasks.org" in text
+        vector_eval = m.run_vector_eval(dims=64)
+        assert vector_eval["schema"] == m.VECTOR_EVAL_SCHEMA_VERSION
+        assert vector_eval["status"] == "pass"
+        assert "vector eval:" in m.format_vector_eval_report(vector_eval)
 
 
 def test_index_limits(m):
