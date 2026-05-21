@@ -8297,6 +8297,7 @@ def format_status(conv: dict | None = None) -> str:
     memories = load_memories(limit=500)
     pinned = sum(1 for row in memories if row.get("pinned"))
     indexes = list_indexes()
+    current_indexes = latest_indexes_by_family(indexes)
     index_files = sum(len(index.get("files", [])) for index in indexes)
     index_chunks = sum(
         len(file_item.get("chunks", []))
@@ -8305,7 +8306,7 @@ def format_status(conv: dict | None = None) -> str:
     )
     duplicate_chunks = sum(int(index.get("duplicate_chunk_count", 0) or 0) for index in indexes)
     derived_bytes = sum(int(index.get("derived_content_bytes", 0) or 0) for index in indexes)
-    index_upgrades = sum(1 for index in indexes if index_needs_artifact_upgrade(index))
+    index_upgrades = sum(1 for index in current_indexes if index_needs_artifact_upgrade(index))
     topics = list_topics()
     dossiers = list_dossiers()
     conversations = list_conversations()
