@@ -136,7 +136,8 @@ Avoid for now:
 
 Current UI direction:
 
-- Motoko's name in chat should be purple.
+- Motoko's name in chat should use per-user `ui.assistant_color` from
+  `~/.config/motoko/config.json`; the default remains purple.
 - Motoko's assistant label is `Motoko`, without a `>` suffix; color carries
   the role distinction.
 - System/status lines use compact `sys`, not `System>`.

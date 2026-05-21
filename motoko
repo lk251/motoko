@@ -432,10 +432,32 @@ ANSI_STYLES = {
     "yellow": "33",
     "blue": "34",
     "purple": "35",
+    "pink": "95",
     "turquoise": "36",
     "magenta": "95",
     "cyan": "36",
     "white": "37",
+}
+DEFAULT_ASSISTANT_COLOR = "purple"
+UI_COLOR_NAMES = {
+    "red",
+    "green",
+    "yellow",
+    "blue",
+    "purple",
+    "pink",
+    "turquoise",
+    "magenta",
+    "cyan",
+    "white",
+}
+UI_COLOR_ALIASES = {
+    "aqua": "turquoise",
+    "teal": "turquoise",
+    "violet": "purple",
+    "fuchsia": "pink",
+    "bright-magenta": "pink",
+    "bright_magenta": "pink",
 }
 
 
@@ -460,6 +482,23 @@ def style(text: str, *names: str) -> str:
     if not codes:
         return text
     return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+
+def normalize_ui_color(value, default: str = DEFAULT_ASSISTANT_COLOR) -> str:
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        candidate = UI_COLOR_ALIASES.get(candidate, candidate)
+        if candidate in UI_COLOR_NAMES:
+            return candidate
+    return default
+
+
+def assistant_color() -> str:
+    return normalize_ui_color(load_config().get("ui", {}).get("assistant_color"))
+
+
+def assistant_label(text: str = "Motoko") -> str:
+    return style(text, assistant_color(), "bold")
 
 
 def command_label(text: str) -> str:
@@ -1291,6 +1330,9 @@ def default_config() -> dict:
             "max_files": None,
             "max_file_bytes": None,
         },
+        "ui": {
+            "assistant_color": DEFAULT_ASSISTANT_COLOR,
+        },
         "model_routes": {},
     }
 
@@ -1315,6 +1357,9 @@ def merged_config(data: dict | None) -> dict:
         for key in ("max_derived_bytes", "max_files", "max_file_bytes"):
             if key in index:
                 merged["index"][key] = index[key]
+    ui = data.get("ui")
+    if isinstance(ui, dict):
+        merged["ui"]["assistant_color"] = normalize_ui_color(ui.get("assistant_color"))
     model_routes = data.get("model_routes")
     if isinstance(model_routes, dict):
         for raw_route, raw_config in model_routes.items():
@@ -1378,6 +1423,7 @@ def format_identity() -> str:
             f"name: {identity.get('name', 'Motoko')}",
             f"realm: {identity.get('realm', 'personal')}",
             f"description: {identity.get('description', '')}",
+            f"assistant color: {assistant_color()}",
             f"config: {config_path()}",
         ]
     )
@@ -8400,6 +8446,7 @@ def format_about() -> str:
             f"revision: {app_revision()}",
             f"identity: {identity_name()}",
             f"realm: {identity_realm()}",
+            f"assistant color: {assistant_color()}",
             f"model: {model_name()}",
             f"model badge: {model_badge()}",
             f"endpoint: {endpoint()}",
@@ -8668,6 +8715,7 @@ def format_status(conv: dict | None = None) -> str:
     lines = [
         f"identity: {identity_name()}",
         f"realm: {identity_realm()}",
+        f"assistant color: {assistant_color()}",
         f"model: {model_name()}",
         f"model badge: {model_badge()}",
         f"endpoint: {endpoint()}",
@@ -10393,7 +10441,7 @@ class MotokoTui:
         input_lines, cursor_row_offset, cursor_col = self.input_display(content_width)
         dropdown_lines = self.dropdown_display(content_width, options)
         title = (
-            f" {style('Motoko', 'purple', 'bold')}  "
+            f" {assistant_label('Motoko')}  "
             f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
             f"{style(model_badge(), 'dim')}"
         )
@@ -10491,7 +10539,7 @@ class MotokoTui:
             if role == "user":
                 prefix = style("> ", "turquoise", "bold")
             elif role == "assistant":
-                prefix = style("Motoko ", "purple", "bold")
+                prefix = assistant_label("Motoko ")
             elif role == "queued":
                 prefix = style("queued ", "yellow", "bold")
             elif role == "error":
@@ -10578,7 +10626,7 @@ def chat_loop(conv: dict) -> None:
         except Exception as exc:
             print(f"Motoko TUI failed; falling back to line mode: {exc}", file=sys.stderr)
     setup_readline_completion()
-    print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+    print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
     print("Type /help for commands, /exit to save and leave.")
     resume_maintenance, resume_note = resume_interrupted_maintenance(conv)
     if resume_note:
@@ -10629,7 +10677,7 @@ def chat_loop(conv: dict) -> None:
             title = user_text[len("/new") :].strip() or None
             conv = new_conversation(title)
             save_conversation(conv)
-            print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+            print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
             continue
         if user_text == "/help":
             print(format_help())
@@ -10638,7 +10686,7 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             selector = user_text[len("/resume") :].strip() or None
             conv = load_conversation(selector)
-            print(f"{style('Motoko', 'purple', 'bold')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+            print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
             continue
         if user_text.startswith("/title "):
             conv["title"] = user_text[len("/title ") :].strip() or conv["title"]
@@ -10870,7 +10918,7 @@ def chat_loop(conv: dict) -> None:
         explicit_saved = save_explicit_user_memories(user_text, conv["id"])
         if explicit_saved:
             print(f"sys memory saved from this prompt ({explicit_saved})")
-        print("\n" + style("Motoko ", "purple", "bold"), end="", flush=True)
+        print("\n" + assistant_label("Motoko "), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
         reply = call_model(messages)
         conv["last_sources"] = sources

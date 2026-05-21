@@ -71,7 +71,7 @@ Conversation files are JSON. Memories are append-only JSONL rows.
 Motoko separates structured identity from conversational style:
 
 - `~/.config/motoko/config.json` says who she is in this Unix account: name,
-  realm, and role.
+  realm, role, and small UI defaults such as Motoko's assistant label color.
 - `~/.config/motoko/personality.md` says how she should speak: tone, warmth,
   directness, enthusiasm, and style.
 
@@ -87,6 +87,9 @@ Example identity config:
     "name": "Motoko",
     "realm": "admin",
     "description": "NixOS and repository review assistant for Javier's admin account."
+  },
+  "ui": {
+    "assistant_color": "purple"
   }
 }
 ```
@@ -155,6 +158,9 @@ Per-user index defaults can also live in `config.json`:
     "max_derived_bytes": "2GiB",
     "max_files": 20000,
     "max_file_bytes": "8MiB"
+  },
+  "ui": {
+    "assistant_color": "purple"
   }
 }
 ```
@@ -170,7 +176,9 @@ MOTOKO_INDEX_MAX_FILE_BYTES=20MiB motoko index ~/Documents
 
 To set defaults manually for `personal` or `mares`, log into that account and
 run `motoko permissions set MODE`, then edit `~/.config/motoko/config.json` if
-that account needs different index limits or identity text. State and config
+that account needs different index limits, identity text, or assistant label
+color. Valid `ui.assistant_color` values are `red`, `green`, `yellow`, `blue`,
+`purple`, `pink`, `turquoise`, `magenta`, `cyan`, and `white`. State and config
 remain under that account's own home directory.
 
 Suggested realm identities:
@@ -184,6 +192,9 @@ Suggested realm identities:
   },
   "permissions": {
     "mode": "repo-review"
+  },
+  "ui": {
+    "assistant_color": "pink"
   }
 }
 ```
@@ -197,6 +208,9 @@ Suggested realm identities:
   },
   "permissions": {
     "mode": "repo-review"
+  },
+  "ui": {
+    "assistant_color": "turquoise"
   }
 }
 ```
@@ -346,8 +360,10 @@ Use `/stop` to stop the current streamed answer.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.
 
-The TUI uses a compact `>` input prompt. Motoko's assistant label is purple and
-shown as `Motoko`, without a `>` suffix. System/status lines use compact `sys`.
+The TUI uses a compact `>` input prompt. Motoko's assistant label is shown as
+`Motoko`, without a `>` suffix, and uses per-user `ui.assistant_color` from
+`~/.config/motoko/config.json` with `purple` as the default. System/status lines
+use compact `sys`.
 Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.

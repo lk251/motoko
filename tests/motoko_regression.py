@@ -951,6 +951,23 @@ def test_identity_config(m):
         assert any(source.get("kind") == "identity" for source in sources)
 
 
+def test_assistant_color_config(m):
+    with isolated_state():
+        assert m.assistant_color() == "purple"
+        config = m.load_config()
+        config["ui"] = {"assistant_color": "pink"}
+        m.save_config(config)
+        assert m.assistant_color() == "pink"
+        assert "assistant color: pink" in m.format_identity()
+        assert "assistant color: pink" in m.format_status()
+
+        config = m.load_config()
+        config["ui"] = {"assistant_color": "\033[31mred"}
+        m.save_config(config)
+        assert m.assistant_color() == "purple"
+        assert "assistant_color" in m.load_config()["ui"]
+
+
 def test_index_limits(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -1669,6 +1686,7 @@ def main() -> int:
         test_cwd_learning_plan_and_existing_index,
         test_permissions_config,
         test_identity_config,
+        test_assistant_color_config,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,
