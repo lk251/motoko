@@ -132,6 +132,10 @@ not the easiest place to review what changed after a long work session.
   Org-date queries inside a selected chunk, so chronological files such as
   `logbook.org` show the newest dated `** do`/`** log` sections instead of
   only the beginning of a large chunk.
+- Added bounded evidence-span selection inside retrieved chunks. Motoko now
+  scores Org headings, Markdown headings, dated sections, term windows, and
+  text windows, then can use the approved embedding/reranker routes on the
+  top large chunks before building chat/source excerpts.
 - Made embedding vector refresh route-aware and parallel across batches up to
   the NixOS-declared `maxParallel`, with batch/parallel metadata shown in
   vector refresh/store reports.

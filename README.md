@@ -116,6 +116,13 @@ Design constraints:
   large chunk before preview/chat/rerank use the source text. This keeps
   `logbook.org`-style `** do` and `** log` subsections visible even when the
   file was indexed as one broad chunk.
+- More generally, Motoko now performs evidence-span selection inside retrieved
+  chunks. She scores dated Org sections, Org/Markdown headings, query-term
+  windows, and overlapping text windows, then uses the approved embedding and
+  reranker routes on a bounded number of large top chunks when available. The
+  selected span metadata is visible in `/sources`; set
+  `MOTOKO_SPAN_EMBEDDING=0`, `MOTOKO_SPAN_RERANK=0`, or
+  `MOTOKO_SPAN_MODEL_MAX_CHUNKS=N` for diagnosis.
 - `/feedback up|down|ok [TEXT]` records private per-realm answer feedback
   under Motoko state so retrieval, rerank, prompt, and answer-quality work can
   improve from real use without writing feedback into the conversation.

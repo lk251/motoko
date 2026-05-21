@@ -1041,6 +1041,16 @@ documents. This is specifically important for chronological files such as
 `logbook.org`, where the relevant `** do` and `** log` subsections may live
 near the end of a large chunk rather than near the beginning.
 
+This is implemented as evidence-span selection, not as a `logbook.org`
+special case. Motoko builds candidate spans from dated Org sections, Org and
+Markdown headings, query-term windows, and overlapping text windows. She scores
+those spans deterministically first, then, for a bounded number of large
+top-ranked chunks, can call the configured embedding and reranker routes to
+choose better spans before passing source text to the final chat model. The
+chosen span method and labels are shown in `/sources`. Set
+`MOTOKO_SPAN_EMBEDDING=0`, `MOTOKO_SPAN_RERANK=0`, or
+`MOTOKO_SPAN_MODEL_MAX_CHUNKS=N` when diagnosing latency or routing behavior.
+
 Use `/feedback up|down|ok [TEXT]` after an answer to record whether it helped
 and what was wrong or right. The shorthand commands `/up [TEXT]` and
 `/down [TEXT]` do the same thing. Feedback is written to the current user's

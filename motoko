@@ -172,6 +172,10 @@ SUMMARY_INPUT_CHARS = 14000
 RETRIEVAL_TOP_CHUNKS = 6
 RETRIEVAL_TOP_FILES = 8
 MAX_RETRIEVAL_CHARS = 56000
+SPAN_SELECTION_MAX_CANDIDATES = 32
+SPAN_SELECTION_EMBED_CANDIDATES = 16
+SPAN_SELECTION_RERANK_CANDIDATES = 10
+SPAN_MODEL_MAX_CHUNKS = 2
 TOPIC_DEFAULT_CHUNKS = 24
 TOPIC_MAX_CHUNKS = 80
 TOPIC_EXCERPT_CHARS = 6000
@@ -3109,21 +3113,339 @@ def query_term_window_excerpt(query: str, content: str, *, max_chars: int) -> st
     return content[start:end].strip()
 
 
-def query_aware_content_excerpt(query: str, content: str, max_chars: int) -> str:
-    content = content.strip()
-    if not content:
-        return ""
-    max_chars = max(1, int(max_chars or 1))
-    if dates := query_date_mentions(query):
-        excerpt = org_dated_sections_excerpt(content, dates, max_chars=max_chars)
-        if excerpt:
-            return excerpt
+def make_evidence_span(
+    *,
+    kind: str,
+    label: str,
+    start: int,
+    end: int,
+    text: str,
+    base_score: float = 0,
+) -> dict:
+    text = text.strip()
+    if not text:
+        return {}
+    return {
+        "kind": kind,
+        "label": label,
+        "start": max(0, int(start or 0)),
+        "end": max(0, int(end or 0)),
+        "text": text,
+        "base_score": float(base_score or 0),
+    }
+
+
+def heading_section_spans(content: str, *, style: str, max_level: int = 4) -> list[dict]:
+    headings = []
+    offset = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.rstrip()
+        if style == "org":
+            match = re.match(r"^(\*+)\s+(.*)$", stripped)
+            if match:
+                headings.append(
+                    {
+                        "start": offset,
+                        "level": len(match.group(1)),
+                        "label": compact_text(match.group(2).strip(), 120),
+                    }
+                )
+        elif style == "markdown":
+            match = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+            if match:
+                headings.append(
+                    {
+                        "start": offset,
+                        "level": len(match.group(1)),
+                        "label": compact_text(match.group(2).strip(), 120),
+                    }
+                )
+        offset += len(line)
+    spans = []
+    for idx, heading in enumerate(headings):
+        level = int(heading.get("level", 1) or 1)
+        if level > max_level:
+            continue
+        end = len(content)
+        for next_heading in headings[idx + 1 :]:
+            if int(next_heading.get("level", 1) or 1) <= level:
+                end = int(next_heading.get("start", end))
+                break
+        text = content[int(heading["start"]) : end].strip()
+        span = make_evidence_span(
+            kind=f"{style}-heading",
+            label=str(heading.get("label", "")),
+            start=int(heading["start"]),
+            end=end,
+            text=text,
+            base_score=80 - (level * 4),
+        )
+        if span:
+            spans.append(span)
+    return spans
+
+
+def window_evidence_spans(content: str, *, max_chars: int) -> list[dict]:
+    text = content.strip()
+    if not text:
+        return []
+    max_chars = max(240, int(max_chars or 240))
+    if len(text) <= max_chars:
+        span = make_evidence_span(
+            kind="whole-chunk",
+            label="whole chunk",
+            start=0,
+            end=len(content),
+            text=text,
+            base_score=10,
+        )
+        return [span] if span else []
+    spans = []
+    step = max(1, int(max_chars * 0.75))
+    start = 0
+    while start < len(content) and len(spans) < SPAN_SELECTION_MAX_CANDIDATES:
+        end = min(len(content), start + max_chars)
+        boundary = content.rfind("\n\n", start, end)
+        if boundary > start + max_chars // 2:
+            end = boundary
+        text = content[start:end].strip()
+        span = make_evidence_span(
+            kind="text-window",
+            label=f"chars {start}-{end}",
+            start=start,
+            end=end,
+            text=text,
+            base_score=5,
+        )
+        if span:
+            spans.append(span)
+        if end >= len(content):
+            break
+        start = max(start + step, end - max_chars // 4)
+    if spans and spans[-1].get("end", 0) < len(content):
+        tail_start = max(0, len(content) - max_chars)
+        span = make_evidence_span(
+            kind="text-window",
+            label=f"tail chars {tail_start}-{len(content)}",
+            start=tail_start,
+            end=len(content),
+            text=content[tail_start:].strip(),
+            base_score=8,
+        )
+        if span:
+            spans.append(span)
+    return spans
+
+
+def base_evidence_spans(query: str, content: str, *, max_chars: int) -> list[dict]:
+    spans = []
+    dates = query_date_mentions(query)
+    for span in org_dated_section_spans(content):
+        date = str(span.get("date", ""))
+        if dates and date not in dates:
+            continue
+        if dates:
+            text = content[int(span["start"]) : int(span["end"])].strip()
+            item = make_evidence_span(
+                kind="org-date-exact",
+                label=date,
+                start=int(span["start"]),
+                end=int(span["end"]),
+                text=text,
+                base_score=4000,
+            )
+            if item:
+                spans.append(item)
     recent_count = query_requested_recent_section_count(query)
     if recent_count:
-        excerpt = recent_org_dated_sections_excerpt(content, recent_count, max_chars=max_chars)
-        if excerpt:
-            return excerpt
-    return query_term_window_excerpt(query, content, max_chars=max_chars)
+        dated_spans = org_dated_section_spans(content)
+        dates_in_content = sorted({str(span.get("date", "")) for span in dated_spans if span.get("date")})
+        recent_dates = set(dates_in_content[-max(1, min(recent_count, len(dates_in_content))) :])
+        for span in dated_spans:
+            if span.get("date") not in recent_dates:
+                continue
+            text = content[int(span["start"]) : int(span["end"])].strip()
+            item = make_evidence_span(
+                kind="org-date-recent",
+                label=str(span.get("date", "")),
+                start=int(span["start"]),
+                end=int(span["end"]),
+                text=text,
+                base_score=3500,
+            )
+            if item:
+                spans.append(item)
+    spans.extend(heading_section_spans(content, style="org"))
+    spans.extend(heading_section_spans(content, style="markdown"))
+    term_window = query_term_window_excerpt(query, content, max_chars=max_chars)
+    if term_window:
+        start = max(0, content.find(term_window[: min(len(term_window), 80)]))
+        item = make_evidence_span(
+            kind="term-window",
+            label="query term window",
+            start=start,
+            end=start + len(term_window),
+            text=term_window,
+            base_score=60,
+        )
+        if item:
+            spans.append(item)
+    spans.extend(window_evidence_spans(content, max_chars=max_chars))
+    deduped = []
+    seen = set()
+    for span in spans:
+        text = str(span.get("text", "")).strip()
+        key = (int(span.get("start", 0)), int(span.get("end", 0)), sha256_hex(text[:240].encode("utf-8")))
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(span)
+    return deduped
+
+
+def score_evidence_spans(query: str, spans: list[dict]) -> list[dict]:
+    query_counts = token_counts(query)
+    rows = []
+    for span in spans:
+        row = dict(span)
+        lexical = score_text(query_counts, str(span.get("text", "")))
+        row["lexical_score"] = lexical
+        row["score"] = float(span.get("base_score", 0) or 0) + lexical
+        rows.append(row)
+    rows.sort(key=lambda row: (float(row.get("score", 0) or 0), -int(row.get("start", 0) or 0)), reverse=True)
+    return rows
+
+
+def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict], list[str]]:
+    warnings = []
+    rows = [dict(row) for row in spans]
+    if not rows:
+        return rows, warnings
+    if env_flag("MOTOKO_SPAN_EMBEDDING", True) and local_model_routes_for_capability(
+        kind="embedding",
+        tasks=EMBEDDING_TASKS,
+        endpoint_path="/v1/embeddings",
+    ):
+        embed_rows = rows[: min(len(rows), SPAN_SELECTION_EMBED_CANDIDATES)]
+        try:
+            vectors, route_info = embed_texts([query] + [str(row.get("text", "")) for row in embed_rows])
+        except SystemExit as exc:
+            warnings.append(f"span embedding skipped: {str(exc).splitlines()[0][:220]}")
+        else:
+            query_vector = vectors[0] if vectors else []
+            for row, vector in zip(embed_rows, vectors[1:]):
+                vector_score = vector_similarity(query_vector, vector)
+                row["span_vector_score"] = round(vector_score, 6)
+                row["span_embedding_route"] = route_info.get("catalog_route") or route_info.get("route", "")
+                row["score"] = float(row.get("score", 0) or 0) + (vector_score * 1000)
+    rows.sort(key=lambda row: float(row.get("score", 0) or 0), reverse=True)
+    if env_flag("MOTOKO_SPAN_RERANK", True) and local_model_routes_for_capability(
+        kind="reranker",
+        tasks=RERANKER_TASKS,
+        endpoint_path="/v1/rerank",
+    ):
+        rerank_rows = rows[: min(len(rows), SPAN_SELECTION_RERANK_CANDIDATES)]
+        try:
+            scores, route_info = rerank_documents(query, [str(row.get("text", "")) for row in rerank_rows])
+        except SystemExit as exc:
+            warnings.append(f"span rerank skipped: {str(exc).splitlines()[0][:220]}")
+        else:
+            for row, score in zip(rerank_rows, scores):
+                row["span_rerank_score"] = round(float(score), 6)
+                row["span_rerank_route"] = route_info.get("catalog_route") or route_info.get("route", "")
+                row["score"] = (float(row.get("score", 0) or 0) * 0.2) + (float(score) * 1000)
+    rows.sort(key=lambda row: float(row.get("score", 0) or 0), reverse=True)
+    return rows, warnings
+
+
+def span_model_chunk_limit() -> int:
+    return max(0, min(env_int("MOTOKO_SPAN_MODEL_MAX_CHUNKS", SPAN_MODEL_MAX_CHUNKS, minimum=0), 12))
+
+
+def select_non_overlapping_spans(spans: list[dict], *, max_chars: int) -> list[dict]:
+    selected = []
+    used = 0
+    for span in spans:
+        start = int(span.get("start", 0) or 0)
+        end = int(span.get("end", 0) or 0)
+        overlaps = any(start < int(row.get("end", 0) or 0) and end > int(row.get("start", 0) or 0) for row in selected)
+        if overlaps:
+            continue
+        text = str(span.get("text", "")).strip()
+        if not text:
+            continue
+        separator = 2 if selected else 0
+        if selected and used + len(text) + separator > max_chars:
+            continue
+        if not selected and len(text) > max_chars:
+            row = dict(span)
+            row["text"] = compact_text_middle(text, max_chars)
+            return [row]
+        selected.append(span)
+        used += len(text) + separator
+        if used >= max_chars or len(selected) >= 4:
+            break
+    if selected:
+        return sorted(selected, key=lambda row: int(row.get("start", 0) or 0))
+    return []
+
+
+def query_aware_content_selection(
+    query: str,
+    content: str,
+    max_chars: int,
+    *,
+    use_models: bool = False,
+) -> dict:
+    content = content.strip()
+    if not content:
+        return {"excerpt": "", "spans": [], "warnings": [], "method": "empty"}
+    max_chars = max(1, int(max_chars or 1))
+    spans = score_evidence_spans(query, base_evidence_spans(query, content, max_chars=max_chars))
+    warnings = []
+    if use_models:
+        spans, warnings = model_score_evidence_spans(query, spans)
+    selected = select_non_overlapping_spans(spans, max_chars=max_chars)
+    if not selected:
+        fallback = query_term_window_excerpt(query, content, max_chars=max_chars)
+        span = make_evidence_span(
+            kind="term-window",
+            label="fallback",
+            start=max(0, content.find(fallback[: min(len(fallback), 80)])),
+            end=max(0, content.find(fallback[: min(len(fallback), 80)])) + len(fallback),
+            text=fallback,
+            base_score=0,
+        )
+        selected = [span] if span else []
+    excerpt = "\n\n".join(str(span.get("text", "")).strip() for span in selected if span.get("text"))
+    return {
+        "excerpt": excerpt[:max_chars].strip(),
+        "spans": [
+            {
+                key: row.get(key)
+                for key in [
+                    "kind",
+                    "label",
+                    "start",
+                    "end",
+                    "score",
+                    "lexical_score",
+                    "span_vector_score",
+                    "span_embedding_route",
+                    "span_rerank_score",
+                    "span_rerank_route",
+                ]
+                if row.get(key) is not None
+            }
+            for row in selected
+        ],
+        "warnings": warnings,
+        "method": "model-span" if use_models and any(row.get("span_rerank_score") or row.get("span_vector_score") for row in selected) else "deterministic-span",
+    }
+
+
+def query_aware_content_excerpt(query: str, content: str, max_chars: int, *, use_models: bool = False) -> str:
+    return query_aware_content_selection(query, content, max_chars, use_models=use_models).get("excerpt", "")
 
 
 def retrieval_chunk_haystack(file_item: dict, chunk: dict, content: str, query: str = "") -> str:
@@ -11155,12 +11477,23 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     if selected_chunks:
         parts.append("Retrieved excerpts:")
         used = 0
+        span_model_uses = 0
+        span_model_limit = span_model_chunk_limit()
         for _score, file_item, chunk, retrieval_method, retrieval_details in selected_chunks:
             content = read_chunk_content(index, chunk)
             remaining = max_retrieval_chars - used
             if remaining <= 0:
                 break
-            excerpt = query_aware_content_excerpt(query, content, remaining)
+            use_span_models = span_model_uses < span_model_limit and len(content) > 4000
+            if use_span_models:
+                span_model_uses += 1
+            excerpt_selection = query_aware_content_selection(
+                query,
+                content,
+                remaining,
+                use_models=use_span_models,
+            )
+            excerpt = excerpt_selection.get("excerpt", "")
             used += len(excerpt)
             chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
             signal_block = f"\n\nStructured signals:\n{chunk_signal_text}" if chunk_signal_text else ""
@@ -11183,6 +11516,9 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
                     "structured_score": retrieval_details.get("structured_score") if isinstance(retrieval_details, dict) else None,
                     "rerank_score": retrieval_details.get("rerank_score") if isinstance(retrieval_details, dict) else None,
                     "vector_score": retrieval_details.get("vector_score") if isinstance(retrieval_details, dict) else None,
+                    "excerpt_selection": excerpt_selection.get("method", ""),
+                    "excerpt_spans": excerpt_selection.get("spans", [])[:4],
+                    "excerpt_warnings": excerpt_selection.get("warnings", [])[:4],
                 }
             )
     return "\n\n".join(part for part in parts if part), sources
@@ -12438,6 +12774,21 @@ def format_sources(sources: list[dict]) -> str:
                 + (f" via {methods}" if methods else "")
                 + (f"; {'; '.join(score_bits)}" if score_bits else "")
             )
+            if source.get("excerpt_selection"):
+                spans = source.get("excerpt_spans") or []
+                span_bits = [
+                    f"{span.get('kind', '')}:{span.get('label', '')}".strip(":")
+                    for span in spans[:3]
+                    if isinstance(span, dict)
+                ]
+                detail = ", ".join(bit for bit in span_bits if bit)
+                lines.append(
+                    "     span: "
+                    + str(source.get("excerpt_selection", ""))
+                    + (f" ({detail})" if detail else "")
+                )
+            for warning in source.get("excerpt_warnings", [])[:2]:
+                lines.append(f"     warning: {warning}")
         else:
             lines.append(f"{idx:3d}  {json.dumps(source, ensure_ascii=False)}")
     return "\n".join(lines)

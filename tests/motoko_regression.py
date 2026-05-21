@@ -1178,6 +1178,106 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
 
 
+def test_span_selection_uses_embedding_and_rerank_routes(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_span_embedding = os.environ.get("MOTOKO_SPAN_EMBEDDING")
+    old_span_rerank = os.environ.get("MOTOKO_SPAN_RERANK")
+    embed_socket = None
+    rerank_socket = None
+    embed_server = None
+    rerank_server = None
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    RerankHandler.payloads = []
+    RerankHandler.paths = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ["MOTOKO_SPAN_EMBEDDING"] = "1"
+        os.environ["MOTOKO_SPAN_RERANK"] = "1"
+        with isolated_state() as tmp:
+            embed_socket = tmp / "embed.sock"
+            embed_server = UnixHTTPServer(str(embed_socket), EmbeddingHandler)
+            embed_thread = threading.Thread(target=embed_server.serve_forever, daemon=True)
+            embed_thread.start()
+            rerank_socket = tmp / "rerank.sock"
+            rerank_server = UnixHTTPServer(str(rerank_socket), RerankHandler)
+            rerank_thread = threading.Thread(target=rerank_server.serve_forever, daemon=True)
+            rerank_thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"unix://{embed_socket}",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    },
+                    "qwen3-reranker-0b6": {
+                        "kind": "reranker",
+                        "endpoint": f"unix://{rerank_socket}",
+                        "modelId": "qwen3-reranker-0.6b-q6-k",
+                        "tasks": ["reranker", "rerank", "vector_rerank"],
+                        "endpoint_paths": ["/v1/rerank"],
+                        "maxParallel": 4,
+                        "openai_compatible": True,
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            content = (
+                "# General notes\n"
+                + ("alpha errands and setup notes without the needed action. " * 80)
+                + "\n\n# Action section\n"
+                "Priority deadline task: prepare the Motoko retrieval span fix.\n"
+            )
+            selection = m.query_aware_content_selection(
+                "priority deadline task",
+                content,
+                900,
+                use_models=True,
+            )
+            assert "Priority deadline task" in selection["excerpt"]
+            assert selection["method"] == "model-span"
+            assert EmbeddingHandler.payloads
+            assert RerankHandler.payloads
+            assert any(span.get("span_rerank_score") == 0.95 for span in selection["spans"])
+    finally:
+        if embed_server is not None:
+            embed_server.shutdown()
+            embed_server.server_close()
+        if rerank_server is not None:
+            rerank_server.shutdown()
+            rerank_server.server_close()
+        for socket_path in (embed_socket, rerank_socket):
+            if socket_path is not None:
+                with contextlib.suppress(OSError):
+                    pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_span_embedding is None:
+            os.environ.pop("MOTOKO_SPAN_EMBEDDING", None)
+        else:
+            os.environ["MOTOKO_SPAN_EMBEDDING"] = old_span_embedding
+        if old_span_rerank is None:
+            os.environ.pop("MOTOKO_SPAN_RERANK", None)
+        else:
+            os.environ["MOTOKO_SPAN_RERANK"] = old_span_rerank
+
+
 def test_study_focus_recent_is_parsed_and_bounded(m):
     query, focus = m.parse_study_directive("summarize yesterday and today according to logbook.org --focus recent")
     assert query == "summarize yesterday and today according to logbook.org"
@@ -2578,7 +2678,8 @@ def test_normal_retrieval_uses_embedding_rerank_by_default(m):
 
             text, sources = m.retrieve_from_index(index, "alpha notes")
             assert "Hybrid retrieval:" in text
-            assert RerankHandler.paths == ["/v1/rerank"]
+            assert RerankHandler.paths
+            assert set(RerankHandler.paths) == {"/v1/rerank"}
             index_source = next(source for source in sources if source.get("kind") == "index")
             assert index_source["vector_store"] == store["id"]
             assert index_source["hybrid_rerank_route"] == "qwen3-reranker-0b6"
@@ -3327,6 +3428,7 @@ def main() -> int:
         test_named_file_query_boosts_matching_path,
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
+        test_span_selection_uses_embedding_and_rerank_routes,
         test_study_focus_recent_is_parsed_and_bounded,
         test_index_plan,
         test_nix_managed_allowdirs_message,

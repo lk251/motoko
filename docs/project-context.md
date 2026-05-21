@@ -287,6 +287,12 @@ Current sequencing notes:
   heading sections from inside the chunk so preview/chat/topic/rerank context
   contains the relevant `** do`/`** log` material rather than only the start of
   the file.
+- Treat that as one instance of a broader "right container, wrong span" class.
+  Motoko should prefer an evidence-span layer after chunk retrieval: generate
+  deterministic spans from structure and windows, score them, and use
+  embedding/rerank routes only on a bounded number of high-value large chunks.
+  Span choices should remain visible in `/sources` so failures can be
+  diagnosed as retrieval, span selection, rerank, or final synthesis problems.
 - Bg-heavy vectorization should use the approved embedding route efficiently:
   batch source chunks, issue concurrent embedding requests up to the
   NixOS-declared route `maxParallel` with a Motoko-side cap of 32, expose
