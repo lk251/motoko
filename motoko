@@ -13983,9 +13983,23 @@ def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str
         return "No explicit documents are attached.", []
     parts = []
     sources = []
+
+    def unavailable_source(kind: str, item: dict, exc: BaseException) -> dict:
+        return {
+            "kind": "context-warning",
+            "context_kind": kind,
+            "id": item.get("id", ""),
+            "path": item.get("path", ""),
+            "warning": str(exc),
+        }
+
     for item in items:
         if item.get("kind") == "index":
-            index = load_index(item["id"])
+            try:
+                index = load_index(item["id"])
+            except (KeyError, SystemExit, OSError, json.JSONDecodeError) as exc:
+                sources.append(unavailable_source("index", item, exc))
+                continue
             if query:
                 text, index_sources = retrieve_from_index(index, query)
                 parts.append(text)
@@ -14017,13 +14031,21 @@ def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str
             )
             continue
         if item.get("kind") == "topic":
-            topic = load_topic(item["id"])
+            try:
+                topic = load_topic(item["id"])
+            except (KeyError, SystemExit, OSError, json.JSONDecodeError) as exc:
+                sources.append(unavailable_source("topic", item, exc))
+                continue
             text, topic_sources = retrieve_from_topic(topic, query)
             parts.append(text)
             sources.extend(topic_sources)
             continue
         if item.get("kind") == "dossier":
-            dossier = load_dossier(item["id"])
+            try:
+                dossier = load_dossier(item["id"])
+            except (KeyError, SystemExit, OSError, json.JSONDecodeError) as exc:
+                sources.append(unavailable_source("dossier", item, exc))
+                continue
             text, dossier_sources = retrieve_from_dossier(dossier, query)
             parts.append(text)
             sources.extend(dossier_sources)
@@ -15023,6 +15045,12 @@ def format_sources(sources: list[dict]) -> str:
         elif kind == "context-catalog":
             lines.append(f"{idx:3d}  context catalog  updated {relative_time(source.get('updated', ''))}")
             lines.append("     why: inventory of available private context")
+        elif kind == "context-warning":
+            detail = source.get("path", "") or source.get("id", "")
+            lines.append(
+                f"{idx:3d}  warning  attached {source.get('context_kind', 'context')} unavailable  {detail}"
+            )
+            lines.append(f"     why: skipped stale or missing attached context: {source.get('warning', '')}")
         elif kind == "context-plan":
             lines.append(
                 f"{idx:3d}  context plan  "
@@ -16013,6 +16041,7 @@ class MotokoTui:
         self.rendered_message_ids: set[int] = set()
         self.bottom_rows_rendered = 0
         self.bottom_cursor_row_offset = 0
+        self.bottom_frame_key: tuple | None = None
         self.overlay_screen_active = False
         self.overlay_title: str | None = None
         self.overlay_lines: list[str] | None = None
@@ -16239,6 +16268,7 @@ class MotokoTui:
             self.dirty = True
             return
         if key == "\x0c":
+            self.bottom_frame_key = None
             self.dirty = True
             return
         if key == "left":
@@ -16385,12 +16415,12 @@ class MotokoTui:
         if self.cwd_indexing or (self.study_running and self.study_status.startswith("bg-heavy:")):
             self.pending_prompts.append(text)
             self.append("queued", text)
-            self.status = f"queued {len(self.pending_prompts)} prompt(s) while Motoko is deep-indexing"
+            self.status = "prompt queued behind bg-heavy work"
             return
         if self.generating:
             self.pending_prompts.append(text)
             self.append("queued", text)
-            self.status = f"queued {len(self.pending_prompts)} prompt(s) while Motoko answers"
+            self.status = "prompt queued behind current answer"
             return
         self.start_generation(text)
 
@@ -16892,6 +16922,7 @@ class MotokoTui:
         self.write("\033[?25l\033[?7l")
         self.bottom_rows_rendered = 0
         self.bottom_cursor_row_offset = 0
+        self.bottom_frame_key = None
 
     def open_overlay(self, title: str, text: str) -> None:
         self.overlay_title = title
@@ -16912,6 +16943,7 @@ class MotokoTui:
             self.overlay_screen_active = False
             self.bottom_rows_rendered = 0
             self.bottom_cursor_row_offset = 0
+            self.bottom_frame_key = None
         self.dirty = True
 
     def start_generation(self, user_text: str) -> None:
@@ -17398,7 +17430,7 @@ class MotokoTui:
             self.render_overlay_page(content_width, height)
         else:
             self.sync_transcript(content_width)
-            self.draw_bottom_area(content_width, height)
+            self.draw_bottom_area(content_width, height, force=force)
         self.last_render = time.monotonic()
         self.dirty = False
 
@@ -17409,7 +17441,9 @@ class MotokoTui:
         )
         status_parts = []
         if not self.generating and not self.maintaining:
-            status_parts.append(style(self.status, "turquoise"))
+            idle_status = str(self.status or "").strip()
+            if idle_status and idle_status != "ready":
+                status_parts.append(style(idle_status, "turquoise"))
         if self.report_running:
             label = self.report_status or "report"
             count = f" x{self.report_running}" if self.report_running > 1 else ""
@@ -17435,29 +17469,41 @@ class MotokoTui:
             text += "  " + "  ".join(status_parts)
         return [style(line, "dim") for line in wrap_display_line(text, width)]
 
-    def clear_bottom_area(self) -> None:
+    def bottom_clear_sequence(self) -> str:
         rows = int(getattr(self, "bottom_rows_rendered", 0) or 0)
         if rows <= 0:
-            return
+            return ""
         offset = min(rows - 1, int(getattr(self, "bottom_cursor_row_offset", 0) or 0))
+        sequence = ""
         if offset > 0:
-            self.write(f"\033[{offset}A")
-        self.write("\r\033[J")
+            sequence += f"\033[{offset}A"
+        sequence += "\r\033[J"
+        return sequence
+
+    def clear_bottom_area(self) -> None:
+        sequence = self.bottom_clear_sequence()
+        if sequence:
+            self.write(sequence)
         self.bottom_rows_rendered = 0
         self.bottom_cursor_row_offset = 0
+        self.bottom_frame_key = None
 
-    def write_lines_at_cursor(self, lines: list[str]) -> None:
+    def lines_at_cursor_sequence(self, lines: list[str]) -> str:
         if not lines:
-            return
+            return ""
         parts = []
         for idx, line in enumerate(lines):
             parts.append(f"\r{line}\033[K")
             if idx + 1 < len(lines):
                 parts.append("\n")
-        self.write("".join(parts))
+        return "".join(parts)
 
-    def draw_bottom_area(self, width: int, height: int) -> None:
-        self.clear_bottom_area()
+    def write_lines_at_cursor(self, lines: list[str]) -> None:
+        sequence = self.lines_at_cursor_sequence(lines)
+        if sequence:
+            self.write(sequence)
+
+    def draw_bottom_area(self, width: int, height: int, *, force: bool = False) -> None:
         options = self.dropdown_options()
         if options:
             self.dropdown_index = min(self.dropdown_index, len(options) - 1)
@@ -17479,19 +17525,23 @@ class MotokoTui:
         lines.extend(input_lines)
         lines.extend(status_lines)
         lines = lines or [""]
-        self.write_lines_at_cursor(lines)
         cursor_row = input_start + cursor_row_offset
         rows_below_cursor = max(0, len(lines) - cursor_row - 1)
+        cursor_col = min(width, cursor_col)
+        frame_key = (width, height, tuple(lines), cursor_row, cursor_col)
+        if not force and frame_key == getattr(self, "bottom_frame_key", None):
+            return
         movement = ""
         if rows_below_cursor:
             movement += f"\033[{rows_below_cursor}A"
         movement += "\r"
         if cursor_col > 1:
-            movement += f"\033[{min(width, cursor_col) - 1}C"
+            movement += f"\033[{cursor_col - 1}C"
         movement += "\033[?25h"
-        self.write(movement)
+        self.write(self.bottom_clear_sequence() + self.lines_at_cursor_sequence(lines) + movement)
         self.bottom_rows_rendered = len(lines)
         self.bottom_cursor_row_offset = cursor_row
+        self.bottom_frame_key = frame_key
 
     def sync_transcript(self, width: int) -> None:
         if not hasattr(self, "rendered_message_ids"):

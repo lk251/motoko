@@ -1269,6 +1269,22 @@ def test_sources_fallback_lists_attached_topic_context(m):
         assert "/tmp/work/logbook.org" in text
 
 
+def test_stale_attached_topic_is_skipped_in_chat_context(m):
+    with isolated_state():
+        conv = m.new_conversation("Stale topic")
+        conv["context_items"] = [{"kind": "topic", "id": "missing-topic"}]
+
+        context_text, sources = m.render_context_with_sources(conv["context_items"], "custom symbology")
+
+        assert context_text == ""
+        assert sources
+        assert sources[0]["kind"] == "context-warning"
+        assert sources[0]["context_kind"] == "topic"
+        assert "matched 0" in sources[0]["warning"]
+        formatted = m.format_sources(sources)
+        assert "attached topic unavailable" in formatted
+
+
 def test_answer_grounding_audit_sources(m):
     sources = [
         {
@@ -1955,7 +1971,47 @@ def test_tui_bottom_status_omits_chat_phase_and_spinner(m):
         assert "Status Test" in status
         assert "chat:" not in status
         assert "/ chat" not in status
+        assert "ready" not in status
         assert "bg: idle" in status
+
+
+def test_tui_bottom_renderer_skips_identical_frames(m):
+    with isolated_state():
+        captured = []
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = {"title": "Stable Bottom"}
+        ui.input_buffer = ""
+        ui.cursor = 0
+        ui.dropdown_index = 0
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.pending_prompts = m.collections.deque()
+        ui.study_running = False
+        ui.study_status = "study: idle"
+        ui.study_last_note = ""
+        ui.status = "ready"
+        ui.index_progress = None
+        ui.answer_entry = None
+        ui.bottom_rows_rendered = 0
+        ui.bottom_cursor_row_offset = 0
+        ui.bottom_frame_key = None
+        ui.write = captured.append
+
+        ui.draw_bottom_area(80, 12)
+        writes_after_first_draw = len(captured)
+        assert writes_after_first_draw == 1
+
+        ui.draw_bottom_area(80, 12)
+        assert len(captured) == writes_after_first_draw
+
+        ui.input_buffer = "draft"
+        ui.cursor = len("draft")
+        ui.draw_bottom_area(80, 12)
+        assert len(captured) == writes_after_first_draw + 1
+        assert captured[-1].count("\033[J") == 1
+        assert "draft" in m.strip_ansi(captured[-1])
 
 
 def test_tui_append_renderer_keeps_transcript_in_scrollback(m):
