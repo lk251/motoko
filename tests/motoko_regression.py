@@ -1833,6 +1833,108 @@ def test_tui_role_markers_working_and_worked_line(m):
         assert "─" in rows[3]
 
 
+def test_tui_seed_messages_renders_full_saved_history_without_redundant_banner(m):
+    conv = {
+        "id": "history-test",
+        "title": "History Test",
+        "messages": [
+            {"role": "user", "content": f"user turn {idx}"}
+            for idx in range(m.MAX_RECENT_MESSAGES + 3)
+        ],
+    }
+    ui = object.__new__(m.MotokoTui)
+    rows = ui.seed_messages(conv)
+    contents = [row.get("content", "") for row in rows]
+    assert contents[0].startswith("Type / for commands.")
+    assert not any("Motoko conversation:" in content for content in contents)
+    assert any(content == "user turn 0" for content in contents)
+    assert any(content == f"user turn {m.MAX_RECENT_MESSAGES + 2}" for content in contents)
+
+
+def test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt(m):
+    with isolated_state():
+        conv = m.new_conversation("Current")
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.input_buffer = ""
+        ui.cursor = 0
+        ui.dropdown_index = 0
+        ui.status = "ready"
+        ui.dirty = False
+
+        old_load = m.load_conversation
+        try:
+            def fail_load(_selector=None):
+                raise AssertionError("/resume without id should not invoke terminal selection in the TUI")
+
+            m.load_conversation = fail_load
+            ui.handle_command("/resume")
+        finally:
+            m.load_conversation = old_load
+
+        assert ui.input_buffer == "/resume "
+        assert ui.cursor == len("/resume ")
+        assert ui.status == "choose a conversation"
+        assert ui.dirty
+
+
+def test_conversation_delete_removes_owned_derived_artifacts(m):
+    with isolated_state():
+        conv = m.new_conversation("Delete Me")
+        conv["id"] = "delete-me"
+        conv["messages"] = [{"role": "user", "content": "remember this"}]
+        write_conversation(m, conv)
+        other = m.new_conversation("Keep Me")
+        other["id"] = "keep-me"
+        write_conversation(m, other)
+
+        m.write_memory_rows(
+            [
+                {"id": "mem-delete", "text": "delete", "conversation_id": "delete-me"},
+                {"id": "mem-keep", "text": "keep", "conversation_id": "keep-me"},
+            ]
+        )
+        m.append_jsonl(m.response_feedback_path(), {"schema": m.RESPONSE_FEEDBACK_SCHEMA_VERSION, "conversation_id": "delete-me"})
+        m.append_jsonl(m.response_feedback_path(), {"schema": m.RESPONSE_FEEDBACK_SCHEMA_VERSION, "conversation_id": "keep-me"})
+        m.append_jsonl(m.study_jobs_path(), {"job_id": "job-delete", "conversation_id": "delete-me"})
+        m.append_jsonl(m.study_jobs_path(), {"job_id": "job-keep", "conversation_id": "keep-me"})
+        m.atomic_write(m.topic_path("topic-delete"), json.dumps({"id": "topic-delete", "owner_conversation_id": "delete-me"}) + "\n")
+        m.atomic_write(m.topic_path("topic-keep"), json.dumps({"id": "topic-keep", "owner_conversation_id": "keep-me"}) + "\n")
+        m.atomic_write(m.dossier_path("dossier-delete"), json.dumps({"id": "dossier-delete", "source_conversations": [{"id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.dossier_path("dossier-keep"), json.dumps({"id": "dossier-keep", "source_conversations": [{"id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.feedback_eval_path("eval-delete"), json.dumps({"fixtures": [{"conversation_id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.feedback_eval_path("eval-keep"), json.dumps({"fixtures": [{"conversation_id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.profile_path(), json.dumps({"conversation_ids": ["delete-me"]}) + "\n")
+        m.write_maintenance_state({"job_id": "maint-delete", "conversation_id": "delete-me", "status": "running"})
+        m.write_study_state({"conversation_id": "delete-me", "status": "running"})
+        m.atomic_write(m.context_catalog_path(), "{}\n")
+
+        report = m.delete_conversation_and_artifacts(conv)
+
+        assert report["conversation_deleted"]
+        assert report["memories_deleted"] == 1
+        assert report["feedback_deleted"] == 1
+        assert report["study_job_events_deleted"] == 1
+        assert report["topics_deleted"] == 1
+        assert report["dossiers_deleted"] == 1
+        assert report["feedback_evals_deleted"] == 1
+        assert not m.conversation_path("delete-me").exists()
+        assert m.conversation_path("keep-me").exists()
+        assert [row["id"] for row in m.read_memory_rows()] == ["mem-keep"]
+        assert [row["conversation_id"] for row in m.read_response_feedback_rows()] == ["keep-me"]
+        assert [row["conversation_id"] for row in m.read_jsonl(m.study_jobs_path())] == ["keep-me"]
+        assert not m.topic_path("topic-delete").exists()
+        assert m.topic_path("topic-keep").exists()
+        assert not m.dossier_path("dossier-delete").exists()
+        assert m.dossier_path("dossier-keep").exists()
+        assert not m.feedback_eval_path("eval-delete").exists()
+        assert m.feedback_eval_path("eval-keep").exists()
+        assert not m.profile_path().exists()
+        assert m.read_maintenance_state() is None
+        assert m.read_study_state() is None
+        assert not m.context_catalog_path().exists()
+
+
 def test_tui_report_commands_do_not_persist_system_output(m):
     with isolated_state():
         conv = m.new_conversation("Reports")
@@ -3963,6 +4065,9 @@ def main() -> int:
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
+        test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
+        test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
+        test_conversation_delete_removes_owned_derived_artifacts,
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,
         test_tui_prompt_is_saved_before_context_preparation,

@@ -5,6 +5,10 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added `/rename` and guarded `/delete` for conversations. Conversation delete
+  removes the chat plus Motoko-owned derived artifacts that explicitly reference
+  that conversation, and new topic/memory dossiers record their owner
+  conversation for future cleanup.
 - Changed memory proposal requests to pass recent conversation turns as a
   quoted transcript inside a user message, avoiding assistant-prefill failures
   on Qwen thinking-mode worker routes.

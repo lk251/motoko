@@ -408,6 +408,7 @@ List and resume conversations:
 motoko list
 motoko resume
 motoko resume CONVERSATION_ID
+motoko delete CONVERSATION_ID --yes
 motoko show
 motoko show CONVERSATION_ID
 motoko status
@@ -431,6 +432,14 @@ When an ID is omitted in an interactive terminal, Motoko opens a numbered
 picker. This avoids typing long conversation IDs for normal use.
 `motoko list` displays compact `created`, `updated`, `branch`, and
 `conversation` columns. Full timestamps remain stored in the conversation JSON.
+`/rename TEXT` and `/title TEXT` both set the current conversation title.
+`/delete` asks for confirmation before deleting the current conversation; it
+also removes Motoko-owned derived artifacts that explicitly reference that
+conversation, such as memories, feedback rows, memory dossiers, owned topic
+dossiers, profile/context cache state, and resumable maintenance state.
+Document indexes are corpus artifacts rather than chat artifacts, so deleting a
+conversation does not delete indexed source-derived data unless that artifact
+declares the deleted conversation as its owner.
 
 Manage memories:
 
@@ -454,6 +463,8 @@ Useful in-chat commands:
 /stop
 /pause
 /new [TITLE]
+/rename TEXT
+/delete
 /resume [CONVERSATION_ID]
 /read PATH
 /index-plan PATH

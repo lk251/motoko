@@ -375,6 +375,8 @@ SLASH_COMMANDS = [
     ("/pause", "ask active work to pause at the next durable checkpoint"),
     ("/new [TITLE]", "start a new conversation"),
     ("/title TEXT", "rename this conversation"),
+    ("/rename TEXT", "rename this conversation"),
+    ("/delete", "delete this conversation after confirmation"),
     ("/resume [ID]", "switch to another saved conversation"),
     ("/read PATH", "attach a bounded excerpt from an allowlisted text file"),
     ("/index-plan PATH", "preview a document index without writing derived text"),
@@ -449,6 +451,7 @@ SHELL_COMMANDS = [
     "list",
     "new",
     "resume",
+    "delete",
     "show",
     "compact",
     "index",
@@ -2011,6 +2014,138 @@ def load_conversation(conversation_id: str | None = None) -> dict:
         label_func=conversation_label,
         selector=conversation_id,
     )
+
+
+def json_references_conversation(value, conversation_id: str) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {
+                "conversation_id",
+                "owner_conversation_id",
+                "created_by_conversation_id",
+            } and str(item) == conversation_id:
+                return True
+            if key in {"conversation_ids", "source_conversation_ids"} and isinstance(item, list):
+                if any(str(row) == conversation_id for row in item):
+                    return True
+            if key == "source_conversations" and isinstance(item, list):
+                if any(isinstance(row, dict) and str(row.get("id", "")) == conversation_id for row in item):
+                    return True
+            if json_references_conversation(item, conversation_id):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(json_references_conversation(item, conversation_id) for item in value)
+    return False
+
+
+def rewrite_jsonl_without_conversation(path: pathlib.Path, conversation_id: str) -> int:
+    rows = read_jsonl(path)
+    if not rows:
+        return 0
+    kept = [row for row in rows if not json_references_conversation(row, conversation_id)]
+    removed = len(rows) - len(kept)
+    if not removed:
+        return 0
+    if kept:
+        atomic_write(path, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in kept))
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    return removed
+
+
+def delete_json_artifacts_referencing_conversation(directory: pathlib.Path, conversation_id: str) -> int:
+    removed = 0
+    for path in sorted(directory.glob("*.json")):
+        data = safe_load_json(path)
+        if data is not None and json_references_conversation(data, conversation_id):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+                removed += 1
+    return removed
+
+
+def delete_conversation_and_artifacts(conv: dict) -> dict:
+    conversation_id = str(conv.get("id", "")).strip()
+    if not conversation_id:
+        raise SystemExit("conversation has no id")
+    report = {
+        "conversation_id": conversation_id,
+        "conversation_deleted": False,
+        "memories_deleted": 0,
+        "feedback_deleted": 0,
+        "study_job_events_deleted": 0,
+        "topics_deleted": 0,
+        "dossiers_deleted": 0,
+        "feedback_evals_deleted": 0,
+        "profile_deleted": False,
+        "maintenance_deleted": False,
+        "study_state_deleted": False,
+        "context_catalog_deleted": False,
+    }
+
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    kept_memories = [row for row in rows if not json_references_conversation(row, conversation_id)]
+    report["memories_deleted"] = len(rows) - len(kept_memories)
+    if report["memories_deleted"]:
+        write_memory_rows(kept_memories)
+
+    report["feedback_deleted"] = rewrite_jsonl_without_conversation(response_feedback_path(), conversation_id)
+    report["study_job_events_deleted"] = rewrite_jsonl_without_conversation(study_jobs_path(), conversation_id)
+    report["topics_deleted"] = delete_json_artifacts_referencing_conversation(topics_dir(), conversation_id)
+    report["dossiers_deleted"] = delete_json_artifacts_referencing_conversation(dossiers_dir(), conversation_id)
+    report["feedback_evals_deleted"] = delete_json_artifacts_referencing_conversation(feedback_evals_dir(), conversation_id)
+
+    profile = safe_load_json(profile_path())
+    if profile is not None and json_references_conversation(profile, conversation_id):
+        with contextlib.suppress(FileNotFoundError):
+            profile_path().unlink()
+            report["profile_deleted"] = True
+
+    maintenance = read_maintenance_state()
+    if maintenance is not None and json_references_conversation(maintenance, conversation_id):
+        clear_maintenance_state(maintenance.get("job_id"))
+        report["maintenance_deleted"] = True
+
+    study_state = read_study_state()
+    if study_state is not None and json_references_conversation(study_state, conversation_id):
+        with contextlib.suppress(FileNotFoundError):
+            study_state_path().unlink()
+            report["study_state_deleted"] = True
+
+    with contextlib.suppress(FileNotFoundError):
+        context_catalog_path().unlink()
+        report["context_catalog_deleted"] = True
+
+    with contextlib.suppress(FileNotFoundError):
+        conversation_path(conversation_id).unlink()
+        report["conversation_deleted"] = True
+    return report
+
+
+def format_conversation_delete_report(report: dict) -> str:
+    lines = [
+        f"deleted conversation: {report.get('conversation_id', '')}",
+        f"memories deleted: {report.get('memories_deleted', 0)}",
+        f"feedback rows deleted: {report.get('feedback_deleted', 0)}",
+        f"study job events deleted: {report.get('study_job_events_deleted', 0)}",
+        f"topic dossiers deleted: {report.get('topics_deleted', 0)}",
+        f"memory dossiers deleted: {report.get('dossiers_deleted', 0)}",
+        f"feedback evals deleted: {report.get('feedback_evals_deleted', 0)}",
+    ]
+    flags = []
+    for key, label in [
+        ("profile_deleted", "profile dossier"),
+        ("maintenance_deleted", "maintenance state"),
+        ("study_state_deleted", "study state"),
+        ("context_catalog_deleted", "context catalog"),
+    ]:
+        if report.get(key):
+            flags.append(label)
+    if flags:
+        lines.append("invalidated: " + ", ".join(flags))
+    return "\n".join(lines)
 
 
 def normalize_model_route(route: str | None, *, strict: bool = True) -> str:
@@ -11786,6 +11921,7 @@ def build_topic_dossier(
     max_chunks: int = TOPIC_DEFAULT_CHUNKS,
     retrieval_query: str | None = None,
     focus: str | None = None,
+    owner_conversation_id: str = "",
 ) -> dict:
     query = query.strip()
     if not query:
@@ -11878,6 +12014,7 @@ def build_topic_dossier(
         "focus": focus or "",
         "retrieval_query": retrieval_query,
         "created": now(),
+        "owner_conversation_id": owner_conversation_id,
         "technique": "topic-focused hierarchical retrieval-augmented dossier",
         "source_indexes": source_indexes,
         "selected_chunk_count": len(evidence),
@@ -11896,7 +12033,7 @@ def build_topic_dossier(
     return topic
 
 
-def build_memory_dossier(query: str, *, name: str | None = None) -> dict:
+def build_memory_dossier(query: str, *, name: str | None = None, owner_conversation_id: str = "") -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("dossier query is empty")
@@ -12009,6 +12146,7 @@ def build_memory_dossier(query: str, *, name: str | None = None) -> dict:
         "name": name or slug_title(query),
         "query": query,
         "created": now(),
+        "owner_conversation_id": owner_conversation_id,
         "technique": "query-focused hierarchical retrieval over memories and conversations",
         "summary": summary,
         "summary_artifact": artifact_provenance(
@@ -12555,6 +12693,7 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
             max_chunks=topic_limit,
             retrieval_query=retrieval_query,
             focus=focus,
+            owner_conversation_id=str(conv.get("id", "")),
         )
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from attached index(es): {topic.get('id')}"
@@ -12567,11 +12706,12 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
             max_chunks=topic_limit,
             retrieval_query=retrieval_query,
             focus=focus,
+            owner_conversation_id=str(conv.get("id", "")),
         )
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from index {index.get('id')}: {topic.get('id')}"
 
-    dossier = build_memory_dossier(retrieval_query)
+    dossier = build_memory_dossier(retrieval_query, owner_conversation_id=str(conv.get("id", "")))
     attach_context_item(conv, context_item_from_dossier(dossier))
     return f"built memory dossier: {dossier.get('id')}"
 
@@ -14240,6 +14380,8 @@ HELP_SECTIONS = [
             ("/pause", "ask active work to pause at the next durable checkpoint"),
             ("/new [TITLE]", "save this chat and start a new conversation"),
             ("/title TEXT", "rename this conversation"),
+            ("/rename TEXT", "rename this conversation"),
+            ("/delete", "delete this conversation and owned derived artifacts after confirmation"),
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
             ("/feedback up|down|ok [TEXT]", "rate the last answer with an optional note"),
             ("/up [TEXT] / /down [TEXT]", "shortcuts for feedback on the last answer"),
@@ -14882,11 +15024,12 @@ def format_task_candidates_from_chat(conv: dict, query: str = "") -> str:
 
 
 def build_topic_from_chat(conv: dict, text: str) -> dict:
+    owner = str(conv.get("id", ""))
     body = text.strip()
     if not body and sys.stdin.isatty():
         index = load_index(None)
         query = input(style("topic query> ", "turquoise")).strip()
-        return build_topic_dossier([index["id"]], query)
+        return build_topic_dossier([index["id"]], query, owner_conversation_id=owner)
     if not body:
         raise SystemExit("usage: /topic [INDEX_ID] QUERY")
     parts = body.split(maxsplit=1)
@@ -14896,15 +15039,16 @@ def build_topic_from_chat(conv: dict, text: str) -> dict:
         except SystemExit:
             pass
         else:
-            return build_topic_dossier([parts[0]], parts[1])
+            return build_topic_dossier([parts[0]], parts[1], owner_conversation_id=owner)
 
     index_ids = attached_index_ids(conv)
     if not index_ids:
         raise SystemExit("attach an index first or use: /topic INDEX_ID QUERY")
-    return build_topic_dossier(index_ids, body)
+    return build_topic_dossier(index_ids, body, owner_conversation_id=owner)
 
 
 def deepen_topic_from_chat(conv: dict, text: str) -> dict:
+    owner = str(conv.get("id", ""))
     body = text.strip()
     if not body:
         raise SystemExit("usage: /deepen [INDEX_ID] QUERY")
@@ -14915,18 +15059,18 @@ def deepen_topic_from_chat(conv: dict, text: str) -> dict:
         except SystemExit:
             pass
         else:
-            return build_topic_dossier([parts[0]], parts[1], max_chunks=TOPIC_MAX_CHUNKS)
+            return build_topic_dossier([parts[0]], parts[1], max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner)
     index_ids = attached_index_ids(conv)
     if not index_ids:
         raise SystemExit("attach an index first or use: /deepen INDEX_ID QUERY")
-    return build_topic_dossier(index_ids, body, max_chunks=TOPIC_MAX_CHUNKS)
+    return build_topic_dossier(index_ids, body, max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner)
 
 
-def build_dossier_from_chat(_conv: dict, text: str) -> dict:
+def build_dossier_from_chat(conv: dict, text: str) -> dict:
     query = text.strip()
     if not query:
         raise SystemExit("usage: /dossier QUERY")
-    return build_memory_dossier(query)
+    return build_memory_dossier(query, owner_conversation_id=str(conv.get("id", "")))
 
 
 def bounded_output(text: str, max_chars: int = REPO_COMMAND_OUTPUT_CHARS) -> str:
@@ -15509,16 +15653,12 @@ class MotokoTui:
         rows = [
             {
                 "role": "system",
-                "content": f"Motoko conversation: {conv.get('title', 'Untitled')} [{conv.get('id', '')}]",
-            },
-            {
-                "role": "system",
                 "content": "Type / for commands. Use arrows to select menu entries. Ctrl+C exits.",
             },
         ]
         if conv.get("summary"):
             rows.append({"role": "summary", "content": conv.get("summary", "")})
-        for msg in conv.get("messages", [])[-MAX_RECENT_MESSAGES:]:
+        for msg in conv.get("messages", []):
             rows.append({"role": msg.get("role", "?"), "content": msg.get("content", "")})
         return rows
 
@@ -15587,6 +15727,10 @@ class MotokoTui:
             if nxt.isalpha() or nxt == b"~":
                 break
         text = bytes(seq).decode("utf-8", errors="replace")
+        if re.match(r"^\x1b\[5(?:;\d+)*~$", text):
+            return "pageup"
+        if re.match(r"^\x1b\[6(?:;\d+)*~$", text):
+            return "pagedown"
         keymap = {
             "\x1b[A": "up",
             "\x1b[B": "down",
@@ -16015,18 +16159,44 @@ class MotokoTui:
                 self.append("system", self.capture_text(lambda: print_memory_search(query)))
             elif text == "/memory review":
                 self.append("system", self.capture_text(lambda: print_memories(verbose=True)))
-            elif text.startswith("/title "):
-                self.conv["title"] = text[len("/title ") :].strip() or self.conv["title"]
+            elif text.startswith("/title ") or text.startswith("/rename "):
+                prefix = "/rename " if text.startswith("/rename ") else "/title "
+                self.conv["title"] = text[len(prefix) :].strip() or self.conv["title"]
                 self.conv["title_kind"] = "manual"
                 self.conv.pop("title_generated", None)
                 save_conversation(self.conv)
                 self.append("system", f"title: {self.conv['title']}")
+            elif text == "/delete" or text.startswith("/delete "):
+                if self.generating or self.maintaining or self.study_running:
+                    self.append("system", "finish or stop active work before deleting this conversation")
+                    return
+                answer = text[len("/delete") :].strip().lower()
+                if answer not in {"yes", "confirm"}:
+                    self.append(
+                        "system",
+                        f"delete this conversation and owned derived artifacts? type /delete yes to confirm ({self.conv.get('id', '')})",
+                    )
+                    return
+                report = delete_conversation_and_artifacts(self.conv)
+                self.conv = new_conversation()
+                save_conversation(self.conv)
+                self.messages = self.seed_messages(self.conv)
+                self.status = "conversation deleted"
+                self.append("system", format_conversation_delete_report(report))
             elif text == "/resume" or text.startswith("/resume "):
                 selector = text[len("/resume") :].strip() or None
+                if selector is None:
+                    self.input_buffer = "/resume "
+                    self.cursor = len(self.input_buffer)
+                    self.dropdown_index = 0
+                    self.status = "choose a conversation"
+                    self.dirty = True
+                    return
                 save_conversation(self.conv)
                 self.conv = load_conversation(selector)
                 self.messages = self.seed_messages(self.conv)
-                self.status = "conversation resumed"
+                message_count = len(self.conv.get("messages", []))
+                self.status = "conversation resumed" if message_count else "conversation resumed (0 messages)"
             elif text.startswith("/read "):
                 item = context_item_from_file(text[len("/read ") :].strip())
                 self.conv.setdefault("context_items", []).append(item)
@@ -17069,12 +17239,26 @@ def chat_loop(conv: dict) -> None:
             conv = load_conversation(selector)
             print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
             continue
-        if user_text.startswith("/title "):
-            conv["title"] = user_text[len("/title ") :].strip() or conv["title"]
+        if user_text.startswith("/title ") or user_text.startswith("/rename "):
+            prefix = "/rename " if user_text.startswith("/rename ") else "/title "
+            conv["title"] = user_text[len(prefix) :].strip() or conv["title"]
             conv["title_kind"] = "manual"
             conv.pop("title_generated", None)
             save_conversation(conv)
             print(f"title: {conv['title']}")
+            continue
+        if user_text == "/delete" or user_text.startswith("/delete "):
+            answer = user_text[len("/delete") :].strip().lower()
+            if answer not in {"yes", "confirm"}:
+                answer = input(f"Delete conversation {conv.get('id', '')}? Type yes to confirm: ").strip().lower()
+            if answer in {"yes", "confirm"}:
+                report = delete_conversation_and_artifacts(conv)
+                print(format_conversation_delete_report(report))
+                conv = new_conversation()
+                save_conversation(conv)
+                print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+            else:
+                print("not deleted")
             continue
         if user_text.startswith("/read "):
             item = context_item_from_file(user_text[len("/read ") :].strip())
@@ -17825,6 +18009,18 @@ def command_resume(args) -> None:
     chat_loop(conv)
 
 
+def command_delete(args) -> None:
+    conv = load_conversation(args.id)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise SystemExit("refusing to delete without --yes in non-interactive mode")
+        answer = input(f"Delete conversation {conv.get('id', '')}? Type yes to confirm: ").strip().lower()
+        if answer not in {"yes", "confirm"}:
+            print("not deleted")
+            return
+    print(format_conversation_delete_report(delete_conversation_and_artifacts(conv)))
+
+
 def command_index(args) -> None:
     if args.plan:
         print_index_plan(args.path, args.glob)
@@ -18400,6 +18596,11 @@ def main(argv: list[str]) -> int:
     resume.add_argument("id", nargs="?")
     resume.add_argument("--line", action="store_true", help="use the legacy line-oriented interface")
     resume.set_defaults(func=command_resume)
+
+    delete = sub.add_parser("delete", help="delete a conversation and owned derived artifacts")
+    delete.add_argument("id", nargs="?")
+    delete.add_argument("--yes", action="store_true", help="confirm deletion without prompting")
+    delete.set_defaults(func=command_delete)
 
     show = sub.add_parser("show", help="show a transcript")
     show.add_argument("id", nargs="?")
