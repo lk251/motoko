@@ -373,7 +373,8 @@ SLASH_COMMANDS = [
     ("/", "show compact command menu"),
     ("/about", "show Motoko version and runtime details"),
     ("/exit", "save and exit"),
-    ("/stop", "stop the current streamed answer"),
+    ("/stop", "stop the current streamed answer and discard queued prompts"),
+    ("/clear-queue", "discard prompts queued behind active work"),
     ("/pause", "ask active work to pause at the next durable checkpoint"),
     ("/new [TITLE]", "start a new conversation"),
     ("/title TEXT", "rename this conversation"),
@@ -514,6 +515,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/about",
     "/exit",
     "/stop",
+    "/clear-queue",
     "/pause",
     "/new",
     "/compact",
@@ -14490,8 +14492,40 @@ def local_model_verify_hint(route_info: dict) -> str:
     return "\n".join(lines)
 
 
+def raise_if_cancelled(cancel_event) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("__motoko_stopped__")
+
+
+def sleep_with_cancel(seconds: float, cancel_event) -> None:
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        raise_if_cancelled(cancel_event)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.1, remaining))
+
+
+def iter_cancelable_response_lines(resp, cancel_event):
+    while True:
+        raise_if_cancelled(cancel_event)
+        raw = resp.readline()
+        if not raw:
+            return
+        yield raw
+
+
 @contextlib.contextmanager
-def open_model_response(route_info: dict, payload: dict, *, timeout: float):
+def open_model_response(
+    route_info: dict,
+    payload: dict,
+    *,
+    timeout: float,
+    cancel_event=None,
+    on_connection=None,
+    on_response=None,
+):
     endpoint_text = str(route_info["endpoint"])
     request_timeout = model_request_timeout(route_info, timeout)
     data = json.dumps(payload).encode("utf-8")
@@ -14505,9 +14539,12 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
         loading_attempts = 0
         transient_attempts = 0
         while True:
+            raise_if_cancelled(cancel_event)
             remaining = max(1.0, deadline - time.monotonic())
             conn = UnixSocketHTTPConnection(socket_path, timeout=remaining)
             try:
+                if on_connection is not None:
+                    on_connection(conn)
                 conn.request(
                     "POST",
                     request_path,
@@ -14515,19 +14552,25 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
                     headers={"Content-Type": "application/json", "Host": "localhost"},
                 )
                 resp = conn.getresponse()
+                if on_response is not None:
+                    on_response(resp)
                 if resp.status >= 400:
                     body = resp.read(1200).decode("utf-8", errors="replace")
                     resp.close()
+                    if on_response is not None:
+                        on_response(None)
                     if model_loading_response(resp.status, body) and time.monotonic() < deadline:
                         loading_attempts += 1
                         sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
-                        time.sleep(sleep_for)
+                        sleep_with_cancel(sleep_for, cancel_event)
                         continue
                     suffix = f" after {loading_attempts} loading retries" if loading_attempts else ""
                     raise OSError(f"model endpoint returned HTTP {resp.status}{suffix}: {body}")
                 try:
                     yield resp
                 finally:
+                    if on_response is not None:
+                        on_response(None)
                     resp.close()
                 return
             except (OSError, http.client.HTTPException) as exc:
@@ -14535,7 +14578,7 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
                     transient_attempts += 1
                     loading_attempts += 1
                     sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
-                    time.sleep(sleep_for)
+                    sleep_with_cancel(sleep_for, cancel_event)
                     continue
                 suffix = (
                     f" after {transient_attempts} transient "
@@ -14547,9 +14590,12 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
                     raise OSError(f"{exc}{suffix}") from exc
                 raise
             finally:
+                if on_connection is not None:
+                    on_connection(None)
                 conn.close()
         return
 
+    raise_if_cancelled(cancel_event)
     req = urllib.request.Request(
         endpoint_text,
         data=data,
@@ -14557,7 +14603,13 @@ def open_model_response(route_info: dict, payload: dict, *, timeout: float):
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-        yield resp
+        if on_response is not None:
+            on_response(resp)
+        try:
+            yield resp
+        finally:
+            if on_response is not None:
+                on_response(None)
 
 
 def call_model(
@@ -14690,6 +14742,9 @@ def call_model_with_callback(
     temperature: float = 0.7,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
+    cancel_event=None,
+    on_connection=None,
+    on_response=None,
 ) -> str:
     route_info = model_route(route)
     payload = {
@@ -14700,8 +14755,17 @@ def call_model_with_callback(
     }
     collected = []
     try:
-        with open_model_response(route_info, payload, timeout=timeout) as resp:
-            for raw in resp:
+        raise_if_cancelled(cancel_event)
+        with open_model_response(
+            route_info,
+            payload,
+            timeout=timeout,
+            cancel_event=cancel_event,
+            on_connection=on_connection,
+            on_response=on_response,
+        ) as resp:
+            for raw in iter_cancelable_response_lines(resp, cancel_event):
+                raise_if_cancelled(cancel_event)
                 line = raw.decode("utf-8", errors="replace").strip()
                 if not line or not line.startswith("data:"):
                     continue
@@ -14721,11 +14785,14 @@ def call_model_with_callback(
                     collected.append(content)
                     on_token(content)
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("__motoko_stopped__") from exc
         hint = local_model_verify_hint(route_info)
         detail = f"model request failed: {exc}"
         if hint:
             detail += "\n" + hint
         raise SystemExit(detail) from exc
+    raise_if_cancelled(cancel_event)
     return "".join(collected)
 
 
@@ -14780,7 +14847,8 @@ HELP_SECTIONS = [
             ("/about", "show version, model, endpoint, and state paths"),
             ("/", "show a compact command menu"),
             ("/exit", "save and exit"),
-            ("/stop", "stop the current streamed answer"),
+            ("/stop", "stop the current streamed answer and discard queued prompts"),
+            ("/clear-queue", "discard prompts queued behind active work"),
             ("/pause", "ask active work to pause at the next durable checkpoint"),
             ("/new [TITLE]", "save this chat and start a new conversation"),
             ("/title TEXT", "rename this conversation"),
@@ -16058,6 +16126,9 @@ class MotokoTui:
         self.answer_entry: dict | None = None
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
+        self.active_model_lock = threading.Lock()
+        self.active_model_connection = None
+        self.active_model_response = None
         self.last_render = 0.0
         self.rendered_message_ids: set[int] = set()
         self.bottom_rows_rendered = 0
@@ -16109,6 +16180,44 @@ class MotokoTui:
             self.history.append(text)
         if len(self.history) > 200:
             self.history = self.history[-200:]
+
+    def clear_queued_prompts(self) -> int:
+        count = len(self.pending_prompts)
+        if count:
+            self.pending_prompts.clear()
+        return count
+
+    def set_active_model_connection(self, conn) -> None:
+        lock = getattr(self, "active_model_lock", None)
+        if lock is None:
+            self.active_model_connection = conn
+            return
+        with lock:
+            self.active_model_connection = conn
+
+    def set_active_model_response(self, resp) -> None:
+        lock = getattr(self, "active_model_lock", None)
+        if lock is None:
+            self.active_model_response = resp
+            return
+        with lock:
+            self.active_model_response = resp
+
+    def close_active_model_request(self) -> None:
+        lock = getattr(self, "active_model_lock", None)
+        if lock is None:
+            items = [getattr(self, "active_model_response", None), getattr(self, "active_model_connection", None)]
+            self.active_model_response = None
+            self.active_model_connection = None
+        else:
+            with lock:
+                items = [self.active_model_response, self.active_model_connection]
+                self.active_model_response = None
+                self.active_model_connection = None
+        for item in items:
+            if item is not None:
+                with contextlib.suppress(Exception):
+                    item.close()
 
     def append(self, role: str, content: str) -> dict:
         row = {"role": role, "content": content}
@@ -16489,11 +16598,27 @@ class MotokoTui:
                 self.status = "new conversation"
                 self.append("system", f"new conversation: {self.conv.get('title', 'Untitled')} [{self.conv.get('id', '')}]")
             elif text == "/stop":
+                discarded = self.clear_queued_prompts()
                 if self.generating:
                     self.cancel_event.set()
-                    self.status = "stopping current answer"
+                    self.close_active_model_request()
+                    note = "stopping current answer"
+                    if discarded:
+                        note += f"; discarded {discarded} queued prompt(s)"
+                    self.status = note
+                    self.append("system", note)
+                elif discarded:
+                    self.status = f"discarded {discarded} queued prompt(s)"
+                    self.append("system", self.status)
                 else:
                     self.append("system", "Motoko is not currently answering.")
+            elif text == "/clear-queue":
+                discarded = self.clear_queued_prompts()
+                if discarded:
+                    self.status = f"discarded {discarded} queued prompt(s)"
+                    self.append("system", self.status)
+                else:
+                    self.append("system", "no queued prompts")
             elif text == "/pause":
                 self.request_pause()
             elif text == "/sources":
@@ -17018,7 +17143,9 @@ class MotokoTui:
 
         def worker() -> None:
             try:
+                raise_if_cancelled(cancel_event)
                 topic = maybe_attach_relevant_existing_topic(self.conv, user_text)
+                raise_if_cancelled(cancel_event)
                 if topic:
                     self.put_event(
                         (
@@ -17027,6 +17154,7 @@ class MotokoTui:
                         )
                     )
                 dossier = maybe_attach_relevant_existing_dossier(self.conv, user_text)
+                raise_if_cancelled(cancel_event)
                 if dossier:
                     self.put_event(
                         (
@@ -17035,11 +17163,12 @@ class MotokoTui:
                         )
                     )
                 messages, sources = build_messages(self.conv, user_text)
+                raise_if_cancelled(cancel_event)
                 self.put_event(("answer_phase", "answering"))
+                raise_if_cancelled(cancel_event)
 
                 def on_token(token: str) -> None:
-                    if cancel_event.is_set():
-                        raise RuntimeError("__motoko_stopped__")
+                    raise_if_cancelled(cancel_event)
                     self.put_event(("token", token))
 
                 reply = call_model_with_callback(
@@ -17047,6 +17176,9 @@ class MotokoTui:
                     temperature=0.7,
                     on_token=on_token,
                     route=MODEL_ROUTE_CHAT,
+                    cancel_event=cancel_event,
+                    on_connection=self.set_active_model_connection,
+                    on_response=self.set_active_model_response,
                 )
                 self.put_event(("done", reply, sources_with_answer_audit(user_text, reply, sources)))
             except RuntimeError as exc:
@@ -17818,6 +17950,12 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/exit":
             close_conversation(conv)
             return
+        if user_text == "/stop":
+            print("no active streamed answer in line mode")
+            continue
+        if user_text == "/clear-queue":
+            print("no queued prompts in line mode")
+            continue
         if user_text == "/pause":
             command_pause(None)
             continue

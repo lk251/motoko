@@ -374,7 +374,9 @@ and typed text remains available while Motoko streams an answer. There is no
 fixed separator between the chat body and the composer. The TUI does not print
 routine startup tips into the conversation body; `/help`, `/status`, and
 `/sources` are the inspectable places for that state.
-Use `/stop` to stop the current streamed answer.
+Use `/stop` to stop the current answer and discard any prompts queued behind
+it. Use `/clear-queue` to discard queued prompts without stopping the active
+answer.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.
 
@@ -482,6 +484,7 @@ Useful in-chat commands:
 /help
 /
 /stop
+/clear-queue
 /pause
 /new [TITLE]
 /rename TEXT

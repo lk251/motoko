@@ -2356,7 +2356,7 @@ def test_tui_prompt_is_saved_before_context_preparation(m):
                 assert release_build.wait(2)
                 return [{"role": "system", "content": "prompt"}] + conv_arg.get("messages", []), []
 
-            def fake_call_model(messages, *, temperature=0.7, on_token=None, route=None):
+            def fake_call_model(messages, *, temperature=0.7, on_token=None, route=None, cancel_event=None, **_kwargs):
                 if on_token:
                     on_token("ok")
                 return "ok"
@@ -2388,6 +2388,111 @@ def test_tui_prompt_is_saved_before_context_preparation(m):
             release_build.set()
             m.build_messages = old_build_messages
             m.call_model_with_callback = old_call_model
+
+
+def test_tui_stop_during_preparing_cancels_before_model_call(m):
+    with isolated_state():
+        conv = m.new_conversation("Stop preparing")
+        conv["id"] = "stop-preparing"
+        write_conversation(m, conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.answer_phase = ""
+        ui.answer_entry = None
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.pending_prompts = m.collections.deque(["queued two", "queued three"])
+        ui.start_maintenance = lambda *args, **kwargs: None
+
+        build_started = threading.Event()
+        release_build = threading.Event()
+        model_called = threading.Event()
+        old_build_messages = m.build_messages
+        old_call_model = m.call_model_with_callback
+        try:
+            def slow_build_messages(conv_arg, query=""):
+                build_started.set()
+                assert release_build.wait(2)
+                return [{"role": "system", "content": "prompt"}] + conv_arg.get("messages", []), []
+
+            def fail_call_model(*args, **kwargs):
+                model_called.set()
+                raise AssertionError("model should not be called after /stop during preparation")
+
+            m.build_messages = slow_build_messages
+            m.call_model_with_callback = fail_call_model
+
+            ui.start_generation("stop while preparing")
+            assert build_started.wait(1)
+            ui.handle_command("/stop")
+            assert ui.cancel_event.is_set()
+            assert not ui.pending_prompts
+            assert any("discarded 2 queued prompt" in row.get("content", "") for row in ui.messages)
+
+            release_build.set()
+            deadline = time.monotonic() + 2
+            while ui.generating and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+            assert not ui.generating
+            assert not model_called.is_set()
+        finally:
+            release_build.set()
+            m.build_messages = old_build_messages
+            m.call_model_with_callback = old_call_model
+
+
+def test_tui_clear_queue_discards_pending_prompts(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.messages = []
+    ui.scroll = 0
+    ui.dirty = False
+    ui.status = "ready"
+    ui.generating = False
+    ui.pending_prompts = m.collections.deque(["one", "two"])
+
+    ui.handle_command("/clear-queue")
+
+    assert not ui.pending_prompts
+    assert ui.status == "discarded 2 queued prompt(s)"
+    assert ui.messages[-1]["content"] == "discarded 2 queued prompt(s)"
+
+
+def test_tui_stop_closes_active_model_request(m):
+    class Closeable:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    response = Closeable()
+    connection = Closeable()
+    ui = object.__new__(m.MotokoTui)
+    ui.messages = []
+    ui.scroll = 0
+    ui.dirty = False
+    ui.status = "ready"
+    ui.generating = True
+    ui.pending_prompts = m.collections.deque()
+    ui.cancel_event = threading.Event()
+    ui.active_model_lock = threading.Lock()
+    ui.active_model_response = response
+    ui.active_model_connection = connection
+
+    ui.handle_command("/stop")
+
+    assert ui.cancel_event.is_set()
+    assert response.closed
+    assert connection.closed
+    assert ui.messages[-1]["content"] == "stopping current answer"
 
 
 def test_response_feedback_is_private_and_does_not_pollute_conversation(m):

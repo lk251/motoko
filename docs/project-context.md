@@ -168,6 +168,9 @@ Current UI direction:
   with Up/Ctrl+P, including after resuming a saved chat.
 - Brand-new chats that still contain no real chat messages when Motoko exits
   should be pruned instead of polluting the conversation list.
+- `/stop` should cancel the current answer during preparation or streaming and
+  discard queued prompts from accidental paste batches; `/clear-queue` should
+  discard queued prompts without stopping the active answer.
 - Conversation lists should use compact relative times while preserving full
   timestamps in JSON state.
 - Resume/list columns should be readable and compact:
