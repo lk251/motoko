@@ -565,6 +565,15 @@ or pretend to know things that are not in context. She should preserve privacy,
 ask clarifying questions only when useful, and keep a thoughtful, grounded tone.
 """.strip()
 
+MARES_LOGO_ASCII = """
+$$$$$_     g$$$$      y$$$$_     $$$$$$$$$$gy   $$$$$$$$$$  yg$$@@@@@$y
+$@@@@@_   g@@@@@     y@@@@@@_    4@@@PPPPP@@@L  @@@FFFFFFF  @@@F~~~~@@@L
+$@@"@@@, g@@F4@@    _@@@ "@@$,   4@@$     g@@F  @@@ggggggs  $@@gggggggy
+$@@ `@@$y@@F 4@@   _$@@yyyy@@$   4@@@@@@@@@@E   @@@FFFFFFF  `FFPPPPP@@@$
+$@@  `@@@@F  4@@   $@@RRRRRR@@$  4@@E~~~~~@@@L  @@$yyyyyyy  $@@yyyyya@@$
+4RR   `RRF   4RR  #RR~      7RR* 4RRF     4RRL  RRRRRRRRRR  ~RR@@@@RRRF~
+""".strip("\n")
+
 
 ANSI_STYLES = {
     "bold": "1",
@@ -14724,7 +14733,7 @@ HELP_SECTIONS = [
     (
         "Session",
         [
-            ("/help", "open this help; in the TUI press q or Esc to return"),
+            ("/help", "open this help; in the TUI press Enter or Esc to return"),
             ("/about", "show version, model, endpoint, and state paths"),
             ("/", "show a compact command menu"),
             ("/exit", "save and exit"),
@@ -14923,24 +14932,46 @@ def format_help() -> str:
 
 
 def format_about() -> str:
-    return "\n".join(
-        [
-            f"Motoko {APP_VERSION}",
-            f"revision: {app_revision()}",
-            f"identity: {identity_name()}",
-            f"realm: {identity_realm()}",
-            f"assistant color: {assistant_color()}",
-            f"model: {model_name()}",
-            f"model badge: {model_badge()}",
-            f"endpoint: {endpoint()}",
-            format_model_routes(include_defaults=True),
-            background_lanes_text(),
-            f"state: {state_root()}",
-            f"config: {config_root()}",
-            f"permissions: {permission_mode()}",
-            f"spinner: {''.join(spinner_frames()) or 'off'}",
-        ]
-    )
+    return "\n".join(format_about_header() + [
+        "",
+        f"revision: {app_revision()}",
+        f"identity: {identity_name()}",
+        f"realm: {identity_realm()}",
+        f"model: {model_name()}",
+        f"model badge: {model_badge()}",
+        f"endpoint: {endpoint()}",
+        background_lanes_text(),
+        f"state: {state_root()}",
+        f"config: {config_root()}",
+        f"permissions: {permission_mode()}",
+    ])
+
+
+def format_about_header(width: int | None = None) -> list[str]:
+    width = width or shutil.get_terminal_size((100, 24)).columns
+    left = [
+        assistant_label("Motoko"),
+        f"version: {APP_VERSION}",
+        "realm-local terminal assistant",
+        "values: intelligence, competence, craft",
+    ]
+    logo = MARES_LOGO_ASCII.splitlines()
+    logo_width = max(display_width(line) for line in logo)
+    left_width = max(display_width(line) for line in left)
+    gap = 4
+    if width >= left_width + gap + logo_width:
+        rows = []
+        for idx in range(max(len(left), len(logo))):
+            left_text = left[idx] if idx < len(left) else ""
+            logo_text = style(logo[idx], assistant_color(), "bold") if idx < len(logo) else ""
+            pad = max(gap, width - display_width(left_text) - display_width(logo_text))
+            rows.append(left_text + (" " * pad) + logo_text)
+        return rows
+    rows = list(left)
+    rows.append("")
+    for line in logo:
+        rows.append(" " * max(0, width - display_width(line)) + style(line, assistant_color(), "bold"))
+    return rows
 
 
 def format_source_span_detail(span: dict) -> str:
@@ -15974,6 +16005,8 @@ class MotokoTui:
         self.answer_phase = ""
         self.report_running = 0
         self.report_status = ""
+        self.report_token = 0
+        self.active_report_token = 0
         self.maintaining = False
         self.study_running = False
         self.study_status = "study: starting"
@@ -16003,12 +16036,7 @@ class MotokoTui:
                 self.append("system", note)
 
     def seed_messages(self, conv: dict) -> list[dict]:
-        rows = [
-            {
-                "role": "system",
-                "content": "Type / for commands. Use arrows to select menu entries. Ctrl+C exits.",
-            },
-        ]
+        rows = []
         if conv.get("summary"):
             rows.append({"role": "summary", "content": conv.get("summary", "")})
         for msg in conv.get("messages", []):
@@ -16120,7 +16148,7 @@ class MotokoTui:
                 self.running = False
             return
         if self.overlay_lines is not None:
-            if key in {"escape", "q", "Q"}:
+            if key in {"escape", "q", "Q", "\r", "\n"}:
                 self.close_overlay()
                 return
             if key == "up":
@@ -16654,10 +16682,11 @@ class MotokoTui:
         existing = attach_best_cwd_index(self.conv, plan)
         if existing is not None:
             status, _warnings = index_staleness(existing)
-            self.append(
-                "system",
-                f"attached corpus index for {plan['root']}: {existing.get('id')} ({status})",
-            )
+            if status != "fresh":
+                self.append(
+                    "system",
+                    f"attached corpus index for {plan['root']}: {existing.get('id')} ({status})",
+                )
             return
         if cwd_learning_declined_recently(plan["root"], plan["glob"]):
             return
@@ -16795,7 +16824,10 @@ class MotokoTui:
         return buf.getvalue().strip() or "(no output)"
 
     def start_report_command(self, label: str, func) -> None:
-        entry = self.append("system", f"{label}: running...")
+        token = getattr(self, "report_token", 0) + 1
+        self.report_token = token
+        self.active_report_token = token
+        self.open_overlay(label, f"{label}: running...")
         self.report_running += 1
         self.report_status = label
         self.dirty = True
@@ -16803,11 +16835,11 @@ class MotokoTui:
         def worker() -> None:
             try:
                 text = func()
-                self.put_event(("report_done", entry, str(text).strip() or "(no output)"))
+                self.put_event(("report_done", token, label, str(text).strip() or "(no output)"))
             except SystemExit as exc:
-                self.put_event(("report_error", entry, str(exc)))
+                self.put_event(("report_error", token, label, str(exc)))
             except Exception as exc:
-                self.put_event(("report_error", entry, f"{type(exc).__name__}: {exc}"))
+                self.put_event(("report_error", token, label, f"{type(exc).__name__}: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -17000,8 +17032,11 @@ class MotokoTui:
                 self.status = "ready"
                 changed = True
             elif kind == "report_done":
-                entry, text = event[1], event[2]
-                entry["content"] = text
+                token, label, text = event[1], event[2], event[3]
+                if token == getattr(self, "active_report_token", 0):
+                    self.overlay_title = label
+                    self.overlay_lines = text.splitlines() or ["(no output)"]
+                    self.overlay_scroll = 0
                 self.report_running = max(0, self.report_running - 1)
                 if not self.report_running:
                     self.report_status = ""
@@ -17009,9 +17044,11 @@ class MotokoTui:
                         self.status = "ready"
                 changed = True
             elif kind == "report_error":
-                entry, text = event[1], event[2]
-                entry["role"] = "error"
-                entry["content"] = text
+                token, label, text = event[1], event[2], event[3]
+                if token == getattr(self, "active_report_token", 0):
+                    self.overlay_title = label
+                    self.overlay_lines = [f"error {text}"]
+                    self.overlay_scroll = 0
                 self.report_running = max(0, self.report_running - 1)
                 if not self.report_running:
                     self.report_status = ""
@@ -17372,13 +17409,13 @@ class MotokoTui:
         if status_parts:
             title += "  " + "  ".join(status_parts)
         title_lines = wrap_display_line(title, content_width)
-        max_title_lines = max(1, height - (3 + len(dropdown_lines) + 1 + len(input_lines)))
+        max_title_lines = max(1, height - (3 + len(dropdown_lines) + len(input_lines)))
         if len(title_lines) > max_title_lines:
             title_lines = title_lines[:max_title_lines]
             plain = strip_ansi(title_lines[-1])
             title_lines[-1] = plain[: max(0, content_width - 1)].rstrip() + "…"
         title_height = len(title_lines)
-        reserve = title_height + len(dropdown_lines) + 1 + len(input_lines)
+        reserve = title_height + len(dropdown_lines) + len(input_lines)
         body_height = max(3, height - reserve)
         if self.overlay_lines is not None:
             body_lines = self.overlay_display(content_width)
@@ -17401,11 +17438,10 @@ class MotokoTui:
         while len(rows) < title_height + body_height:
             rows.append("")
         rows.extend(dropdown_lines)
-        rows.append(style("─" * content_width, "dim"))
         rows.extend(input_lines)
         screen = "\033[H" + "\n".join(f"{row}\033[K" for row in rows[:height])
         screen += "\033[J"
-        input_start_row = title_height + body_height + len(dropdown_lines) + 2
+        input_start_row = title_height + body_height + len(dropdown_lines) + 1
         cursor_row = min(height, input_start_row + cursor_row_offset)
         screen += f"\033[{cursor_row};{min(content_width, cursor_col)}H\033[?25h"
         self.write(screen)
@@ -17486,10 +17522,12 @@ class MotokoTui:
     def overlay_display(self, width: int) -> list[str]:
         rows = []
         title = self.overlay_title or "help"
-        rows.extend(wrap_display_line(style(title, "purple", "bold") + style("  q/Esc closes", "dim"), width))
+        rows.extend(wrap_display_line(style(title, "purple", "bold") + style("  Enter/Esc closes", "dim"), width))
         rows.append("")
         for raw in self.overlay_lines or []:
-            if raw.endswith(":") and not raw.startswith(" "):
+            if raw.startswith("error "):
+                text = style(raw, "red")
+            elif raw.endswith(":") and not raw.startswith(" "):
                 text = style(raw, "turquoise", "bold")
             elif raw.startswith("  /") or raw.startswith("  motoko"):
                 command, sep, rest = raw.strip().partition("  ")
@@ -18330,7 +18368,8 @@ def maybe_prompt_cwd_learning_for_line_chat(conv: dict) -> None:
     existing = attach_best_cwd_index(conv, plan)
     if existing is not None:
         status, _warnings = index_staleness(existing)
-        print(f"sys attached corpus index for {plan['root']}: {existing.get('id')} ({status})")
+        if status != "fresh":
+            print(f"sys attached corpus index for {plan['root']}: {existing.get('id')} ({status})")
         return
     if cwd_learning_declined_recently(plan["root"], plan["glob"]):
         return

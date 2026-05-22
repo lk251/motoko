@@ -105,6 +105,13 @@ motoko status
 ```
 
 and includes it in the system prompt and `/sources` provenance for each answer.
+`motoko about` is the compact introduction screen: Motoko's name, version,
+brief purpose and development values, the Mares ASCII logo in the assistant
+color, identity/realm, active chat model and endpoint, background lanes, state
+paths, and permissions. In the TUI, `/about` and other report-style commands
+open a temporary page instead of adding report text to the chat view; close the
+page with Enter or Esc. Detailed model route information lives in
+`motoko model-routes` and `/model-routes` instead of `/about`.
 
 ## Permissions
 
@@ -264,8 +271,10 @@ material plus Motoko-owned derived artifacts such as indexes, summaries, chunks,
 topic dossiers, memory dossiers, freshness metadata, and study state. If a
 matching corpus index already exists for the current directory root, Motoko
 attaches it automatically and freshness checks decide whether later background
-refresh is useful. If no matching index exists, the TUI asks whether to learn
-the directory tree. Saying `yes` starts a heavy local-model indexing pass over
+refresh is useful. A fresh automatic attachment stays quiet at startup and is
+visible through `/status` or `/sources`; stale or otherwise actionable index
+state is still shown. If no matching index exists, the TUI asks whether to
+learn the directory tree. Saying `yes` starts a heavy local-model indexing pass over
 all readable text files under that root and stores a separate corpus index for
 that directory. Saying `no` records a short decline cooldown so she does not ask
 again immediately. Binary files and common cache/vendor directories are skipped
@@ -358,6 +367,9 @@ When stdin and stdout are terminals, `motoko` starts in a small stdlib-only TUI:
 the conversation stays above, the composer stays pinned to the bottom, `/`
 opens command suggestions, arrow keys move through suggestions, Enter accepts a
 selection, and typed text remains available while Motoko streams an answer.
+There is no fixed separator between the chat body and the composer. The TUI
+does not print routine startup tips into the conversation body; `/help`,
+`/status`, and `/sources` are the inspectable places for that state.
 Use `/stop` to stop the current streamed answer.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.

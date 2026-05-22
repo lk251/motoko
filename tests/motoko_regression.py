@@ -340,10 +340,15 @@ def test_help_about_and_explicit_memory(m):
         help_text = m.format_help()
         assert "Session:" in help_text
         assert "Memory:" in help_text
-        assert "q or Esc" in help_text
+        assert "Enter or Esc" in help_text
         about = m.format_about()
-        assert "Motoko " in about
+        assert "Motoko" in about
         assert "model badge:" in about
+        assert "values: intelligence, competence, craft" in about
+        assert "$$$$$_" in about
+        assert "Model routes:" not in about
+        assert "assistant color:" not in about
+        assert "spinner:" not in about
         assert m.explicit_memory_candidates("Please remember that I prefer small terminal UIs.") == [
             "I prefer small terminal UIs."
         ]
@@ -364,6 +369,40 @@ def test_help_overlay_closes(m):
     ui.handle_key("q")
     assert ui.overlay_lines is None
     assert ui.dirty
+    ui.open_overlay("about", "Motoko\n\nversion: 0.1.0")
+    ui.handle_key("\n")
+    assert ui.overlay_lines is None
+
+
+def test_tui_about_opens_overlay(m):
+    with isolated_state():
+        conv = m.new_conversation("About overlay")
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.report_token = 0
+        ui.active_report_token = 0
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+
+        ui.handle_command("/about")
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+
+        assert ui.overlay_title == "/about"
+        assert any("Motoko" in line for line in ui.overlay_lines or [])
+        assert any("values: intelligence, competence, craft" in line for line in ui.overlay_lines or [])
+        assert ui.messages == []
 
 
 class FakeHandler(BaseHTTPRequestHandler):
@@ -1696,6 +1735,15 @@ def test_cwd_learning_plan_and_existing_index(m):
             attached = m.attach_best_cwd_index(conv, refreshed)
             assert attached["id"] == "corpus-index"
             assert conv["context_items"][0]["id"] == "corpus-index"
+            ui = object.__new__(m.MotokoTui)
+            ui.conv = m.new_conversation("Quiet Cwd Attach")
+            ui.messages = []
+            ui.scroll = 0
+            ui.dirty = False
+            ui.cwd_index_offer = None
+            ui.maybe_offer_cwd_learning()
+            assert ui.conv["context_items"][0]["id"] == "corpus-index"
+            assert not any("attached corpus index" in row.get("content", "") for row in ui.messages)
         finally:
             os.chdir(old_cwd)
 
@@ -1906,8 +1954,8 @@ def test_tui_seed_messages_renders_full_saved_history_without_redundant_banner(m
     ui = object.__new__(m.MotokoTui)
     rows = ui.seed_messages(conv)
     contents = [row.get("content", "") for row in rows]
-    assert contents[0].startswith("Type / for commands.")
     assert not any("Motoko conversation:" in content for content in contents)
+    assert not any("Type / for commands" in content for content in contents)
     assert any(content == "user turn 0" for content in contents)
     assert any(content == f"user turn {m.MAX_RECENT_MESSAGES + 2}" for content in contents)
 
@@ -2025,20 +2073,33 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         ui.maintaining = False
         ui.report_running = 0
         ui.report_status = ""
+        ui.report_token = 0
+        ui.active_report_token = 0
+        ui.overlay_title = None
+        ui.overlay_lines = None
+        ui.overlay_scroll = 0
         ui.events = m.collections.deque()
         ui.events_lock = threading.Lock()
 
         ui.handle_command("/status")
-        ui.handle_command("/sources")
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+        assert ui.overlay_title == "/status"
+        assert any("identity:" in line for line in ui.overlay_lines or [])
 
+        ui.handle_command("/sources")
         deadline = time.monotonic() + 2
         while ui.report_running and time.monotonic() < deadline:
             ui.drain_events()
             time.sleep(0.01)
         ui.drain_events()
 
-        assert any(row.get("role") == "system" and "identity:" in row.get("content", "") for row in ui.messages)
-        assert any(row.get("role") == "system" and "answer audit" in row.get("content", "") for row in ui.messages)
+        assert ui.overlay_title == "/sources"
+        assert any("answer audit" in line for line in ui.overlay_lines or [])
+        assert ui.messages == []
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
         assert saved_after["messages"] == saved_before["messages"]
@@ -2060,6 +2121,11 @@ def test_tui_report_command_does_not_block_render_thread(m):
         ui.maintaining = False
         ui.report_running = 0
         ui.report_status = ""
+        ui.report_token = 0
+        ui.active_report_token = 0
+        ui.overlay_title = None
+        ui.overlay_lines = None
+        ui.overlay_scroll = 0
         ui.events = m.collections.deque()
         ui.events_lock = threading.Lock()
 
@@ -2076,8 +2142,8 @@ def test_tui_report_command_does_not_block_render_thread(m):
             ui.handle_command("/status")
 
             assert ui.report_running == 1
-            assert ui.messages[-1]["role"] == "system"
-            assert ui.messages[-1]["content"] == "/status: running..."
+            assert ui.overlay_title == "/status"
+            assert ui.overlay_lines == ["/status: running..."]
             assert started.wait(1)
 
             release.set()
@@ -2087,7 +2153,7 @@ def test_tui_report_command_does_not_block_render_thread(m):
                 time.sleep(0.01)
             ui.drain_events()
             assert ui.report_running == 0
-            assert ui.messages[-1]["content"] == "identity: Motoko\nmodel status source: test"
+            assert ui.overlay_lines == ["identity: Motoko", "model status source: test"]
         finally:
             release.set()
             m.format_status = old_format_status
@@ -2261,6 +2327,11 @@ def test_retrieval_preview_shows_context_without_model_call(m):
         ui.maintaining = False
         ui.report_running = 0
         ui.report_status = ""
+        ui.report_token = 0
+        ui.active_report_token = 0
+        ui.overlay_title = None
+        ui.overlay_lines = None
+        ui.overlay_scroll = 0
         ui.events = m.collections.deque()
         ui.events_lock = threading.Lock()
         ui.handle_command("/retrieval-preview tomorrow plan")
@@ -2271,7 +2342,7 @@ def test_retrieval_preview_shows_context_without_model_call(m):
             time.sleep(0.01)
         ui.drain_events()
 
-        assert any("Prepare tomorrow plan" in row.get("content", "") for row in ui.messages)
+        assert any("Prepare tomorrow plan" in line for line in ui.overlay_lines or [])
         assert conv["messages"] == []
 
 

@@ -34,7 +34,8 @@ Design constraints:
   conversation, dossier, index, or chunk was included.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
-- TTY-safe ASCII spinner by default, with braille as explicit opt-in.
+- A quiet TUI header: chat activity appears in the conversation body, background
+  activity stays in the top line, and line-mode spinners are opt-in.
 - TUI model badge showing the active local model/endpoint, such as
   `qwen3.6-27b-mtp:chat` for a per-realm Unix socket or
   `qwen3.6-27b-mtp:8083` for an older loopback endpoint.

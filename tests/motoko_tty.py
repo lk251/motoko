@@ -108,8 +108,9 @@ def main() -> int:
             ui.render(force=True)
             first = read_available(master_fd)
             assert "\x1b[H" in first
-            assert "Motoko" in first
+            assert "PTY Resize Probe" in first
             assert "Suggestions" not in first
+            assert "─" not in first
 
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72

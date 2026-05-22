@@ -197,12 +197,19 @@ Current UI direction:
   conversation state.
 - TUI report commands that may touch indexes, helper processes, route status,
   or retrieval diagnostics should acknowledge Enter immediately and run their
-  report-building work off the input/render path.
+  report-building work off the input/render path. They should open a temporary
+  page, not append routine report text to the chat body.
+- Keep the composer visually close to the chat body; avoid fixed separator
+  lines unless a future terminal architecture clearly needs them.
+- A Codex-style append-only transcript with a bottom composer/status area may
+  be a good future direction because it would make normal terminal scrollback
+  useful, but it is a larger renderer architecture change than the current
+  full-screen stdlib TUI.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
-- The default spinner should be ASCII everywhere. Braille is an explicit opt-in
-  because the Linux TTY/Terminus path can render braille as square fallback
-  glyphs.
+- The TUI should not show a spinner by default. Legacy line-mode spinners are
+  opt-in; use ASCII before braille because the Linux TTY/Terminus path can
+  render braille as square fallback glyphs.
 
 ## Near-Term Next Improvement
 
