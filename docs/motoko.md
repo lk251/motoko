@@ -381,7 +381,8 @@ color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.
 The TUI does not render a spinner or duplicate chat activity in the top status
 line; the in-chat active answer row carries `Preparing` and `Answering` state.
-The top status line includes the model badge, for example
+The top status line starts with the conversation title rather than the
+assistant name. It includes the model badge, for example
 `qwen3.6-27b-mtp:8083`, and reports active memory and background-study phases
 such as
 `mem: proposing(model)`, `bg-light: catalog(cpu)`, or

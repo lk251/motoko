@@ -146,6 +146,8 @@ Current UI direction:
 - The top status line should not duplicate chat activity from the in-chat
   active answer row. It should keep model identity plus background/maintenance
   status such as `bg: idle`, `bg-light`, or `bg-heavy`.
+- The top-left header should start with the conversation title, not the
+  assistant name.
 - Prose in the prompt and main chat should wrap on word boundaries when
   possible; code/preformatted text should remain literal and easy to copy.
 - User input prompt should be just `>`, not `You>`.

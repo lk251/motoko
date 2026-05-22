@@ -17343,8 +17343,7 @@ class MotokoTui:
         input_lines, cursor_row_offset, cursor_col = self.input_display(content_width)
         dropdown_lines = self.dropdown_display(content_width, options)
         title = (
-            f" {assistant_label('Motoko')}  "
-            f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
+            f" {style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
             f"{style(model_badge(), 'dim')}"
         )
         status_parts = []

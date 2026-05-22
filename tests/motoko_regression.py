@@ -1887,6 +1887,8 @@ def test_tui_top_status_omits_chat_phase_and_spinner(m):
 
         screen = m.strip_ansi(captured[-1])
         first_line = screen.splitlines()[0]
+        assert "Motoko" not in first_line
+        assert "Status Test" in first_line
         assert "chat:" not in first_line
         assert "/ chat" not in first_line
         assert "bg: idle" in first_line
