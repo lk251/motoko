@@ -2085,6 +2085,31 @@ def test_tui_seed_messages_renders_full_saved_history_without_redundant_banner(m
     assert any(content == f"user turn {m.MAX_RECENT_MESSAGES + 2}" for content in contents)
 
 
+def test_tui_prompt_history_is_seeded_from_saved_user_turns(m):
+    conv = {
+        "id": "prompt-history-test",
+        "title": "Prompt History Test",
+        "messages": [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "second question"},
+        ],
+    }
+    ui = object.__new__(m.MotokoTui)
+    ui.history = ui.seed_input_history(conv)
+    ui.history_index = None
+    ui.input_buffer = ""
+    ui.cursor = 0
+
+    ui.history_up()
+    assert ui.input_buffer == "second question"
+    assert ui.cursor == len("second question")
+
+    ui.history_up()
+    assert ui.input_buffer == "first question"
+    assert ui.cursor == len("first question")
+
+
 def test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt(m):
     with isolated_state():
         conv = m.new_conversation("Current")
@@ -2167,6 +2192,23 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert m.read_maintenance_state() is None
         assert m.read_study_state() is None
         assert not m.context_catalog_path().exists()
+
+
+def test_close_conversation_prunes_empty_chats(m):
+    with isolated_state():
+        empty = m.new_conversation()
+        empty["id"] = "empty-chat"
+        m.save_conversation(empty)
+        assert m.conversation_path("empty-chat").exists()
+
+        assert not m.close_conversation(empty)
+        assert not m.conversation_path("empty-chat").exists()
+
+        kept = m.new_conversation()
+        kept["id"] = "kept-chat"
+        kept["messages"] = [{"role": "user", "content": "keep this"}]
+        assert m.close_conversation(kept)
+        assert m.conversation_path("kept-chat").exists()
 
 
 def test_tui_report_commands_do_not_persist_system_output(m):

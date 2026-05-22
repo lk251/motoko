@@ -1901,6 +1901,27 @@ def save_conversation(conv: dict) -> None:
     atomic_write(conversation_path(conv["id"]), json.dumps(conv, ensure_ascii=False, indent=2) + "\n")
 
 
+def conversation_has_chat_content(conv: dict) -> bool:
+    if str(conv.get("summary", "")).strip():
+        return True
+    messages = conv.get("messages", [])
+    for msg in messages if isinstance(messages, list) else []:
+        if isinstance(msg, dict) and str(msg.get("content", "")).strip():
+            return True
+    return False
+
+
+def close_conversation(conv: dict) -> bool:
+    if conversation_has_chat_content(conv):
+        save_conversation(conv)
+        return True
+    conversation_id = str(conv.get("id", "")).strip()
+    if conversation_id:
+        with contextlib.suppress(FileNotFoundError):
+            conversation_path(conversation_id).unlink()
+    return False
+
+
 def list_conversations() -> list[dict]:
     rows = []
     for path in sorted(conversations_dir().glob("*.json"), reverse=True):
@@ -16014,7 +16035,7 @@ class MotokoTui:
         self.input_buffer = ""
         self.cursor = 0
         self.kill_ring = ""
-        self.history: list[str] = []
+        self.history: list[str] = self.seed_input_history(conv)
         self.history_index: int | None = None
         self.scroll = 0
         self.dropdown_index = 0
@@ -16066,6 +16087,28 @@ class MotokoTui:
         for msg in conv.get("messages", []):
             rows.append({"role": msg.get("role", "?"), "content": msg.get("content", "")})
         return rows
+
+    def seed_input_history(self, conv: dict) -> list[str]:
+        history = []
+        messages = conv.get("messages", [])
+        for msg in messages if isinstance(messages, list) else []:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") != "user":
+                continue
+            content = str(msg.get("content", "")).strip()
+            if content and (not history or history[-1] != content):
+                history.append(content)
+        return history[-200:]
+
+    def remember_input_history(self, text: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        if not self.history or self.history[-1] != text:
+            self.history.append(text)
+        if len(self.history) > 200:
+            self.history = self.history[-200:]
 
     def append(self, role: str, content: str) -> dict:
         row = {"role": role, "content": content}
@@ -16167,7 +16210,7 @@ class MotokoTui:
 
     def handle_key(self, key: str) -> None:
         if key == "\x03":
-            save_conversation(self.conv)
+            close_conversation(self.conv)
             self.running = False
             return
         if key == "\x04":  # Ctrl+D
@@ -16176,7 +16219,7 @@ class MotokoTui:
                 self.dropdown_index = 0
                 self.dirty = True
             elif not self.input_buffer:
-                save_conversation(self.conv)
+                close_conversation(self.conv)
                 self.running = False
             return
         if self.overlay_lines is not None:
@@ -16402,7 +16445,7 @@ class MotokoTui:
         if not text:
             self.dirty = True
             return
-        self.history.append(text)
+        self.remember_input_history(text)
         self.submit_text(text)
 
     def submit_text(self, text: str) -> None:
@@ -16433,14 +16476,16 @@ class MotokoTui:
             elif text == "/about":
                 self.start_report_command("/about", format_about)
             elif text == "/exit":
-                save_conversation(self.conv)
+                close_conversation(self.conv)
                 self.running = False
             elif text == "/new" or text.startswith("/new "):
                 title = text[len("/new") :].strip() or None
-                save_conversation(self.conv)
+                close_conversation(self.conv)
                 self.conv = new_conversation(title)
                 save_conversation(self.conv)
                 self.messages = self.seed_messages(self.conv)
+                self.history = self.seed_input_history(self.conv)
+                self.history_index = None
                 self.status = "new conversation"
                 self.append("system", f"new conversation: {self.conv.get('title', 'Untitled')} [{self.conv.get('id', '')}]")
             elif text == "/stop":
@@ -16612,8 +16657,9 @@ class MotokoTui:
                     return
                 report = delete_conversation_and_artifacts(self.conv)
                 self.conv = new_conversation()
-                save_conversation(self.conv)
                 self.messages = self.seed_messages(self.conv)
+                self.history = self.seed_input_history(self.conv)
+                self.history_index = None
                 self.status = "conversation deleted"
                 self.append("system", format_conversation_delete_report(report))
             elif text == "/resume" or text.startswith("/resume "):
@@ -16625,9 +16671,11 @@ class MotokoTui:
                     self.status = "choose a conversation"
                     self.dirty = True
                     return
-                save_conversation(self.conv)
+                close_conversation(self.conv)
                 self.conv = load_conversation(selector)
                 self.messages = self.seed_messages(self.conv)
+                self.history = self.seed_input_history(self.conv)
+                self.history_index = None
                 message_count = len(self.conv.get("messages", []))
                 self.status = "conversation resumed" if message_count else "conversation resumed (0 messages)"
             elif text.startswith("/read "):
@@ -17757,7 +17805,7 @@ def chat_loop(conv: dict) -> None:
             user_text = motoko_input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            save_conversation(conv)
+            close_conversation(conv)
             return
         if not user_text:
             continue
@@ -17768,13 +17816,13 @@ def chat_loop(conv: dict) -> None:
             print_report(format_about())
             continue
         if user_text == "/exit":
-            save_conversation(conv)
+            close_conversation(conv)
             return
         if user_text == "/pause":
             command_pause(None)
             continue
         if user_text == "/new" or user_text.startswith("/new "):
-            save_conversation(conv)
+            close_conversation(conv)
             title = user_text[len("/new") :].strip() or None
             conv = new_conversation(title)
             save_conversation(conv)
@@ -17784,7 +17832,7 @@ def chat_loop(conv: dict) -> None:
             print(format_help())
             continue
         if user_text == "/resume" or user_text.startswith("/resume "):
-            save_conversation(conv)
+            close_conversation(conv)
             selector = user_text[len("/resume") :].strip() or None
             conv = load_conversation(selector)
             print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
@@ -17805,7 +17853,6 @@ def chat_loop(conv: dict) -> None:
                 report = delete_conversation_and_artifacts(conv)
                 print(format_conversation_delete_report(report))
                 conv = new_conversation()
-                save_conversation(conv)
                 print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
             else:
                 print("not deleted")

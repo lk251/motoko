@@ -164,6 +164,10 @@ Current UI direction:
   - `Ctrl+Y` yank killed text;
   - `Ctrl+P` previous suggestion/history;
   - `Ctrl+N` next suggestion/history.
+- Empty prompts should recall prior user prompts from the current conversation
+  with Up/Ctrl+P, including after resuming a saved chat.
+- Brand-new chats that still contain no real chat messages when Motoko exits
+  should be pruned instead of polluting the conversation list.
 - Conversation lists should use compact relative times while preserving full
   timestamps in JSON state.
 - Resume/list columns should be readable and compact:
