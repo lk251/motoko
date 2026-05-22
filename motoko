@@ -14949,28 +14949,19 @@ def format_about() -> str:
 
 def format_about_header(width: int | None = None) -> list[str]:
     width = width or shutil.get_terminal_size((100, 24)).columns
-    left = [
-        assistant_label("Motoko"),
-        f"version: {APP_VERSION}",
-        "realm-local terminal assistant",
-        "values: intelligence, competence, craft",
-    ]
     logo = MARES_LOGO_ASCII.splitlines()
-    logo_width = max(display_width(line) for line in logo)
-    left_width = max(display_width(line) for line in left)
-    gap = 4
-    if width >= left_width + gap + logo_width:
-        rows = []
-        for idx in range(max(len(left), len(logo))):
-            left_text = left[idx] if idx < len(left) else ""
-            logo_text = style(logo[idx], assistant_color(), "bold") if idx < len(logo) else ""
-            pad = max(gap, width - display_width(left_text) - display_width(logo_text))
-            rows.append(left_text + (" " * pad) + logo_text)
-        return rows
-    rows = list(left)
-    rows.append("")
+    rows = []
     for line in logo:
         rows.append(" " * max(0, width - display_width(line)) + style(line, assistant_color(), "bold"))
+    rows.append("")
+    rows.extend(
+        [
+            assistant_label("Motoko"),
+            f"version: {APP_VERSION}",
+            "realm-local terminal assistant",
+            "values: intelligence, competence, craft",
+        ]
+    )
     return rows
 
 
@@ -16019,6 +16010,10 @@ class MotokoTui:
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
         self.last_render = 0.0
+        self.rendered_message_ids: set[int] = set()
+        self.bottom_rows_rendered = 0
+        self.bottom_cursor_row_offset = 0
+        self.overlay_screen_active = False
         self.overlay_title: str | None = None
         self.overlay_lines: list[str] | None = None
         self.overlay_scroll = 0
@@ -16082,6 +16077,14 @@ class MotokoTui:
             self.restore_terminal()
 
     def restore_terminal(self) -> None:
+        try:
+            if getattr(self, "overlay_screen_active", False):
+                self.write("\033[?1049l")
+                self.overlay_screen_active = False
+            else:
+                self.clear_bottom_area()
+        except Exception:
+            pass
         if self.old_termios is not None:
             termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_termios)
             self.old_termios = None
@@ -16876,13 +16879,19 @@ class MotokoTui:
         self.dirty = True
 
     def restore_for_blocking(self) -> None:
+        self.clear_bottom_area()
+        if getattr(self, "overlay_screen_active", False):
+            self.write("\033[?1049l")
+            self.overlay_screen_active = False
         if self.old_termios is not None:
             termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_termios)
-        self.write("\033[?7h\033[?25h\033[0m\033[2J\033[H")
+        self.write("\033[?7h\033[?25h\033[0m\n")
 
     def reenter_after_blocking(self) -> None:
         tty.setcbreak(self.stdin_fd)
         self.write("\033[?25l\033[?7l")
+        self.bottom_rows_rendered = 0
+        self.bottom_cursor_row_offset = 0
 
     def open_overlay(self, title: str, text: str) -> None:
         self.overlay_title = title
@@ -16894,6 +16903,15 @@ class MotokoTui:
         self.overlay_title = None
         self.overlay_lines = None
         self.overlay_scroll = 0
+        self.active_report_token = 0
+        if getattr(self, "overlay_screen_active", False):
+            try:
+                self.write("\033[?1049l")
+            except Exception:
+                pass
+            self.overlay_screen_active = False
+            self.bottom_rows_rendered = 0
+            self.bottom_cursor_row_offset = 0
         self.dirty = True
 
     def start_generation(self, user_text: str) -> None:
@@ -17010,6 +17028,8 @@ class MotokoTui:
                     partial = self.answer_entry.get("content", "")
                     if partial:
                         self.answer_entry["content"] = partial.rstrip() + "\n\n[stopped]"
+                    elif self.answer_entry in self.messages:
+                        self.messages.remove(self.answer_entry)
                 if partial:
                     self.conv["messages"].append(
                         {"role": "assistant", "content": partial.rstrip() + "\n\n[stopped]"}
@@ -17023,11 +17043,14 @@ class MotokoTui:
                 self.status = "answer stopped"
                 changed = True
             elif kind == "error":
+                failed_answer = self.answer_entry
                 self.generating = False
                 self.answer_phase = ""
                 self.answer_entry = None
                 self.answer_started_monotonic = 0.0
                 self.answer_phase_started_monotonic = 0.0
+                if failed_answer is not None and not failed_answer.get("content") and failed_answer in self.messages:
+                    self.messages.remove(failed_answer)
                 self.append("error", event[1])
                 self.status = "ready"
                 changed = True
@@ -17061,7 +17084,6 @@ class MotokoTui:
                 self.status = "ready"
                 self.maintenance_status = ""
                 if notes:
-                    self.messages = self.seed_messages(self.conv)
                     self.append("system", "; ".join(notes))
                 changed = True
             elif kind == "maintenance_error":
@@ -17372,15 +17394,17 @@ class MotokoTui:
         width = max(40, width)
         height = max(12, height)
         content_width = max(20, width - 1)
-        options = self.dropdown_options()
-        if options:
-            self.dropdown_index = min(self.dropdown_index, len(options) - 1)
+        if self.overlay_lines is not None:
+            self.render_overlay_page(content_width, height)
         else:
-            self.dropdown_index = 0
-        input_lines, cursor_row_offset, cursor_col = self.input_display(content_width)
-        dropdown_lines = self.dropdown_display(content_width, options)
+            self.sync_transcript(content_width)
+            self.draw_bottom_area(content_width, height)
+        self.last_render = time.monotonic()
+        self.dirty = False
+
+    def status_display(self, width: int) -> list[str]:
         title = (
-            f" {style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
+            f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
             f"{style(model_badge(), 'dim')}"
         )
         status_parts = []
@@ -17406,47 +17430,112 @@ class MotokoTui:
             status_parts.append(style(f"bg: idle ({self.study_last_note})", "dim"))
         else:
             status_parts.append(style("bg: idle", "dim"))
+        text = title
         if status_parts:
-            title += "  " + "  ".join(status_parts)
-        title_lines = wrap_display_line(title, content_width)
-        max_title_lines = max(1, height - (3 + len(dropdown_lines) + len(input_lines)))
-        if len(title_lines) > max_title_lines:
-            title_lines = title_lines[:max_title_lines]
-            plain = strip_ansi(title_lines[-1])
-            title_lines[-1] = plain[: max(0, content_width - 1)].rstrip() + "…"
-        title_height = len(title_lines)
-        reserve = title_height + len(dropdown_lines) + len(input_lines)
-        body_height = max(3, height - reserve)
-        if self.overlay_lines is not None:
-            body_lines = self.overlay_display(content_width)
-            max_scroll = max(0, len(body_lines) - body_height)
-            self.overlay_scroll = min(self.overlay_scroll, max_scroll)
-            visible = body_lines[self.overlay_scroll : self.overlay_scroll + body_height]
-        else:
-            body_lines = self.body_display(content_width)
-            max_scroll = max(0, len(body_lines) - body_height)
-            self.scroll = min(self.scroll, max_scroll)
-            if self.scroll:
-                start = max(0, len(body_lines) - body_height - self.scroll)
-                visible = body_lines[start : start + body_height]
-            else:
-                visible = body_lines[-body_height:]
+            text += "  " + "  ".join(status_parts)
+        return [style(line, "dim") for line in wrap_display_line(text, width)]
 
+    def clear_bottom_area(self) -> None:
+        rows = int(getattr(self, "bottom_rows_rendered", 0) or 0)
+        if rows <= 0:
+            return
+        offset = min(rows - 1, int(getattr(self, "bottom_cursor_row_offset", 0) or 0))
+        if offset > 0:
+            self.write(f"\033[{offset}A")
+        self.write("\r\033[J")
+        self.bottom_rows_rendered = 0
+        self.bottom_cursor_row_offset = 0
+
+    def write_lines_at_cursor(self, lines: list[str]) -> None:
+        if not lines:
+            return
+        parts = []
+        for idx, line in enumerate(lines):
+            parts.append(f"\r{line}\033[K")
+            if idx + 1 < len(lines):
+                parts.append("\n")
+        self.write("".join(parts))
+
+    def draw_bottom_area(self, width: int, height: int) -> None:
+        self.clear_bottom_area()
+        options = self.dropdown_options()
+        if options:
+            self.dropdown_index = min(self.dropdown_index, len(options) - 1)
+        else:
+            self.dropdown_index = 0
+        input_lines, cursor_row_offset, cursor_col = self.input_display(width)
+        dropdown_lines = self.dropdown_display(width, options)
+        status_lines = self.status_display(width)
+        live_lines = self.live_answer_display(width)
+        max_live = max(0, height - len(dropdown_lines) - len(input_lines) - len(status_lines) - 2)
+        if max_live and len(live_lines) > max_live:
+            live_lines = [style("…", "dim")] + live_lines[-max(1, max_live - 1) :]
+        elif not max_live:
+            live_lines = []
+        lines = []
+        lines.extend(live_lines)
+        lines.extend(dropdown_lines)
+        input_start = len(lines)
+        lines.extend(input_lines)
+        lines.extend(status_lines)
+        lines = lines or [""]
+        self.write_lines_at_cursor(lines)
+        cursor_row = input_start + cursor_row_offset
+        rows_below_cursor = max(0, len(lines) - cursor_row - 1)
+        movement = ""
+        if rows_below_cursor:
+            movement += f"\033[{rows_below_cursor}A"
+        movement += "\r"
+        if cursor_col > 1:
+            movement += f"\033[{min(width, cursor_col) - 1}C"
+        movement += "\033[?25h"
+        self.write(movement)
+        self.bottom_rows_rendered = len(lines)
+        self.bottom_cursor_row_offset = cursor_row
+
+    def sync_transcript(self, width: int) -> None:
+        if not hasattr(self, "rendered_message_ids"):
+            self.rendered_message_ids = set()
         rows = []
-        rows.extend(title_lines)
-        rows.extend(visible)
-        while len(rows) < title_height + body_height:
-            rows.append("")
-        rows.extend(dropdown_lines)
-        rows.extend(input_lines)
-        screen = "\033[H" + "\n".join(f"{row}\033[K" for row in rows[:height])
-        screen += "\033[J"
-        input_start_row = title_height + body_height + len(dropdown_lines) + 1
-        cursor_row = min(height, input_start_row + cursor_row_offset)
-        screen += f"\033[{cursor_row};{min(content_width, cursor_col)}H\033[?25h"
+        for entry in getattr(self, "messages", []):
+            if entry is self.answer_entry and self.generating:
+                continue
+            ident = id(entry)
+            if ident in self.rendered_message_ids:
+                continue
+            rows.extend(self.message_display_lines(entry, width))
+            self.rendered_message_ids.add(ident)
+        if not rows:
+            return
+        self.clear_bottom_area()
+        self.write("".join(f"{row}\033[K\n" for row in rows))
+
+    def live_answer_display(self, width: int) -> list[str]:
+        if self.answer_entry is None or not self.generating:
+            return []
+        phase_started = self.answer_phase_started_monotonic or self.answer_started_monotonic or time.monotonic()
+        lines = [
+            tui_marker(assistant_color(), active=True)
+            + working_text(self.answer_phase, time.monotonic() - phase_started),
+            "",
+        ]
+        content = self.answer_entry.get("content", "")
+        if content:
+            lines.extend(self.message_display_lines(self.answer_entry, width))
+        return lines
+
+    def render_overlay_page(self, width: int, height: int) -> None:
+        self.clear_bottom_area()
+        if not getattr(self, "overlay_screen_active", False):
+            self.write("\033[?1049h")
+            self.overlay_screen_active = True
+        body_lines = self.overlay_display(width)
+        max_scroll = max(0, len(body_lines) - height)
+        self.overlay_scroll = min(self.overlay_scroll, max_scroll)
+        visible = body_lines[self.overlay_scroll : self.overlay_scroll + height]
+        rows = visible + [""] * max(0, height - len(visible))
+        screen = "\033[H" + "\n".join(f"{row}\033[K" for row in rows[:height]) + "\033[J\033[?25h"
         self.write(screen)
-        self.last_render = time.monotonic()
-        self.dirty = False
 
     def study_status_label(self) -> str:
         if self.index_progress:
@@ -17466,57 +17555,65 @@ class MotokoTui:
             return "bg-light: scanning(cpu)"
         return f"bg: {phase}"
 
-    def body_display(self, width: int) -> list[str]:
+    def message_display_lines(self, entry: dict, width: int, *, active_answer: bool = False) -> list[str]:
         lines = []
         code = False
-        for entry in self.messages:
-            role = entry.get("role", "?")
-            content = entry.get("content", "")
-            active_answer = bool(role == "assistant" and entry is self.answer_entry and self.generating)
-            if active_answer:
-                phase_started = self.answer_phase_started_monotonic or self.answer_started_monotonic or time.monotonic()
-                lines.append(
-                    tui_marker(assistant_color(), active=True)
-                    + working_text(self.answer_phase, time.monotonic() - phase_started)
-                )
-                lines.append("")
-            if role == "worked":
-                lines.append(worked_line(str(content), width))
-                lines.append("")
-                continue
-            if active_answer and not content:
-                continue
-            if role == "user":
-                prefix = style("> ", "turquoise", "bold")
-            elif role == "assistant":
-                prefix = tui_marker(assistant_color())
-            elif role == "queued":
-                prefix = style("queued ", "yellow", "bold")
-            elif role == "error":
-                prefix = style("error ", "red", "bold")
-            elif role == "summary":
-                prefix = style("summary ", "magenta", "bold")
-            else:
-                prefix = tui_marker("yellow")
-            wrapped = []
-            for raw_line in content.splitlines() or [""]:
-                if raw_line.startswith("```"):
-                    code = not code
-                    wrapped.extend(wrap_display_line(style(raw_line, "magenta"), width - len(strip_ansi(prefix)), word_wrap=False))
-                    continue
-                if code:
-                    wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix)), word_wrap=False))
-                elif role == "system":
-                    wrapped.extend(wrap_display_line(highlight_report_line(raw_line), width - len(strip_ansi(prefix))))
-                elif raw_line.startswith(("/", "motoko ")):
-                    wrapped.extend(wrap_display_line(style(raw_line, "turquoise"), width - len(strip_ansi(prefix))))
-                elif raw_line.startswith(("- ", "* ", "  /", "  motoko")):
-                    wrapped.extend(wrap_display_line(style(raw_line, "dim"), width - len(strip_ansi(prefix))))
-                else:
-                    wrapped.extend(wrap_display_line(raw_line, width - len(strip_ansi(prefix))))
-            for idx, line in enumerate(wrapped):
-                lines.append((prefix if idx == 0 else " " * len(strip_ansi(prefix))) + line)
+        role = entry.get("role", "?")
+        content = entry.get("content", "")
+        if active_answer:
+            phase_started = self.answer_phase_started_monotonic or self.answer_started_monotonic or time.monotonic()
+            lines.append(
+                tui_marker(assistant_color(), active=True)
+                + working_text(self.answer_phase, time.monotonic() - phase_started)
+            )
             lines.append("")
+        if role == "worked":
+            return [worked_line(str(content), width), ""]
+        if active_answer and not content:
+            return lines
+        if role == "user":
+            prefix = style("> ", "turquoise", "bold")
+        elif role == "assistant":
+            prefix = tui_marker(assistant_color())
+        elif role == "queued":
+            prefix = style("queued ", "yellow", "bold")
+        elif role == "error":
+            prefix = style("error ", "red", "bold")
+        elif role == "summary":
+            prefix = style("summary ", "magenta", "bold")
+        else:
+            prefix = tui_marker("yellow")
+        wrapped = []
+        for raw_line in content.splitlines() or [""]:
+            if raw_line.startswith("```"):
+                code = not code
+                wrapped.extend(wrap_display_line(style(raw_line, "magenta"), width - len(strip_ansi(prefix)), word_wrap=False))
+                continue
+            if code:
+                wrapped.extend(wrap_display_line(style(raw_line, "green"), width - len(strip_ansi(prefix)), word_wrap=False))
+            elif role == "system":
+                wrapped.extend(wrap_display_line(highlight_report_line(raw_line), width - len(strip_ansi(prefix))))
+            elif raw_line.startswith(("/", "motoko ")):
+                wrapped.extend(wrap_display_line(style(raw_line, "turquoise"), width - len(strip_ansi(prefix))))
+            elif raw_line.startswith(("- ", "* ", "  /", "  motoko")):
+                wrapped.extend(wrap_display_line(style(raw_line, "dim"), width - len(strip_ansi(prefix))))
+            else:
+                wrapped.extend(wrap_display_line(raw_line, width - len(strip_ansi(prefix))))
+        for idx, line in enumerate(wrapped):
+            lines.append((prefix if idx == 0 else " " * len(strip_ansi(prefix))) + line)
+        lines.append("")
+        return lines or [""]
+
+    def body_display(self, width: int) -> list[str]:
+        lines = []
+        for entry in self.messages:
+            lines.extend(
+                self.message_display_lines(
+                    entry,
+                    width,
+                    active_answer=bool(entry is self.answer_entry and self.generating),
+                )
+            )
         return lines or [""]
 
     def overlay_display(self, width: int) -> list[str]:
@@ -17533,7 +17630,7 @@ class MotokoTui:
                 command, sep, rest = raw.strip().partition("  ")
                 text = "  " + style(command, "turquoise", "bold") + (sep + style(rest, "dim") if sep else "")
             else:
-                text = raw
+                text = highlight_report_line(raw)
             rows.extend(wrap_display_line(text, width))
         return rows or [""]
 

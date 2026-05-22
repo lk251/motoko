@@ -107,17 +107,19 @@ def main() -> int:
             assert ui.terminal_size().columns == 50
             ui.render(force=True)
             first = read_available(master_fd)
-            assert "\x1b[H" in first
+            assert "\x1b[H" not in first
             assert "PTY Resize Probe" in first
-            assert "Suggestions" not in first
+            assert "resize redraw probe" in first
+            assert "checking pty dimensions" in first
             assert "─" not in first
 
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72
             ui.render(force=True)
             second = read_available(master_fd)
-            assert "\x1b[H" in second
+            assert "\x1b[H" not in second
             assert "PTY Resize Probe" in second
+            assert "resize redraw probe" not in second
             assert first != second
         finally:
             os.close(master_fd)

@@ -143,11 +143,9 @@ Current UI direction:
   labels; the active answer status row uses `● Preparing (...)` or
   `● Answering (...)`, and completed answers leave a dim `Worked for ...`
   separator across the chat width.
-- The top status line should not duplicate chat activity from the in-chat
-  active answer row. It should keep model identity plus background/maintenance
-  status such as `bg: idle`, `bg-light`, or `bg-heavy`.
-- The top-left header should start with the conversation title, not the
-  assistant name.
+- The bottom status line should not duplicate chat activity from the in-chat
+  active answer row. It should keep the conversation title, model identity, and
+  background/maintenance status such as `bg: idle`, `bg-light`, or `bg-heavy`.
 - Prose in the prompt and main chat should wrap on word boundaries when
   possible; code/preformatted text should remain literal and easy to copy.
 - User input prompt should be just `>`, not `You>`.
@@ -201,10 +199,9 @@ Current UI direction:
   page, not append routine report text to the chat body.
 - Keep the composer visually close to the chat body; avoid fixed separator
   lines unless a future terminal architecture clearly needs them.
-- A Codex-style append-only transcript with a bottom composer/status area may
-  be a good future direction because it would make normal terminal scrollback
-  useful, but it is a larger renderer architecture change than the current
-  full-screen stdlib TUI.
+- The TUI uses a Codex-style append-only transcript with a bottom composer and
+  status area. Normal terminal scrollback should show chat history; only the
+  composer/status/live-answer area should be redrawn in place.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
 - The TUI should not show a spinner by default. Legacy line-mode spinners are

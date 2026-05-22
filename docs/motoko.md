@@ -108,7 +108,9 @@ and includes it in the system prompt and `/sources` provenance for each answer.
 `motoko about` is the compact introduction screen: Motoko's name, version,
 brief purpose and development values, the Mares ASCII logo in the assistant
 color, identity/realm, active chat model and endpoint, background lanes, state
-paths, and permissions. In the TUI, `/about` and other report-style commands
+paths, and permissions. The logo is rendered first and right-justified, with
+the Motoko/version/values text below it so narrow terminals do not interleave
+the text with the ASCII art. In the TUI, `/about` and other report-style commands
 open a temporary page instead of adding report text to the chat view; close the
 page with Enter or Esc. Detailed model route information lives in
 `motoko model-routes` and `/model-routes` instead of `/about`.
@@ -289,7 +291,7 @@ model calls so long jobs are easier to anticipate. Multi-round file and corpus
 summaries can still make early estimates rough, so Motoko updates the model-call
 plan as larger reductions are discovered and bases ETA on completed model-call
 timing rather than only on raw file count. While the TUI is learning a corpus,
-the top status reports file/chunk/model-call progress, elapsed time, current
+the bottom status reports file/chunk/model-call progress, elapsed time, current
 model-call time, and ETA; `/indexes` and `/status` also show active durable
 index jobs from Motoko state. The same progress display is used later if an
 attached stale index needs a heavy background refresh.
@@ -363,13 +365,15 @@ motoko help
 motoko chat --line
 ```
 
-When stdin and stdout are terminals, `motoko` starts in a small stdlib-only TUI:
-the conversation stays above, the composer stays pinned to the bottom, `/`
-opens command suggestions, arrow keys move through suggestions, Enter accepts a
-selection, and typed text remains available while Motoko streams an answer.
-There is no fixed separator between the chat body and the composer. The TUI
-does not print routine startup tips into the conversation body; `/help`,
-`/status`, and `/sources` are the inspectable places for that state.
+When stdin and stdout are terminals, `motoko` starts in a small stdlib-only TUI.
+The conversation is an append-only transcript, so normal terminal scrollback in
+TTY, Sway, Foot, or tmux shows chat history instead of old full-screen redraw
+frames. The composer and status area redraw at the bottom, `/` opens command
+suggestions, arrow keys move through suggestions, Enter accepts a selection,
+and typed text remains available while Motoko streams an answer. There is no
+fixed separator between the chat body and the composer. The TUI does not print
+routine startup tips into the conversation body; `/help`, `/status`, and
+`/sources` are the inspectable places for that state.
 Use `/stop` to stop the current streamed answer.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.
@@ -391,9 +395,9 @@ literal.
 Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.
-The TUI does not render a spinner or duplicate chat activity in the top status
-line; the in-chat active answer row carries `Preparing` and `Answering` state.
-The top status line starts with the conversation title rather than the
+The TUI does not render a spinner or duplicate chat activity in the bottom
+status line; the live answer row carries `Preparing` and `Answering` state.
+The bottom status line starts with the conversation title rather than the
 assistant name. It includes the model badge, for example
 `qwen3.6-27b-mtp:8083`, and reports active memory and background-study phases
 such as
@@ -676,7 +680,7 @@ not lose to broad task-signal matches elsewhere in the corpus.
 For document corpora already attached to the active conversation, Motoko may
 also run a heavier background index refresh when an attached index becomes stale
 or when enough new files appear under the indexed root. This work uses the local
-model endpoint for summaries, is shown in the top status bar as
+model endpoint for summaries, is shown in the bottom status line as
 `bg-heavy: indexing(model)`, and queues new prompts until the refresh finishes
 so the chat does not compete with the indexing pass. It is deliberately bounded:
 it only considers already attached indexes, waits for normal idle time, refreshes

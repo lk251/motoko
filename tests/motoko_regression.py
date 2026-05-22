@@ -346,6 +346,7 @@ def test_help_about_and_explicit_memory(m):
         assert "model badge:" in about
         assert "values: intelligence, competence, craft" in about
         assert "$$$$$_" in about
+        assert about.index("$$$$$_") < about.index("version:")
         assert "Model routes:" not in about
         assert "assistant color:" not in about
         assert "spinner:" not in about
@@ -403,6 +404,39 @@ def test_tui_about_opens_overlay(m):
         assert any("Motoko" in line for line in ui.overlay_lines or [])
         assert any("values: intelligence, competence, craft" in line for line in ui.overlay_lines or [])
         assert ui.messages == []
+
+
+def test_tui_overlay_highlights_report_labels(m):
+    class FakeTty:
+        def isatty(self):
+            return True
+
+    old_stdout = m.sys.stdout
+    old_real_stdout = m.sys.__stdout__
+    old_term = os.environ.get("TERM")
+    old_no_color = os.environ.get("NO_COLOR")
+    try:
+        os.environ["TERM"] = "xterm-256color"
+        os.environ.pop("NO_COLOR", None)
+        m.sys.stdout = m.io.StringIO()
+        m.sys.__stdout__ = FakeTty()
+        ui = object.__new__(m.MotokoTui)
+        ui.open_overlay("status", "identity: Motoko\nBackground lanes:\n  /status  show status")
+        rows = ui.overlay_display(80)
+        assert any("\033[" in row and "identity:" in row for row in rows)
+        assert any("\033[" in row and "Background lanes:" in row for row in rows)
+        assert any("\033[" in row and "/status" in row for row in rows)
+    finally:
+        m.sys.stdout = old_stdout
+        m.sys.__stdout__ = old_real_stdout
+        if old_term is None:
+            os.environ.pop("TERM", None)
+        else:
+            os.environ["TERM"] = old_term
+        if old_no_color is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = old_no_color
 
 
 class FakeHandler(BaseHTTPRequestHandler):
@@ -1901,9 +1935,8 @@ def test_tui_alt_backspace_deletes_previous_word(m):
     assert ui.dirty
 
 
-def test_tui_top_status_omits_chat_phase_and_spinner(m):
+def test_tui_bottom_status_omits_chat_phase_and_spinner(m):
     with isolated_state():
-        captured = []
         ui = object.__new__(m.MotokoTui)
         ui.conv = {"title": "Status Test"}
         ui.generating = True
@@ -1915,31 +1948,67 @@ def test_tui_top_status_omits_chat_phase_and_spinner(m):
         ui.study_status = "study: idle"
         ui.study_last_note = ""
         ui.status = "ready"
+        ui.index_progress = None
+
+        status = m.strip_ansi(" ".join(ui.status_display(80)))
+        assert "Motoko" not in status
+        assert "Status Test" in status
+        assert "chat:" not in status
+        assert "/ chat" not in status
+        assert "bg: idle" in status
+
+
+def test_tui_append_renderer_keeps_transcript_in_scrollback(m):
+    with isolated_state():
+        captured = []
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = {"title": "Scrollback Test"}
+        ui.messages = [
+            {"role": "user", "content": "first prompt"},
+            {"role": "assistant", "content": "first answer"},
+        ]
+        ui.rendered_message_ids = set()
+        ui.bottom_rows_rendered = 0
+        ui.bottom_cursor_row_offset = 0
+        ui.overlay_screen_active = False
+        ui.overlay_lines = None
         ui.input_buffer = ""
         ui.cursor = 0
         ui.dropdown_index = 0
-        ui.overlay_lines = None
-        ui.overlay_scroll = 0
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.pending_prompts = m.collections.deque()
+        ui.study_running = False
+        ui.study_status = "study: idle"
+        ui.study_last_note = ""
+        ui.status = "ready"
+        ui.index_progress = None
+        ui.answer_entry = None
         ui.scroll = 0
         ui.last_render = 0.0
         ui.dirty = True
-        ui.index_progress = None
         ui.drain_events = lambda: None
-        ui.terminal_size = lambda: os.terminal_size((80, 16))
-        ui.dropdown_options = lambda: []
-        ui.dropdown_display = lambda width, options: []
-        ui.body_display = lambda width: []
+        ui.terminal_size = lambda: os.terminal_size((80, 12))
         ui.write = captured.append
 
         ui.render()
+        first = m.strip_ansi("".join(captured))
+        assert "\x1b[H" not in "".join(captured)
+        assert "first prompt" in first
+        assert "first answer" in first
+        assert "Scrollback Test" in first
 
-        screen = m.strip_ansi(captured[-1])
-        first_line = screen.splitlines()[0]
-        assert "Motoko" not in first_line
-        assert "Status Test" in first_line
-        assert "chat:" not in first_line
-        assert "/ chat" not in first_line
-        assert "bg: idle" in first_line
+        captured.clear()
+        ui.input_buffer = "draft"
+        ui.cursor = len("draft")
+        ui.dirty = True
+        ui.render()
+        second = m.strip_ansi("".join(captured))
+        assert "first prompt" not in second
+        assert "first answer" not in second
+        assert "draft" in second
 
 
 def test_tui_seed_messages_renders_full_saved_history_without_redundant_banner(m):
@@ -4232,6 +4301,8 @@ def main() -> int:
         test_wall_timeout,
         test_help_about_and_explicit_memory,
         test_help_overlay_closes,
+        test_tui_about_opens_overlay,
+        test_tui_overlay_highlights_report_labels,
         test_fake_openai_stream,
         test_unix_socket_model_loading_retries,
         test_unix_socket_connection_reset_retries_while_activating,
@@ -4260,7 +4331,8 @@ def main() -> int:
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
         test_tui_alt_backspace_deletes_previous_word,
-        test_tui_top_status_omits_chat_phase_and_spinner,
+        test_tui_bottom_status_omits_chat_phase_and_spinner,
+        test_tui_append_renderer_keeps_transcript_in_scrollback,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
         test_conversation_delete_removes_owned_derived_artifacts,

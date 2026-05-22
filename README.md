@@ -22,7 +22,7 @@ Design constraints:
 - A low-intensity idle background study loop that refreshes the private context
   catalog without silently crawling new directories or competing with chat.
 - Bounded heavy background index refresh for attached stale indexes or meaningful
-  batches of new files, visible in the TUI status bar.
+  batches of new files, visible in the TUI bottom status line.
 - Heavy corpus indexing records durable progress under Motoko state and reports
   file/chunk/model-call progress with elapsed time and ETA in the TUI.
 - Heavy corpus indexing checkpoints completed files, can pause at durable
@@ -34,8 +34,8 @@ Design constraints:
   conversation, dossier, index, or chunk was included.
 - Quick `/status` and `motoko status` checks for model, memory, and context
   state.
-- A quiet TUI header: chat activity appears in the conversation body, background
-  activity stays in the top line, and line-mode spinners are opt-in.
+- A Codex-style TUI transcript: chat output is append-only so normal terminal
+  scrollback works, while the composer and status line redraw at the bottom.
 - TUI model badge showing the active local model/endpoint, such as
   `qwen3.6-27b-mtp:chat` for a per-realm Unix socket or
   `qwen3.6-27b-mtp:8083` for an older loopback endpoint.
