@@ -92,6 +92,7 @@ MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
 RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
 RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
+INDEX_CLEANUP_SCHEMA_VERSION = "index-cleanup-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
 VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
@@ -218,6 +219,7 @@ QUALITY_TASK_CHECK_LIMIT = 40
 CORPUS_PROFILE_SCHEMA_VERSION = "corpus-profile-v1"
 BACKGROUND_INDEX_UPGRADE_LIMIT = 1
 BACKGROUND_INDEX_REPAIR_LIMIT = 2
+BACKGROUND_INDEX_CLEANUP_LIMIT = 1
 ORG_TODO_KEYWORDS = {
     "TODO",
     "NEXT",
@@ -397,6 +399,7 @@ SLASH_COMMANDS = [
     ("/index-quality [ID]", "show index artifact quality checks"),
     ("/index-repair [ID]", "repair failed index quality artifacts"),
     ("/index-storage", "audit index storage and safe cleanup opportunities"),
+    ("/index-cleanup", "clean stale superseded index snapshots and derived stores"),
     ("/tasks [QUERY]", "show ranked Org task candidates from corpus indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
@@ -462,6 +465,7 @@ SHELL_COMMANDS = [
     "index-quality",
     "index-repair",
     "index-storage",
+    "index-cleanup",
     "topic",
     "deepen",
     "topics",
@@ -544,6 +548,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/index-quality",
     "/index-repair",
     "/index-storage",
+    "/index-cleanup",
     "/tasks",
     "/topics",
     "/dossiers",
@@ -903,7 +908,7 @@ def max_derived_index_bytes(override: str | None = None) -> int:
 
 
 def spinner_frames() -> list[str]:
-    mode = os.environ.get("MOTOKO_SPINNER", "auto").strip().lower()
+    mode = os.environ.get("MOTOKO_SPINNER", "off").strip().lower()
     if mode in {"0", "false", "no", "none", "off"}:
         return []
     if mode == "auto":
@@ -7934,6 +7939,328 @@ def partial_index_cleanup_bytes(partial: dict) -> int:
     return path_size(index_partial_path(index_id)) + tree_size(indexes_dir() / f"{index_id}.chunks")
 
 
+def index_chunk_ordinal(file_item: dict, chunk: dict, fallback: int) -> int:
+    ordinal = safe_int(file_item.get("index_ordinal"))
+    if ordinal > 0:
+        return ordinal
+    chunk_id = str(chunk.get("id", ""))
+    prefix, _sep, _suffix = chunk_id.partition(".")
+    ordinal = safe_int(prefix)
+    return ordinal if ordinal > 0 else fallback
+
+
+def materialize_duplicate_chunks(index: dict) -> dict:
+    index_id = str(index.get("id", "")).strip()
+    report = {
+        "index": index_id,
+        "materialized_chunks": 0,
+        "materialized_bytes": 0,
+        "missing_chunks": 0,
+        "changed": False,
+    }
+    if not index_id:
+        return report
+    changed = False
+    for file_pos, file_item in enumerate(index.get("files", []), 1):
+        if not isinstance(file_item, dict):
+            continue
+        file_materialized = 0
+        file_bytes = 0
+        chunks = file_item.get("chunks", [])
+        for chunk_pos, chunk in enumerate(chunks, 1):
+            if not isinstance(chunk, dict) or not chunk.get("duplicate_of_existing_index"):
+                continue
+            digest = str(chunk.get("content_sha256", "")).strip()
+            text = find_existing_chunk_content(digest, skip_index_id=index_id)
+            if not text:
+                report["missing_chunks"] += 1
+                continue
+            ordinal = index_chunk_ordinal(file_item, chunk, file_pos)
+            chunk_number = safe_int(chunk.get("chunk"), chunk_pos)
+            relpath = chunk_content_relpath(index_id, ordinal, chunk_number)
+            path = indexes_dir() / relpath
+            ensure_private_dir(path.parent)
+            atomic_write(path, text)
+            content_bytes = len(text.encode("utf-8"))
+            chunk["content_path"] = relpath
+            chunk["stored_content_bytes"] = content_bytes
+            chunk["content_bytes"] = safe_int(chunk.get("content_bytes"), content_bytes) or content_bytes
+            chunk["materialized_from_duplicate"] = True
+            chunk["materialized_at"] = now()
+            chunk.pop("duplicate_of_existing_index", None)
+            report["materialized_chunks"] += 1
+            report["materialized_bytes"] += content_bytes
+            file_materialized += 1
+            file_bytes += content_bytes
+            changed = True
+        if file_materialized:
+            file_item["duplicate_chunk_count"] = sum(
+                1 for chunk in chunks if isinstance(chunk, dict) and chunk.get("duplicate_of_existing_index")
+            )
+            file_item["derived_content_bytes"] = safe_int(file_item.get("derived_content_bytes")) + file_bytes
+    if changed:
+        index["derived_content_bytes"] = safe_int(index.get("derived_content_bytes")) + safe_int(report.get("materialized_bytes"))
+        atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        report["changed"] = True
+    return report
+
+
+def json_references_index(value, index_id: str) -> bool:
+    if not index_id:
+        return False
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {
+                "index",
+                "index_id",
+                "source_index",
+                "source_index_id",
+                "created_by_index_id",
+                "source_fingerprint_index",
+            }:
+                if str(item) == index_id:
+                    return True
+                if isinstance(item, dict) and str(item.get("id", "")) == index_id:
+                    return True
+            if key in {"indexes", "index_ids", "source_indexes", "source_index_ids"} and isinstance(item, list):
+                if any(
+                    str(row) == index_id or (isinstance(row, dict) and str(row.get("id", "")) == index_id)
+                    for row in item
+                ):
+                    return True
+            if key == "context_items" and isinstance(item, list):
+                if any(isinstance(row, dict) and row.get("kind") == "index" and str(row.get("id", "")) == index_id for row in item):
+                    return True
+            if json_references_index(item, index_id):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(json_references_index(item, index_id) for item in value)
+    return False
+
+
+def delete_json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> int:
+    removed = 0
+    for path in sorted(directory.glob("*.json")):
+        data = safe_load_json(path)
+        if data is not None and json_references_index(data, index_id):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+                removed += 1
+    return removed
+
+
+def stores_referencing_index(directory: pathlib.Path, index_id: str) -> list[pathlib.Path]:
+    rows = []
+    if not directory.exists():
+        return rows
+    for path in sorted(directory.glob("*.json")):
+        data = safe_load_json(path)
+        if data is not None and json_references_index(data, index_id):
+            rows.append(path)
+    return rows
+
+
+def vector_progress_referencing_index(index_id: str) -> list[pathlib.Path]:
+    root = vector_progress_dir()
+    if not root.exists():
+        return []
+    rows = []
+    for path in sorted(root.glob("*.json")):
+        data = safe_load_json(path)
+        if data is not None and json_references_index(data, index_id):
+            rows.append(path)
+    return rows
+
+
+def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:
+    all_indexes = indexes if indexes is not None else list_indexes()
+    latest_by_key = {index_family_key(index): index for index in latest_indexes_by_family(all_indexes)}
+    candidates = []
+    for index in all_indexes:
+        index_id = str(index.get("id", "")).strip()
+        latest = latest_by_key.get(index_family_key(index))
+        if not index_id or latest is None or latest.get("id") == index_id:
+            continue
+        status, warnings = index_staleness(index)
+        if status != "stale":
+            continue
+        candidates.append(
+            {
+                "index": index,
+                "latest": latest,
+                "status": status,
+                "warnings": warnings,
+                "bytes": path_size(index_path(index_id)) + tree_size(indexes_dir() / f"{index_id}.chunks"),
+            }
+        )
+    candidates.sort(key=lambda row: stored_record_sort_key(row.get("index", {})))
+    return candidates
+
+
+def delete_index_snapshot(index: dict) -> dict:
+    index_id = str(index.get("id", "")).strip()
+    report = {
+        "index": index_id,
+        "index_deleted": False,
+        "chunk_dir_deleted": False,
+        "progress_deleted": False,
+        "partial_deleted": False,
+        "vector_stores_deleted": 0,
+        "evidence_stores_deleted": 0,
+        "vector_progress_deleted": 0,
+        "topics_deleted": 0,
+        "dossiers_deleted": 0,
+        "retrieval_debug_deleted": 0,
+        "retrieval_evals_deleted": 0,
+        "feedback_evals_deleted": 0,
+        "bytes": path_size(index_path(index_id)) + tree_size(indexes_dir() / f"{index_id}.chunks"),
+    }
+    if not index_id:
+        return report
+    for key, path in [
+        ("index_deleted", index_path(index_id)),
+        ("progress_deleted", index_progress_path(index_id)),
+        ("partial_deleted", index_partial_path(index_id)),
+    ]:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            report[key] = True
+    chunk_dir = indexes_dir() / f"{index_id}.chunks"
+    if chunk_dir.exists():
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        report["chunk_dir_deleted"] = True
+    for path in stores_referencing_index(vector_stores_dir(), index_id):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            report["vector_stores_deleted"] += 1
+    for path in stores_referencing_index(evidence_stores_dir(), index_id):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            report["evidence_stores_deleted"] += 1
+    for path in vector_progress_referencing_index(index_id):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            report["vector_progress_deleted"] += 1
+    report["topics_deleted"] = delete_json_artifacts_referencing_index(topics_dir(), index_id)
+    report["dossiers_deleted"] = delete_json_artifacts_referencing_index(dossiers_dir(), index_id)
+    report["retrieval_debug_deleted"] = delete_json_artifacts_referencing_index(retrieval_debug_dir(), index_id)
+    report["retrieval_evals_deleted"] = delete_json_artifacts_referencing_index(retrieval_evals_dir(), index_id)
+    report["feedback_evals_deleted"] = delete_json_artifacts_referencing_index(feedback_evals_dir(), index_id)
+    return report
+
+
+def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False) -> dict:
+    limit = max(0, int(limit or 0))
+    candidates = index_cleanup_candidates()
+    selected = candidates if limit == 0 else candidates[:limit]
+    latest_ids = {str(row.get("latest", {}).get("id", "")) for row in selected}
+    materialized = []
+    if not dry_run:
+        for latest_id in sorted(latest_ids):
+            if not latest_id:
+                continue
+            try:
+                latest = load_index_exact(latest_id)
+            except SystemExit:
+                continue
+            item = materialize_duplicate_chunks(latest)
+            if item.get("changed") or item.get("missing_chunks"):
+                materialized.append(item)
+    deleted = []
+    blocked = []
+    for row in selected:
+        index = row.get("index", {})
+        index_id = str(index.get("id", ""))
+        latest_id = str(row.get("latest", {}).get("id", ""))
+        if dry_run:
+            deleted.append(
+                {
+                    "index": index_id,
+                    "latest": latest_id,
+                    "status": "candidate",
+                    "bytes": row.get("bytes", 0),
+                    "warnings": row.get("warnings", [])[:4],
+                }
+            )
+            continue
+        try:
+            latest = load_index_exact(latest_id)
+        except SystemExit as exc:
+            blocked.append({"index": index_id, "reason": f"latest index unavailable: {exc}"})
+            continue
+        missing = index_artifact_warnings(latest)
+        if missing:
+            blocked.append(
+                {
+                    "index": index_id,
+                    "latest": latest_id,
+                    "reason": "latest index still has unresolved stored chunk references",
+                    "warnings": missing[:4],
+                }
+            )
+            continue
+        deleted.append(delete_index_snapshot(index))
+    if not dry_run and deleted:
+        with contextlib.suppress(FileNotFoundError):
+            context_catalog_path().unlink()
+    return {
+        "schema": INDEX_CLEANUP_SCHEMA_VERSION,
+        "created": now(),
+        "dry_run": dry_run,
+        "candidate_count": len(candidates),
+        "selected_count": len(selected),
+        "materialized": materialized,
+        "deleted": deleted,
+        "blocked": blocked,
+    }
+
+
+def format_index_cleanup_report(report: dict) -> str:
+    lines = [
+        f"index cleanup: {report.get('schema', INDEX_CLEANUP_SCHEMA_VERSION)}",
+        f"created: {report.get('created', '')}",
+        f"mode: {'dry-run' if report.get('dry_run') else 'apply'}",
+        f"candidates: {report.get('candidate_count', 0)} selected: {report.get('selected_count', 0)}",
+    ]
+    for item in report.get("materialized", []):
+        lines.append(
+            f"- materialized latest {item.get('index', '')}: "
+            f"{item.get('materialized_chunks', 0)} chunk(s), {human_bytes(item.get('materialized_bytes', 0))}"
+        )
+        if item.get("missing_chunks"):
+            lines.append(f"  warning: {item.get('missing_chunks', 0)} duplicate chunk(s) still missing source text")
+    for item in report.get("deleted", []):
+        status = item.get("status", "deleted")
+        lines.append(
+            f"- {status}: {item.get('index', '')} "
+            f"{human_bytes(item.get('bytes', 0))}"
+        )
+        extras = []
+        for key, label in [
+            ("vector_stores_deleted", "vector"),
+            ("evidence_stores_deleted", "evidence"),
+            ("topics_deleted", "topics"),
+            ("dossiers_deleted", "dossiers"),
+            ("retrieval_debug_deleted", "retrieval-debug"),
+            ("retrieval_evals_deleted", "retrieval-evals"),
+            ("feedback_evals_deleted", "feedback-evals"),
+        ]:
+            if item.get(key):
+                extras.append(f"{label}:{item.get(key)}")
+        if extras:
+            lines.append("  derived deleted: " + ", ".join(extras))
+        for warning in item.get("warnings", [])[:3]:
+            lines.append(f"  warning: {warning}")
+    for item in report.get("blocked", []):
+        lines.append(f"- blocked: {item.get('index', '')} {item.get('reason', '')}".rstrip())
+        for warning in item.get("warnings", [])[:3]:
+            lines.append(f"  warning: {warning}")
+    if not report.get("deleted") and not report.get("blocked") and not report.get("materialized"):
+        lines.append("no stale superseded index artifacts were safe to clean")
+    return "\n".join(lines)
+
+
 def index_storage_scan_record(
     record: dict,
     *,
@@ -8105,7 +8432,18 @@ def index_storage_audit() -> dict:
     unique_stored_bytes = sum(unique_digest_bytes.values())
     stored_body_duplicates = sum(max(0, len(locations) - 1) for locations in stored_by_digest.values())
     older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
+    stale_superseded_indexes = index_cleanup_candidates(indexes)
     safe_cleanup = []
+    if stale_superseded_indexes:
+        safe_cleanup.append(
+            {
+                "kind": "stale-superseded-indexes",
+                "count": len(stale_superseded_indexes),
+                "bytes": sum(safe_int(item.get("bytes")) for item in stale_superseded_indexes),
+                "safety": "candidate",
+                "action": "run motoko index-cleanup --yes after reviewing that the newer family index is attached/fresh",
+            }
+        )
     if superseded_partials:
         safe_cleanup.append(
             {
@@ -8127,13 +8465,14 @@ def index_storage_audit() -> dict:
             }
         )
     blocked_cleanup = []
-    if older_indexes:
+    blocked_older_count = max(0, len(older_indexes) - len(stale_superseded_indexes))
+    if blocked_older_count:
         blocked_cleanup.append(
             {
                 "kind": "older-complete-indexes",
-                "count": len(older_indexes),
+                "count": blocked_older_count,
                 "safety": "blocked",
-                "reason": "older complete indexes may still hold duplicate-reference targets; migrate to content-addressed storage or verify replacement targets before deleting",
+                "reason": "fresh or unsuperseded older indexes may still hold duplicate-reference targets; cleanup only deletes stale snapshots after materializing the newer replacement",
             }
         )
     if missing_duplicate_refs:
@@ -12888,6 +13227,19 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     if heavy_notes:
         notes.extend(heavy_notes)
         catalog = write_context_catalog()
+    cleanup_limit = env_int("MOTOKO_BACKGROUND_INDEX_CLEANUP_LIMIT", BACKGROUND_INDEX_CLEANUP_LIMIT)
+    if env_flag("MOTOKO_BACKGROUND_INDEX_CLEANUP", True) and cleanup_limit:
+        cleanup_candidates = index_cleanup_candidates()
+        if cleanup_candidates:
+            set_phase("bg-light: cleanup(cpu)", notes=notes)
+            cleanup_report = cleanup_superseded_stale_indexes(limit=cleanup_limit)
+            deleted_count = len(cleanup_report.get("deleted", []) or [])
+            blocked_count = len(cleanup_report.get("blocked", []) or [])
+            if deleted_count:
+                notes.append(f"stale superseded index artifact(s) cleaned: {deleted_count}")
+                catalog = write_context_catalog()
+            if blocked_count:
+                notes.append(f"index cleanup blocked: {blocked_count}")
     evidence_limit = env_int("MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT", BACKGROUND_EVIDENCE_REFRESH_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_EVIDENCE_REFRESH", True) and evidence_limit:
         evidence_candidates = evidence_refresh_candidates()
@@ -14417,6 +14769,7 @@ HELP_SECTIONS = [
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
+            ("/index-cleanup", "clean stale superseded index snapshots and derived stores"),
             ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
             ("/evidence-refresh [ID]", "build missing or stale evidence stores"),
             ("/evidence-query QUERY", "query the latest evidence store"),
@@ -14451,6 +14804,7 @@ HELP_SECTIONS = [
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
             ("/index-storage", "audit index storage and safe cleanup opportunities"),
+            ("/index-cleanup", "clean stale superseded index snapshots and derived stores"),
             ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
             ("/evidence-refresh [ID]", "build missing or stale evidence stores"),
             ("/evidence-query QUERY", "query the latest evidence store"),
@@ -14501,6 +14855,7 @@ HELP_SECTIONS = [
             ("motoko corpus-profile [ID]", "show an index's corpus profile"),
             ("motoko index-quality [ID]", "show index artifact quality checks"),
             ("motoko index-storage", "audit index storage and safe cleanup opportunities"),
+            ("motoko index-cleanup [--yes]", "clean stale superseded index snapshots and derived stores"),
             ("motoko vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("motoko vector-build [ID]", "build a realm-local vector store for an index"),
             ("motoko vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -15631,8 +15986,6 @@ class MotokoTui:
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
         self.last_render = 0.0
-        self.tui_spinner_frames = spinner_frames() or ["*"]
-        self.tui_spinner_index = 0
         self.overlay_title: str | None = None
         self.overlay_lines: list[str] | None = None
         self.overlay_scroll = 0
@@ -15747,6 +16100,8 @@ class MotokoTui:
             "\x1bf": "word-right",
             "\x1bB": "word-left",
             "\x1bF": "word-right",
+            "\x1b\x7f": "word-backspace",
+            "\x1b\b": "word-backspace",
         }
         return keymap.get(text, "escape")
 
@@ -15803,13 +16158,7 @@ class MotokoTui:
             self.dirty = True
             return
         if key == "\x17":  # Ctrl+W
-            left = self.input_buffer[: self.cursor].rstrip()
-            cut = left.rfind(" ") + 1
-            self.kill_ring = self.input_buffer[cut : self.cursor]
-            self.input_buffer = self.input_buffer[:cut] + self.input_buffer[self.cursor :]
-            self.cursor = cut
-            self.dropdown_index = 0
-            self.dirty = True
+            self.delete_word_left()
             return
         if key == "\x0b":  # Ctrl+K
             self.kill_ring = self.input_buffer[self.cursor :]
@@ -15877,6 +16226,9 @@ class MotokoTui:
             self.move_word_right()
             self.dirty = True
             return
+        if key == "word-backspace":
+            self.delete_word_left()
+            return
         if key == "home":
             self.cursor = 0
             self.dirty = True
@@ -15943,6 +16295,17 @@ class MotokoTui:
         while idx < length and not self.input_buffer[idx].isspace():
             idx += 1
         self.cursor = idx
+
+    def delete_word_left(self) -> None:
+        if self.cursor <= 0:
+            return
+        left = self.input_buffer[: self.cursor].rstrip()
+        cut = left.rfind(" ") + 1
+        self.kill_ring = self.input_buffer[cut : self.cursor]
+        self.input_buffer = self.input_buffer[:cut] + self.input_buffer[self.cursor :]
+        self.cursor = cut
+        self.dropdown_index = 0
+        self.dirty = True
 
     def history_up(self) -> None:
         if not self.history:
@@ -16112,6 +16475,15 @@ class MotokoTui:
                 self.append("system", format_index_quality_gate(index_quality_gate(load_index(selector))))
             elif text == "/index-storage":
                 self.append("system", format_index_storage_audit(index_storage_audit()))
+            elif text == "/index-cleanup" or text.startswith("/index-cleanup "):
+                tail = text[len("/index-cleanup") :].strip()
+                apply_cleanup = tail in {"yes", "--yes", "apply"}
+                self.start_report_command(
+                    "/index-cleanup",
+                    lambda: format_index_cleanup_report(
+                        cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)
+                    ),
+                )
             elif text == "/vector-plan" or text.startswith("/vector-plan "):
                 selector = text[len("/vector-plan") :].strip() or None
                 self.start_report_command("/vector-plan", lambda: format_vector_plan(vector_plan(selector)))
@@ -16975,27 +17347,23 @@ class MotokoTui:
             f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
             f"{style(model_badge(), 'dim')}"
         )
-        spinner = self.tui_spinner_frames[self.tui_spinner_index % len(self.tui_spinner_frames)] if self.tui_spinner_frames else ""
         status_parts = []
-        if self.generating:
-            answer_phase = self.answer_phase or "answering"
-            status_parts.append(style(f"{spinner} chat: {answer_phase}", "turquoise"))
-        elif not self.maintaining:
+        if not self.generating and not self.maintaining:
             status_parts.append(style(self.status, "turquoise"))
         if self.report_running:
             label = self.report_status or "report"
             count = f" x{self.report_running}" if self.report_running > 1 else ""
-            status_parts.append(style(f"{spinner} {label}{count}", "turquoise"))
+            status_parts.append(style(f"{label}{count}", "turquoise"))
         if self.maintaining:
             elapsed = int(time.monotonic() - self.maintenance_phase_started)
             phase = self.maintenance_status or self.status
             label = "mem: proposing(model)" if phase == "memory: proposing" else f"mem: {phase}"
-            status_parts.append(style(f"{spinner} {label} {human_duration(elapsed)}".rstrip(), "turquoise"))
+            status_parts.append(style(f"{label} {human_duration(elapsed)}".rstrip(), "turquoise"))
         if self.pending_prompts:
             status_parts.append(style(f"queued:{len(self.pending_prompts)}", "yellow"))
         if self.study_running:
             elapsed = int(time.monotonic() - self.study_phase_started)
-            status_parts.append(style(f"{spinner} {self.study_status_label()} {human_duration(elapsed)}".rstrip(), "turquoise"))
+            status_parts.append(style(f"{self.study_status_label()} {human_duration(elapsed)}".rstrip(), "turquoise"))
         elif self.study_status == "study: off":
             status_parts.append(style("bg: off", "dim"))
         elif self.study_last_note:
@@ -17042,8 +17410,6 @@ class MotokoTui:
         cursor_row = min(height, input_start_row + cursor_row_offset)
         screen += f"\033[{cursor_row};{min(content_width, cursor_col)}H\033[?25h"
         self.write(screen)
-        if self.generating or self.maintaining or self.study_running or self.report_running:
-            self.tui_spinner_index += 1
         self.last_render = time.monotonic()
         self.dirty = False
 
@@ -17334,6 +17700,15 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/index-storage":
             print_report(format_index_storage_audit(index_storage_audit()))
+            continue
+        if user_text == "/index-cleanup" or user_text.startswith("/index-cleanup "):
+            tail = user_text[len("/index-cleanup") :].strip()
+            apply_cleanup = tail in {"yes", "--yes", "apply"}
+            print_report(
+                format_index_cleanup_report(
+                    cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)
+                )
+            )
             continue
         if user_text == "/vector-plan" or user_text.startswith("/vector-plan "):
             selector = user_text[len("/vector-plan") :].strip() or None
@@ -18149,6 +18524,17 @@ def command_index_storage(args) -> None:
         print_report(format_index_storage_audit(audit))
 
 
+def command_index_cleanup(args) -> None:
+    report = cleanup_superseded_stale_indexes(
+        limit=args.limit,
+        dry_run=not args.yes,
+    )
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_index_cleanup_report(report))
+
+
 def command_evidence_build(args) -> None:
     index = load_index(args.index) if args.index else default_vector_index()
     store = build_evidence_store_from_index(index, write=True)
@@ -18780,6 +19166,12 @@ def main(argv: list[str]) -> int:
     index_storage = sub.add_parser("index-storage", help="audit index storage and safe cleanup opportunities")
     index_storage.add_argument("--json", action="store_true", help="print JSON audit")
     index_storage.set_defaults(func=command_index_storage)
+
+    index_cleanup = sub.add_parser("index-cleanup", help="clean stale superseded index snapshots and derived stores")
+    index_cleanup.add_argument("--limit", type=int, default=1, help="maximum stale superseded indexes to clean; 0 means all")
+    index_cleanup.add_argument("--yes", action="store_true", help="apply cleanup; without this Motoko prints a dry-run")
+    index_cleanup.add_argument("--json", action="store_true", help="print JSON report")
+    index_cleanup.set_defaults(func=command_index_cleanup)
 
     vector_plan_cmd = sub.add_parser("vector-plan", help="inspect vector/reranker storage readiness")
     vector_plan_cmd.add_argument("index", nargs="?", help="optional document index to size; defaults to latest indexes")

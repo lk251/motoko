@@ -234,6 +234,8 @@ def test_spinner_and_input_wrapping(m):
     old_spinner = os.environ.get("MOTOKO_SPINNER")
     try:
         os.environ["TERM"] = "xterm-256color"
+        os.environ.pop("MOTOKO_SPINNER", None)
+        assert m.spinner_frames() == []
         os.environ["MOTOKO_SPINNER"] = "auto"
         assert m.spinner_frames() == ["/", "|", "\\", "-"]
         os.environ["MOTOKO_SPINNER"] = "braille"
@@ -1833,6 +1835,63 @@ def test_tui_role_markers_working_and_worked_line(m):
         assert "─" in rows[3]
 
 
+def test_tui_alt_backspace_deletes_previous_word(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.input_buffer = "alpha beta  gamma"
+    ui.cursor = len(ui.input_buffer)
+    ui.kill_ring = ""
+    ui.dropdown_index = 0
+    ui.overlay_lines = None
+    ui.dirty = False
+
+    ui.handle_key("word-backspace")
+
+    assert ui.input_buffer == "alpha beta  "
+    assert ui.cursor == len("alpha beta  ")
+    assert ui.kill_ring == "gamma"
+    assert ui.dropdown_index == 0
+    assert ui.dirty
+
+
+def test_tui_top_status_omits_chat_phase_and_spinner(m):
+    with isolated_state():
+        captured = []
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = {"title": "Status Test"}
+        ui.generating = True
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.pending_prompts = m.collections.deque()
+        ui.study_running = False
+        ui.study_status = "study: idle"
+        ui.study_last_note = ""
+        ui.status = "ready"
+        ui.input_buffer = ""
+        ui.cursor = 0
+        ui.dropdown_index = 0
+        ui.overlay_lines = None
+        ui.overlay_scroll = 0
+        ui.scroll = 0
+        ui.last_render = 0.0
+        ui.dirty = True
+        ui.index_progress = None
+        ui.drain_events = lambda: None
+        ui.terminal_size = lambda: os.terminal_size((80, 16))
+        ui.dropdown_options = lambda: []
+        ui.dropdown_display = lambda width, options: []
+        ui.body_display = lambda width: []
+        ui.write = captured.append
+
+        ui.render()
+
+        screen = m.strip_ansi(captured[-1])
+        first_line = screen.splitlines()[0]
+        assert "chat:" not in first_line
+        assert "/ chat" not in first_line
+        assert "bg: idle" in first_line
+
+
 def test_tui_seed_messages_renders_full_saved_history_without_redundant_banner(m):
     conv = {
         "id": "history-test",
@@ -2297,6 +2356,68 @@ def test_index_storage_audit_reports_duplicates_and_cleanup_plan(m):
         assert "index storage audit:" in text
         assert "duplicate reference(s)" in text
         assert "safe cleanup plan:" in text
+
+
+def test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        a_path = docs / "a.org"
+        b_path = docs / "b.org"
+        a_path.write_text("* TODO Old project\n", encoding="utf-8")
+        b_path.write_text("* TODO Shared stable note\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            first = m.build_document_index(str(docs), name="docs")
+            first["created"] = "2026-05-22T00:00:00+00:00"
+            m.atomic_write(m.index_path(first["id"]), json.dumps(first, ensure_ascii=False, indent=2) + "\n")
+
+            a_path.write_text("* TODO New project\n", encoding="utf-8")
+            second = m.build_document_index(str(docs), name="docs")
+            second["created"] = "2026-05-22T00:01:00+00:00"
+            m.atomic_write(m.index_path(second["id"]), json.dumps(second, ensure_ascii=False, indent=2) + "\n")
+        finally:
+            m.quiet_model = old_quiet_model
+
+        latest_before = m.load_index_exact(second["id"])
+        assert any(
+            chunk.get("duplicate_of_existing_index")
+            for file_item in latest_before.get("files", [])
+            for chunk in file_item.get("chunks", [])
+        )
+        m.atomic_write(
+            m.vector_store_path("vec-old"),
+            json.dumps({"id": "vec-old", "source_index": {"id": first["id"]}}, ensure_ascii=False) + "\n",
+        )
+        m.atomic_write(
+            m.evidence_store_path("ev-old"),
+            json.dumps({"id": "ev-old", "source_index": {"id": first["id"]}}, ensure_ascii=False) + "\n",
+        )
+
+        dry_run = m.cleanup_superseded_stale_indexes(limit=1, dry_run=True)
+        assert dry_run["candidate_count"] == 1
+        assert dry_run["deleted"][0]["status"] == "candidate"
+        assert m.index_path(first["id"]).exists()
+
+        report = m.cleanup_superseded_stale_indexes(limit=1)
+
+        assert report["deleted"][0]["index"] == first["id"]
+        assert report["deleted"][0]["vector_stores_deleted"] == 1
+        assert report["deleted"][0]["evidence_stores_deleted"] == 1
+        assert not m.index_path(first["id"]).exists()
+        assert not (m.indexes_dir() / f"{first['id']}.chunks").exists()
+        assert not m.vector_store_path("vec-old").exists()
+        assert not m.evidence_store_path("ev-old").exists()
+        latest_after = m.load_index_exact(second["id"])
+        assert not m.index_artifact_warnings(latest_after)
+        assert not any(
+            chunk.get("duplicate_of_existing_index")
+            for file_item in latest_after.get("files", [])
+            for chunk in file_item.get("chunks", [])
+        )
 
 
 def test_vector_plan_reports_storage_and_readiness_gates(m):
@@ -4065,6 +4186,8 @@ def main() -> int:
         test_assistant_color_config,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
+        test_tui_alt_backspace_deletes_previous_word,
+        test_tui_top_status_omits_chat_phase_and_spinner,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
         test_conversation_delete_removes_owned_derived_artifacts,
@@ -4075,6 +4198,7 @@ def main() -> int:
         test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_preview_shows_context_without_model_call,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
+        test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,

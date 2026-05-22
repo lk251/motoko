@@ -143,6 +143,9 @@ Current UI direction:
   labels; the active answer status row uses `● Preparing (...)` or
   `● Answering (...)`, and completed answers leave a dim `Worked for ...`
   separator across the chat width.
+- The top status line should not duplicate chat activity from the in-chat
+  active answer row. It should keep model identity plus background/maintenance
+  status such as `bg: idle`, `bg-light`, or `bg-heavy`.
 - Prose in the prompt and main chat should wrap on word boundaries when
   possible; code/preformatted text should remain literal and easy to copy.
 - User input prompt should be just `>`, not `You>`.
@@ -156,6 +159,7 @@ Current UI direction:
   - `Ctrl+F` forward char;
   - `Alt+B` backward word;
   - `Alt+F` forward word;
+  - `Alt+Backspace` delete previous word;
   - `Ctrl+K` kill to end of line;
   - `Ctrl+Y` yank killed text;
   - `Ctrl+P` previous suggestion/history;
@@ -233,8 +237,10 @@ The implementation path is:
 - keep auditing derived index storage alongside vector stores: report duplicate
   reference chunks, unique stored chunk bodies, logical corpus bytes, stored
   bytes, missing duplicate targets, and superseded partial/index cleanup
-  opportunities. Cleanup should start as inspectable safe-GC planning, not
-  aggressive deletion.
+  opportunities. Cleanup must be conservative and inspectable: stale
+  superseded index snapshots may be deleted only after a newer fresh family
+  index exists and any duplicate references in that newer index have been
+  materialized so the replacement remains self-contained.
 - keep embedding/reranker storage behind explicit schema, provenance,
   invalidation, migration, privacy boundaries, eval fixtures, and NixOS service
   contracts.

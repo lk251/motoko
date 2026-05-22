@@ -379,11 +379,11 @@ literal.
 Supporting UI such as titles and command text uses turquoise where terminal
 color support is available. The slash-command dropdown scrolls with the active
 selection so entries past the first visible page remain visible.
-The default spinner is the plain ASCII `/|\-` cycle so Linux TTYs with Terminus
-do not show square fallback glyphs. Set `MOTOKO_SPINNER=braille` only in a
-terminal/font combination known to render braille cells correctly. The top
-status line includes the model badge, for example `qwen3.6-27b-mtp:8083`, and
-reports active memory and background-study phases such as
+The TUI does not render a spinner or duplicate chat activity in the top status
+line; the in-chat active answer row carries `Preparing` and `Answering` state.
+The top status line includes the model badge, for example
+`qwen3.6-27b-mtp:8083`, and reports active memory and background-study phases
+such as
 `mem: proposing(model)`, `bg-light: catalog(cpu)`, or
 `bg-heavy: summarizing chunk file 6/54 chunk 10/100 9% eta 3h12m`.
 
@@ -396,6 +396,7 @@ Ctrl+B  backward char
 Ctrl+F  forward char
 Alt+B   backward word
 Alt+F   forward word
+Alt+Backspace  delete previous word
 Ctrl+K  kill to end of line
 Ctrl+Y  yank killed text
 Ctrl+P  previous dropdown item or history entry
@@ -423,6 +424,9 @@ motoko index-upgrade INDEX_ID
 motoko index-upgrade --all
 motoko index-repair INDEX_ID
 motoko index-repair --all
+motoko index-storage
+motoko index-cleanup
+motoko index-cleanup --yes
 motoko corpus-profile INDEX_ID
 motoko tasks "priority tasks tomorrow"
 motoko permissions
@@ -1008,8 +1012,14 @@ Use `motoko index-storage` or `/index-storage` to audit the derived index store
 before cleanup or vector-store work. The report shows complete and partial
 indexes, duplicate reference chunks, unique stored chunk bodies, logical corpus
 bytes versus physical stored bytes, missing duplicate targets, orphan chunk
-files, and cleanup opportunities. It is intentionally read-only: safe cleanup
-starts as an inspectable plan, not automatic deletion.
+files, and cleanup opportunities. `motoko index-cleanup` is a dry-run; add
+`--yes` to apply it. `/index-cleanup` is also a dry-run, and
+`/index-cleanup yes` applies one bounded cleanup pass. Cleanup is
+conservative: it deletes only stale superseded index snapshots after a newer
+fresh index exists for the same corpus family, and it first materializes any
+duplicate chunk references in that newer index so the replacement remains
+self-contained. The light background loop can run the same bounded cleanup
+automatically after a successful refresh.
 
 Use `motoko evidence-build [INDEX_ID]` or `/evidence-build [INDEX_ID]` to build
 a deterministic hierarchical evidence store for an index. Evidence stores live
@@ -1227,10 +1237,8 @@ Older or ad-hoc environments can still use the loopback MTP Qwen3.6 service:
 http://127.0.0.1:8083/v1/chat/completions
 ```
 
-While waiting for the first streamed response token or while background
-maintenance runs, Motoko shows a small thinking spinner. The default `auto`
-mode uses the tty-safe ASCII spinner; braille remains opt-in because some Linux
-TTY/font paths render braille as square fallback glyphs:
+Line mode can still use the legacy thinking spinner when `MOTOKO_SPINNER` is
+set. The default is off. ASCII and braille remain opt-in:
 
 ```bash
 MOTOKO_SPINNER=auto motoko
