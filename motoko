@@ -326,6 +326,9 @@ PROFILE_SOURCE_CONVERSATIONS = 12
 PROFILE_SOURCE_MEMORIES = 80
 AUTO_INDEX_GLOB = "auto"
 TEXT_SAMPLE_BYTES = 8192
+MOTOKO_IGNORE_FILE = ".motokoignore"
+SOURCE_SELECTION_SCHEMA_VERSION = "source-selection-v1"
+MAX_INDEX_IGNORE_EXAMPLES = 8
 DEEP_RETRIEVAL_TERMS = {
     "all",
     "analyze",
@@ -366,6 +369,9 @@ SKIP_INDEX_DIR_NAMES = {
     ".tox",
     ".cache",
     "node_modules",
+}
+SKIP_INDEX_FILE_NAMES = {
+    MOTOKO_IGNORE_FILE,
 }
 
 SLASH_COMMANDS = [
@@ -5605,30 +5611,267 @@ def is_probably_text_file(path: pathlib.Path) -> bool:
     return control_chars / len(decoded) <= 0.10
 
 
-def iter_index_candidates(root: pathlib.Path, pattern: str | None) -> list[pathlib.Path]:
-    if root.is_file():
-        return [root] if is_probably_text_file(root) else []
+def source_selection_mode(pattern: str | None) -> str:
+    return "auto-text-v1" if (pattern or AUTO_INDEX_GLOB) == AUTO_INDEX_GLOB else "glob-text-v1"
 
+
+def motoko_ignore_path(root: pathlib.Path) -> pathlib.Path | None:
+    if root.is_dir():
+        return root / MOTOKO_IGNORE_FILE
+    return None
+
+
+def parse_motoko_ignore(root: pathlib.Path) -> tuple[list[dict], dict]:
+    ignore_path = motoko_ignore_path(root)
+    info = {
+        "path": str(ignore_path) if ignore_path is not None else "",
+        "exists": False,
+        "sha256": "",
+        "rules": [],
+    }
+    if ignore_path is None or not ignore_path.exists():
+        return [], info
+    try:
+        raw = ignore_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(f"{ignore_path}: must be UTF-8 text: {exc}") from exc
+    except OSError as exc:
+        raise SystemExit(f"{ignore_path}: cannot read corpus ignore file: {exc}") from exc
+
+    info["exists"] = True
+    info["sha256"] = sha256_hex(raw.encode("utf-8"))
+    rules: list[dict] = []
+    for line_number, line in enumerate(raw.splitlines(), 1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("!"):
+            raise SystemExit(
+                f"{ignore_path}:{line_number}: negation patterns are not supported in {MOTOKO_IGNORE_FILE}"
+            )
+        while stripped.startswith("./"):
+            stripped = stripped[2:]
+        anchored = stripped.startswith("/")
+        if anchored:
+            stripped = stripped[1:]
+        directory_only = stripped.endswith("/")
+        stripped = stripped.strip("/")
+        if not stripped:
+            continue
+        rule = {
+            "pattern": stripped,
+            "anchored": anchored,
+            "directory_only": directory_only,
+            "line": line_number,
+        }
+        rules.append(rule)
+    info["rules"] = rules
+    return rules, info
+
+
+def document_selection_policy(root: pathlib.Path, pattern: str | None) -> dict:
     normalized = (pattern or AUTO_INDEX_GLOB).strip() or AUTO_INDEX_GLOB
-    candidates = []
+    rules, ignore_info = parse_motoko_ignore(root)
+    policy = {
+        "schema": SOURCE_SELECTION_SCHEMA_VERSION,
+        "mode": source_selection_mode(normalized),
+        "glob": normalized,
+        "motokoignore": ignore_info,
+        "builtin_skip_dirs": sorted(SKIP_INDEX_DIR_NAMES),
+        "builtin_skip_files": sorted(SKIP_INDEX_FILE_NAMES),
+    }
+    fingerprint_source = {
+        key: value
+        for key, value in policy.items()
+        if key != "motokoignore"
+    }
+    fingerprint_source["motokoignore"] = {
+        "exists": ignore_info.get("exists", False),
+        "sha256": ignore_info.get("sha256", ""),
+        "rules": ignore_info.get("rules", []),
+    }
+    policy["fingerprint"] = sha256_hex(
+        json.dumps(fingerprint_source, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+    return policy
+
+
+def rel_posix(path: pathlib.Path, root: pathlib.Path) -> str:
+    return path.relative_to(root).as_posix()
+
+
+def ignore_directory_match(rule: dict, rel: str, *, is_dir: bool) -> bool:
+    pattern = str(rule.get("pattern", "")).strip("/")
+    if not pattern or not rel:
+        return False
+    parts = rel.split("/")
+    ancestor_count = len(parts) if is_dir else max(0, len(parts) - 1)
+    ancestors = ["/".join(parts[:idx]) for idx in range(1, ancestor_count + 1)]
+    if "/" not in pattern and not rule.get("anchored"):
+        return any(fnmatch.fnmatchcase(ancestor.split("/")[-1], pattern) for ancestor in ancestors)
+    for ancestor in ancestors:
+        if rule.get("anchored"):
+            if fnmatch.fnmatchcase(ancestor, pattern):
+                return True
+        elif (
+            fnmatch.fnmatchcase(ancestor, pattern)
+            or fnmatch.fnmatchcase(ancestor, "*/" + pattern)
+            or ancestor.endswith("/" + pattern)
+        ):
+            return True
+    return False
+
+
+def motoko_ignore_matches(rules: list[dict], rel: str, *, is_dir: bool) -> dict | None:
+    rel = rel.strip("/")
+    if not rel:
+        return None
+    name = rel.split("/")[-1]
+    for rule in rules:
+        pattern = str(rule.get("pattern", "")).strip("/")
+        if not pattern:
+            continue
+        if rule.get("directory_only"):
+            if ignore_directory_match(rule, rel, is_dir=is_dir):
+                return rule
+            continue
+        if "/" not in pattern and not rule.get("anchored"):
+            if fnmatch.fnmatchcase(name, pattern):
+                return rule
+            if is_dir and fnmatch.fnmatchcase(rel, pattern):
+                return rule
+            continue
+        if rule.get("anchored"):
+            if fnmatch.fnmatchcase(rel, pattern):
+                return rule
+        elif (
+            fnmatch.fnmatchcase(rel, pattern)
+            or fnmatch.fnmatchcase(rel, "*/" + pattern)
+            or rel.endswith("/" + pattern)
+        ):
+            return rule
+    return None
+
+
+def ignored_path_record(path: pathlib.Path, root: pathlib.Path, kind: str, rule: dict) -> dict:
+    return {
+        "path": str(path),
+        "relative_path": rel_posix(path, root),
+        "kind": kind,
+        "pattern": rule.get("pattern", ""),
+        "line": rule.get("line", 0),
+    }
+
+
+def index_candidate_report(root: pathlib.Path, pattern: str | None) -> dict:
+    normalized = (pattern or AUTO_INDEX_GLOB).strip() or AUTO_INDEX_GLOB
+    selection_policy = document_selection_policy(root, normalized)
+    if root.is_file():
+        candidates = [root] if is_probably_text_file(root) else []
+        return {
+            "root": str(root),
+            "glob": normalized,
+            "candidates": candidates,
+            "ignored_count": 0,
+            "ignored_file_count": 0,
+            "ignored_dir_count": 0,
+            "ignored_examples": [],
+            "selection_policy": selection_policy,
+        }
+
+    rules = selection_policy.get("motokoignore", {}).get("rules", [])
+    candidates: list[pathlib.Path] = []
+    ignored_examples: list[dict] = []
+    ignored_count = 0
+    ignored_file_count = 0
+    ignored_dir_count = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            dirname
-            for dirname in dirnames
-            if dirname not in SKIP_INDEX_DIR_NAMES
-        ]
         current = pathlib.Path(dirpath)
+        kept_dirs = []
+        for dirname in sorted(dirnames):
+            directory = current / dirname
+            if dirname in SKIP_INDEX_DIR_NAMES:
+                continue
+            rel = rel_posix(directory, root)
+            ignore_rule = motoko_ignore_matches(rules, rel, is_dir=True)
+            if ignore_rule is not None:
+                ignored_count += 1
+                ignored_dir_count += 1
+                if len(ignored_examples) < MAX_INDEX_IGNORE_EXAMPLES:
+                    ignored_examples.append(ignored_path_record(directory, root, "directory", ignore_rule))
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
         for filename in sorted(filenames):
+            if filename in SKIP_INDEX_FILE_NAMES:
+                continue
             candidate = current / filename
-            rel = candidate.relative_to(root)
+            rel = rel_posix(candidate, root)
+            ignore_rule = motoko_ignore_matches(rules, rel, is_dir=False)
+            if ignore_rule is not None:
+                ignored_count += 1
+                ignored_file_count += 1
+                if len(ignored_examples) < MAX_INDEX_IGNORE_EXAMPLES:
+                    ignored_examples.append(ignored_path_record(candidate, root, "file", ignore_rule))
+                continue
             if normalized != AUTO_INDEX_GLOB and not (
                 fnmatch.fnmatch(filename, normalized)
-                or fnmatch.fnmatch(str(rel), normalized)
+                or fnmatch.fnmatch(rel, normalized)
             ):
                 continue
             if is_probably_text_file(candidate):
                 candidates.append(candidate)
-    return sorted(candidates)
+    return {
+        "root": str(root),
+        "glob": normalized,
+        "candidates": sorted(candidates),
+        "ignored_count": ignored_count,
+        "ignored_file_count": ignored_file_count,
+        "ignored_dir_count": ignored_dir_count,
+        "ignored_examples": ignored_examples,
+        "selection_policy": selection_policy,
+    }
+
+
+def iter_index_candidates(root: pathlib.Path, pattern: str | None) -> list[pathlib.Path]:
+    return index_candidate_report(root, pattern)["candidates"]
+
+
+def selection_policy_staleness(index: dict) -> tuple[str, list[str]]:
+    root_text = index.get("root", "")
+    if not root_text:
+        return "unknown", ["index has no root path; cannot verify source selection policy"]
+    root = pathlib.Path(root_text).expanduser()
+    pattern = index.get("glob") or AUTO_INDEX_GLOB
+    try:
+        current = document_selection_policy(root, pattern)
+    except SystemExit as exc:
+        return "stale", [str(exc)]
+    stored = index.get("selection_policy") or {}
+    if stored:
+        if stored.get("fingerprint") != current.get("fingerprint"):
+            return "stale", [f"source selection policy changed for {root}"]
+    elif current.get("motokoignore", {}).get("exists"):
+        return "stale", [f"{MOTOKO_IGNORE_FILE} is present but this index has no stored source selection policy"]
+
+    rules = current.get("motokoignore", {}).get("rules", [])
+    if rules and root.is_dir():
+        ignored_indexed_paths = []
+        for file_item in index.get("files", []):
+            path_text = file_item.get("path", "")
+            if not path_text:
+                continue
+            path = pathlib.Path(path_text).expanduser()
+            try:
+                rel = path.resolve().relative_to(root.resolve()).as_posix()
+            except (OSError, ValueError):
+                continue
+            if motoko_ignore_matches(rules, rel, is_dir=False):
+                ignored_indexed_paths.append(path_text)
+        if ignored_indexed_paths:
+            examples = ", ".join(ignored_indexed_paths[:3])
+            return "stale", [f"source selection policy now excludes indexed file(s): {examples}"]
+    return "fresh", []
 
 
 def apply_index_limits(candidates: list[pathlib.Path]) -> list[pathlib.Path]:
@@ -5670,7 +5913,8 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
     require_allowed(root)
     if not root.exists():
         raise SystemExit(f"not found: {root}")
-    candidates = apply_index_limits(iter_index_candidates(root, pattern))
+    candidate_report = index_candidate_report(root, pattern)
+    candidates = apply_index_limits(candidate_report["candidates"])
     total_bytes = 0
     estimated_chunks = 0
     estimated_file_summary_calls = 0
@@ -5696,6 +5940,11 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
         "estimated_file_summary_calls": estimated_file_summary_calls,
         "estimated_model_calls": estimated_model_calls,
         "largest": largest[:5],
+        "ignored_count": candidate_report.get("ignored_count", 0),
+        "ignored_file_count": candidate_report.get("ignored_file_count", 0),
+        "ignored_dir_count": candidate_report.get("ignored_dir_count", 0),
+        "ignored_examples": candidate_report.get("ignored_examples", []),
+        "selection_policy": candidate_report.get("selection_policy", {}),
     }
 
 
@@ -5708,6 +5957,16 @@ def print_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> None:
     print(f"estimated chunks: {plan['estimated_chunks']}")
     print(f"estimated file-summary model calls: {plan['estimated_file_summary_calls']}")
     print(f"estimated HRAG model calls: {plan['estimated_model_calls']}")
+    if plan.get("ignored_count"):
+        print(
+            f"ignored by {MOTOKO_IGNORE_FILE}: {plan['ignored_count']} "
+            f"({plan.get('ignored_file_count', 0)} file(s), {plan.get('ignored_dir_count', 0)} dir(s))"
+        )
+        for item in plan.get("ignored_examples", [])[:MAX_INDEX_IGNORE_EXAMPLES]:
+            print(
+                f"  line {item.get('line', 0)} {item.get('pattern', '')}: "
+                f"{item.get('relative_path', '')}"
+            )
     if plan["largest"]:
         print("largest files:")
         for size, candidate in plan["largest"]:
@@ -7689,8 +7948,11 @@ def file_staleness(file_item: dict) -> tuple[str, list[str]]:
 
 
 def index_staleness(index: dict) -> tuple[str, list[str]]:
+    selection_status, selection_warnings = selection_policy_staleness(index)
+    if selection_status == "stale":
+        return "stale", selection_warnings
     statuses = []
-    warnings = []
+    warnings = list(selection_warnings)
     for file_item in index.get("files", []):
         status, file_warnings = file_staleness(file_item)
         statuses.append(status)
@@ -11815,13 +12077,16 @@ def document_index_record(
     files: list[dict],
     corpus_summary: str = "",
     candidates: list[pathlib.Path] | None = None,
+    selection_policy: dict | None = None,
 ) -> dict:
+    selection_policy = selection_policy or document_selection_policy(root, pattern)
     index = {
         "id": index_id,
         "name": name or root.name or str(root),
         "root": str(root),
         "glob": pattern or AUTO_INDEX_GLOB,
-        "selection": "auto-text-v1" if (pattern or AUTO_INDEX_GLOB) == AUTO_INDEX_GLOB else "glob-text-v1",
+        "selection": selection_policy.get("mode", source_selection_mode(pattern)),
+        "selection_policy": selection_policy,
         "created": created,
         "technique": "hierarchical retrieval-augmented generation",
         "content_storage": "motoko-state-chunks-v1",
@@ -11874,7 +12139,8 @@ def pause_document_index_if_requested(
     budget: dict,
     files: list[dict],
     candidates: list[pathlib.Path],
-    progress: dict | None,
+    selection_policy: dict | None = None,
+    progress: dict | None = None,
     progress_callback=None,
 ) -> None:
     request = read_work_pause_request()
@@ -11891,6 +12157,7 @@ def pause_document_index_if_requested(
             budget=budget,
             files=files,
             candidates=candidates,
+            selection_policy=selection_policy,
         ),
         status="paused",
         error=message,
@@ -11912,7 +12179,9 @@ def build_document_index(
     require_allowed(root)
     if not root.exists():
         raise SystemExit(f"not a file or directory: {root}")
-    candidates = apply_index_limits(iter_index_candidates(root, pattern))
+    candidate_report = index_candidate_report(root, pattern)
+    candidates = apply_index_limits(candidate_report["candidates"])
+    selection_policy = candidate_report.get("selection_policy", {})
     if not candidates:
         raise SystemExit(f"no ingestible text files matched {pattern or AUTO_INDEX_GLOB} under {root}")
 
@@ -11957,6 +12226,7 @@ def build_document_index(
                         budget=budget,
                         files=files,
                         candidates=candidates,
+                        selection_policy=selection_policy,
                     ),
                     status="running",
                 )
@@ -11969,6 +12239,7 @@ def build_document_index(
                     budget=budget,
                     files=files,
                     candidates=candidates,
+                    selection_policy=selection_policy,
                     progress=progress,
                     progress_callback=progress_callback,
                 )
@@ -11984,6 +12255,7 @@ def build_document_index(
             budget=budget,
             files=files,
             candidates=candidates,
+            selection_policy=selection_policy,
             progress=progress,
             progress_callback=progress_callback,
         )
@@ -12009,6 +12281,7 @@ def build_document_index(
             budget=budget,
             files=files,
             corpus_summary=corpus_summary,
+            selection_policy=selection_policy,
         )
         atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         try:
@@ -12032,6 +12305,7 @@ def build_document_index(
                 budget=budget,
                 files=files,
                 candidates=candidates,
+                selection_policy=selection_policy,
             ),
             status="failed",
             error=f"{type(exc).__name__}: {exc}",
@@ -12062,7 +12336,9 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
     created = partial.get("created") or now()
     if not root.exists():
         raise SystemExit(f"not a file or directory: {root}")
-    candidates = apply_index_limits(iter_index_candidates(root, pattern))
+    candidate_report = index_candidate_report(root, pattern)
+    candidates = apply_index_limits(candidate_report["candidates"])
+    selection_policy = candidate_report.get("selection_policy", {})
     if not candidates:
         raise SystemExit(f"no ingestible text files matched {pattern or AUTO_INDEX_GLOB} under {root}")
     files = list(partial.get("files", []))
@@ -12071,6 +12347,20 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
         for file_item in files
         if file_item.get("path")
     }
+    partial_policy = partial.get("selection_policy") or {}
+    if partial_policy and partial_policy.get("fingerprint") != selection_policy.get("fingerprint"):
+        raise SystemExit(
+            f"cannot resume index {index_id}: source selection policy changed; rebuild this index"
+        )
+    candidate_keys = {str(candidate.resolve()) for candidate in candidates}
+    completed_now_ignored = sorted(
+        path_text for path_text in completed_by_path if path_text not in candidate_keys
+    )
+    if completed_now_ignored:
+        raise SystemExit(
+            f"cannot resume index {index_id}: source selection policy no longer includes "
+            f"{completed_now_ignored[0]}"
+        )
     budget = {
         "max_bytes": int(partial.get("derived_content_budget_bytes") or DEFAULT_MAX_DERIVED_INDEX_BYTES),
         "used_bytes": sum(int(item.get("derived_content_bytes", 0) or 0) for item in files),
@@ -12125,6 +12415,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
                         budget=budget,
                         files=files,
                         candidates=candidates,
+                        selection_policy=selection_policy,
                     ),
                     status="running",
                 )
@@ -12137,6 +12428,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
                     budget=budget,
                     files=files,
                     candidates=candidates,
+                    selection_policy=selection_policy,
                     progress=progress,
                     progress_callback=progress_callback,
                 )
@@ -12151,6 +12443,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
             budget=budget,
             files=files,
             candidates=candidates,
+            selection_policy=selection_policy,
             progress=progress,
             progress_callback=progress_callback,
         )
@@ -12176,6 +12469,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
             budget=budget,
             files=files,
             corpus_summary=corpus_summary,
+            selection_policy=selection_policy,
         )
         atomic_write(index_path(index_id), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         try:
@@ -12199,6 +12493,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
                 budget=budget,
                 files=files,
                 candidates=candidates,
+                selection_policy=selection_policy,
             ),
             status="failed",
             error=f"{type(exc).__name__}: {exc}",
@@ -12625,7 +12920,8 @@ def index_change_summary(index: dict) -> dict:
     }
     try:
         require_allowed(root)
-        candidates = apply_index_limits(iter_index_candidates(root, pattern))
+        candidate_report = index_candidate_report(root, pattern)
+        candidates = apply_index_limits(candidate_report["candidates"])
     except SystemExit as exc:
         return {
             "status": status,
@@ -12636,6 +12932,9 @@ def index_change_summary(index: dict) -> dict:
             "indexed_files": len(known_paths),
             "covered_files": 0,
             "missing_files": [],
+            "ignored_count": 0,
+            "ignored_file_count": 0,
+            "ignored_dir_count": 0,
             "coverage_score": 0,
         }
     current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
@@ -12667,6 +12966,9 @@ def index_change_summary(index: dict) -> dict:
         "indexed_files": indexed_count,
         "covered_files": covered_files,
         "missing_files": missing_paths,
+        "ignored_count": candidate_report.get("ignored_count", 0),
+        "ignored_file_count": candidate_report.get("ignored_file_count", 0),
+        "ignored_dir_count": candidate_report.get("ignored_dir_count", 0),
         "coverage_score": coverage_score,
     }
 
@@ -12682,6 +12984,9 @@ def format_index_health(summary: dict) -> str:
         parts.append(f"new {new_files}")
     if missing_files:
         parts.append(f"missing {missing_files}")
+    ignored = int(summary.get("ignored_count", 0) or 0)
+    if ignored:
+        parts.append(f"ignored {summary.get('ignored_count')}")
     if summary.get("status") == "stale":
         parts.append("stale")
     return " ".join(parts)

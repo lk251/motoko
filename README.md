@@ -46,6 +46,9 @@ Design constraints:
 - Current-directory corpus learning: when started inside an allowlisted
   directory without an attached index, Motoko can ask once whether to learn that
   directory tree and then stores separate corpus artifacts per directory root.
+- Repo-local `.motokoignore` files let a corpus deterministically exclude
+  archival or irrelevant paths from automatic indexing and derived evidence /
+  vector work without changing the document allowlist security boundary.
 - Org-mode corpus artifacts include deterministic heading, TODO, priority,
   deadline, and schedule signals so task-planning questions can retrieve the
   right source chunks even when model summaries are too generic.

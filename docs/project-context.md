@@ -102,6 +102,8 @@ Accepted directions:
 - compacted conversations;
 - explicit profile dossiers from memories and conversations;
 - hierarchical document indexes;
+- deterministic `.motokoignore` corpus-selection rules for excluding archival
+  or irrelevant files from automatic indexing without weakening allowlists;
 - durable progress and ETA reporting for heavy corpus indexing;
 - deterministic Org-mode task/headline/deadline signals inside corpus indexes;
 - deterministic CPU lanes for parsing, fingerprints, corpus health, artifact

@@ -1724,6 +1724,91 @@ def test_index_plan(m):
         assert plan["estimated_model_calls"] == 3
 
 
+def test_motokoignore_filters_index_candidates_and_plan(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "keep.org").write_text("* TODO Keep\n", encoding="utf-8")
+        (docs / "secret.org").write_text("* Archive\n", encoding="utf-8")
+        (docs / "legacy.bak").write_text("old text\n", encoding="utf-8")
+        archive = docs / "archive"
+        archive.mkdir()
+        (archive / "old.org").write_text("* Old\n", encoding="utf-8")
+        (docs / ".motokoignore").write_text(
+            "# Motoko corpus exclusions\narchive/\n*.bak\n/secret.org\n",
+            encoding="utf-8",
+        )
+        m.add_allowed_dir(str(docs))
+
+        candidates = m.iter_index_candidates(docs, m.AUTO_INDEX_GLOB)
+        assert [path.name for path in candidates] == ["keep.org"]
+
+        plan = m.plan_document_index(str(docs))
+        assert plan["files"] == 1
+        assert plan["ignored_count"] == 3
+        assert plan["ignored_file_count"] == 2
+        assert plan["ignored_dir_count"] == 1
+        assert len(plan["selection_policy"]["motokoignore"]["rules"]) == 3
+        ignored = {item["relative_path"] for item in plan["ignored_examples"]}
+        assert {"archive", "legacy.bak", "secret.org"} <= ignored
+
+
+def test_motokoignore_marks_existing_index_stale(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        current = docs / "current.org"
+        legacy = docs / "legacy.org"
+        current.write_text("* Current\n", encoding="utf-8")
+        legacy.write_text("* Legacy\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        index = {
+            "id": "ignore-stale-index",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "selection_policy": m.document_selection_policy(docs, m.AUTO_INDEX_GLOB),
+            "created": m.now(),
+            "corpus_summary": "test corpus",
+            "files": [
+                {
+                    "path": str(current.resolve()),
+                    "source_fingerprint": m.source_fingerprint(current),
+                    "chunks": [],
+                },
+                {
+                    "path": str(legacy.resolve()),
+                    "source_fingerprint": m.source_fingerprint(legacy),
+                    "chunks": [],
+                },
+            ],
+        }
+        status, warnings = m.index_staleness(index)
+        assert status == "fresh"
+        assert warnings == []
+
+        (docs / ".motokoignore").write_text("legacy.org\n", encoding="utf-8")
+        status, warnings = m.index_staleness(index)
+        assert status == "stale"
+        assert any("source selection policy changed" in warning for warning in warnings)
+
+
+def test_motokoignore_rejects_unsupported_negation(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "keep.org").write_text("* Keep\n", encoding="utf-8")
+        (docs / ".motokoignore").write_text("!keep.org\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        try:
+            m.plan_document_index(str(docs))
+        except SystemExit as exc:
+            assert "negation patterns are not supported" in str(exc)
+        else:
+            raise AssertionError("unsupported negation should fail closed")
+
+
 def test_nix_managed_allowdirs_message(m):
     with isolated_state() as tmp:
         config = tmp / "config"

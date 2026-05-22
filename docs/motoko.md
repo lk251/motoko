@@ -905,6 +905,19 @@ files, config files, logs, JSON/YAML/TOML, and extensionless text. It skips
 common cache/vendor directories and files that look binary. The goal is one
 corpus index per source tree, not separate indexes by file extension.
 
+To keep irrelevant or archival material out of a corpus while leaving it in the
+source tree, put a `.motokoignore` file at the root being indexed. This is a
+deterministic corpus-selection rule for automatic indexing and derived
+evidence/vector work, not a security boundary: explicit allowlists still
+control file access, and explicit reads remain separate user actions. Motoko
+supports a small `.gitignore`-like subset: blank lines, `#` comments, file
+globs such as `*.bak`, root-anchored paths such as `/legacy.org`, and directory
+exclusions such as `archive/`. Negation patterns such as `!keep.org`
+intentionally fail closed for now instead of pretending to work. `motoko index
+--plan PATH` reports ignored paths and stores a source-selection fingerprint so
+changing `.motokoignore` makes old indexes stale and eligible for normal
+refresh/rebuild work.
+
 By default, a new reusable index may store up to 200 GiB of derived chunk text
 under Motoko state unless the current user's `~/.config/motoko/config.json`
 sets a smaller `index.max_derived_bytes`. Override this for a reviewed one-off
