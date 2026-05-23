@@ -585,6 +585,10 @@ Current implementation progress:
 - Step 7 now also has memory-dossier list/show report formatting in
   `motoko_core.dossiers`. Dossier loading, selector prompts, model-backed
   dossier construction, and state writes remain in the root script.
+- Step 7 now also has memory-dossier retrieval/source packing in
+  `motoko_core.dossiers`. The root script still loads selected dossiers and
+  supplies retrieval budgets, while core ranks dossier memory/conversation
+  excerpts and returns prompt text plus source records.
 - Step 7 now also has conversation-delete support helpers in
   `motoko_core.conversations`: JSON row filtering for conversation references
   and delete-report formatting. The root script still coordinates the actual

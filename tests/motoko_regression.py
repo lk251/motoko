@@ -281,6 +281,29 @@ def test_core_dossier_formatters_are_injectable(m):
     assert m.format_dossiers_list([]) == "No memory dossiers yet."
 
 
+def test_core_dossier_retrieval_is_injectable(m):
+    dossier = {
+        "id": "dossier-1",
+        "name": "Craft",
+        "query": "craftsmanship",
+        "summary": "Careful work.",
+        "source_memories": [
+            {"id": "mem-other", "importance": 3, "score": 1, "source": "test", "excerpt": "Unrelated note."},
+            {"id": "mem-hit", "importance": 5, "score": 9, "source": "test", "excerpt": "Grounded retrieval matters."},
+        ],
+        "source_conversations": [
+            {"id": "conv-hit", "title": "Retrieval", "updated": "today", "selection": ["relevant"], "excerpt": "retrieval chat"},
+        ],
+    }
+
+    text, sources = m.retrieve_from_dossier_core(dossier, "retrieval", max_chars=1000)
+
+    assert "=== Memory dossier: Craft ===" in text
+    assert text.index("mem-hit") < text.index("mem-other")
+    assert "conversation:conv-hit" in text
+    assert [source["kind"] for source in sources] == ["dossier", "dossier-memory", "dossier-memory", "dossier-conversation"]
+
+
 def test_spinner_and_input_wrapping(m):
     old_term = os.environ.get("TERM")
     old_spinner = os.environ.get("MOTOKO_SPINNER")
