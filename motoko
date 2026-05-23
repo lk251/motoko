@@ -110,6 +110,13 @@ from motoko_core.model_routes import (  # noqa: E402
     route_model_name,
     route_string_value,
 )
+from motoko_core.model_services import (  # noqa: E402
+    compact_local_model_status,
+    format_route_cache_policy,
+    local_model_helper_route,
+    model_service_selector_tokens,
+    parse_local_model_status,
+)
 from motoko_core.state import (  # noqa: E402
     allowdirs_path,
     append_jsonl,
@@ -1856,29 +1863,6 @@ def model_route_badge(route: str = MODEL_ROUTE_CHAT) -> str:
     return "-".join(pieces) + model_endpoint_suffix(info["endpoint"])
 
 
-def format_route_cache_policy(route_info: dict) -> str:
-    policy = route_info.get("cache") if isinstance(route_info.get("cache"), dict) else {}
-    pieces = []
-    if "prompt" in policy:
-        pieces.append("prompt-cache=on" if policy.get("prompt") else "prompt-cache=off")
-    if "reuseMinTokens" in policy:
-        pieces.append(f"reuse>={policy.get('reuseMinTokens')}tok")
-    if "cacheRamMiB" in policy:
-        pieces.append(f"cache-ram={policy.get('cacheRamMiB')}MiB")
-    if "slotPromptSimilarity" in policy:
-        pieces.append(f"similarity={policy.get('slotPromptSimilarity')}")
-    if "metrics" in policy:
-        pieces.append("metrics=on" if policy.get("metrics") else "metrics=off")
-    if policy.get("persistentSlotCache"):
-        pieces.append("persistent-slots=declared")
-    elif "persistentSlotCache" in policy:
-        pieces.append("persistent-slots=off")
-    if route_info.get("metrics_endpoint"):
-        metrics_path = route_info.get("metrics_path") or "/metrics"
-        pieces.append(f"metrics-endpoint={route_info.get('metrics_endpoint')} path={metrics_path}")
-    return "; cache " + ", ".join(pieces) if pieces else ""
-
-
 def configured_model_routes() -> list[str]:
     routes = list(MODEL_ROUTE_DESCRIPTIONS)
     candidate = config_root() / "config.json"
@@ -1891,15 +1875,6 @@ def configured_model_routes() -> list[str]:
         if route in MODEL_ROUTE_DESCRIPTIONS and route not in routes:
             routes.append(route)
     return routes
-
-
-def parse_local_model_status(raw: str) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for line in raw.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            values[key.strip()] = value.strip()
-    return values
 
 
 def model_service_routes() -> list[dict]:
@@ -1960,16 +1935,6 @@ def model_service_routes() -> list[dict]:
         add_route(info, summary=summary)
 
     return list(rows.values())
-
-
-def model_service_selector_tokens(info: dict) -> set[str]:
-    tokens = {
-        str(info.get("route", "")),
-        str(info.get("catalog_route", "")),
-        local_model_helper_route(info),
-    }
-    tokens.update(str(route) for route in info.get("_logical_routes", []))
-    return {token for token in tokens if token}
 
 
 def resolve_model_service_route(selector: str) -> dict:
@@ -13909,10 +13874,6 @@ def model_request_timeout(route_info: dict, timeout: float) -> float:
     )
 
 
-def local_model_helper_route(route_info: dict) -> str:
-    return str(route_info.get("catalog_route") or route_info.get("route", MODEL_ROUTE_CHAT))
-
-
 def run_local_model_helper(command: str, route_info: dict, *, timeout: float = LOCAL_MODEL_HELPER_TIMEOUT_SECONDS) -> str:
     helper = shutil.which("motoko-model")
     if not helper:
@@ -13939,21 +13900,6 @@ def local_model_status_text(route_info: dict) -> str:
         return run_local_model_helper("status", route_info)
     except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         return f"motoko-model status could not run: {exc}"
-
-
-def compact_local_model_status(raw: str) -> str:
-    values: dict[str, str] = {}
-    for line in raw.splitlines():
-        key, sep, value = line.partition("=")
-        if sep:
-            values[key.strip()] = value.strip()
-    if not values:
-        return raw.strip()[:240]
-    fields = []
-    for key in ("route", "socket", "proxy", "backend"):
-        if values.get(key):
-            fields.append(f"{key}={values[key]}")
-    return " ".join(fields) if fields else raw.strip()[:240]
 
 
 def local_model_status_activating(route_info: dict) -> bool:

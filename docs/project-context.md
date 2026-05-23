@@ -443,9 +443,14 @@ Current implementation progress:
   request handling with injected retry/timeouts, streaming event parsing, JSON
   response parsing, cancellation checks, loading/transient detection, and
   shared model-request failure formatting.
-- The remaining step-4 work is to extract model-route cache/metrics report
-  formatting and local `motoko-model` helper diagnostics without weakening the
-  NixOS-owned service boundary or leaking prompt/request/response content.
+- Step 4 now also has pure model-service formatting helpers in
+  `motoko_core.model_services`: helper route names, content-free
+  `motoko-model status` parsing/compaction, route cache-policy report
+  formatting, and service selector token generation.
+- The remaining step-4 work is to extract the local `motoko-model` helper
+  diagnostics and live model-service report/control orchestration without
+  weakening the NixOS-owned service boundary or leaking
+  prompt/request/response content.
 
 ## Roadmap Candidates
 
