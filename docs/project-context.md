@@ -553,6 +553,10 @@ Current implementation progress:
   and delete-report formatting. The root script still coordinates the actual
   deletion across memories, feedback, study jobs, dossiers, profile state, and
   conversation files.
+- Step 8 has started with pure TUI prompt-editing helpers in
+  `motoko_core.input_edit`: word-left/right cursor movement, word deletion,
+  and previous/next input-history selection. Terminal rendering and command
+  dispatch still stay in `motoko`.
 
 ## Roadmap Candidates
 
