@@ -13284,6 +13284,26 @@ def context_attachment_command_request(text: str, conv: dict):
     return None
 
 
+def shared_command_request(text: str, conv: dict):
+    builders = [
+        lambda: report_command_request(text, conv),
+        lambda: evidence_command_request(text, conv),
+        lambda: model_command_request(text),
+        lambda: settings_command_request(text),
+        lambda: index_report_command_request(text, conv),
+        lambda: vector_command_request(text, conv),
+        lambda: topic_dossier_report_command_request(text),
+        lambda: memory_profile_report_command_request(text),
+        lambda: memory_mutation_command_request(text, conv),
+        lambda: context_attachment_command_request(text, conv),
+    ]
+    for build in builders:
+        request = build()
+        if request is not None:
+            return request
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -14167,38 +14187,17 @@ class MotokoTui:
                     self.append("system", "no queued prompts")
             elif text == "/pause":
                 self.request_pause()
-            elif (report_request := report_command_request(text, self.conv)) is not None:
-                label, func = report_request
-                self.start_report_command(label, func)
             elif is_feedback_command(text):
                 rating, note = parse_feedback_command(text)
                 self.append("system", format_feedback_saved(record_response_feedback(self.conv, rating, note)))
-            elif (evidence_request := evidence_command_request(text, self.conv)) is not None:
-                label, func = evidence_request
-                self.start_report_command(label, func)
-            elif (model_request := model_command_request(text)) is not None:
-                label, func = model_request
-                self.start_report_command(label, func)
-            elif (settings_request := settings_command_request(text)) is not None:
-                label, func = settings_request
+            elif (command_request := shared_command_request(text, self.conv)) is not None:
+                label, func = command_request
                 self.start_report_command(label, func)
             elif text == "/repo" or text.startswith("/repo "):
                 self.attach_repo_report(text[len("/repo") :].strip())
-            elif (memory_profile_request := memory_profile_report_command_request(text)) is not None:
-                label, func = memory_profile_request
-                self.start_report_command(label, func)
             elif text == "/profile-refresh":
                 self.run_blocking_command("Refreshing profile dossier...", refresh_profile_dossier)
                 self.append("system", format_profile())
-            elif (index_request := index_report_command_request(text, self.conv)) is not None:
-                label, func = index_request
-                self.start_report_command(label, func)
-            elif (vector_request := vector_command_request(text, self.conv)) is not None:
-                label, func = vector_request
-                self.start_report_command(label, func)
-            elif (topic_dossier_request := topic_dossier_report_command_request(text)) is not None:
-                label, func = topic_dossier_request
-                self.start_report_command(label, func)
             elif text == "/study" or text.startswith("/study "):
                 body = text[len("/study") :].strip()
                 self.run_blocking_command("Studying context...", lambda: self.study_from_body(body))
@@ -14243,12 +14242,6 @@ class MotokoTui:
                 self.history_index = None
                 message_count = len(self.conv.get("messages", []))
                 self.status = "conversation resumed" if message_count else "conversation resumed (0 messages)"
-            elif (attachment_request := context_attachment_command_request(text, self.conv)) is not None:
-                label, func = attachment_request
-                self.start_report_command(label, func)
-            elif (memory_mutation_request := memory_mutation_command_request(text, self.conv)) is not None:
-                label, func = memory_mutation_request
-                self.start_report_command(label, func)
             elif text == "/compact":
                 self.run_blocking_command("Compacting conversation...", lambda: compact_conversation(self.conv))
             elif text == "/memorize":
@@ -15245,9 +15238,9 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/pause":
             command_pause(None)
             continue
-        report_request = report_command_request(user_text, conv)
-        if report_request is not None:
-            _label, func = report_request
+        command_request = shared_command_request(user_text, conv)
+        if command_request is not None:
+            _label, func = command_request
             try:
                 print_report(func())
             except SystemExit as exc:
@@ -15327,30 +15320,6 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             print(f"attached deep topic: {topic['id']}")
             continue
-        index_request = index_report_command_request(user_text, conv)
-        if index_request is not None:
-            _label, func = index_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
-        vector_request = vector_command_request(user_text, conv)
-        if vector_request is not None:
-            _label, func = vector_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
-        topic_dossier_request = topic_dossier_report_command_request(user_text)
-        if topic_dossier_request is not None:
-            _label, func = topic_dossier_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
         if user_text == "/dossier" or user_text.startswith("/dossier "):
             try:
                 dossier = build_dossier_from_chat(conv, user_text[len("/dossier") :])
@@ -15386,30 +15355,6 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        evidence_request = evidence_command_request(user_text, conv)
-        if evidence_request is not None:
-            _label, func = evidence_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
-        model_request = model_command_request(user_text)
-        if model_request is not None:
-            _label, func = model_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
-        settings_request = settings_command_request(user_text)
-        if settings_request is not None:
-            _label, func = settings_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
         if user_text == "/repo" or user_text.startswith("/repo "):
             body = user_text[len("/repo") :].strip()
             parts = body.split(maxsplit=1)
@@ -15426,25 +15371,9 @@ def chat_loop(conv: dict) -> None:
             print(f"attached repo {command} report for {repo}")
             print(item["content"])
             continue
-        memory_profile_request = memory_profile_report_command_request(user_text)
-        if memory_profile_request is not None:
-            _label, func = memory_profile_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
         if user_text == "/profile-refresh":
             profile = refresh_profile_dossier()
             print(f"profile refreshed: {profile.get('updated', '')}")
-            continue
-        memory_mutation_request = memory_mutation_command_request(user_text, conv)
-        if memory_mutation_request is not None:
-            _label, func = memory_mutation_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
             continue
         if user_text == "/memorize":
             memorize_conversation(conv)

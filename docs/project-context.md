@@ -625,6 +625,11 @@ Current implementation progress:
 - Step 9 now also routes context attachment commands (`/read`, `/attach-index`,
   `/attach-topic`, `/attach-dossier`) through a shared helper that mutates the
   current conversation context and returns an explicit status string.
+- Step 9 now has a shared command-request dispatcher for all command families
+  that already expose the `(label, callable)` shape. The TUI and line mode
+  still keep special control-flow commands explicit, but report-like,
+  settings, context-attachment, and memory mutation families now share one
+  dispatch path.
 
 ## Roadmap Candidates
 
