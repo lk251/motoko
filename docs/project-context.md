@@ -612,6 +612,10 @@ Current implementation progress:
   `/profile`, `/personality`) and routes them through a shared report-command
   helper. Memory mutation commands remain explicit until their update helpers
   return structured results instead of printing.
+- Step 9 now also gives memory mutation helpers return-value forms and routes
+  `/remember`, `/forget`, `/memory edit`, `/memory importance`, `/memory pin`,
+  and `/memory unpin` through one shared command helper while preserving the
+  existing CLI print wrappers.
 
 ## Roadmap Candidates
 

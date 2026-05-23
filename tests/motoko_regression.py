@@ -2397,6 +2397,26 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         assert ui.overlay_title == "/profile"
         assert ui.overlay_lines == ["No profile dossier yet. Run 'motoko profile refresh' or /profile-refresh."]
 
+        ui.handle_command("/remember durable preference")
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+        assert ui.overlay_title == "/remember"
+        assert ui.overlay_lines == ["memory saved"]
+        assert m.read_memory_rows()[-1]["text"] == "durable preference"
+
+        ui.handle_command("/memory pin 1")
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+        assert ui.overlay_title == "/memory pin"
+        assert ui.overlay_lines[0].startswith("memory pinned:")
+        assert m.read_memory_rows()[0]["pinned"] is True
+
         old_latest_evidence_store = m.latest_evidence_store
         old_query_evidence_store = m.query_evidence_store
         old_format_evidence_query_report = m.format_evidence_query_report

@@ -3381,17 +3381,21 @@ def resolve_memory(rows: list[dict], selector: str) -> tuple[int, dict]:
     return matches[0]
 
 
-def edit_memory(selector: str, text: str) -> None:
+def edit_memory_text(selector: str, text: str) -> str:
     rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
     idx, row = resolve_memory(rows, selector)
     row["text"] = text.strip()[:MAX_MEMORY_CHARS]
     row["updated"] = now()
     rows[idx] = row
     write_memory_rows(rows)
-    print(f"memory updated: {row['id']}")
+    return f"memory updated: {row['id']}"
 
 
-def set_memory_importance(selector: str, importance: str) -> None:
+def edit_memory(selector: str, text: str) -> None:
+    print(edit_memory_text(selector, text))
+
+
+def set_memory_importance_text(selector: str, importance: str) -> str:
     try:
         value = int(importance)
     except ValueError as exc:
@@ -3404,10 +3408,14 @@ def set_memory_importance(selector: str, importance: str) -> None:
     row["updated"] = now()
     rows[idx] = row
     write_memory_rows(rows)
-    print(f"memory importance updated: {row['id']} -> {value}")
+    return f"memory importance updated: {row['id']} -> {value}"
 
 
-def set_memory_pinned(selector: str, pinned: bool) -> None:
+def set_memory_importance(selector: str, importance: str) -> None:
+    print(set_memory_importance_text(selector, importance))
+
+
+def set_memory_pinned_text(selector: str, pinned: bool) -> str:
     rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
     idx, row = resolve_memory(rows, selector)
     row["pinned"] = pinned
@@ -3415,15 +3423,23 @@ def set_memory_pinned(selector: str, pinned: bool) -> None:
     rows[idx] = row
     write_memory_rows(rows)
     state = "pinned" if pinned else "unpinned"
-    print(f"memory {state}: {row['id']}")
+    return f"memory {state}: {row['id']}"
 
 
-def forget_memory(selector: str) -> None:
+def set_memory_pinned(selector: str, pinned: bool) -> None:
+    print(set_memory_pinned_text(selector, pinned))
+
+
+def forget_memory_text(selector: str) -> str:
     rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
     idx, row = resolve_memory(rows, selector)
     del rows[idx]
     write_memory_rows(rows)
-    print(f"memory forgotten: {row['id']}")
+    return f"memory forgotten: {row['id']}"
+
+
+def forget_memory(selector: str) -> None:
+    print(forget_memory_text(selector))
 
 
 def print_memories(*, verbose: bool = False) -> None:
@@ -13168,6 +13184,41 @@ def memory_profile_report_command_request(text: str):
     return None
 
 
+def memory_mutation_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/remember" and body:
+        def run_remember() -> str:
+            add_memory(body, source="manual-chat", conversation_id=conv["id"])
+            return "memory saved"
+
+        return "/remember", run_remember
+    if primary == "/forget" and body:
+        return "/forget", lambda: forget_memory_text(body)
+    if primary != "/memory":
+        return None
+    parts = body.split(maxsplit=2)
+    subcommand = parts[0] if parts else ""
+    if subcommand == "edit":
+        if len(parts) != 3:
+            return "/memory edit", lambda: "usage: /memory edit ID TEXT"
+        return "/memory edit", lambda: edit_memory_text(parts[1], parts[2])
+    if subcommand == "importance":
+        if len(parts) != 3:
+            return "/memory importance", lambda: "usage: /memory importance ID 1-5"
+        return "/memory importance", lambda: set_memory_importance_text(parts[1], parts[2])
+    if subcommand == "pin":
+        if len(parts) != 2:
+            return "/memory pin", lambda: "usage: /memory pin ID"
+        return "/memory pin", lambda: set_memory_pinned_text(parts[1], True)
+    if subcommand == "unpin":
+        if len(parts) != 2:
+            return "/memory unpin", lambda: "usage: /memory unpin ID"
+        return "/memory unpin", lambda: set_memory_pinned_text(parts[1], False)
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -14152,27 +14203,9 @@ class MotokoTui:
                 self.conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
                 save_conversation(self.conv)
                 self.append("system", f"attached dossier: {dossier['id']}")
-            elif text.startswith("/remember "):
-                add_memory(text[len("/remember ") :], source="manual-chat", conversation_id=self.conv["id"])
-                self.append("system", "memory saved")
-            elif text.startswith("/forget "):
-                self.append("system", self.capture_text(lambda: forget_memory(text[len("/forget ") :].strip())))
-            elif text.startswith("/memory edit "):
-                parts = text.split(maxsplit=3)
-                if len(parts) != 4:
-                    self.append("system", "usage: /memory edit ID TEXT")
-                else:
-                    self.append("system", self.capture_text(lambda: edit_memory(parts[2], parts[3])))
-            elif text.startswith("/memory importance "):
-                parts = text.split(maxsplit=3)
-                if len(parts) != 4:
-                    self.append("system", "usage: /memory importance ID 1-5")
-                else:
-                    self.append("system", self.capture_text(lambda: set_memory_importance(parts[2], parts[3])))
-            elif text.startswith("/memory pin "):
-                self.append("system", self.capture_text(lambda: set_memory_pinned(text[len("/memory pin ") :].strip(), True)))
-            elif text.startswith("/memory unpin "):
-                self.append("system", self.capture_text(lambda: set_memory_pinned(text[len("/memory unpin ") :].strip(), False)))
+            elif (memory_mutation_request := memory_mutation_command_request(text, self.conv)) is not None:
+                label, func = memory_mutation_request
+                self.start_report_command(label, func)
             elif text == "/compact":
                 self.run_blocking_command("Compacting conversation...", lambda: compact_conversation(self.conv))
             elif text == "/memorize":
@@ -15403,36 +15436,13 @@ def chat_loop(conv: dict) -> None:
             profile = refresh_profile_dossier()
             print(f"profile refreshed: {profile.get('updated', '')}")
             continue
-        if user_text.startswith("/remember "):
-            add_memory(
-                user_text[len("/remember ") :],
-                source="manual-chat",
-                conversation_id=conv["id"],
-            )
-            print("memory saved")
-            continue
-        if user_text.startswith("/memory edit "):
-            parts = user_text.split(maxsplit=3)
-            if len(parts) != 4:
-                print("usage: /memory edit ID TEXT")
-                continue
-            edit_memory(parts[2], parts[3])
-            continue
-        if user_text.startswith("/memory importance "):
-            parts = user_text.split(maxsplit=3)
-            if len(parts) != 4:
-                print("usage: /memory importance ID 1-5")
-                continue
-            set_memory_importance(parts[2], parts[3])
-            continue
-        if user_text.startswith("/memory pin "):
-            set_memory_pinned(user_text[len("/memory pin ") :].strip(), True)
-            continue
-        if user_text.startswith("/memory unpin "):
-            set_memory_pinned(user_text[len("/memory unpin ") :].strip(), False)
-            continue
-        if user_text.startswith("/forget "):
-            forget_memory(user_text[len("/forget ") :].strip())
+        memory_mutation_request = memory_mutation_command_request(user_text, conv)
+        if memory_mutation_request is not None:
+            _label, func = memory_mutation_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text == "/memorize":
             memorize_conversation(conv)
