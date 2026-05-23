@@ -98,6 +98,8 @@ from motoko_core.tui_render import (  # noqa: E402
     lines_at_cursor_sequence as render_lines_at_cursor_sequence,
     message_display_lines as render_message_display_lines,
     overlay_display_lines,
+    status_display_lines as render_status_display_lines,
+    study_status_label_core,
 )
 from motoko_core.model_io import (  # noqa: E402
     chat_completion_payload,
@@ -14547,39 +14549,25 @@ class MotokoTui:
         self.dirty = False
 
     def status_display(self, width: int) -> list[str]:
-        title = (
-            f"{style(self.conv.get('title', 'Untitled'), 'turquoise', 'bold')}  "
-            f"{style(model_badge(), 'dim')}"
+        now_value = time.monotonic()
+        return render_status_display_lines(
+            title=str(self.conv.get("title", "Untitled")),
+            model_badge=model_badge(),
+            width=width,
+            idle_status=str(getattr(self, "status", "") or ""),
+            generating=bool(getattr(self, "generating", False)),
+            maintaining=bool(getattr(self, "maintaining", False)),
+            report_running=int(getattr(self, "report_running", 0) or 0),
+            report_status=str(getattr(self, "report_status", "") or ""),
+            maintenance_elapsed=int(now_value - getattr(self, "maintenance_phase_started", now_value)),
+            maintenance_phase=str(getattr(self, "maintenance_status", "") or getattr(self, "status", "")),
+            pending_count=len(getattr(self, "pending_prompts", [])),
+            study_running=bool(getattr(self, "study_running", False)),
+            study_elapsed=int(now_value - getattr(self, "study_phase_started", now_value)),
+            study_status=str(getattr(self, "study_status", "study: idle")),
+            study_status_label=self.study_status_label(),
+            study_last_note=str(getattr(self, "study_last_note", "") or ""),
         )
-        status_parts = []
-        if not self.generating and not self.maintaining:
-            idle_status = str(self.status or "").strip()
-            if idle_status and idle_status != "ready":
-                status_parts.append(style(idle_status, "turquoise"))
-        if self.report_running:
-            label = self.report_status or "report"
-            count = f" x{self.report_running}" if self.report_running > 1 else ""
-            status_parts.append(style(f"{label}{count}", "turquoise"))
-        if self.maintaining:
-            elapsed = int(time.monotonic() - self.maintenance_phase_started)
-            phase = self.maintenance_status or self.status
-            label = "mem: proposing(model)" if phase == "memory: proposing" else f"mem: {phase}"
-            status_parts.append(style(f"{label} {human_duration(elapsed)}".rstrip(), "turquoise"))
-        if self.pending_prompts:
-            status_parts.append(style(f"queued:{len(self.pending_prompts)}", "yellow"))
-        if self.study_running:
-            elapsed = int(time.monotonic() - self.study_phase_started)
-            status_parts.append(style(f"{self.study_status_label()} {human_duration(elapsed)}".rstrip(), "turquoise"))
-        elif self.study_status == "study: off":
-            status_parts.append(style("bg: off", "dim"))
-        elif self.study_last_note:
-            status_parts.append(style(f"bg: idle ({self.study_last_note})", "dim"))
-        else:
-            status_parts.append(style("bg: idle", "dim"))
-        text = title
-        if status_parts:
-            text += "  " + "  ".join(status_parts)
-        return [style(line, "dim") for line in wrap_display_line(text, width)]
 
     def bottom_clear_sequence(self) -> str:
         return render_bottom_clear_sequence(
@@ -14688,22 +14676,11 @@ class MotokoTui:
         self.write(screen)
 
     def study_status_label(self) -> str:
-        if self.index_progress:
-            return format_index_progress_status(self.index_progress)
-        phase = self.study_status
-        if phase.startswith("bg-heavy:"):
-            return phase
-        if "profile" in phase:
-            return "bg-heavy: profile(model)"
-        if "index" in phase:
-            return "bg-heavy: indexing(model)"
-        if "catalog" in phase:
-            return "bg-light: catalog(cpu)"
-        if "planning" in phase:
-            return "bg-light: planning(cpu)"
-        if "scanning" in phase:
-            return "bg-light: scanning(cpu)"
-        return f"bg: {phase}"
+        return study_status_label_core(
+            str(getattr(self, "study_status", "study: idle")),
+            getattr(self, "index_progress", None),
+            progress_formatter=format_index_progress_status,
+        )
 
     def message_display_lines(self, entry: dict, width: int, *, active_answer: bool = False) -> list[str]:
         phase_elapsed = 0.0

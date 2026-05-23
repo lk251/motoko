@@ -11,6 +11,74 @@ from motoko_core.terminal import (
     working_text,
     wrap_display_line,
 )
+from motoko_core.text import human_duration
+
+
+def study_status_label_core(study_status: str, index_progress: dict | None, *, progress_formatter) -> str:
+    if index_progress:
+        return progress_formatter(index_progress)
+    phase = study_status
+    if phase.startswith("bg-heavy:"):
+        return phase
+    if "profile" in phase:
+        return "bg-heavy: profile(model)"
+    if "index" in phase:
+        return "bg-heavy: indexing(model)"
+    if "catalog" in phase:
+        return "bg-light: catalog(cpu)"
+    if "planning" in phase:
+        return "bg-light: planning(cpu)"
+    if "scanning" in phase:
+        return "bg-light: scanning(cpu)"
+    return f"bg: {phase}"
+
+
+def status_display_lines(
+    *,
+    title: str,
+    model_badge: str,
+    width: int,
+    idle_status: str,
+    generating: bool,
+    maintaining: bool,
+    report_running: int,
+    report_status: str,
+    maintenance_elapsed: int,
+    maintenance_phase: str,
+    pending_count: int,
+    study_running: bool,
+    study_elapsed: int,
+    study_status: str,
+    study_status_label: str,
+    study_last_note: str,
+) -> list[str]:
+    text = f"{style(title, 'turquoise', 'bold')}  {style(model_badge, 'dim')}"
+    status_parts = []
+    if not generating and not maintaining:
+        idle_status = str(idle_status or "").strip()
+        if idle_status and idle_status != "ready":
+            status_parts.append(style(idle_status, "turquoise"))
+    if report_running:
+        label = report_status or "report"
+        count = f" x{report_running}" if report_running > 1 else ""
+        status_parts.append(style(f"{label}{count}", "turquoise"))
+    if maintaining:
+        phase = maintenance_phase
+        label = "mem: proposing(model)" if phase == "memory: proposing" else f"mem: {phase}"
+        status_parts.append(style(f"{label} {human_duration(maintenance_elapsed)}".rstrip(), "turquoise"))
+    if pending_count:
+        status_parts.append(style(f"queued:{pending_count}", "yellow"))
+    if study_running:
+        status_parts.append(style(f"{study_status_label} {human_duration(study_elapsed)}".rstrip(), "turquoise"))
+    elif study_status == "study: off":
+        status_parts.append(style("bg: off", "dim"))
+    elif study_last_note:
+        status_parts.append(style(f"bg: idle ({study_last_note})", "dim"))
+    else:
+        status_parts.append(style("bg: idle", "dim"))
+    if status_parts:
+        text += "  " + "  ".join(status_parts)
+    return [style(line, "dim") for line in wrap_display_line(text, width)]
 
 
 def overlay_display_lines(title: str, body_lines: list[str], width: int) -> list[str]:

@@ -621,6 +621,10 @@ Current implementation progress:
   `motoko_core.tui_render`: clearing previously rendered bottom rows and
   writing line blocks at the cursor. The root TUI still decides when to emit
   those sequences.
+- Step 8 now also has bottom status-line rendering and background-study label
+  policy in `motoko_core.tui_render`. The root TUI still owns live timers,
+  terminal writes, and state transitions, while core owns the display text
+  composition for queued prompts, reports, memory maintenance, and study lanes.
 - Step 8 also has direct tty/input regression coverage for the new pure input
   editing and TUI rendering helpers, in addition to the existing
   pseudo-terminal resize/render check.

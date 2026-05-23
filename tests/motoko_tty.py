@@ -48,6 +48,8 @@ from motoko_core.tui_render import (
     lines_at_cursor_sequence,
     message_display_lines,
     overlay_display_lines,
+    status_display_lines,
+    study_status_label_core,
 )
 
 
@@ -166,6 +168,30 @@ def main() -> int:
         )
     )
     assert "copy this" in message
+    status = "\n".join(
+        status_display_lines(
+            title="Chat",
+            model_badge="model",
+            width=80,
+            idle_status="ready",
+            generating=False,
+            maintaining=False,
+            report_running=0,
+            report_status="",
+            maintenance_elapsed=0,
+            maintenance_phase="",
+            pending_count=2,
+            study_running=False,
+            study_elapsed=0,
+            study_status="study: idle",
+            study_status_label="bg: idle",
+            study_last_note="catalog fresh",
+        )
+    )
+    assert "Chat" in status
+    assert "queued:2" in status
+    assert "bg: idle (catalog fresh)" in status
+    assert study_status_label_core("study: indexing", None, progress_formatter=lambda _row: "unused") == "bg-heavy: indexing(model)"
     assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
     assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
     with tempfile.TemporaryDirectory() as tmp:
