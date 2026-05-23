@@ -406,6 +406,23 @@ fixtures, privacy/realm boundaries, and NixOS deployment shape explicit. The
 point is to make the retrieval layer measurably smarter, not to accumulate
 infrastructure.
 
+## Periodic External-Agent Reviews
+
+Every three months, review Nous Research's Hermes Agent
+(`github.com/NousResearch/hermes-agent`) and a small set of comparable local or
+self-hosted assistant/agent systems for ideas that could make Motoko more
+intelligent, competent, inspectable, or carefully crafted. Treat this as a
+research and design input, not as a mandate to copy architecture.
+
+The first Hermes Agent review should deeply understand its goals, skills,
+tools, looping behavior, memory model, self-improvement mechanisms, scheduling,
+subagent/fanout patterns, sandboxing, and evaluation story. Candidate ideas may
+include skills, tool registries, explicit goals, durable loops, self-improving
+artifacts, and user-feedback workflows. Import code only when the license,
+dependency, security, privacy, and maintenance tradeoffs are reviewed and the
+result still fits Motoko's account boundaries, stdlib-first bias, provenance
+requirements, and NixOS-owned service boundary.
+
 ## NixOS-Facing Model Boundary
 
 Motoko has repo-local support for named model routes and deterministic
