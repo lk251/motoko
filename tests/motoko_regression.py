@@ -2416,6 +2416,38 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert not m.context_catalog_path().exists()
 
 
+def test_core_memory_report_formatters_are_injectable(m):
+    rows = [
+        {
+            "id": "mem-1",
+            "text": "Javier likes grounded retrieval.",
+            "importance": 4,
+            "pinned": True,
+            "created": "2026-05-23T00:00:00+00:00",
+            "source": "test",
+            "conversation_id": "conv-1",
+            "derived_from": "manual",
+            "tags": ["retrieval"],
+            "seen_count": 2,
+            "_score": 42,
+            "_matched_terms": 3,
+        }
+    ]
+
+    memories = m.format_memory_rows(rows, verbose=True)
+    search = m.format_memory_search_rows(rows)
+
+    assert "mem-1" in memories
+    assert "i4 pin" in memories
+    assert "source: test" in memories
+    assert "conversation: conv-1" in memories
+    assert "tags: retrieval" in memories
+    assert "score= 42" in search
+    assert "match= 3" in search
+    assert m.format_memory_rows([]) == "No memories yet."
+    assert m.format_memory_search_rows([]) == "No matching memories."
+
+
 def test_close_conversation_prunes_empty_chats(m):
     with isolated_state():
         empty = m.new_conversation()

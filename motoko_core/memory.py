@@ -249,3 +249,53 @@ def rank_memory_rows(
             if len(selected) >= min(limit, 6):
                 break
     return selected[:limit]
+
+
+def format_memory_rows(
+    rows: list[dict],
+    *,
+    verbose: bool = False,
+    default_importance: int = DEFAULT_MEMORY_IMPORTANCE,
+) -> str:
+    if not rows:
+        return "No memories yet."
+    lines = []
+    for idx, row in enumerate(rows, 1):
+        pin = "pin" if row.get("pinned") else "   "
+        prefix = (
+            f"{idx:3d}  {row.get('id', '')}  "
+            f"i{row.get('importance', default_importance)} {pin}  "
+            f"{row.get('created', '')}"
+        )
+        lines.append(f"{prefix}  {row.get('text', '')}")
+        if verbose:
+            lines.append(f"     source: {row.get('source', 'unknown')}")
+            if row.get("conversation_id"):
+                lines.append(f"     conversation: {row.get('conversation_id')}")
+            if row.get("derived_from"):
+                lines.append(f"     derived from: {row.get('derived_from')}")
+            if row.get("tags"):
+                lines.append(f"     tags: {', '.join(row.get('tags', []))}")
+            if row.get("seen_count"):
+                lines.append(f"     seen: {row.get('seen_count')} time(s)")
+    return "\n".join(lines)
+
+
+def format_memory_search_rows(
+    rows: list[dict],
+    *,
+    default_importance: int = DEFAULT_MEMORY_IMPORTANCE,
+) -> str:
+    if not rows:
+        return "No matching memories."
+    lines = []
+    for idx, row in enumerate(rows, 1):
+        pin = "pin" if row.get("pinned") else "   "
+        lines.append(
+            f"{idx:3d}  {row.get('id', '')}  "
+            f"score={row.get('_score', 0):3d}  "
+            f"match={row.get('_matched_terms', 0):2d}  "
+            f"i{row.get('importance', default_importance)} {pin}  "
+            f"{row.get('text', '')}"
+        )
+    return "\n".join(lines)

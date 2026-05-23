@@ -158,6 +158,8 @@ from motoko_core.maintenance import (  # noqa: E402
 )
 from motoko_core.memory import (  # noqa: E402
     find_similar_memory as core_find_similar_memory,
+    format_memory_rows,
+    format_memory_search_rows,
     load_memory_rows,
     memory_query_text,
     memory_relevance,
@@ -3352,28 +3354,7 @@ def print_memories(*, verbose: bool = False) -> None:
 
 def format_memories(*, verbose: bool = False) -> str:
     memories = load_memories(limit=500)
-    if not memories:
-        return "No memories yet."
-    lines = []
-    for idx, row in enumerate(memories, 1):
-        pin = "pin" if row.get("pinned") else "   "
-        prefix = (
-            f"{idx:3d}  {row.get('id', '')}  "
-            f"i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)} {pin}  "
-            f"{row.get('created', '')}"
-        )
-        lines.append(f"{prefix}  {row.get('text', '')}")
-        if verbose:
-            lines.append(f"     source: {row.get('source', 'unknown')}")
-            if row.get("conversation_id"):
-                lines.append(f"     conversation: {row.get('conversation_id')}")
-            if row.get("derived_from"):
-                lines.append(f"     derived from: {row.get('derived_from')}")
-            if row.get("tags"):
-                lines.append(f"     tags: {', '.join(row.get('tags', []))}")
-            if row.get("seen_count"):
-                lines.append(f"     seen: {row.get('seen_count')} time(s)")
-    return "\n".join(lines)
+    return format_memory_rows(memories, verbose=verbose, default_importance=MEMORY_DEFAULT_IMPORTANCE)
 
 
 def context_query_text(conv: dict | None, query: str = "") -> str:
@@ -3507,19 +3488,7 @@ def format_memory_search(query: str) -> str:
     if not query:
         raise SystemExit("usage: motoko memory search TEXT")
     rows = search_memories(query)
-    if not rows:
-        return "No matching memories."
-    lines = []
-    for idx, row in enumerate(rows, 1):
-        pin = "pin" if row.get("pinned") else "   "
-        lines.append(
-            f"{idx:3d}  {row.get('id', '')}  "
-            f"score={row.get('_score', 0):3d}  "
-            f"match={row.get('_matched_terms', 0):2d}  "
-            f"i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)} {pin}  "
-            f"{row.get('text', '')}"
-        )
-    return "\n".join(lines)
+    return format_memory_search_rows(rows, default_importance=MEMORY_DEFAULT_IMPORTANCE)
 
 
 def allowed_dirs() -> list[pathlib.Path]:

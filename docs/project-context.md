@@ -564,6 +564,10 @@ Current implementation progress:
   duplicate detection, tag derivation, conversation-aware query text, relevance
   scoring, and ranked memory selection. The root script still loads realm-local
   memory state and renders selected memories into chat context.
+- Step 7 now also has memory list/search report formatting in
+  `motoko_core.memory`. The root script still loads, mutates, and searches
+  realm-local memory rows, while core owns the inspectable text layout for
+  memory reports.
 - Step 7 now also has durable memory-maintenance checkpoint helpers in
   `motoko_core.maintenance`: maintenance state read/write, clear,
   incomplete-job detection, begin/update, and interrupted-job resume/abandon
