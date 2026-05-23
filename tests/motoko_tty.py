@@ -32,7 +32,7 @@ from motoko_core.input_edit import (
     next_history_entry,
     previous_history_entry,
 )
-from motoko_core.tui_render import dropdown_display_lines, overlay_display_lines
+from motoko_core.tui_render import dropdown_display_lines, message_display_lines, overlay_display_lines
 
 
 SOURCE = pathlib.Path(os.environ.get("MOTOKO_SOURCE", "motoko"))
@@ -128,6 +128,14 @@ def main() -> int:
     )
     assert len(dropdown) == 2
     assert "/sources" in dropdown[1]
+    message = "\n".join(
+        message_display_lines(
+            {"role": "assistant", "content": "```text\ncopy this\n```"},
+            60,
+            assistant_color="cyan",
+        )
+    )
+    assert "copy this" in message
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
         os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
