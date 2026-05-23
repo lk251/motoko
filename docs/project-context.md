@@ -582,6 +582,10 @@ Current implementation progress:
   `/retrieval-preview`, `/identity`, and `/permissions` use the same resolver
   in TUI and line mode. State-changing command families still stay in explicit
   dispatch until they can be moved behind focused tests.
+- Step 9 now also centralizes feedback command detection around exact slash
+  command primaries (`/feedback`, `/up`, `/down`) so the TUI and line mode no
+  longer duplicate prefix checks, and near-miss commands cannot be parsed as
+  feedback by accident.
 
 ## Roadmap Candidates
 

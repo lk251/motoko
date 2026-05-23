@@ -5,6 +5,7 @@ from __future__ import annotations
 import collections
 import hashlib
 
+from motoko_core.commands import command_body, command_matches_any, command_primary
 from motoko_core.text import compact_text
 
 
@@ -274,13 +275,19 @@ def format_feedback_eval_report(report: dict) -> str:
     return "\n".join(lines)
 
 
+def is_feedback_command(text: str) -> bool:
+    return command_matches_any(text, ("/feedback", "/up", "/down"))
+
+
 def parse_feedback_command(text: str) -> tuple[str, str]:
-    stripped = text.strip()
-    if stripped.startswith("/up"):
-        return "up", stripped[len("/up") :].strip()
-    if stripped.startswith("/down"):
-        return "down", stripped[len("/down") :].strip()
-    body = stripped[len("/feedback") :].strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/up":
+        return "up", body
+    if primary == "/down":
+        return "down", body
+    if primary != "/feedback":
+        raise SystemExit("usage: /feedback up|down|ok [note]")
     if not body:
         raise SystemExit("usage: /feedback up|down|ok [note]")
     parts = body.split(maxsplit=1)

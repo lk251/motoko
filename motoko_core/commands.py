@@ -24,6 +24,16 @@ def command_body(text: str) -> str:
     return parts[1].strip() if len(parts) > 1 else ""
 
 
+def command_matches(text: str, command: str, *, allow_body: bool = True) -> bool:
+    if command_primary(text) != command:
+        return False
+    return allow_body or not command_body(text)
+
+
+def command_matches_any(text: str, commands: set[str] | tuple[str, ...], *, allow_body: bool = True) -> bool:
+    return any(command_matches(text, command, allow_body=allow_body) for command in commands)
+
+
 def command_menu_text(commands: list[tuple[str, str]], *, title: str = "Chat commands:") -> str:
     lines = [title]
     for command, description in commands:

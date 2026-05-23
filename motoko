@@ -73,6 +73,7 @@ from motoko_core.feedback import (  # noqa: E402
     feedback_eval_focus,
     feedback_eval_source_hints,
     format_feedback_eval_report,
+    is_feedback_command,
     last_message_content,
     make_feedback_eval_report,
     make_response_feedback_row,
@@ -13883,14 +13884,7 @@ class MotokoTui:
             elif (report_request := report_command_request(text, self.conv)) is not None:
                 label, func = report_request
                 self.start_report_command(label, func)
-            elif (
-                text == "/feedback"
-                or text.startswith("/feedback ")
-                or text == "/up"
-                or text.startswith("/up ")
-                or text == "/down"
-                or text.startswith("/down ")
-            ):
+            elif is_feedback_command(text):
                 rating, note = parse_feedback_command(text)
                 self.append("system", format_feedback_saved(record_response_feedback(self.conv, rating, note)))
             elif text == "/model-stop" or text.startswith("/model-stop "):
@@ -15306,14 +15300,7 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/compact":
             compact_conversation(conv)
             continue
-        if (
-            user_text == "/feedback"
-            or user_text.startswith("/feedback ")
-            or user_text == "/up"
-            or user_text.startswith("/up ")
-            or user_text == "/down"
-            or user_text.startswith("/down ")
-        ):
+        if is_feedback_command(user_text):
             try:
                 rating, note = parse_feedback_command(user_text)
                 print(format_feedback_saved(record_response_feedback(conv, rating, note)))

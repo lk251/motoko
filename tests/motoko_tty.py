@@ -27,11 +27,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from motoko_core.commands import (
     command_body,
+    command_matches,
+    command_matches_any,
     command_menu_text,
     command_names,
     command_primary,
     slash_command_value,
 )
+from motoko_core.feedback import is_feedback_command, parse_feedback_command
 from motoko_core.input_edit import (
     delete_word_left,
     move_word_left,
@@ -134,6 +137,12 @@ def main() -> int:
     assert command_body("/models qwen35-2b-worker") == "qwen35-2b-worker"
     assert command_primary("   /status   ") == "/status"
     assert command_body("   /status   ") == ""
+    assert command_matches("/status", "/status")
+    assert not command_matches("/status extra", "/status", allow_body=False)
+    assert command_matches_any("/down missed sources", ("/up", "/down"))
+    assert is_feedback_command("/up helpful")
+    assert not is_feedback_command("/upward helpful")
+    assert parse_feedback_command("/down missed sources") == ("down", "missed sources")
     assert command_names(commands) == ["/help", "/memory search"]
     assert "search memories" in command_menu_text(commands)
     overlay = "\n".join(overlay_display_lines("status", ["routes:", "  /status  show state"], 60))
