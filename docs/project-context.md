@@ -564,6 +564,10 @@ Current implementation progress:
   `motoko_core.tui_render`, including user/assistant/system/error markers,
   code-block wrapping, and worked-answer markers. The root TUI still owns live
   timing, terminal writes, and scrollback synchronization.
+- Step 8 now also has pure bottom-area terminal sequence builders in
+  `motoko_core.tui_render`: clearing previously rendered bottom rows and
+  writing line blocks at the cursor. The root TUI still decides when to emit
+  those sequences.
 - Step 8 also has direct tty/input regression coverage for the new pure input
   editing and TUI rendering helpers, in addition to the existing
   pseudo-terminal resize/render check.

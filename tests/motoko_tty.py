@@ -32,7 +32,13 @@ from motoko_core.input_edit import (
     next_history_entry,
     previous_history_entry,
 )
-from motoko_core.tui_render import dropdown_display_lines, message_display_lines, overlay_display_lines
+from motoko_core.tui_render import (
+    bottom_clear_sequence,
+    dropdown_display_lines,
+    lines_at_cursor_sequence,
+    message_display_lines,
+    overlay_display_lines,
+)
 
 
 SOURCE = pathlib.Path(os.environ.get("MOTOKO_SOURCE", "motoko"))
@@ -136,6 +142,8 @@ def main() -> int:
         )
     )
     assert "copy this" in message
+    assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
+    assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
         os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")

@@ -116,3 +116,25 @@ def message_display_lines(
         lines.append((prefix if idx == 0 else " " * len(strip_ansi(prefix))) + line)
     lines.append("")
     return lines or [""]
+
+
+def bottom_clear_sequence(rendered_rows: int, cursor_row_offset: int) -> str:
+    if rendered_rows <= 0:
+        return ""
+    offset = min(rendered_rows - 1, max(0, cursor_row_offset))
+    sequence = ""
+    if offset > 0:
+        sequence += f"\033[{offset}A"
+    sequence += "\r\033[J"
+    return sequence
+
+
+def lines_at_cursor_sequence(lines: list[str]) -> str:
+    if not lines:
+        return ""
+    parts = []
+    for idx, line in enumerate(lines):
+        parts.append(f"\r{line}\033[K")
+        if idx + 1 < len(lines):
+            parts.append("\n")
+    return "".join(parts)

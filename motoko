@@ -87,7 +87,9 @@ from motoko_core.input_edit import (  # noqa: E402
     previous_history_entry,
 )
 from motoko_core.tui_render import (  # noqa: E402
+    bottom_clear_sequence as render_bottom_clear_sequence,
     dropdown_display_lines,
+    lines_at_cursor_sequence as render_lines_at_cursor_sequence,
     message_display_lines as render_message_display_lines,
     overlay_display_lines,
 )
@@ -14880,15 +14882,10 @@ class MotokoTui:
         return [style(line, "dim") for line in wrap_display_line(text, width)]
 
     def bottom_clear_sequence(self) -> str:
-        rows = int(getattr(self, "bottom_rows_rendered", 0) or 0)
-        if rows <= 0:
-            return ""
-        offset = min(rows - 1, int(getattr(self, "bottom_cursor_row_offset", 0) or 0))
-        sequence = ""
-        if offset > 0:
-            sequence += f"\033[{offset}A"
-        sequence += "\r\033[J"
-        return sequence
+        return render_bottom_clear_sequence(
+            int(getattr(self, "bottom_rows_rendered", 0) or 0),
+            int(getattr(self, "bottom_cursor_row_offset", 0) or 0),
+        )
 
     def clear_bottom_area(self) -> None:
         sequence = self.bottom_clear_sequence()
@@ -14899,14 +14896,7 @@ class MotokoTui:
         self.bottom_frame_key = None
 
     def lines_at_cursor_sequence(self, lines: list[str]) -> str:
-        if not lines:
-            return ""
-        parts = []
-        for idx, line in enumerate(lines):
-            parts.append(f"\r{line}\033[K")
-            if idx + 1 < len(lines):
-                parts.append("\n")
-        return "".join(parts)
+        return render_lines_at_cursor_sequence(lines)
 
     def write_lines_at_cursor(self, lines: list[str]) -> None:
         sequence = self.lines_at_cursor_sequence(lines)
