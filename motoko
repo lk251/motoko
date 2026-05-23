@@ -3954,28 +3954,35 @@ def plan_document_index(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> dic
 
 
 def print_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> None:
+    print(format_index_plan(path, pattern))
+
+
+def format_index_plan(path: str, pattern: str | None = AUTO_INDEX_GLOB) -> str:
     plan = plan_document_index(path, pattern)
-    print(f"root: {plan['root']}")
-    print(f"glob: {plan['glob']}")
-    print(f"candidate files: {plan['files']}")
-    print(f"source bytes: {human_bytes(plan['bytes'])}")
-    print(f"estimated chunks: {plan['estimated_chunks']}")
-    print(f"estimated file-summary model calls: {plan['estimated_file_summary_calls']}")
-    print(f"estimated HRAG model calls: {plan['estimated_model_calls']}")
+    lines = [
+        f"root: {plan['root']}",
+        f"glob: {plan['glob']}",
+        f"candidate files: {plan['files']}",
+        f"source bytes: {human_bytes(plan['bytes'])}",
+        f"estimated chunks: {plan['estimated_chunks']}",
+        f"estimated file-summary model calls: {plan['estimated_file_summary_calls']}",
+        f"estimated HRAG model calls: {plan['estimated_model_calls']}",
+    ]
     if plan.get("ignored_count"):
-        print(
+        lines.append(
             f"ignored by {MOTOKO_IGNORE_FILE}: {plan['ignored_count']} "
             f"({plan.get('ignored_file_count', 0)} file(s), {plan.get('ignored_dir_count', 0)} dir(s))"
         )
         for item in plan.get("ignored_examples", [])[:MAX_INDEX_IGNORE_EXAMPLES]:
-            print(
+            lines.append(
                 f"  line {item.get('line', 0)} {item.get('pattern', '')}: "
                 f"{item.get('relative_path', '')}"
             )
     if plan["largest"]:
-        print("largest files:")
+        lines.append("largest files:")
         for size, candidate in plan["largest"]:
-            print(f"  {human_bytes(size):>10}  {candidate}")
+            lines.append(f"  {human_bytes(size):>10}  {candidate}")
+    return "\n".join(lines)
 
 
 def context_item_from_file(path: str) -> dict:
@@ -14116,7 +14123,7 @@ class MotokoTui:
                 self.start_report_command(label, func)
             elif text.startswith("/permissions set "):
                 mode = text[len("/permissions set ") :].strip()
-                self.append("system", self.capture_text(lambda: command_permissions_set(mode)))
+                self.append("system", command_permissions_set_text(mode))
             elif text == "/repo" or text.startswith("/repo "):
                 self.attach_repo_report(text[len("/repo") :].strip())
             elif (memory_profile_request := memory_profile_report_command_request(text)) is not None:
@@ -14124,7 +14131,7 @@ class MotokoTui:
                 self.start_report_command(label, func)
             elif text == "/profile-refresh":
                 self.run_blocking_command("Refreshing profile dossier...", refresh_profile_dossier)
-                self.append("system", self.capture_text(print_profile))
+                self.append("system", format_profile())
             elif (index_request := index_report_command_request(text, self.conv)) is not None:
                 label, func = index_request
                 self.start_report_command(label, func)
@@ -14184,7 +14191,7 @@ class MotokoTui:
                 save_conversation(self.conv)
                 self.append("system", f"attached: {item['path']}")
             elif text.startswith("/index-plan "):
-                self.append("system", self.capture_text(lambda: print_index_plan(text[len("/index-plan ") :].strip())))
+                self.append("system", format_index_plan(text[len("/index-plan ") :].strip()))
             elif text == "/attach-index" or text.startswith("/attach-index "):
                 selector = text[len("/attach-index") :].strip() or None
                 index = load_index(selector)
@@ -14361,30 +14368,6 @@ class MotokoTui:
     def study_from_body(self, body: str) -> None:
         query, focus = parse_study_directive(body)
         print(study_query(self.conv, query, focus=focus))
-
-    def capture_text(self, func) -> str:
-        class Capture:
-            def __init__(self) -> None:
-                self.parts: list[str] = []
-
-            def write(self, text: str) -> int:
-                self.parts.append(text)
-                return len(text)
-
-            def flush(self) -> None:
-                return None
-
-            def getvalue(self) -> str:
-                return "".join(self.parts)
-
-        buf = Capture()
-        old_stdout = sys.stdout
-        try:
-            sys.stdout = buf
-            func()
-        finally:
-            sys.stdout = old_stdout
-        return buf.getvalue().strip() or "(no output)"
 
     def start_report_command(self, label: str, func) -> None:
         token = getattr(self, "report_token", 0) + 1
@@ -16480,9 +16463,12 @@ def command_permissions(args) -> None:
 
 
 def command_permissions_set(mode: str) -> None:
+    print(command_permissions_set_text(mode))
+
+
+def command_permissions_set_text(mode: str) -> str:
     set_permission_mode(mode)
-    print(f"permissions mode set: {mode}")
-    print(f"config: {config_path()}")
+    return "\n".join([f"permissions mode set: {mode}", f"config: {config_path()}"])
 
 
 def command_repo(args) -> None:

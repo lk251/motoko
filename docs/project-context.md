@@ -616,6 +616,9 @@ Current implementation progress:
   `/remember`, `/forget`, `/memory edit`, `/memory importance`, `/memory pin`,
   and `/memory unpin` through one shared command helper while preserving the
   existing CLI print wrappers.
+- Step 9 now also removes the TUI's ad hoc stdout-capture helper by giving the
+  remaining captured commands return-value paths (`/index-plan`,
+  `/permissions set`, and profile display after `/profile-refresh`).
 
 ## Roadmap Candidates
 
