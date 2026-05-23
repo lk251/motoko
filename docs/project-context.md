@@ -575,6 +575,13 @@ Current implementation progress:
   slash command value normalization, compact command-menu text, and sorted
   command-name extraction. The large TUI and line-mode dispatch conditionals
   still stay in `motoko` until a command registry can be introduced safely.
+- Step 9 now also has shared report-command request parsing in the root script,
+  backed by `motoko_core.commands` primary/body helpers, so read-only report
+  commands such as `/about`, `/sources`, `/status`, `/model-routes`,
+  `/models`, `/retrieval-eval`, `/feedback-eval`, `/retrieval-debug`,
+  `/retrieval-preview`, `/identity`, and `/permissions` use the same resolver
+  in TUI and line mode. State-changing command families still stay in explicit
+  dispatch until they can be moved behind focused tests.
 
 ## Roadmap Candidates
 

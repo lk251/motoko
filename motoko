@@ -248,8 +248,10 @@ from motoko_core.conversations import (  # noqa: E402
     save_conversation_record,
 )
 from motoko_core.commands import (  # noqa: E402
+    command_body,
     command_menu_text,
     command_names,
+    command_primary,
     slash_command_value,
 )
 from motoko_core.state import (  # noqa: E402
@@ -12964,6 +12966,37 @@ def print_status(conv: dict | None = None) -> None:
     print_report(format_status(conv))
 
 
+def report_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/about" and not body:
+        return "/about", format_about
+    if primary == "/sources" and not body:
+        return "/sources", lambda: format_conversation_sources(conv)
+    if primary == "/status" and not body:
+        return "/status", lambda: format_status(conv)
+    if primary == "/model-routes" and not body:
+        return "/model-routes", lambda: format_model_routes(include_defaults=True)
+    if primary in {"/models", "/model-status"}:
+        return primary, lambda: format_model_services(body or None)
+    if primary == "/retrieval-eval" and not body:
+        return "/retrieval-eval", lambda: format_retrieval_eval_report(run_retrieval_eval())
+    if primary == "/feedback-eval" and not body:
+        return "/feedback-eval", lambda: format_feedback_eval_report(run_feedback_eval())
+    if primary == "/retrieval-debug":
+        query = body or context_query_text(conv, conv.get("title", ""))
+        return "/retrieval-debug", lambda: format_retrieval_debug_report(run_retrieval_debug(query, conv=conv))
+    if primary == "/retrieval-preview":
+        query = body or context_query_text(conv, conv.get("title", ""))
+        return "/retrieval-preview", lambda: format_retrieval_preview(conv, query)
+    if primary == "/identity" and not body:
+        return "/identity", format_identity
+    if primary == "/permissions" and not body:
+        return "/permissions", format_permissions
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -13810,8 +13843,6 @@ class MotokoTui:
                 self.append("system", self.compact_command_menu())
             elif text == "/help":
                 self.open_overlay("help", format_help())
-            elif text == "/about":
-                self.start_report_command("/about", format_about)
             elif text == "/exit":
                 close_conversation(self.conv)
                 self.running = False
@@ -13849,8 +13880,9 @@ class MotokoTui:
                     self.append("system", "no queued prompts")
             elif text == "/pause":
                 self.request_pause()
-            elif text == "/sources":
-                self.start_report_command("/sources", lambda: format_conversation_sources(self.conv))
+            elif (report_request := report_command_request(text, self.conv)) is not None:
+                label, func = report_request
+                self.start_report_command(label, func)
             elif (
                 text == "/feedback"
                 or text.startswith("/feedback ")
@@ -13861,32 +13893,12 @@ class MotokoTui:
             ):
                 rating, note = parse_feedback_command(text)
                 self.append("system", format_feedback_saved(record_response_feedback(self.conv, rating, note)))
-            elif text == "/status":
-                self.start_report_command("/status", lambda: format_status(self.conv))
-            elif text == "/model-routes":
-                self.start_report_command("/model-routes", lambda: format_model_routes(include_defaults=True))
-            elif text == "/models" or text.startswith("/models ") or text == "/model-status" or text.startswith("/model-status "):
-                selector = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else None
-                self.start_report_command(text.split(maxsplit=1)[0], lambda: format_model_services(selector))
             elif text == "/model-stop" or text.startswith("/model-stop "):
                 selector = text[len("/model-stop") :].strip()
                 if not selector:
                     self.append("system", "usage: /model-stop ROUTE")
                 else:
                     self.start_report_command("/model-stop", lambda: stop_model_service(selector))
-            elif text == "/retrieval-eval":
-                self.start_report_command("/retrieval-eval", lambda: format_retrieval_eval_report(run_retrieval_eval()))
-            elif text == "/feedback-eval":
-                self.start_report_command("/feedback-eval", lambda: format_feedback_eval_report(run_feedback_eval()))
-            elif text == "/retrieval-debug" or text.startswith("/retrieval-debug "):
-                query = text[len("/retrieval-debug") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
-                self.start_report_command(
-                    "/retrieval-debug",
-                    lambda: format_retrieval_debug_report(run_retrieval_debug(query, conv=self.conv)),
-                )
-            elif text == "/retrieval-preview" or text.startswith("/retrieval-preview "):
-                query = text[len("/retrieval-preview") :].strip() or context_query_text(self.conv, self.conv.get("title", ""))
-                self.start_report_command("/retrieval-preview", lambda: format_retrieval_preview(self.conv, query))
             elif text == "/evidence-build" or text.startswith("/evidence-build "):
                 selector = text[len("/evidence-build") :].strip() or None
                 store = build_evidence_store_from_index(load_index(selector) if selector else default_vector_index(self.conv))
@@ -13906,10 +13918,6 @@ class MotokoTui:
                     self.append("system", format_evidence_query_report(query_evidence_store(store, query)))
                 except SystemExit as exc:
                     self.append("error", str(exc))
-            elif text == "/identity":
-                self.start_report_command("/identity", format_identity)
-            elif text == "/permissions":
-                self.start_report_command("/permissions", format_permissions)
             elif text.startswith("/permissions set "):
                 mode = text[len("/permissions set ") :].strip()
                 self.append("system", self.capture_text(lambda: command_permissions_set(mode)))
@@ -15085,9 +15093,6 @@ def chat_loop(conv: dict) -> None:
         if user_text in {"/", "/commands"}:
             print_command_menu()
             continue
-        if user_text == "/about":
-            print_report(format_about())
-            continue
         if user_text == "/exit":
             close_conversation(conv)
             return
@@ -15099,6 +15104,14 @@ def chat_loop(conv: dict) -> None:
             continue
         if user_text == "/pause":
             command_pause(None)
+            continue
+        report_request = report_command_request(user_text, conv)
+        if report_request is not None:
+            _label, func = report_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text == "/new" or user_text.startswith("/new "):
             close_conversation(conv)
@@ -15293,9 +15306,6 @@ def chat_loop(conv: dict) -> None:
         if user_text == "/compact":
             compact_conversation(conv)
             continue
-        if user_text == "/sources":
-            print_sources(conv)
-            continue
         if (
             user_text == "/feedback"
             or user_text.startswith("/feedback ")
@@ -15310,19 +15320,6 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        if user_text == "/status":
-            print_status(conv)
-            continue
-        if user_text == "/model-routes":
-            print_report(format_model_routes(include_defaults=True))
-            continue
-        if user_text == "/models" or user_text.startswith("/models ") or user_text == "/model-status" or user_text.startswith("/model-status "):
-            selector = user_text.split(maxsplit=1)[1].strip() if len(user_text.split(maxsplit=1)) > 1 else None
-            try:
-                print_report(format_model_services(selector))
-            except SystemExit as exc:
-                print(exc)
-            continue
         if user_text == "/model-stop" or user_text.startswith("/model-stop "):
             selector = user_text[len("/model-stop") :].strip()
             if not selector:
@@ -15332,26 +15329,6 @@ def chat_loop(conv: dict) -> None:
                     print_report(stop_model_service(selector))
                 except SystemExit as exc:
                     print(exc)
-            continue
-        if user_text == "/retrieval-eval":
-            print_report(format_retrieval_eval_report(run_retrieval_eval()))
-            continue
-        if user_text == "/feedback-eval":
-            print_report(format_feedback_eval_report(run_feedback_eval()))
-            continue
-        if user_text == "/retrieval-debug" or user_text.startswith("/retrieval-debug "):
-            query = user_text[len("/retrieval-debug") :].strip() or context_query_text(conv, conv.get("title", ""))
-            try:
-                print_report(format_retrieval_debug_report(run_retrieval_debug(query, conv=conv)))
-            except SystemExit as exc:
-                print(exc)
-            continue
-        if user_text == "/retrieval-preview" or user_text.startswith("/retrieval-preview "):
-            query = user_text[len("/retrieval-preview") :].strip() or context_query_text(conv, conv.get("title", ""))
-            try:
-                print_report(format_retrieval_preview(conv, query))
-            except SystemExit as exc:
-                print(exc)
             continue
         if user_text == "/evidence-build" or user_text.startswith("/evidence-build "):
             selector = user_text[len("/evidence-build") :].strip() or None
@@ -15377,12 +15354,6 @@ def chat_loop(conv: dict) -> None:
                 print_report(format_evidence_query_report(query_evidence_store(store, query)))
             except SystemExit as exc:
                 print(exc)
-            continue
-        if user_text == "/identity":
-            print_report(format_identity())
-            continue
-        if user_text == "/permissions":
-            print_report(format_permissions())
             continue
         if user_text.startswith("/permissions set "):
             command_permissions_set(user_text[len("/permissions set ") :].strip())
