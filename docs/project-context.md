@@ -475,6 +475,11 @@ Current implementation progress:
   injected warning provider from the root script. This keeps source-selection
   and source-staleness policy together without merging it into derived-artifact
   migration logic.
+- Step 5 now also has the document allowlist file helpers in
+  `motoko_core.corpus_selection`: reading allowed directories, appending new
+  entries, and enforcing that document reads/indexing remain under an allowed
+  path. The root script still owns user-facing commands and the Nix-managed
+  configuration error wording.
 
 ## Roadmap Candidates
 

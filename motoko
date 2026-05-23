@@ -130,6 +130,7 @@ from motoko_core.corpus_selection import (  # noqa: E402
     SKIP_INDEX_FILE_NAMES,
     SOURCE_SELECTION_SCHEMA_VERSION,
     TEXT_SAMPLE_BYTES,
+    add_allowed_dir_entry,
     document_selection_policy,
     file_staleness,
     ignore_directory_match,
@@ -142,7 +143,9 @@ from motoko_core.corpus_selection import (  # noqa: E402
     motoko_ignore_matches,
     motoko_ignore_path,
     parse_motoko_ignore,
+    read_allowed_dirs_file,
     rel_posix,
+    require_path_allowed,
     selection_policy_staleness,
     sha256_file,
     source_fingerprint,
@@ -4474,15 +4477,7 @@ def print_memory_search(query: str) -> None:
 
 
 def allowed_dirs() -> list[pathlib.Path]:
-    path = allowdirs_path()
-    if not path.exists():
-        return []
-    dirs = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            dirs.append(pathlib.Path(line).expanduser().resolve())
-    return dirs
+    return read_allowed_dirs_file(allowdirs_path())
 
 
 def nix_managed_config_message(path: pathlib.Path, description: str) -> str | None:
@@ -4502,18 +4497,13 @@ def add_allowed_dir(path: str) -> None:
     resolved = pathlib.Path(path).expanduser().resolve()
     if not resolved.is_dir():
         raise SystemExit(f"not a directory: {resolved}")
-    existing = allowed_dirs()
-    if resolved not in existing:
-        path = allowdirs_path()
-        try:
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(str(resolved) + "\n")
-            path.chmod(0o600)
-        except OSError as exc:
-            message = nix_managed_config_message(path, "document allowlist")
-            if message:
-                raise SystemExit(message) from None
-            raise SystemExit(f"cannot update Motoko document allowlist at {path}: {exc}") from None
+    add_allowed_dir_entry(
+        allowdirs_path(),
+        resolved,
+        nix_managed_message_provider=lambda allowlist_path: nix_managed_config_message(
+            allowlist_path, "document allowlist"
+        ),
+    )
     print(f"allowed: {resolved}")
 
 
@@ -4691,17 +4681,7 @@ def print_profile() -> None:
 
 
 def require_allowed(path: pathlib.Path) -> None:
-    resolved = path.expanduser().resolve()
-    dirs = allowed_dirs()
-    if not dirs:
-        raise SystemExit(
-            "Motoko has no allowed document directories yet; run 'motoko allow-dir DIR' first"
-        )
-    if any(resolved == directory or is_under(resolved, directory) for directory in dirs):
-        return
-    raise SystemExit(
-        f"{resolved} is outside Motoko's allowed directories; run 'motoko allow-dir DIR' first"
-    )
+    require_path_allowed(path, allowed_dirs())
 
 
 def read_text_file(path: pathlib.Path) -> str:

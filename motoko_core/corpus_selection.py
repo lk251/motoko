@@ -61,6 +61,51 @@ def is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
+def read_allowed_dirs_file(path: pathlib.Path) -> list[pathlib.Path]:
+    if not path.exists():
+        return []
+    dirs = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            dirs.append(pathlib.Path(line).expanduser().resolve())
+    return dirs
+
+
+def add_allowed_dir_entry(
+    allowlist_path: pathlib.Path,
+    resolved: pathlib.Path,
+    *,
+    nix_managed_message_provider=None,
+) -> bool:
+    existing = read_allowed_dirs_file(allowlist_path)
+    if resolved in existing:
+        return False
+    try:
+        with allowlist_path.open("a", encoding="utf-8") as fh:
+            fh.write(str(resolved) + "\n")
+        allowlist_path.chmod(0o600)
+    except OSError as exc:
+        message = nix_managed_message_provider(allowlist_path) if nix_managed_message_provider else None
+        if message:
+            raise SystemExit(message) from None
+        raise SystemExit(f"cannot update Motoko document allowlist at {allowlist_path}: {exc}") from None
+    return True
+
+
+def require_path_allowed(path: pathlib.Path, directories: list[pathlib.Path]) -> None:
+    resolved = path.expanduser().resolve()
+    if not directories:
+        raise SystemExit(
+            "Motoko has no allowed document directories yet; run 'motoko allow-dir DIR' first"
+        )
+    if any(resolved == directory or is_under(resolved, directory) for directory in directories):
+        return
+    raise SystemExit(
+        f"{resolved} is outside Motoko's allowed directories; run 'motoko allow-dir DIR' first"
+    )
+
+
 def is_probably_text_file(path: pathlib.Path, *, sample_bytes: int = TEXT_SAMPLE_BYTES) -> bool:
     try:
         with path.open("rb") as fh:
