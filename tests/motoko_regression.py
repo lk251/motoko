@@ -4704,6 +4704,43 @@ def test_conversation_mutation_command_request_renames_chat(m):
         assert saved["title"] == "New title"
 
 
+def test_conversation_lifecycle_helpers(m):
+    with isolated_state():
+        current = m.new_conversation("Current")
+        current["messages"] = [{"role": "user", "content": "keep me"}]
+        m.save_conversation(current)
+        replacement = m.start_new_conversation_from_current(current, "Replacement")
+        assert replacement["title"] == "Replacement"
+        assert m.conversation_path(current["id"]).exists()
+        assert m.conversation_path(replacement["id"]).exists()
+
+        resumed = m.resume_conversation_from_current(replacement, current["id"])
+        assert resumed["id"] == current["id"]
+
+        next_conv, report = m.delete_conversation_then_new(resumed)
+        assert report["conversation_id"] == current["id"]
+        assert next_conv["id"] != current["id"]
+        assert not m.conversation_path(current["id"]).exists()
+
+
+def test_feedback_command_request_records_private_feedback(m):
+    with isolated_state():
+        conv = m.new_conversation("Feedback command")
+        conv["messages"] = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        request = m.feedback_command_request("/down missed source", conv)
+        assert request is not None
+        label, run = request
+        assert label == "/feedback"
+        output = run()
+        assert "feedback saved" in output
+        rows = m.read_jsonl(m.response_feedback_path())
+        assert rows[0]["rating"] == "down"
+        assert rows[0]["note"] == "missed source"
+
+
 def test_blocking_command_request_attaches_index(m):
     with isolated_state():
         conv = m.new_conversation("Index attach")

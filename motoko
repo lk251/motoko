@@ -1726,6 +1726,27 @@ def load_conversation(conversation_id: str | None = None) -> dict:
     )
 
 
+def format_conversation_banner(conv: dict) -> str:
+    return f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]"
+
+
+def start_new_conversation_from_current(current: dict, title: str | None = None) -> dict:
+    close_conversation(current)
+    conv = new_conversation(title)
+    save_conversation(conv)
+    return conv
+
+
+def resume_conversation_from_current(current: dict, selector: str | None = None) -> dict:
+    close_conversation(current)
+    return load_conversation(selector)
+
+
+def delete_conversation_then_new(conv: dict) -> tuple[dict, dict]:
+    report = delete_conversation_and_artifacts(conv)
+    return new_conversation(), report
+
+
 def delete_conversation_and_artifacts(conv: dict) -> dict:
     conversation_id = str(conv.get("id", "")).strip()
     if not conversation_id:
@@ -13300,6 +13321,17 @@ def conversation_mutation_command_request(text: str, conv: dict):
     return primary, run_rename
 
 
+def feedback_command_request(text: str, conv: dict):
+    if not is_feedback_command(text):
+        return None
+
+    def run_feedback() -> str:
+        rating, note = parse_feedback_command(text)
+        return format_feedback_saved(record_response_feedback(conv, rating, note))
+
+    return "/feedback", run_feedback
+
+
 def attach_index_from_path_text(conv: dict, path: str) -> str:
     if not path:
         raise SystemExit("usage: /index PATH")
@@ -13401,6 +13433,7 @@ def shared_command_request(text: str, conv: dict):
         lambda: context_attachment_command_request(text, conv),
         lambda: repo_command_request(text, conv),
         lambda: conversation_mutation_command_request(text, conv),
+        lambda: feedback_command_request(text, conv),
     ]
     for build in builders:
         request = build()
@@ -14280,9 +14313,7 @@ class MotokoTui:
                 self.running = False
             elif text == "/new" or text.startswith("/new "):
                 title = text[len("/new") :].strip() or None
-                close_conversation(self.conv)
-                self.conv = new_conversation(title)
-                save_conversation(self.conv)
+                self.conv = start_new_conversation_from_current(self.conv, title)
                 self.messages = self.seed_messages(self.conv)
                 self.history = self.seed_input_history(self.conv)
                 self.history_index = None
@@ -14312,9 +14343,6 @@ class MotokoTui:
                     self.append("system", "no queued prompts")
             elif text == "/pause":
                 self.request_pause()
-            elif is_feedback_command(text):
-                rating, note = parse_feedback_command(text)
-                self.append("system", format_feedback_saved(record_response_feedback(self.conv, rating, note)))
             elif (command_request := shared_command_request(text, self.conv)) is not None:
                 label, func = command_request
                 self.start_report_command(label, func)
@@ -14329,8 +14357,7 @@ class MotokoTui:
                         f"delete this conversation and owned derived artifacts? type /delete yes to confirm ({self.conv.get('id', '')})",
                     )
                     return
-                report = delete_conversation_and_artifacts(self.conv)
-                self.conv = new_conversation()
+                self.conv, report = delete_conversation_then_new(self.conv)
                 self.messages = self.seed_messages(self.conv)
                 self.history = self.seed_input_history(self.conv)
                 self.history_index = None
@@ -14345,8 +14372,7 @@ class MotokoTui:
                     self.status = "choose a conversation"
                     self.dirty = True
                     return
-                close_conversation(self.conv)
-                self.conv = load_conversation(selector)
+                self.conv = resume_conversation_from_current(self.conv, selector)
                 self.messages = self.seed_messages(self.conv)
                 self.history = self.seed_input_history(self.conv)
                 self.history_index = None
@@ -15234,7 +15260,7 @@ def chat_loop(conv: dict) -> None:
         except Exception as exc:
             print(f"Motoko TUI failed; falling back to line mode: {exc}", file=sys.stderr)
     setup_readline_completion()
-    print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+    print(format_conversation_banner(conv))
     print("Type /help for commands, /exit to save and leave.")
     resume_maintenance, resume_note = resume_interrupted_maintenance(conv)
     if resume_note:
@@ -15292,30 +15318,26 @@ def chat_loop(conv: dict) -> None:
                 print(exc)
             continue
         if user_text == "/new" or user_text.startswith("/new "):
-            close_conversation(conv)
             title = user_text[len("/new") :].strip() or None
-            conv = new_conversation(title)
-            save_conversation(conv)
-            print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+            conv = start_new_conversation_from_current(conv, title)
+            print(format_conversation_banner(conv))
             continue
         if user_text == "/help":
             print(format_help())
             continue
         if user_text == "/resume" or user_text.startswith("/resume "):
-            close_conversation(conv)
             selector = user_text[len("/resume") :].strip() or None
-            conv = load_conversation(selector)
-            print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+            conv = resume_conversation_from_current(conv, selector)
+            print(format_conversation_banner(conv))
             continue
         if user_text == "/delete" or user_text.startswith("/delete "):
             answer = user_text[len("/delete") :].strip().lower()
             if answer not in {"yes", "confirm"}:
                 answer = input(f"Delete conversation {conv.get('id', '')}? Type yes to confirm: ").strip().lower()
             if answer in {"yes", "confirm"}:
-                report = delete_conversation_and_artifacts(conv)
+                conv, report = delete_conversation_then_new(conv)
                 print(format_conversation_delete_report(report))
-                conv = new_conversation()
-                print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
+                print(format_conversation_banner(conv))
             else:
                 print("not deleted")
             continue
@@ -15326,13 +15348,6 @@ def chat_loop(conv: dict) -> None:
                 result = func()
                 if result:
                     print_report(str(result))
-            except SystemExit as exc:
-                print(exc)
-            continue
-        if is_feedback_command(user_text):
-            try:
-                rating, note = parse_feedback_command(user_text)
-                print(format_feedback_saved(record_response_feedback(conv, rating, note)))
             except SystemExit as exc:
                 print(exc)
             continue

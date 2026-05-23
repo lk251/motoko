@@ -643,6 +643,9 @@ Current implementation progress:
   `/memorize`. The TUI still runs these as foreground blocking jobs so prompts
   and durable checkpoints behave as before, but command parsing and context
   attachment are no longer duplicated with line mode.
+- Step 9 now also has shared conversation lifecycle helpers for starting,
+  resuming, deleting, and banner-formatting chats, plus a shared private
+  feedback command request for `/feedback`, `/up`, and `/down`.
 
 ## Roadmap Candidates
 
