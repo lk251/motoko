@@ -506,6 +506,10 @@ Current implementation progress:
   packing in `motoko_core.retrieval`. Live hybrid orchestration still stays in
   the root script where it can call index stores, vector stores, rerank routes,
   and source-content readers explicitly.
+- Step 6 now also has retrieval score-part assembly and debug-diagnosis helpers
+  in `motoko_core.retrieval`, with task-signal boosts injected by the root
+  script. This keeps lexical/path scoring and failure classification reusable
+  without absorbing Org/task signal ownership yet.
 
 ## Roadmap Candidates
 

@@ -48,6 +48,38 @@ def score_text(query_counts: collections.Counter, text: str) -> int:
     return int(round(score * 10))
 
 
+def retrieval_haystack_terms(query_counts: collections.Counter, text: str) -> list[str]:
+    if not query_counts:
+        return []
+    counts = token_counts(text)
+    return [term for term in query_counts if counts.get(term)]
+
+
+def retrieval_score_parts(
+    query: str,
+    query_counts: collections.Counter,
+    haystack: str,
+    *,
+    path: str = "",
+    file_signals: dict | None = None,
+    chunk_signals: dict | None = None,
+    task_boost_fn=None,
+) -> dict:
+    lexical = score_text(query_counts, haystack)
+    path_boost = query_path_match_boost(query, path)
+    file_task_boost = task_boost_fn(query, file_signals or {}) if task_boost_fn else 0
+    chunk_task_boost = task_boost_fn(query, chunk_signals or {}) if task_boost_fn else 0
+    total = lexical + path_boost + file_task_boost + chunk_task_boost
+    return {
+        "total": total,
+        "lexical": lexical,
+        "path_boost": path_boost,
+        "file_task_boost": file_task_boost,
+        "chunk_task_boost": chunk_task_boost,
+        "matched_terms": retrieval_haystack_terms(query_counts, haystack)[:24],
+    }
+
+
 def query_path_mentions(query: str) -> list[str]:
     mentions = []
     seen = set()
@@ -746,3 +778,38 @@ def selected_evidence_excerpt(
         for row in selected
     ]
     return excerpt[:max_chars].strip(), spans
+
+
+def diagnose_retrieval_debug(index_report: dict, query: str) -> list[str]:
+    notes = []
+    chunks = index_report.get("chunks", [])
+    files = index_report.get("files", [])
+    positive_chunks = [row for row in chunks if int(row.get("total", 0) or 0) > 0]
+    if index_report.get("freshness") == "stale":
+        notes.append("stale data: refresh or rebuild this index before trusting source answers")
+    if not chunks:
+        notes.append("chunking failure: this index has no chunks to retrieve")
+    elif not positive_chunks:
+        notes.append("recall failure: no chunk had a positive score for this query")
+    else:
+        notes.append(f"recall ok: {len(positive_chunks)} positive chunk(s) before limit")
+    if index_report.get("vector_chunks"):
+        notes.append(f"vector recall available: {len(index_report.get('vector_chunks', []))} vector-ranked chunk(s)")
+    elif index_report.get("vector_error"):
+        notes.append(f"vector recall issue: {index_report.get('vector_error')}")
+    mentions = query_path_mentions(query)
+    if mentions:
+        top_paths = [row.get("path", "").lower() for row in chunks[:3] + files[:3]]
+        for mention in mentions:
+            mention_name = pathlib.PurePosixPath(mention.lower()).name
+            if not any(
+                path.endswith("/" + mention.lower()) or pathlib.PurePosixPath(path).name == mention_name
+                for path in top_paths
+            ):
+                notes.append(f"ranking/path issue: mentioned {mention} was not in the top displayed rows")
+    if chunks and int(chunks[0].get("content_chars", 0) or 0) <= 0:
+        notes.append("chunk content issue: top chunk has no stored text available")
+    if chunks and int(chunks[0].get("content_chars", 0) or 0) > 0 and not chunks[0].get("summary"):
+        notes.append("summary issue: top chunk has source text but no chunk summary")
+    notes.append("prompt-use check: if /sources shows the right chunk but the answer ignores it, the issue is final synthesis/prompt use")
+    return notes
