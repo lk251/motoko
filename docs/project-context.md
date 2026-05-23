@@ -587,6 +587,10 @@ Current implementation progress:
   `motoko_core.conversations`. Ranking and live conversation selection remain
   in the root script for now, while bounded text/source rendering for chat
   prompt context is importable and tested.
+- Step 7 now also has recent-conversation ranking policy in
+  `motoko_core.conversations`. The root script still loads and timestamp-sorts
+  saved chats from realm-local state, while core owns the recency/relevance
+  lane selection and score annotations.
 - Step 8 has started with pure TUI prompt-editing helpers in
   `motoko_core.input_edit`: word-left/right cursor movement, word deletion,
   and previous/next input-history selection. Terminal rendering and command

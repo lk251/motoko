@@ -4904,6 +4904,29 @@ def test_core_recent_conversation_renderer_is_injectable(m):
     ]
 
 
+def test_core_recent_conversation_ranking_is_injectable(m):
+    rows = [
+        {"id": "new", "title": "Newest", "body": "recent but unrelated"},
+        {"id": "match", "title": "Relevant", "body": "grounded retrieval and memory"},
+        {"id": "old", "title": "Old", "body": "archive"},
+    ]
+    query_counts = m.token_counts("retrieval")
+
+    ranked = m.rank_recent_conversation_rows(
+        rows,
+        query_counts=query_counts,
+        recall_text_func=lambda row: f"{row.get('title', '')} {row.get('body', '')}",
+        score_text_func=m.score_text,
+        recency_lane=1,
+        relevance_lane=1,
+        limit=3,
+    )
+
+    assert [row["id"] for row in ranked[:2]] == ["new", "match"]
+    assert ranked[0]["_selection_reasons"] == ["recent"]
+    assert ranked[1]["_selection_reasons"] == ["relevant"]
+
+
 def test_repo_command_request_attaches_context(m):
     with isolated_state() as tmp:
         conv = m.new_conversation("Repo request")

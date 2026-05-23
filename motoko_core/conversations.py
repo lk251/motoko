@@ -184,6 +184,74 @@ def conversation_transcript_for_model(
     return compact_text(transcript, max_chars) if max_chars > 0 else transcript
 
 
+def rank_recent_conversation_rows(
+    rows: list[dict],
+    *,
+    query_counts,
+    recall_text_func,
+    score_text_func,
+    recency_lane: int,
+    relevance_lane: int,
+    limit: int,
+) -> list[dict]:
+    if not rows:
+        return []
+    scored_by_id = {}
+    for idx, row in enumerate(rows):
+        recall_text = recall_text_func(row)
+        lexical = score_text_func(query_counts, recall_text) if query_counts else 0
+        recency_bonus = max(1, 10 - idx)
+        enriched = dict(row)
+        enriched["_recall_text"] = recall_text
+        enriched["_recall_score"] = lexical * 8 + recency_bonus
+        enriched["_matched_terms"] = lexical
+        enriched["_recency_bonus"] = recency_bonus
+        enriched["_selection_reasons"] = []
+        scored_by_id[enriched.get("id", "")] = enriched
+
+    selected: list[dict] = []
+    seen: set[str] = set()
+    for row in rows[:recency_lane]:
+        enriched = scored_by_id.get(row.get("id", ""))
+        if not enriched:
+            continue
+        enriched["_selection_reasons"].append("recent")
+        selected.append(enriched)
+        seen.add(enriched.get("id", ""))
+
+    relevance_ranked = sorted(
+        scored_by_id.values(),
+        key=lambda row: (
+            row.get("_matched_terms", 0),
+            row.get("_recall_score", 0),
+            row.get("updated", row.get("created", "")),
+        ),
+        reverse=True,
+    )
+    for row in relevance_ranked:
+        if row.get("_matched_terms", 0) <= 0 and query_counts:
+            continue
+        if row.get("id", "") in seen:
+            if "relevant" not in row["_selection_reasons"] and row.get("_matched_terms", 0) > 0:
+                row["_selection_reasons"].append("relevant")
+            continue
+        row["_selection_reasons"].append("relevant")
+        selected.append(row)
+        seen.add(row.get("id", ""))
+        if len([item for item in selected if "relevant" in item.get("_selection_reasons", [])]) >= relevance_lane:
+            break
+
+    selected.sort(
+        key=lambda row: (
+            "recent" in row.get("_selection_reasons", []),
+            row.get("_matched_terms", 0),
+            row.get("_recall_score", 0),
+        ),
+        reverse=True,
+    )
+    return selected[:limit]
+
+
 def render_recent_conversations_with_sources_core(
     conversations: list[dict],
     *,
