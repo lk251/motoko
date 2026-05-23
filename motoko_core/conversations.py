@@ -182,3 +182,56 @@ def conversation_transcript_for_model(
         lines.append(f"{role}: {content}")
     transcript = "\n\n".join(lines).strip()
     return compact_text(transcript, max_chars) if max_chars > 0 else transcript
+
+
+def render_recent_conversations_with_sources_core(
+    conversations: list[dict],
+    *,
+    relative_time_func,
+    max_chars: int,
+    snippet_chars: int,
+    recent_message_limit: int,
+) -> tuple[str, list[dict]]:
+    if not conversations:
+        return "No other recent conversations yet.", []
+    lines = []
+    sources = []
+    used = 0
+    for row in conversations:
+        title = row.get("title") or "Untitled"
+        updated = relative_time_func(row.get("updated", row.get("created", "")))
+        branch = row.get("branch") or "-"
+        header = f"- [conversation:{row.get('id', '')}; updated={updated}; branch={branch}] {title}"
+        body_parts = []
+        if row.get("summary"):
+            body_parts.append("summary: " + compact_text(row.get("summary", ""), snippet_chars))
+        recent_lines = []
+        for msg in row.get("messages", [])[-recent_message_limit:]:
+            role = msg.get("role", "")
+            if role not in {"user", "assistant"}:
+                continue
+            label = "Javier" if role == "user" else "Motoko"
+            recent_lines.append(f"{label}: {compact_text(msg.get('content', ''), snippet_chars)}")
+        if recent_lines:
+            body_parts.append("recent turns:\n  " + "\n  ".join(recent_lines))
+        text = header + ("\n  " + "\n  ".join(body_parts) if body_parts else "")
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(text) > remaining:
+            text = text[: max(0, remaining - 1)].rstrip() + "…"
+        lines.append(text)
+        used += len(text)
+        sources.append(
+            {
+                "kind": "recent-conversation",
+                "conversation_id": row.get("id", ""),
+                "title": title,
+                "updated": row.get("updated", row.get("created", "")),
+                "branch": branch,
+                "score": row.get("_recall_score", 0),
+                "matched_terms": row.get("_matched_terms", 0),
+                "selection": row.get("_selection_reasons", []),
+            }
+        )
+    return "\n\n".join(lines), sources

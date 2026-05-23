@@ -579,6 +579,10 @@ Current implementation progress:
   and delete-report formatting. The root script still coordinates the actual
   deletion across memories, feedback, study jobs, dossiers, profile state, and
   conversation files.
+- Step 7 now also has recent-conversation context rendering in
+  `motoko_core.conversations`. Ranking and live conversation selection remain
+  in the root script for now, while bounded text/source rendering for chat
+  prompt context is importable and tested.
 - Step 8 has started with pure TUI prompt-editing helpers in
   `motoko_core.input_edit`: word-left/right cursor movement, word deletion,
   and previous/next input-history selection. Terminal rendering and command

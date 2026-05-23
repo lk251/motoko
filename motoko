@@ -257,6 +257,7 @@ from motoko_core.conversations import (  # noqa: E402
     json_references_conversation,
     list_conversation_records,
     make_conversation_record,
+    render_recent_conversations_with_sources_core,
     rename_conversation_record,
     rewrite_jsonl_without_conversation,
     save_conversation_record,
@@ -3488,49 +3489,13 @@ def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
 
 def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
     conversations = ranked_recent_conversations(conv, query)
-    if not conversations:
-        return "No other recent conversations yet.", []
-    lines = []
-    sources = []
-    used = 0
-    for row in conversations:
-        title = row.get("title") or "Untitled"
-        updated = relative_time(row.get("updated", row.get("created", "")))
-        branch = row.get("branch") or "-"
-        header = f"- [conversation:{row.get('id', '')}; updated={updated}; branch={branch}] {title}"
-        body_parts = []
-        if row.get("summary"):
-            body_parts.append("summary: " + compact_text(row.get("summary", ""), RECENT_CONVERSATION_SNIPPET_CHARS))
-        recent_lines = []
-        for msg in row.get("messages", [])[-RECENT_CONVERSATION_MESSAGES:]:
-            role = msg.get("role", "")
-            if role not in {"user", "assistant"}:
-                continue
-            label = "Javier" if role == "user" else "Motoko"
-            recent_lines.append(f"{label}: {compact_text(msg.get('content', ''), RECENT_CONVERSATION_SNIPPET_CHARS)}")
-        if recent_lines:
-            body_parts.append("recent turns:\n  " + "\n  ".join(recent_lines))
-        text = header + ("\n  " + "\n  ".join(body_parts) if body_parts else "")
-        remaining = RECENT_CONVERSATION_MAX_CHARS - used
-        if remaining <= 0:
-            break
-        if len(text) > remaining:
-            text = text[: max(0, remaining - 1)].rstrip() + "…"
-        lines.append(text)
-        used += len(text)
-        sources.append(
-            {
-                "kind": "recent-conversation",
-                "conversation_id": row.get("id", ""),
-                "title": title,
-                "updated": row.get("updated", row.get("created", "")),
-                "branch": branch,
-                "score": row.get("_recall_score", 0),
-                "matched_terms": row.get("_matched_terms", 0),
-                "selection": row.get("_selection_reasons", []),
-            }
-        )
-    return "\n\n".join(lines), sources
+    return render_recent_conversations_with_sources_core(
+        conversations,
+        relative_time_func=relative_time,
+        max_chars=RECENT_CONVERSATION_MAX_CHARS,
+        snippet_chars=RECENT_CONVERSATION_SNIPPET_CHARS,
+        recent_message_limit=RECENT_CONVERSATION_MESSAGES,
+    )
 
 
 def print_memory_search(query: str) -> None:

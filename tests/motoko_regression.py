@@ -4830,6 +4830,48 @@ def test_core_context_renderer_uses_injected_loaders(m):
     assert [source["kind"] for source in sources] == ["index", "repo", "file"]
 
 
+def test_core_recent_conversation_renderer_is_injectable(m):
+    text, sources = m.render_recent_conversations_with_sources_core(
+        [
+            {
+                "id": "conv-1",
+                "title": "Planning",
+                "updated": "2026-05-23T00:00:00+00:00",
+                "branch": "master",
+                "summary": "Long-term Motoko planning.",
+                "messages": [
+                    {"role": "user", "content": "What next?"},
+                    {"role": "assistant", "content": "Use grounded retrieval."},
+                ],
+                "_recall_score": 12,
+                "_matched_terms": 3,
+                "_selection_reasons": ["recent", "relevant"],
+            }
+        ],
+        relative_time_func=lambda value: "today" if value else "-",
+        max_chars=500,
+        snippet_chars=80,
+        recent_message_limit=2,
+    )
+
+    assert "conversation:conv-1" in text
+    assert "updated=today" in text
+    assert "Javier: What next?" in text
+    assert "Motoko: Use grounded retrieval." in text
+    assert sources == [
+        {
+            "kind": "recent-conversation",
+            "conversation_id": "conv-1",
+            "title": "Planning",
+            "updated": "2026-05-23T00:00:00+00:00",
+            "branch": "master",
+            "score": 12,
+            "matched_terms": 3,
+            "selection": ["recent", "relevant"],
+        }
+    ]
+
+
 def test_repo_command_request_attaches_context(m):
     with isolated_state() as tmp:
         conv = m.new_conversation("Repo request")
