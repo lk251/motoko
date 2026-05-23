@@ -43,6 +43,7 @@ from motoko_core.input_edit import (
     previous_history_entry,
 )
 from motoko_core.tui_render import (
+    bottom_area_frame,
     bottom_clear_sequence,
     dropdown_display_lines,
     lines_at_cursor_sequence,
@@ -192,6 +193,22 @@ def main() -> int:
     assert "queued:2" in status
     assert "bg: idle (catalog fresh)" in status
     assert study_status_label_core("study: indexing", None, progress_formatter=lambda _row: "unused") == "bg-heavy: indexing(model)"
+    frame_lines, frame_cursor_row, frame_cursor_col = bottom_area_frame(
+        live_lines=["live1", "live2", "live3"],
+        dropdown_lines=["choice"],
+        input_lines=["> prompt"],
+        status_lines=["status"],
+        input_cursor_row_offset=0,
+        input_cursor_col=4,
+        width=80,
+        height=7,
+        truncation_marker="...",
+    )
+    assert "live1" not in frame_lines
+    assert "live3" in frame_lines
+    assert frame_lines[-2:] == ["> prompt", "status"]
+    assert frame_cursor_row == len(frame_lines) - 2
+    assert frame_cursor_col == 4
     assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
     assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
     with tempfile.TemporaryDirectory() as tmp:

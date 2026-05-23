@@ -625,6 +625,10 @@ Current implementation progress:
   policy in `motoko_core.tui_render`. The root TUI still owns live timers,
   terminal writes, and state transitions, while core owns the display text
   composition for queued prompts, reports, memory maintenance, and study lanes.
+- Step 8 now also has pure bottom-area frame composition in
+  `motoko_core.tui_render`. The root TUI still gathers live-answer, dropdown,
+  input, and status rows and emits terminal control sequences, while core owns
+  live-output clipping, row ordering, and cursor placement.
 - Step 8 also has direct tty/input regression coverage for the new pure input
   editing and TUI rendering helpers, in addition to the existing
   pseudo-terminal resize/render check.

@@ -94,6 +94,7 @@ from motoko_core.input_edit import (  # noqa: E402
 )
 from motoko_core.tui_render import (  # noqa: E402
     bottom_clear_sequence as render_bottom_clear_sequence,
+    bottom_area_frame as render_bottom_area_frame,
     dropdown_display_lines,
     lines_at_cursor_sequence as render_lines_at_cursor_sequence,
     message_display_lines as render_message_display_lines,
@@ -14601,21 +14602,18 @@ class MotokoTui:
         dropdown_lines = self.dropdown_display(width, options)
         status_lines = self.status_display(width)
         live_lines = self.live_answer_display(width)
-        max_live = max(0, height - len(dropdown_lines) - len(input_lines) - len(status_lines) - 2)
-        if max_live and len(live_lines) > max_live:
-            live_lines = [style("…", "dim")] + live_lines[-max(1, max_live - 1) :]
-        elif not max_live:
-            live_lines = []
-        lines = []
-        lines.extend(live_lines)
-        lines.extend(dropdown_lines)
-        input_start = len(lines)
-        lines.extend(input_lines)
-        lines.extend(status_lines)
-        lines = lines or [""]
-        cursor_row = input_start + cursor_row_offset
+        lines, cursor_row, cursor_col = render_bottom_area_frame(
+            live_lines=live_lines,
+            dropdown_lines=dropdown_lines,
+            input_lines=input_lines,
+            status_lines=status_lines,
+            input_cursor_row_offset=cursor_row_offset,
+            input_cursor_col=cursor_col,
+            width=width,
+            height=height,
+            truncation_marker="…",
+        )
         rows_below_cursor = max(0, len(lines) - cursor_row - 1)
-        cursor_col = min(width, cursor_col)
         frame_key = (width, height, tuple(lines), cursor_row, cursor_col)
         if not force and frame_key == getattr(self, "bottom_frame_key", None):
             return

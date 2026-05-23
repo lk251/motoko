@@ -81,6 +81,39 @@ def status_display_lines(
     return [style(line, "dim") for line in wrap_display_line(text, width)]
 
 
+def bottom_area_frame(
+    *,
+    live_lines: list[str],
+    dropdown_lines: list[str],
+    input_lines: list[str],
+    status_lines: list[str],
+    input_cursor_row_offset: int,
+    input_cursor_col: int,
+    width: int,
+    height: int,
+    truncation_marker: str,
+) -> tuple[list[str], int, int]:
+    max_live = max(0, height - len(dropdown_lines) - len(input_lines) - len(status_lines) - 2)
+    if max_live and len(live_lines) > max_live:
+        clipped_live_lines = live_lines
+        tail_count = max(0, max_live - 1)
+        live_lines = [style(truncation_marker, "dim")]
+        if tail_count:
+            live_lines.extend(clipped_live_lines[-tail_count:])
+    elif not max_live:
+        live_lines = []
+    lines = []
+    lines.extend(live_lines)
+    lines.extend(dropdown_lines)
+    input_start = len(lines)
+    lines.extend(input_lines)
+    lines.extend(status_lines)
+    lines = lines or [""]
+    cursor_row = input_start + input_cursor_row_offset
+    cursor_col = min(width, input_cursor_col)
+    return lines, cursor_row, cursor_col
+
+
 def overlay_display_lines(title: str, body_lines: list[str], width: int) -> list[str]:
     rows = []
     rows.extend(wrap_display_line(style(title or "help", "purple", "bold") + style("  Enter/Esc closes", "dim"), width))
