@@ -540,6 +540,12 @@ Current implementation progress:
   `motoko_core.retrieval`. The root script still builds and saves reports from
   live indexes, evidence stores, and vector stores, while core owns the
   inspectable diagnostic text layout.
+- Step 6 now also has pure vector-store primitives in
+  `motoko_core.vector_store`: embedding/rerank response parsing, dense and
+  sparse vector normalization/scoring, embedding input splitting, bounded
+  embedding text assembly, and vector-query option parsing. The root facade
+  still owns live route I/O, store construction, persistence, and refresh
+  orchestration.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript
