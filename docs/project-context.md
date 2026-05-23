@@ -651,6 +651,12 @@ Current implementation progress:
   whose behavior is intentionally UI-specific: menu display, exit, new/resume,
   stop, queue clearing, pause, delete confirmation, shared reports, and
   foreground blocking work.
+- Step 9 is effectively complete for the current single-file facade: command
+  families with shared semantics now resolve through small request builders,
+  while true control-flow commands remain explicit at the TUI or line-mode
+  boundary. Future command work should be tactical, such as moving these root
+  request builders behind narrower service modules after those services are
+  extracted further.
 
 ## Roadmap Candidates
 
