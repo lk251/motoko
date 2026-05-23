@@ -26,13 +26,20 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from motoko_core.commands import (
+    COMMAND_KIND_MUTATION,
+    CommandRequest,
     command_body,
     command_matches,
     command_matches_any,
     command_menu_text,
     command_names,
     command_primary,
+    normalize_command_request,
     slash_command_value,
+)
+from motoko_core.artifact_lifecycle import (
+    source_lifecycle_state,
+    superseded_index_cleanup_decision,
 )
 from motoko_core.feedback import is_feedback_command, parse_feedback_command
 from motoko_core.input_edit import (
@@ -44,6 +51,11 @@ from motoko_core.input_edit import (
     remember_input_history_entry,
     seed_input_history_from_messages,
 )
+from motoko_core.jobs import JobSupervisor, format_job_snapshots
+from motoko_core.model_manager import ModelRouteManager
+from motoko_core.observability import format_observability_report, scrub_observability_row
+from motoko_core.retrieval_service import RetrievalService
+from motoko_core.runtime import RuntimePaths, make_runtime_context
 from motoko_core.terminal import strip_ansi
 from motoko_core.tui_render import (
     bottom_area_frame,
@@ -160,6 +172,13 @@ def main() -> int:
     assert command_matches("/status", "/status")
     assert not command_matches("/status extra", "/status", allow_body=False)
     assert command_matches_any("/down missed sources", ("/up", "/down"))
+    request = normalize_command_request(("/remember", lambda: "ok"), kind=COMMAND_KIND_MUTATION, mutates_state=True)
+    assert isinstance(request, CommandRequest)
+    assert request.kind == COMMAND_KIND_MUTATION
+    assert request.mutates_state
+    label, runner = request
+    assert label == "/remember"
+    assert runner() == "ok"
     assert is_feedback_command("/up helpful")
     assert not is_feedback_command("/upward helpful")
     assert parse_feedback_command("/down missed sources") == ("down", "missed sources")
@@ -244,6 +263,59 @@ def main() -> int:
     assert overlay_page_sequence(["one"], 2) == "\033[Hone\033[K\n\033[K\033[J\033[?25h"
     assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
     assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
+    supervisor = JobSupervisor(clock=lambda: 10.0, id_factory=lambda: "job-1")
+    job = supervisor.begin(kind="answer", lane="large-model", label="chat answer")
+    supervisor.update(job.job_id, progress={"batch": 1}, checkpoint={"durable": True})
+    assert supervisor.request_stop_by_kind("answer") == 1
+    snapshot = supervisor.snapshots(include_done=False)[0]
+    assert snapshot["status"] == "stop-requested"
+    assert snapshot["progress"] == {"batch": 1}
+    assert "job-1 answer large-model" in format_job_snapshots([snapshot])
+    runtime = make_runtime_context(
+        realm="mares",
+        identity="Motoko",
+        app_version="0.1.0",
+        revision="test",
+        permissions="repo-review",
+        paths=RuntimePaths(state_root=pathlib.Path("/state"), config_root=pathlib.Path("/config")),
+        routes=[{"route": "chat", "model": "qwen", "endpoint": "unix:///run/motoko.sock", "max_parallel": 1}],
+    ).content_free_dict()
+    assert runtime["schema"] == "runtime-context-v1"
+    assert runtime["routes"][0]["endpoint_kind"] == "unix"
+    manager = ModelRouteManager(
+        route_provider=lambda _name: {"route": "chat", "endpoint": "unix:///x", "model": "m"},
+        status_provider=lambda _route: "socket=active\nproxy=active\nbackend=activating",
+        verify_hint_provider=lambda _route: "verify",
+        activating_detector=lambda text: "activating" in text,
+    )
+    readiness = manager.readiness("chat")
+    assert readiness.activating
+    assert readiness.content_free_dict()["has_verify_hint"]
+    service = RetrievalService(
+        load_index=lambda _id: {"id": "idx"},
+        retrieve_index_query=lambda _index, _query: ("index text", [{"kind": "index"}]),
+        render_index_overview=lambda _index: ("overview", [{"kind": "index"}]),
+        load_topic=lambda _id: {},
+        retrieve_topic=lambda _topic, _query: ("topic", []),
+        load_dossier=lambda _id: {},
+        retrieve_dossier=lambda _dossier, _query: ("dossier", []),
+        render_context_items=lambda items, query, **_callbacks: (f"{len(items)}:{query}", [{"kind": "ctx"}]),
+    )
+    retrieval = service.render_attached_context([{"kind": "index", "id": "idx"}], "query")
+    assert retrieval.text == "1:query"
+    assert retrieval.diagnostics["schema"] == "retrieval-service-v1"
+    decision = superseded_index_cleanup_decision(
+        index_id="old",
+        latest_id="new",
+        stale=True,
+        latest_has_missing_artifacts=False,
+        bytes_estimate=12,
+    ).to_dict()
+    assert decision["action"] == "delete"
+    assert source_lifecycle_state(path="/private/file", exists=False, ignored=False, fingerprint_changed=False)["status"] == "deleted"
+    scrubbed = scrub_observability_row({"event": "status", "prompt": "private", "route": "chat"})
+    assert scrubbed["prompt"] == "<redacted>"
+    assert "prompt=<redacted>" in format_observability_report([scrubbed])
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
         os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")

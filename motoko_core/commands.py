@@ -2,6 +2,69 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Callable
+
+
+COMMAND_KIND_REPORT = "report"
+COMMAND_KIND_MUTATION = "mutation"
+COMMAND_KIND_FOREGROUND_JOB = "foreground-job"
+COMMAND_KIND_BACKGROUND_JOB = "background-job"
+COMMAND_KIND_SESSION_CONTROL = "session-control"
+
+
+@dataclass(frozen=True)
+class CommandRequest:
+    label: str
+    run: Callable
+    kind: str = COMMAND_KIND_REPORT
+    mutates_state: bool = False
+    blocks: bool = False
+
+    def __iter__(self):
+        yield self.label
+        yield self.run
+
+    def content_free_dict(self) -> dict:
+        return {
+            "label": self.label,
+            "kind": self.kind,
+            "mutates_state": self.mutates_state,
+            "blocks": self.blocks,
+        }
+
+
+def command_request(
+    label: str,
+    run: Callable,
+    *,
+    kind: str = COMMAND_KIND_REPORT,
+    mutates_state: bool = False,
+    blocks: bool = False,
+) -> CommandRequest:
+    return CommandRequest(
+        label=str(label),
+        run=run,
+        kind=str(kind),
+        mutates_state=bool(mutates_state),
+        blocks=bool(blocks),
+    )
+
+
+def normalize_command_request(
+    request,
+    *,
+    kind: str = COMMAND_KIND_REPORT,
+    mutates_state: bool = False,
+    blocks: bool = False,
+) -> CommandRequest | None:
+    if request is None:
+        return None
+    if isinstance(request, CommandRequest):
+        return request
+    label, run = request
+    return command_request(label, run, kind=kind, mutates_state=mutates_state, blocks=blocks)
+
 
 def slash_command_value(command: str) -> str:
     parts = command.split()

@@ -311,11 +311,36 @@ from motoko_core.conversations import (  # noqa: E402
     save_conversation_record,
 )
 from motoko_core.commands import (  # noqa: E402
+    COMMAND_KIND_FOREGROUND_JOB,
+    COMMAND_KIND_MUTATION,
+    COMMAND_KIND_REPORT,
+    CommandRequest,
     command_body,
     command_menu_text,
     command_names,
     command_primary,
+    normalize_command_request,
     slash_command_value,
+)
+from motoko_core.jobs import (  # noqa: E402
+    JobSupervisor,
+    format_job_snapshots,
+)
+from motoko_core.model_manager import (  # noqa: E402
+    ModelRouteManager,
+)
+from motoko_core.retrieval_service import (  # noqa: E402
+    RetrievalService,
+)
+from motoko_core.runtime import (  # noqa: E402
+    RuntimePaths,
+    make_runtime_context,
+)
+from motoko_core.artifact_lifecycle import (  # noqa: E402
+    superseded_index_cleanup_decision,
+)
+from motoko_core.observability import (  # noqa: E402
+    format_observability_report,
 )
 from motoko_core.state import (  # noqa: E402
     allowdirs_path,
@@ -393,6 +418,7 @@ except ImportError:  # pragma: no cover - readline is platform dependent.
 
 APP = "motoko"
 APP_VERSION = "0.1.0"
+LIVE_JOB_SUPERVISOR = JobSupervisor()
 DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
 LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
@@ -6299,6 +6325,13 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False) -
         index_id = str(index.get("id", ""))
         latest_id = str(row.get("latest", {}).get("id", ""))
         if dry_run:
+            decision = superseded_index_cleanup_decision(
+                index_id=index_id,
+                latest_id=latest_id,
+                stale=True,
+                latest_has_missing_artifacts=False,
+                bytes_estimate=int(row.get("bytes", 0) or 0),
+            )
             deleted.append(
                 {
                     "index": index_id,
@@ -6306,6 +6339,7 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False) -
                     "status": "candidate",
                     "bytes": row.get("bytes", 0),
                     "warnings": row.get("warnings", [])[:4],
+                    "lifecycle": decision.to_dict(),
                 }
             )
             continue
@@ -6315,6 +6349,13 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False) -
             blocked.append({"index": index_id, "reason": f"latest index unavailable: {exc}"})
             continue
         missing = index_artifact_warnings(latest)
+        decision = superseded_index_cleanup_decision(
+            index_id=index_id,
+            latest_id=latest_id,
+            stale=True,
+            latest_has_missing_artifacts=bool(missing),
+            bytes_estimate=int(row.get("bytes", 0) or 0),
+        )
         if missing:
             blocked.append(
                 {
@@ -6322,10 +6363,13 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False) -
                     "latest": latest_id,
                     "reason": "latest index still has unresolved stored chunk references",
                     "warnings": missing[:4],
+                    "lifecycle": decision.to_dict(),
                 }
             )
             continue
-        deleted.append(delete_index_snapshot(index))
+        deleted_item = delete_index_snapshot(index)
+        deleted_item["lifecycle"] = decision.to_dict()
+        deleted.append(deleted_item)
     if not dry_run and deleted:
         with contextlib.suppress(FileNotFoundError):
             context_catalog_path().unlink()
@@ -11484,17 +11528,18 @@ def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
 
 
 def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
-    return core_render_context_items_with_sources(
-        items,
-        query,
+    service = RetrievalService(
         load_index=load_index,
-        render_index_query=retrieve_from_index,
+        retrieve_index_query=retrieve_from_index,
         render_index_overview=render_index_overview_context,
         load_topic=load_topic,
-        render_topic=retrieve_from_topic,
+        retrieve_topic=retrieve_from_topic,
         load_dossier=load_dossier,
-        render_dossier=retrieve_from_dossier,
+        retrieve_dossier=retrieve_from_dossier,
+        render_context_items=core_render_context_items_with_sources,
     )
+    result = service.render_attached_context(items, query)
+    return result.text, result.sources
 
 
 def render_conversation_summary(conv: dict) -> str:
@@ -12204,9 +12249,11 @@ def format_help() -> str:
 
 
 def format_about() -> str:
+    runtime = current_runtime_context()
     return "\n".join(format_about_header() + [
         "",
         f"revision: {app_revision()}",
+        f"runtime schema: {runtime.get('schema', '')}",
         f"identity: {identity_name()}",
         f"realm: {identity_realm()}",
         f"model: {model_name()}",
@@ -12235,6 +12282,41 @@ def format_about_header(width: int | None = None) -> list[str]:
         ]
     )
     return rows
+
+
+def current_runtime_context() -> dict:
+    routes = []
+    for route in configured_model_routes():
+        info = model_route(route)
+        info = dict(info)
+        info["lane"] = model_route_lane(route)
+        routes.append(info)
+    context = make_runtime_context(
+        realm=identity_realm(),
+        identity=identity_name(),
+        app_version=APP_VERSION,
+        revision=app_revision(),
+        permissions=permission_mode(),
+        paths=RuntimePaths(
+            state_root=state_root(),
+            config_root=config_root(),
+            conversations_dir=conversations_dir(),
+            indexes_dir=indexes_dir(),
+            vector_stores_dir=vector_stores_dir(),
+            evidence_stores_dir=evidence_stores_dir(),
+        ),
+        routes=routes,
+    )
+    return context.content_free_dict()
+
+
+def model_route_manager() -> ModelRouteManager:
+    return ModelRouteManager(
+        route_provider=model_route,
+        status_provider=local_model_status_text,
+        verify_hint_provider=local_model_verify_hint,
+        activating_detector=local_model_status_is_activating,
+    )
 
 
 def attached_context_sources(conv: dict) -> list[dict]:
@@ -12354,13 +12436,17 @@ def format_status(conv: dict | None = None) -> str:
     index_config = config.get("index", {})
     chat_route_info = model_route(MODEL_ROUTE_CHAT)
     if endpoint_is_unix(chat_route_info.get("endpoint", "")):
-        chat_route_state = compact_local_model_status(local_model_status_text(chat_route_info)) or "unknown"
+        readiness = model_route_manager().readiness(MODEL_ROUTE_CHAT)
+        chat_route_state = compact_local_model_status(readiness.status_text) or "unknown"
         chat_status_source = f"motoko-model status {local_model_helper_route(chat_route_info)}"
     else:
         chat_route_state = "not a NixOS Unix-socket route"
         chat_status_source = "not available"
+    runtime = current_runtime_context()
 
     lines = [
+        f"runtime schema: {runtime.get('schema', '')}",
+        format_observability_report([{"event": "status", "privacy": "content-free"}]).splitlines()[0],
         f"identity: {identity_name()}",
         f"realm: {identity_realm()}",
         f"assistant color: {assistant_color()}",
@@ -12398,6 +12484,9 @@ def format_status(conv: dict | None = None) -> str:
         f"topics: {len(topics)}",
         f"memory dossiers: {len(dossiers)}",
     ]
+    active_jobs = LIVE_JOB_SUPERVISOR.snapshots(include_done=False)
+    if active_jobs:
+        lines.append(format_job_snapshots(active_jobs))
     if conv:
         lines.extend(
             [
@@ -12790,53 +12879,63 @@ def refresh_profile_dossier_text() -> str:
     return f"profile refreshed: {profile.get('updated', '')}"
 
 
+def foreground_command_request(label: str, func) -> CommandRequest:
+    return CommandRequest(
+        label,
+        func,
+        kind=COMMAND_KIND_FOREGROUND_JOB,
+        mutates_state=True,
+        blocks=True,
+    )
+
+
 def blocking_command_request(text: str, conv: dict):
     text = text.strip()
     primary = command_primary(text)
     body = command_body(text)
     if primary == "/profile-refresh" and not body:
-        return "Refreshing profile dossier...", refresh_profile_dossier_text
+        return foreground_command_request("Refreshing profile dossier...", refresh_profile_dossier_text)
     if primary == "/study":
-        return "Studying context...", lambda: study_from_body_text(conv, body)
+        return foreground_command_request("Studying context...", lambda: study_from_body_text(conv, body))
     if primary == "/compact" and not body:
-        return "Compacting conversation...", lambda: compact_conversation_text(conv)
+        return foreground_command_request("Compacting conversation...", lambda: compact_conversation_text(conv))
     if primary == "/memorize" and not body:
-        return "Running memory proposal...", lambda: memorize_conversation(conv)
+        return foreground_command_request("Running memory proposal...", lambda: memorize_conversation(conv))
     if primary == "/index" and body:
-        return "Building document index...", lambda: attach_index_from_path_text(conv, body)
+        return foreground_command_request("Building document index...", lambda: attach_index_from_path_text(conv, body))
     if primary == "/index-resume":
-        return "Resuming document index...", lambda: attach_index_from_resume_text(conv, body)
+        return foreground_command_request("Resuming document index...", lambda: attach_index_from_resume_text(conv, body))
     if primary == "/resume-work":
-        return "Resuming Motoko work...", lambda: attach_resumed_work_text(conv, body or None)
+        return foreground_command_request("Resuming Motoko work...", lambda: attach_resumed_work_text(conv, body or None))
     if primary == "/topic":
-        return "Building topic dossier...", lambda: attach_topic_from_body_text(conv, body)
+        return foreground_command_request("Building topic dossier...", lambda: attach_topic_from_body_text(conv, body))
     if primary == "/deepen":
-        return "Building deep topic dossier...", lambda: attach_deep_topic_from_body_text(conv, body)
+        return foreground_command_request("Building deep topic dossier...", lambda: attach_deep_topic_from_body_text(conv, body))
     if primary == "/dossier":
-        return "Building memory dossier...", lambda: attach_dossier_from_body_text(conv, body)
+        return foreground_command_request("Building memory dossier...", lambda: attach_dossier_from_body_text(conv, body))
     return None
 
 
 def shared_command_request(text: str, conv: dict):
     builders = [
-        lambda: report_command_request(text, conv),
-        lambda: evidence_command_request(text, conv),
-        lambda: model_command_request(text),
-        lambda: settings_command_request(text),
-        lambda: index_report_command_request(text, conv),
-        lambda: vector_command_request(text, conv),
-        lambda: topic_dossier_report_command_request(text),
-        lambda: memory_profile_report_command_request(text),
-        lambda: memory_mutation_command_request(text, conv),
-        lambda: context_attachment_command_request(text, conv),
-        lambda: repo_command_request(text, conv),
-        lambda: conversation_mutation_command_request(text, conv),
-        lambda: feedback_command_request(text, conv),
+        (lambda: report_command_request(text, conv), COMMAND_KIND_REPORT, False),
+        (lambda: evidence_command_request(text, conv), COMMAND_KIND_REPORT, True),
+        (lambda: model_command_request(text), COMMAND_KIND_MUTATION, True),
+        (lambda: settings_command_request(text), COMMAND_KIND_MUTATION, True),
+        (lambda: index_report_command_request(text, conv), COMMAND_KIND_REPORT, True),
+        (lambda: vector_command_request(text, conv), COMMAND_KIND_REPORT, True),
+        (lambda: topic_dossier_report_command_request(text), COMMAND_KIND_REPORT, False),
+        (lambda: memory_profile_report_command_request(text), COMMAND_KIND_REPORT, False),
+        (lambda: memory_mutation_command_request(text, conv), COMMAND_KIND_MUTATION, True),
+        (lambda: context_attachment_command_request(text, conv), COMMAND_KIND_MUTATION, True),
+        (lambda: repo_command_request(text, conv), COMMAND_KIND_MUTATION, True),
+        (lambda: conversation_mutation_command_request(text, conv), COMMAND_KIND_MUTATION, True),
+        (lambda: feedback_command_request(text, conv), COMMAND_KIND_MUTATION, True),
     ]
-    for build in builders:
+    for build, kind, mutates_state in builders:
         request = build()
         if request is not None:
-            return request
+            return normalize_command_request(request, kind=kind, mutates_state=mutates_state)
     return None
 
 
@@ -13250,6 +13349,7 @@ class MotokoTui:
         self.dropdown_index = 0
         self.events: collections.deque[tuple] = collections.deque()
         self.events_lock = threading.Lock()
+        self.jobs = LIVE_JOB_SUPERVISOR
         self.generating = False
         self.answer_phase = ""
         self.report_running = 0
@@ -13702,6 +13802,9 @@ class MotokoTui:
             elif text == "/stop":
                 discarded = self.clear_queued_prompts()
                 if self.generating:
+                    jobs = getattr(self, "jobs", None)
+                    if jobs is not None:
+                        jobs.request_stop_by_kind("answer")
                     self.cancel_event.set()
                     self.close_active_model_request()
                     note = "stopping current answer"
@@ -13831,7 +13934,12 @@ class MotokoTui:
             except Exception as exc:
                 self.put_event(("cwd_index_error", f"{type(exc).__name__}: {exc}"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
+            kind="cwd-index",
+            lane="large-model",
+            label="corpus learning",
+            target=worker,
+        )
 
     def request_pause(self) -> None:
         active = self.generating or self.maintaining or self.study_running or self.cwd_indexing
@@ -13865,7 +13973,7 @@ class MotokoTui:
             except Exception as exc:
                 self.put_event(("report_error", token, label, f"{type(exc).__name__}: {exc}"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(kind="report", lane="cpu", label=label, target=worker)
 
     def run_blocking_command(self, label: str, func) -> None:
         if self.generating:
@@ -14012,7 +14120,13 @@ class MotokoTui:
             except Exception as exc:  # Defensive: preserve terminal session.
                 self.put_event(("error", f"{type(exc).__name__}: {exc}"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
+            kind="answer",
+            lane="large-model",
+            label="chat answer",
+            target=worker,
+            cancel_event=cancel_event,
+        )
 
     def put_event(self, event: tuple) -> None:
         with self.events_lock:
@@ -14232,7 +14346,12 @@ class MotokoTui:
                 else:
                     self.put_event(("study_done", notes))
 
-        threading.Thread(target=worker, daemon=True).start()
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
+            kind="study-loop",
+            lane="cpu",
+            label="background study loop",
+            target=worker,
+        )
 
     def start_maintenance(self, *, resumed: bool = False) -> None:
         if self.maintaining or self.generating:
@@ -14266,7 +14385,12 @@ class MotokoTui:
                 )
                 self.put_event(("maintenance_error", f"{type(exc).__name__}: {exc}"))
 
-        threading.Thread(target=worker, daemon=True).start()
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
+            kind="maintenance",
+            lane="small-model",
+            label="memory maintenance",
+            target=worker,
+        )
 
     def compact_command_menu(self) -> str:
         return command_menu_text(SLASH_COMMANDS)

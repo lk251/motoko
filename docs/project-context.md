@@ -756,6 +756,127 @@ Current implementation progress:
   coordinate cancellation, persistence, per-realm state, terminal recovery, and
   local model route side effects.
 
+### Live Subsystem Extraction Plan
+
+The next refactor phase is live subsystem extraction. This phase is riskier
+than the safe pure-helper pass because it touches timing, cancellation,
+checkpoint durability, terminal recovery, local-model route behavior, and
+realm-local state mutation. It should still be completed incrementally and
+with narrow commits, but the goal is a real service boundary rather than
+leaving all orchestration in the root `motoko` facade.
+
+Completion criteria:
+
+1. Characterization coverage exists before moving live behavior. Tests must
+   cover the policies for stop/cancel, queued prompt handling, job
+   pause/resume/checkpoint shape, route-loading diagnostics, conversation
+   lifecycle cleanup, stale/deleted source handling, and status/progress
+   rendering.
+2. A runtime context object carries realm, state/config paths, model route
+   catalog facts, cancellation/job hooks, and content-free status metadata
+   without exposing prompts, responses, filenames from private corpora, or
+   retrieved context to admin-owned logs.
+3. Command execution has an explicit boundary. Commands should resolve to
+   typed requests such as report, mutation, foreground job, background job, or
+   session control before the TUI or line-mode shell decides how to execute
+   them.
+4. A job supervisor owns live job identity, lane/kind metadata, cooperative
+   cancellation, progress events, durable checkpoint metadata, and safe
+   recovery decisions. It must support visible `bg-heavy` work, lighter
+   maintenance work, and prompt queuing without losing completed work after
+   interruption.
+5. A model route manager owns route readiness, approved `motoko-model`
+   helper interaction, loading/backoff diagnostics, timeout policy, and
+   content-free telemetry. It must not call `systemctl`, select arbitrary
+   model paths, or write request/response bodies outside user-owned Motoko
+   state.
+6. A retrieval service owns live hybrid retrieval orchestration: lexical and
+   structured candidates, evidence-store spans, vector recall, rerank fusion,
+   source packing, source records, and diagnostics. Lexical/structured truth
+   remains first-class rather than being replaced by vector retrieval.
+7. An artifact lifecycle service owns stale/deleted/ignored source cleanup
+   decisions across indexes, vector stores, evidence stores, dossiers,
+   feedback fixtures, memories, profile state, and conversation-derived
+   artifacts. Schema changes must still include deterministic upgrades or
+   source reprocessing paths.
+8. The TUI event loop routes blocking work through explicit job/event paths
+   while keeping terminal writes single-owned. This should improve `/stop`,
+   queued prompts, visible progress, and terminal recovery without introducing
+   rendering races.
+9. Observability remains content-free outside the user's Motoko state. Status,
+   last-call, model, job, and progress reports should explain what is
+   happening without logging prompts, responses, private filenames, summaries,
+   memories, or retrieved snippets to admin-owned services.
+10. The phase ends with a soak/eval gate: full automated validation plus an
+   interactive checklist covering retrieval quality, source grounding,
+   `/sources`, stale edits, deleted/ignored files, vector refresh, feedback
+   evals, interruption, memory maintenance, and model-route loading failures.
+
+Implementation notes:
+
+- The root `motoko` executable should remain the stable compatibility facade
+  until these services are demonstrably safe.
+- Each extracted live subsystem should be constructed so it can be tested with
+  fake callbacks and temporary realm-local state.
+- If extraction reveals that a planned step would weaken cancellation,
+  checkpoint durability, per-realm boundaries, or terminal recovery, revise the
+  local design and complete the revised step before moving on.
+
+Soak/eval checklist for the end of this phase:
+
+- `nix develop --command python3 -m py_compile motoko motoko_core/*.py
+  tests/motoko_tty.py tests/motoko_regression.py tests/motoko_eval.py`
+- `nix develop --command python3 tests/motoko_tty.py`
+- `nix develop --command python3 tests/motoko_regression.py`
+- `nix develop --command python3 tests/motoko_eval.py`
+- `git diff --check`
+- `nix flake check`
+- Interactive after deployment: start Motoko in an indexed corpus, ask a
+  grounded document question, inspect `/sources`, run `/retrieval-preview`,
+  run `/retrieval-debug`, edit or delete an indexed source, confirm freshness
+  warnings or cleanup decisions, run `/vector-refresh`, record feedback with
+  `/up` or `/down`, run `/feedback-eval`, test `/stop` during preparing and
+  answering, test `/pause` during heavy work, and verify `/status`,
+  `/last-call`, `/models`, and job/progress reports remain content-free.
+
+Current implementation progress:
+
+- Step 1 is complete for this phase: existing regression coverage already
+  characterizes stop/cancel, queue clearing, model-loading diagnostics,
+  stale-source handling, index/vector pause/resume, conversation cleanup, and
+  render responsiveness; new checks cover typed command metadata, runtime
+  context shape, job snapshots, retrieval-service wrapping, artifact lifecycle
+  decisions, and observability scrubbing.
+- Step 2 is complete: `motoko_core.runtime` defines the runtime context and
+  `format_about`/`format_status` expose only content-free runtime schema and
+  route facts.
+- Step 3 is complete: `motoko_core.commands` now has typed `CommandRequest`
+  records, and shared command builders classify report, mutation, and
+  foreground-job requests while preserving the legacy tuple facade.
+- Step 4 is complete for the root facade: `motoko_core.jobs` provides the
+  in-process job supervisor, cooperative stop/pause flags, content-free
+  snapshots, checkpoint/progress metadata, and formatting; TUI answer,
+  report, maintenance, study, and cwd-index workers are registered there.
+- Step 5 is complete: `motoko_core.model_manager` is the model-route readiness
+  boundary over the approved `motoko-model` helper path, and `/status` uses it
+  for chat-route state without logging request or response bodies.
+- Step 6 is complete for the current facade: `motoko_core.retrieval_service`
+  wraps live attached-context retrieval through injected callbacks, while
+  concrete index/vector/evidence/rerank stores remain explicitly owned by the
+  root process.
+- Step 7 is complete for current cleanup decisions:
+  `motoko_core.artifact_lifecycle` owns source/artifact lifecycle decision
+  records and stale superseded index cleanup now records the lifecycle
+  decision behind each dry-run, deletion, or block.
+- Step 8 is complete for this pass: TUI live worker creation now goes through
+  the job supervisor while terminal writes remain single-owned by the TUI.
+- Step 9 is complete for this pass: `motoko_core.observability` provides
+  content-free report scrubbing and `/status` identifies its observability
+  schema.
+- Step 10 is complete as an automated gate in this repository; the manual
+  interactive checklist above remains the deployment soak path after Javier
+  updates the Motoko flake input and rebuilds.
+
 ## Roadmap Candidates
 
 The following path looks attractive, but it is not mandatory and should remain

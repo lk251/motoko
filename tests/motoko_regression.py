@@ -5350,6 +5350,29 @@ def test_color_survives_quiet_index_redirect(m):
             os.environ["NO_COLOR"] = old_no_color
 
 
+def test_live_command_request_metadata(m):
+    with isolated_state():
+        conv = m.new_conversation("Command boundary")
+        conv["id"] = "command-boundary"
+        report = m.shared_command_request("/status", conv)
+        assert report is not None
+        assert report.kind == m.COMMAND_KIND_REPORT
+        assert not report.blocks
+        label, run = report
+        assert label == "/status"
+        assert "runtime schema:" in run()
+
+        mutation = m.shared_command_request("/rename Better title", conv)
+        assert mutation is not None
+        assert mutation.kind == m.COMMAND_KIND_MUTATION
+        assert mutation.mutates_state
+
+        blocking = m.blocking_command_request("/study current context", conv)
+        assert blocking is not None
+        assert blocking.kind == m.COMMAND_KIND_FOREGROUND_JOB
+        assert blocking.blocks
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -5444,6 +5467,7 @@ def main() -> int:
         test_repo_context_item,
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,
+        test_live_command_request_metadata,
     ]
     for test in tests:
         test(m)

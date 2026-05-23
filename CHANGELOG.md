@@ -5,6 +5,11 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added a live-subsystem refactor boundary: runtime context, typed command
+  requests, job supervision, model-route readiness, retrieval-service wrapping,
+  artifact lifecycle decisions, and content-free observability now have
+  dedicated stdlib modules while the root `motoko` executable remains the
+  compatibility facade.
 - Added a chat context governor that estimates prompt size, keeps normal chat on
   the Qwen3.6 Q5 route, and switches to an approved max-context Q4 route only
   for very large chat prompts or explicit context-mode overrides.
