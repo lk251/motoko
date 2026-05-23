@@ -519,6 +519,11 @@ Current implementation progress:
   script. This keeps source rendering, repo/file context formatting, and
   unavailable-source warnings importable while preserving realm-local state and
   live retrieval ownership in `motoko`.
+- Step 6 now also has answer-grounding audit logic in
+  `motoko_core.retrieval`, parameterized by schema/version, timestamps, and
+  source-kind policy from the root script. `/sources` and answer audit
+  behavior remain unchanged, but the reasoning about strong evidence, context
+  evidence, stale warnings, and recommended actions is importable and tested.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript

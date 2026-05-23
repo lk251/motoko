@@ -1319,6 +1319,27 @@ def test_answer_grounding_audit_sources(m):
     assert "attach or study" in thin["recommended_action"]
 
 
+def test_core_answer_grounding_audit_is_injectable(m):
+    audit = m.answer_grounding_audit_core(
+        "according to plan.org",
+        "answer",
+        [{"kind": "index", "root": "/tmp/docs", "status": "stale", "warnings": ["old"]}],
+        schema_version="audit-test",
+        created="2026-05-23T00:00:00+00:00",
+        grounding_query_words={"according"},
+        task_query_words={"task"},
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"index"},
+    )
+
+    assert audit["artifact_schema"] == "audit-test"
+    assert audit["status"] == "partial"
+    assert audit["context_sources"] == 1
+    assert audit["needs_grounding"]
+    assert "/tmp/docs: stale" in audit["warnings"]
+    assert audit["paths"] == ["/tmp/docs"]
+
+
 def test_named_file_query_boosts_matching_path(m):
     with isolated_state():
         index = {

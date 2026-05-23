@@ -188,6 +188,7 @@ from motoko_core.retrieval import (  # noqa: E402
     query_path_match_boost,
     query_path_mentions,
     query_date_mentions,
+    query_needs_grounded_sources_core,
     query_requested_recent_section_count,
     query_aware_content_selection as core_query_aware_content_selection,
     query_term_window_excerpt,
@@ -200,6 +201,8 @@ from motoko_core.retrieval import (  # noqa: E402
     score_evidence_spans,
     select_non_overlapping_spans,
     selected_evidence_excerpt,
+    answer_grounding_audit_core,
+    sources_with_answer_audit_core,
     token_counts,
     token_words,
     span_model_subspans as core_span_model_subspans,
@@ -11049,71 +11052,39 @@ def context_sufficiency_note(conv: dict, query: str, sources: list[dict]) -> str
 
 
 def query_needs_grounded_sources(query: str) -> bool:
-    terms = set(token_counts(query))
-    return bool(query_path_mentions(query) or (terms & GROUNDING_QUERY_WORDS) or (terms & TASK_QUERY_WORDS))
+    return query_needs_grounded_sources_core(
+        query,
+        grounding_query_words=GROUNDING_QUERY_WORDS,
+        task_query_words=TASK_QUERY_WORDS,
+    )
 
 
 def answer_grounding_audit(query: str, reply: str, sources: list[dict]) -> dict:
-    clean_sources = [source for source in sources if source.get("kind") != "answer-audit"]
-    kinds = collections.Counter(source.get("kind", "unknown") for source in clean_sources)
-    strong_count = sum(kinds.get(kind, 0) for kind in GROUNDING_STRONG_SOURCE_KINDS)
-    context_count = sum(kinds.get(kind, 0) for kind in GROUNDING_CONTEXT_SOURCE_KINDS)
-    needs_grounding = query_needs_grounded_sources(query)
-    freshness_warnings = []
-    for source in clean_sources:
-        status = str(source.get("status", ""))
-        if status == "stale":
-            label = source.get("path") or source.get("root") or source.get("id") or source.get("kind", "source")
-            freshness_warnings.append(f"{label}: stale")
-        for warning in source.get("warnings", []) or []:
-            freshness_warnings.append(str(warning))
-    paths = []
-    seen_paths = set()
-    for source in clean_sources:
-        path = str(source.get("path") or source.get("root") or "").strip()
-        if not path or path in seen_paths:
-            continue
-        seen_paths.add(path)
-        paths.append(path)
-    if strong_count:
-        status = "warn" if freshness_warnings else "pass"
-        reflection = "answer had retrieved source excerpts or explicit attached evidence available"
-        action = "check cited paths if the answer is high impact" if freshness_warnings else "no immediate action"
-    elif context_count:
-        status = "partial"
-        reflection = "answer had summaries, memories, or dossier context but no retrieved excerpt-level evidence"
-        action = "run /study for precise source excerpts if details matter"
-    elif needs_grounding:
-        status = "fail"
-        reflection = "question appeared to need document or task grounding, but no usable source context was selected"
-        action = "attach or study the relevant corpus before trusting the answer"
-    else:
-        status = "thin"
-        reflection = "answer was mostly conversational and did not use retrieved external evidence"
-        action = "no action unless the answer should have used private context"
-    return {
-        "kind": "answer-audit",
-        "artifact_schema": ANSWER_GROUNDING_SCHEMA_VERSION,
-        "created": now(),
-        "status": status,
-        "strong_evidence_sources": strong_count,
-        "context_sources": context_count,
-        "total_sources": len(clean_sources),
-        "source_kinds": dict(sorted(kinds.items())),
-        "needs_grounding": needs_grounding,
-        "freshness_warning_count": len(freshness_warnings),
-        "warnings": freshness_warnings[:8],
-        "paths": paths[:12],
-        "query_sha256": sha256_hex(query.encode("utf-8")),
-        "answer_sha256": sha256_hex(reply.encode("utf-8")),
-        "reflection": reflection,
-        "recommended_action": action,
-    }
+    return answer_grounding_audit_core(
+        query,
+        reply,
+        sources,
+        schema_version=ANSWER_GROUNDING_SCHEMA_VERSION,
+        created=now(),
+        grounding_query_words=GROUNDING_QUERY_WORDS,
+        task_query_words=TASK_QUERY_WORDS,
+        strong_source_kinds=GROUNDING_STRONG_SOURCE_KINDS,
+        context_source_kinds=GROUNDING_CONTEXT_SOURCE_KINDS,
+    )
 
 
 def sources_with_answer_audit(query: str, reply: str, sources: list[dict]) -> list[dict]:
-    clean_sources = [source for source in sources if source.get("kind") != "answer-audit"]
-    return clean_sources + [answer_grounding_audit(query, reply, clean_sources)]
+    return sources_with_answer_audit_core(
+        query,
+        reply,
+        sources,
+        schema_version=ANSWER_GROUNDING_SCHEMA_VERSION,
+        created=now(),
+        grounding_query_words=GROUNDING_QUERY_WORDS,
+        task_query_words=TASK_QUERY_WORDS,
+        strong_source_kinds=GROUNDING_STRONG_SOURCE_KINDS,
+        context_source_kinds=GROUNDING_CONTEXT_SOURCE_KINDS,
+    )
 
 
 def background_study_step(conv: dict, phase_callback=None) -> list[str]:

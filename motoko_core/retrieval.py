@@ -152,6 +152,105 @@ def render_context_items_with_sources(
     return "\n\n".join(parts), sources
 
 
+def sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def query_needs_grounded_sources_core(
+    query: str,
+    *,
+    grounding_query_words: set[str],
+    task_query_words: set[str],
+) -> bool:
+    terms = set(token_counts(query))
+    return bool(query_path_mentions(query) or (terms & grounding_query_words) or (terms & task_query_words))
+
+
+def answer_grounding_audit_core(
+    query: str,
+    reply: str,
+    sources: list[dict],
+    *,
+    schema_version: str,
+    created: str,
+    grounding_query_words: set[str],
+    task_query_words: set[str],
+    strong_source_kinds: set[str],
+    context_source_kinds: set[str],
+) -> dict:
+    clean_sources = [source for source in sources if source.get("kind") != "answer-audit"]
+    kinds = collections.Counter(source.get("kind", "unknown") for source in clean_sources)
+    strong_count = sum(kinds.get(kind, 0) for kind in strong_source_kinds)
+    context_count = sum(kinds.get(kind, 0) for kind in context_source_kinds)
+    needs_grounding = query_needs_grounded_sources_core(
+        query,
+        grounding_query_words=grounding_query_words,
+        task_query_words=task_query_words,
+    )
+    freshness_warnings = []
+    for source in clean_sources:
+        status = str(source.get("status", ""))
+        if status == "stale":
+            label = source.get("path") or source.get("root") or source.get("id") or source.get("kind", "source")
+            freshness_warnings.append(f"{label}: stale")
+        for warning in source.get("warnings", []) or []:
+            freshness_warnings.append(str(warning))
+    paths = []
+    seen_paths = set()
+    for source in clean_sources:
+        path = str(source.get("path") or source.get("root") or "").strip()
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        paths.append(path)
+    if strong_count:
+        status = "warn" if freshness_warnings else "pass"
+        reflection = "answer had retrieved source excerpts or explicit attached evidence available"
+        action = "check cited paths if the answer is high impact" if freshness_warnings else "no immediate action"
+    elif context_count:
+        status = "partial"
+        reflection = "answer had summaries, memories, or dossier context but no retrieved excerpt-level evidence"
+        action = "run /study for precise source excerpts if details matter"
+    elif needs_grounding:
+        status = "fail"
+        reflection = "question appeared to need document or task grounding, but no usable source context was selected"
+        action = "attach or study the relevant corpus before trusting the answer"
+    else:
+        status = "thin"
+        reflection = "answer was mostly conversational and did not use retrieved external evidence"
+        action = "no action unless the answer should have used private context"
+    return {
+        "kind": "answer-audit",
+        "artifact_schema": schema_version,
+        "created": created,
+        "status": status,
+        "strong_evidence_sources": strong_count,
+        "context_sources": context_count,
+        "total_sources": len(clean_sources),
+        "source_kinds": dict(sorted(kinds.items())),
+        "needs_grounding": needs_grounding,
+        "freshness_warning_count": len(freshness_warnings),
+        "warnings": freshness_warnings[:8],
+        "paths": paths[:12],
+        "query_sha256": sha256_text(query),
+        "answer_sha256": sha256_text(reply),
+        "reflection": reflection,
+        "recommended_action": action,
+    }
+
+
+def sources_with_answer_audit_core(
+    query: str,
+    reply: str,
+    sources: list[dict],
+    **audit_kwargs,
+) -> list[dict]:
+    clean_sources = [source for source in sources if source.get("kind") != "answer-audit"]
+    return clean_sources + [
+        answer_grounding_audit_core(query, reply, clean_sources, **audit_kwargs)
+    ]
+
+
 def retrieval_score_parts(
     query: str,
     query_counts: collections.Counter,
