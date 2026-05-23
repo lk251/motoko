@@ -13067,6 +13067,18 @@ def vector_command_request(text: str, conv: dict):
     return None
 
 
+def model_command_request(text: str):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/model-stop":
+        selector = body
+        if not selector:
+            return "/model-stop", lambda: "usage: /model-stop ROUTE"
+        return "/model-stop", lambda: stop_model_service(selector)
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -13959,12 +13971,9 @@ class MotokoTui:
             elif (evidence_request := evidence_command_request(text, self.conv)) is not None:
                 label, func = evidence_request
                 self.start_report_command(label, func)
-            elif text == "/model-stop" or text.startswith("/model-stop "):
-                selector = text[len("/model-stop") :].strip()
-                if not selector:
-                    self.append("system", "usage: /model-stop ROUTE")
-                else:
-                    self.start_report_command("/model-stop", lambda: stop_model_service(selector))
+            elif (model_request := model_command_request(text)) is not None:
+                label, func = model_request
+                self.start_report_command(label, func)
             elif text.startswith("/permissions set "):
                 mode = text[len("/permissions set ") :].strip()
                 self.append("system", self.capture_text(lambda: command_permissions_set(mode)))
@@ -15332,15 +15341,13 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        if user_text == "/model-stop" or user_text.startswith("/model-stop "):
-            selector = user_text[len("/model-stop") :].strip()
-            if not selector:
-                print("usage: /model-stop ROUTE")
-            else:
-                try:
-                    print_report(stop_model_service(selector))
-                except SystemExit as exc:
-                    print(exc)
+        model_request = model_command_request(user_text)
+        if model_request is not None:
+            _label, func = model_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text.startswith("/permissions set "):
             command_permissions_set(user_text[len("/permissions set ") :].strip())

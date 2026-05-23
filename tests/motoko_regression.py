@@ -2397,6 +2397,21 @@ def test_tui_report_commands_do_not_persist_system_output(m):
 
         assert ui.overlay_title == "/vector-query"
         assert ui.overlay_lines == ["vector query: texere rerank=True"]
+
+        old_stop_model_service = m.stop_model_service
+        try:
+            m.stop_model_service = lambda selector: f"stopped model route: {selector}"
+            ui.handle_command("/model-stop qwen35-2b-worker")
+            deadline = time.monotonic() + 2
+            while ui.report_running and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.stop_model_service = old_stop_model_service
+
+        assert ui.overlay_title == "/model-stop"
+        assert ui.overlay_lines == ["stopped model route: qwen35-2b-worker"]
         assert ui.messages == []
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))

@@ -594,6 +594,9 @@ Current implementation progress:
   `/vector-build`, `/vector-refresh`, `/vector-query`, and `/vector-eval`.
   Vector commands still run through the existing realm-local vector-store
   builders and query paths; the refactor only unifies command routing.
+- Step 9 now also routes `/model-stop` through a shared command request helper.
+  Service control remains limited to the approved `motoko-model` helper path;
+  the refactor only removes duplicated TUI/line-mode selector handling.
 
 ## Roadmap Candidates
 
