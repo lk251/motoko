@@ -480,6 +480,13 @@ Current implementation progress:
   entries, and enforcing that document reads/indexing remain under an allowed
   path. The root script still owns user-facing commands and the Nix-managed
   configuration error wording.
+- Step 5 is effectively complete. Future corpus-selection changes should be
+  tactical follow-ups unless a new source-policy feature changes the boundary.
+- Step 6 has started with pure lexical retrieval helpers in
+  `motoko_core.retrieval`: tokenization, BM25-like lexical scoring, path
+  mention boosts, and base hybrid-candidate scoring. The root script still owns
+  live retrieval orchestration, evidence/vector/rerank calls, and source
+  packing.
 
 ## Roadmap Candidates
 
