@@ -35,7 +35,6 @@ import time
 import tty
 import urllib.error
 import urllib.parse
-import urllib.request
 import uuid
 
 _SOURCE_DIR = pathlib.Path(__file__).resolve().parent
@@ -73,14 +72,15 @@ from motoko_core.terminal import (  # noqa: E402
     working_text,
 )
 from motoko_core.model_io import (  # noqa: E402
-    UnixSocketHTTPConnection,
+    chat_completion_payload,
     endpoint_is_unix,
     iter_cancelable_response_lines,
-    model_loading_response,
+    model_request_failure_detail,
+    model_request_timeout as model_io_request_timeout,
+    open_model_response as open_model_response_core,
+    parse_openai_stream_line,
     raise_if_cancelled,
     read_json_response,
-    sleep_with_cancel,
-    transient_model_connection_error,
 )
 from motoko_core.model_routes import (  # noqa: E402
     MODEL_ROUTE_AUDIT,
@@ -9340,10 +9340,7 @@ def rerank_documents(
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         hint = local_model_verify_hint(route_info)
-        detail = f"rerank request failed: {exc}"
-        if hint:
-            detail += "\n" + hint
-        raise SystemExit(detail) from exc
+        raise SystemExit(model_request_failure_detail("rerank request failed", exc, hint)) from exc
     try:
         scores = parse_rerank_response(data, len(documents))
     except RuntimeError as exc:
@@ -9365,10 +9362,7 @@ def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         hint = local_model_verify_hint(route_info)
-        detail = f"embedding request failed: {exc}"
-        if hint:
-            detail += "\n" + hint
-        raise SystemExit(detail) from exc
+        raise SystemExit(model_request_failure_detail("embedding request failed", exc, hint)) from exc
     try:
         embeddings = parse_embedding_response(data, len(texts))
     except RuntimeError as exc:
@@ -13908,9 +13902,11 @@ def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]
 
 
 def model_request_timeout(route_info: dict, timeout: float) -> float:
-    if endpoint_is_unix(route_info.get("endpoint", "")):
-        return max(float(timeout), SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS)
-    return timeout
+    return model_io_request_timeout(
+        str(route_info.get("endpoint", "")),
+        timeout,
+        SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS,
+    )
 
 
 def local_model_helper_route(route_info: dict) -> str:
@@ -14029,90 +14025,18 @@ def open_model_response(
     on_connection=None,
     on_response=None,
 ):
-    endpoint_text = str(route_info["endpoint"])
-    request_timeout = model_request_timeout(route_info, timeout)
-    data = json.dumps(payload).encode("utf-8")
-    if endpoint_is_unix(endpoint_text):
-        parsed = urllib.parse.urlparse(endpoint_text)
-        socket_path = urllib.parse.unquote(parsed.path)
-        if not socket_path:
-            raise SystemExit(f"model request failed: empty Unix socket endpoint for route {route_info['route']}")
-        request_path = str(route_info.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH)
-        deadline = time.monotonic() + request_timeout
-        loading_attempts = 0
-        transient_attempts = 0
-        while True:
-            raise_if_cancelled(cancel_event)
-            remaining = max(1.0, deadline - time.monotonic())
-            conn = UnixSocketHTTPConnection(socket_path, timeout=remaining)
-            try:
-                if on_connection is not None:
-                    on_connection(conn)
-                conn.request(
-                    "POST",
-                    request_path,
-                    body=data,
-                    headers={"Content-Type": "application/json", "Host": "localhost"},
-                )
-                resp = conn.getresponse()
-                if on_response is not None:
-                    on_response(resp)
-                if resp.status >= 400:
-                    body = resp.read(1200).decode("utf-8", errors="replace")
-                    resp.close()
-                    if on_response is not None:
-                        on_response(None)
-                    if model_loading_response(resp.status, body) and time.monotonic() < deadline:
-                        loading_attempts += 1
-                        sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
-                        sleep_with_cancel(sleep_for, cancel_event)
-                        continue
-                    suffix = f" after {loading_attempts} loading retries" if loading_attempts else ""
-                    raise OSError(f"model endpoint returned HTTP {resp.status}{suffix}: {body}")
-                try:
-                    yield resp
-                finally:
-                    if on_response is not None:
-                        on_response(None)
-                    resp.close()
-                return
-            except (OSError, http.client.HTTPException) as exc:
-                if transient_model_connection_error(exc) and time.monotonic() < deadline:
-                    transient_attempts += 1
-                    loading_attempts += 1
-                    sleep_for = min(MODEL_LOADING_RETRY_SECONDS, max(0.1, deadline - time.monotonic()))
-                    sleep_with_cancel(sleep_for, cancel_event)
-                    continue
-                suffix = (
-                    f" after {transient_attempts} transient "
-                    f"{'retry' if transient_attempts == 1 else 'retries'}"
-                    if transient_attempts
-                    else ""
-                )
-                if suffix:
-                    raise OSError(f"{exc}{suffix}") from exc
-                raise
-            finally:
-                if on_connection is not None:
-                    on_connection(None)
-                conn.close()
-        return
-
-    raise_if_cancelled(cancel_event)
-    req = urllib.request.Request(
-        endpoint_text,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
-        if on_response is not None:
-            on_response(resp)
-        try:
-            yield resp
-        finally:
-            if on_response is not None:
-                on_response(None)
+    with open_model_response_core(
+        route_info,
+        payload,
+        timeout=timeout,
+        unix_request_path=LOCAL_MODEL_UNIX_REQUEST_PATH,
+        socket_activation_min_timeout=SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS,
+        model_loading_retry_seconds=MODEL_LOADING_RETRY_SECONDS,
+        cancel_event=cancel_event,
+        on_connection=on_connection,
+        on_response=on_response,
+    ) as resp:
+        yield resp
 
 
 def call_model(
@@ -14125,12 +14049,7 @@ def call_model(
     route: str = MODEL_ROUTE_CHAT,
 ) -> str:
     route_info = model_route(route)
-    payload = {
-        "model": route_info["model"],
-        "messages": messages,
-        "temperature": temperature,
-        "stream": stream,
-    }
+    payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=stream)
     spinner = ThinkingSpinner(enabled=echo)
     try:
         spinner.start()
@@ -14141,10 +14060,7 @@ def call_model(
             return read_json_response(resp)
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         hint = local_model_verify_hint(route_info)
-        detail = f"model request failed: {exc}"
-        if hint:
-            detail += "\n" + hint
-        raise SystemExit(detail) from exc
+        raise SystemExit(model_request_failure_detail("model request failed", exc, hint)) from exc
     finally:
         spinner.stop()
 
@@ -14250,12 +14166,7 @@ def call_model_with_callback(
     on_response=None,
 ) -> str:
     route_info = model_route(route)
-    payload = {
-        "model": route_info["model"],
-        "messages": messages,
-        "temperature": temperature,
-        "stream": True,
-    }
+    payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=True)
     collected = []
     try:
         raise_if_cancelled(cancel_event)
@@ -14269,21 +14180,9 @@ def call_model_with_callback(
         ) as resp:
             for raw in iter_cancelable_response_lines(resp, cancel_event):
                 raise_if_cancelled(cancel_event)
-                line = raw.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
+                done, content = parse_openai_stream_line(raw)
+                if done:
                     break
-                try:
-                    event = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = event.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                content = delta.get("content") or ""
                 if content:
                     collected.append(content)
                     on_token(content)
@@ -14291,10 +14190,7 @@ def call_model_with_callback(
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("__motoko_stopped__") from exc
         hint = local_model_verify_hint(route_info)
-        detail = f"model request failed: {exc}"
-        if hint:
-            detail += "\n" + hint
-        raise SystemExit(detail) from exc
+        raise SystemExit(model_request_failure_detail("model request failed", exc, hint)) from exc
     raise_if_cancelled(cancel_event)
     return "".join(collected)
 
@@ -14307,21 +14203,9 @@ def read_streaming_response(
 ) -> str:
     collected = []
     for raw in resp:
-        line = raw.decode("utf-8", errors="replace").strip()
-        if not line or not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
+        done, content = parse_openai_stream_line(raw)
+        if done:
             break
-        try:
-            event = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        choices = event.get("choices") or []
-        if not choices:
-            continue
-        delta = choices[0].get("delta") or {}
-        content = delta.get("content") or ""
         if content:
             if spinner is not None:
                 spinner.stop()

@@ -438,10 +438,14 @@ Current implementation progress:
   route names/descriptions, local model catalog loading, route normalization,
   endpoint-path normalization, cache-policy normalization, capability lookup,
   and merged local route summaries.
-- The remaining step-4 work is to extract request construction, model-route
-  cache/metrics report formatting, and user-facing model error diagnostics
-  without weakening the NixOS-owned service boundary or leaking
-  prompt/request/response content.
+- Step 4 now also has request transport/request-construction helpers in
+  `motoko_core.model_io`: chat payload construction, Unix-socket/openai HTTP
+  request handling with injected retry/timeouts, streaming event parsing, JSON
+  response parsing, cancellation checks, loading/transient detection, and
+  shared model-request failure formatting.
+- The remaining step-4 work is to extract model-route cache/metrics report
+  formatting and local `motoko-model` helper diagnostics without weakening the
+  NixOS-owned service boundary or leaking prompt/request/response content.
 
 ## Roadmap Candidates
 
