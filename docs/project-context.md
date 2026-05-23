@@ -514,6 +514,11 @@ Current implementation progress:
   `motoko_core.retrieval`, with input size and per-parent subspan limits passed
   in from the root script. Environment/config reads remain in `motoko`; pure
   model-input slicing is importable.
+- Step 7 has started with pure conversation-record helpers in
+  `motoko_core.conversations`: new conversation record construction,
+  empty-chat detection, recall text generation, and bounded model transcript
+  rendering. Persistence, deletion, artifact cleanup, and memory maintenance
+  still stay in the root script.
 
 ## Roadmap Candidates
 
