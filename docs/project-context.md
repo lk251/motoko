@@ -434,10 +434,14 @@ Current implementation progress:
 - Step 4 has started: Unix-socket HTTP transport, loading/transient detection,
   cancellation helpers, and JSON response parsing live in
   `motoko_core.model_io`.
-- The remaining step-4 work is to extract route catalog/config discovery,
-  route cache/metrics reporting, request construction, and user-facing model
-  error diagnostics without weakening the NixOS-owned service boundary or
-  leaking prompt/request/response content.
+- Step 4 now also has route-catalog helpers in `motoko_core.model_routes`:
+  route names/descriptions, local model catalog loading, route normalization,
+  endpoint-path normalization, cache-policy normalization, capability lookup,
+  and merged local route summaries.
+- The remaining step-4 work is to extract request construction, model-route
+  cache/metrics report formatting, and user-facing model error diagnostics
+  without weakening the NixOS-owned service boundary or leaking
+  prompt/request/response content.
 
 ## Roadmap Candidates
 
