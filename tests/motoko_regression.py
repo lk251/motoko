@@ -2379,6 +2379,24 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         assert ui.overlay_title == "/dossiers"
         assert ui.overlay_lines == ["No memory dossiers yet."]
 
+        ui.handle_command("/memories")
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+        assert ui.overlay_title == "/memories"
+        assert ui.overlay_lines == ["No memories yet."]
+
+        ui.handle_command("/profile")
+        deadline = time.monotonic() + 2
+        while ui.report_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+        assert ui.overlay_title == "/profile"
+        assert ui.overlay_lines == ["No profile dossier yet. Run 'motoko profile refresh' or /profile-refresh."]
+
         old_latest_evidence_store = m.latest_evidence_store
         old_query_evidence_store = m.query_evidence_store
         old_format_evidence_query_report = m.format_evidence_query_report

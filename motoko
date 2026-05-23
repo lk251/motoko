@@ -3427,10 +3427,14 @@ def forget_memory(selector: str) -> None:
 
 
 def print_memories(*, verbose: bool = False) -> None:
+    print(format_memories(verbose=verbose))
+
+
+def format_memories(*, verbose: bool = False) -> str:
     memories = load_memories(limit=500)
     if not memories:
-        print("No memories yet.")
-        return
+        return "No memories yet."
+    lines = []
     for idx, row in enumerate(memories, 1):
         pin = "pin" if row.get("pinned") else "   "
         prefix = (
@@ -3438,17 +3442,18 @@ def print_memories(*, verbose: bool = False) -> None:
             f"i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)} {pin}  "
             f"{row.get('created', '')}"
         )
-        print(f"{prefix}  {row.get('text', '')}")
+        lines.append(f"{prefix}  {row.get('text', '')}")
         if verbose:
-            print(f"     source: {row.get('source', 'unknown')}")
+            lines.append(f"     source: {row.get('source', 'unknown')}")
             if row.get("conversation_id"):
-                print(f"     conversation: {row.get('conversation_id')}")
+                lines.append(f"     conversation: {row.get('conversation_id')}")
             if row.get("derived_from"):
-                print(f"     derived from: {row.get('derived_from')}")
+                lines.append(f"     derived from: {row.get('derived_from')}")
             if row.get("tags"):
-                print(f"     tags: {', '.join(row.get('tags', []))}")
+                lines.append(f"     tags: {', '.join(row.get('tags', []))}")
             if row.get("seen_count"):
-                print(f"     seen: {row.get('seen_count')} time(s)")
+                lines.append(f"     seen: {row.get('seen_count')} time(s)")
+    return "\n".join(lines)
 
 
 def context_query_text(conv: dict | None, query: str = "") -> str:
@@ -3610,22 +3615,27 @@ def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tup
 
 
 def print_memory_search(query: str) -> None:
+    print(format_memory_search(query))
+
+
+def format_memory_search(query: str) -> str:
     query = query.strip()
     if not query:
         raise SystemExit("usage: motoko memory search TEXT")
     rows = search_memories(query)
     if not rows:
-        print("No matching memories.")
-        return
+        return "No matching memories."
+    lines = []
     for idx, row in enumerate(rows, 1):
         pin = "pin" if row.get("pinned") else "   "
-        print(
+        lines.append(
             f"{idx:3d}  {row.get('id', '')}  "
             f"score={row.get('_score', 0):3d}  "
             f"match={row.get('_matched_terms', 0):2d}  "
             f"i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)} {pin}  "
             f"{row.get('text', '')}"
         )
+    return "\n".join(lines)
 
 
 def allowed_dirs() -> list[pathlib.Path]:
@@ -3697,12 +3707,13 @@ def init_personality(*, force: bool = False) -> None:
 
 
 def print_personality() -> None:
+    print(format_personality())
+
+
+def format_personality() -> str:
     text, path, exists = load_personality()
     status = "custom" if exists else "default"
-    print(f"path: {path}")
-    print(f"status: {status}")
-    print()
-    print(text)
+    return "\n".join([f"path: {path}", f"status: {status}", "", text])
 
 
 def load_profile_dossier() -> dict | None:
@@ -3821,15 +3832,22 @@ def render_profile_with_sources() -> tuple[str, list[dict]]:
 
 
 def print_profile() -> None:
+    print(format_profile())
+
+
+def format_profile() -> str:
     profile = load_profile_dossier()
     if not profile:
-        print("No profile dossier yet. Run 'motoko profile refresh' or /profile-refresh.")
-        return
-    print(f"updated: {profile.get('updated', '')}")
-    print(f"memories: {len(profile.get('memory_ids', []))}")
-    print(f"conversations: {len(profile.get('conversation_ids', []))}")
-    print()
-    print(profile.get("text", ""))
+        return "No profile dossier yet. Run 'motoko profile refresh' or /profile-refresh."
+    return "\n".join(
+        [
+            f"updated: {profile.get('updated', '')}",
+            f"memories: {len(profile.get('memory_ids', []))}",
+            f"conversations: {len(profile.get('conversation_ids', []))}",
+            "",
+            str(profile.get("text", "")),
+        ]
+    )
 
 
 def require_allowed(path: pathlib.Path) -> None:
@@ -13129,6 +13147,27 @@ def topic_dossier_report_command_request(text: str):
     return None
 
 
+def memory_profile_report_command_request(text: str):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/memories" and not body:
+        return "/memories", lambda: format_memories()
+    if primary == "/memory":
+        parts = body.split(maxsplit=1)
+        subcommand = parts[0] if parts else ""
+        subbody = parts[1].strip() if len(parts) > 1 else ""
+        if subcommand == "review" and not subbody:
+            return "/memory review", lambda: format_memories(verbose=True)
+        if subcommand == "search":
+            return "/memory search", lambda: format_memory_search(subbody)
+    if primary == "/personality" and not body:
+        return "/personality", format_personality
+    if primary == "/profile" and not body:
+        return "/profile", format_profile
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -14029,15 +14068,12 @@ class MotokoTui:
                 self.append("system", self.capture_text(lambda: command_permissions_set(mode)))
             elif text == "/repo" or text.startswith("/repo "):
                 self.attach_repo_report(text[len("/repo") :].strip())
-            elif text == "/personality":
-                self.append("system", self.capture_text(print_personality))
-            elif text == "/profile":
-                self.append("system", self.capture_text(print_profile))
+            elif (memory_profile_request := memory_profile_report_command_request(text)) is not None:
+                label, func = memory_profile_request
+                self.start_report_command(label, func)
             elif text == "/profile-refresh":
                 self.run_blocking_command("Refreshing profile dossier...", refresh_profile_dossier)
                 self.append("system", self.capture_text(print_profile))
-            elif text == "/memories":
-                self.append("system", self.capture_text(print_memories))
             elif (index_request := index_report_command_request(text, self.conv)) is not None:
                 label, func = index_request
                 self.start_report_command(label, func)
@@ -14050,11 +14086,6 @@ class MotokoTui:
             elif text == "/study" or text.startswith("/study "):
                 body = text[len("/study") :].strip()
                 self.run_blocking_command("Studying context...", lambda: self.study_from_body(body))
-            elif text.startswith("/memory search "):
-                query = text[len("/memory search ") :]
-                self.append("system", self.capture_text(lambda: print_memory_search(query)))
-            elif text == "/memory review":
-                self.append("system", self.capture_text(lambda: print_memories(verbose=True)))
             elif text.startswith("/title ") or text.startswith("/rename "):
                 prefix = "/rename " if text.startswith("/rename ") else "/title "
                 self.conv["title"] = text[len(prefix) :].strip() or self.conv["title"]
@@ -15360,11 +15391,13 @@ def chat_loop(conv: dict) -> None:
             print(f"attached repo {command} report for {repo}")
             print(item["content"])
             continue
-        if user_text == "/personality":
-            print_personality()
-            continue
-        if user_text == "/profile":
-            print_profile()
+        memory_profile_request = memory_profile_report_command_request(user_text)
+        if memory_profile_request is not None:
+            _label, func = memory_profile_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text == "/profile-refresh":
             profile = refresh_profile_dossier()
@@ -15377,15 +15410,6 @@ def chat_loop(conv: dict) -> None:
                 conversation_id=conv["id"],
             )
             print("memory saved")
-            continue
-        if user_text == "/memories":
-            print_memories()
-            continue
-        if user_text.startswith("/memory search "):
-            print_memory_search(user_text[len("/memory search ") :])
-            continue
-        if user_text == "/memory review":
-            print_memories(verbose=True)
             continue
         if user_text.startswith("/memory edit "):
             parts = user_text.split(maxsplit=3)

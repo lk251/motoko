@@ -607,6 +607,11 @@ Current implementation progress:
 - Step 9 now also gives topic and dossier list/show commands formatter-backed
   output (`/topics`, `/topic-show`, `/dossiers`, `/dossier-show`) and routes
   them through a shared read-only report-command helper.
+- Step 9 now also gives read-only memory/profile/personality commands
+  formatter-backed output (`/memories`, `/memory review`, `/memory search`,
+  `/profile`, `/personality`) and routes them through a shared report-command
+  helper. Memory mutation commands remain explicit until their update helpers
+  return structured results instead of printing.
 
 ## Roadmap Candidates
 
