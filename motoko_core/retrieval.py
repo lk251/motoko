@@ -393,6 +393,143 @@ def format_retrieval_preview_core(
     return "\n".join(lines)
 
 
+def format_retrieval_eval_report_core(report: dict) -> str:
+    lines = [
+        f"retrieval eval: {report.get('status', 'unknown')} "
+        f"({report.get('passed', 0)}/{report.get('total', 0)})",
+        f"id: {report.get('id', '')}",
+    ]
+    if report.get("saved_path"):
+        lines.append(f"saved: {report.get('saved_path')}")
+    for row in report.get("fixtures", []):
+        lines.append(
+            f"- {row.get('status', 'unknown')}: {row.get('id', '')} "
+            f"chunks {row.get('chunk_source_count', 0)} "
+            f"audit {row.get('answer_audit_status', '')}"
+        )
+        lines.append("  selected: " + (", ".join(row.get("selected_paths", [])[:4]) or "-"))
+        details = []
+        if row.get("missing_paths"):
+            details.append("missing paths " + ", ".join(row.get("missing_paths", [])[:6]))
+        if row.get("missing_terms"):
+            details.append("missing terms " + ", ".join(row.get("missing_terms", [])[:6]))
+        if details:
+            lines.append("  " + "; ".join(details))
+    return "\n".join(lines)
+
+
+def format_retrieval_debug_report_core(report: dict) -> str:
+    lines = [
+        f"retrieval debug: {report.get('query', '')}",
+        f"id: {report.get('id', '')}",
+        "query terms: " + (", ".join(report.get("query_terms", [])) or "-"),
+    ]
+    if report.get("path_mentions"):
+        lines.append("path mentions: " + ", ".join(report.get("path_mentions", [])))
+    if report.get("saved_path"):
+        lines.append(f"saved: {report.get('saved_path')}")
+    if not report.get("indexes"):
+        lines.append("no indexes available; attach or build an index first")
+        return "\n".join(lines)
+    lines.append(
+        "guide: no relevant file means recall; wrong top chunk means ranking; warnings mean stale data; "
+        "right chunk but bad answer means prompt/final synthesis"
+    )
+    for index in report.get("indexes", []):
+        lines.append(
+            f"\nindex {index.get('id', '')}  {index.get('freshness', 'unknown')}  "
+            f"{index.get('files_considered', 0)} file(s)  {index.get('chunks_considered', 0)} chunk(s)  "
+            f"{index.get('name', '')}  {index.get('root', '')}"
+        )
+        lines.append(f"  production: {index.get('production_retrieval', 'hybrid retrieval')}")
+        for warning in index.get("warnings", [])[:3]:
+            lines.append(f"  warning: {warning}")
+        for note in index.get("diagnosis", []):
+            lines.append(f"  diagnosis: {note}")
+        lines.append("  top files:")
+        for idx, row in enumerate(index.get("files", [])[:5], 1):
+            lines.append(
+                f"    {idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+                f"path={row.get('path_boost', 0)} task={row.get('file_task_boost', 0)} "
+                f"{row.get('freshness', 'unknown')}  {row.get('path', '')}"
+            )
+            if row.get("matched_terms"):
+                lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+            if row.get("summary_matched_terms") or row.get("content_matched_terms"):
+                lines.append(
+                    "       matched by: "
+                    f"summary={','.join(row.get('summary_matched_terms', [])[:8]) or '-'} "
+                    f"content={','.join(row.get('content_matched_terms', [])[:8]) or '-'}"
+                )
+            if row.get("summary"):
+                lines.append("       summary: " + row.get("summary", ""))
+        lines.append("  top chunks:")
+        for idx, row in enumerate(index.get("chunks", [])[:8], 1):
+            lines.append(
+                f"    {idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+                f"path={row.get('path_boost', 0)} file_task={row.get('file_task_boost', 0)} "
+                f"chunk_task={row.get('chunk_task_boost', 0)} chars={row.get('content_chars', 0)}  "
+                f"{row.get('path', '')} chunk {row.get('chunk', '')}"
+            )
+            if row.get("matched_terms"):
+                lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+            if row.get("summary"):
+                lines.append("       summary: " + row.get("summary", ""))
+        if index.get("evidence_store"):
+            store = index.get("evidence_store", {})
+            lines.append(f"  evidence store: {store.get('id', '')} freshness={store.get('freshness', '')}")
+        for warning in index.get("evidence_warnings", [])[:3]:
+            lines.append(f"  evidence warning: {warning}")
+        if index.get("evidence_error"):
+            lines.append(f"  evidence error: {index.get('evidence_error')}")
+        if index.get("evidence_rows"):
+            lines.append("  top evidence rows:")
+            for idx, row in enumerate(index.get("evidence_rows", [])[:8], 1):
+                lines.append(
+                    f"    {idx}. total={row.get('total', 0)} lex={row.get('lexical', 0)} "
+                    f"path={row.get('path_boost', 0)} structured={row.get('structured', 0)} "
+                    f"{row.get('kind', '')}  {row.get('path', '')} chunk {row.get('chunk', '')}"
+                )
+                labels = []
+                if row.get("date"):
+                    labels.append(f"date={row.get('date')}")
+                if row.get("todo"):
+                    labels.append(f"todo={row.get('todo')}")
+                if row.get("priority"):
+                    labels.append(f"priority={row.get('priority')}")
+                if row.get("title"):
+                    labels.append(f"title={row.get('title')}")
+                if labels:
+                    lines.append("       " + "  ".join(labels))
+                if row.get("matched_terms"):
+                    lines.append("       matched: " + ", ".join(row.get("matched_terms", [])[:12]))
+                if row.get("text"):
+                    lines.append("       text: " + compact_text(row.get("text", ""), 220))
+        if index.get("vector_store"):
+            store = index.get("vector_store", {})
+            lines.append(
+                f"  vector store: {store.get('id', '')} method={store.get('method', '')} "
+                f"rerank={store.get('rerank', False)} fallback={store.get('rerank_fallback', False)}"
+            )
+        for warning in index.get("vector_warnings", [])[:3]:
+            lines.append(f"  vector warning: {warning}")
+        if index.get("vector_error"):
+            lines.append(f"  vector error: {index.get('vector_error')}")
+        if index.get("vector_chunks"):
+            lines.append("  top vector chunks:")
+            for idx, row in enumerate(index.get("vector_chunks", [])[:8], 1):
+                lines.append(
+                    f"    {idx}. score={row.get('score', 0)} vec={row.get('vector_score', 0)} "
+                    f"lex={row.get('lexical', 0)} path={row.get('path_boost', 0)}  "
+                    f"{row.get('path', '')} chunk {row.get('chunk', '')}"
+                )
+                if "rerank_score" in row:
+                    lines.append(f"       rerank_score: {row.get('rerank_score', 0)}")
+                if row.get("summary"):
+                    lines.append("       summary: " + row.get("summary", ""))
+    return "\n".join(lines)
+
+
 def retrieval_score_parts(
     query: str,
     query_counts: collections.Counter,

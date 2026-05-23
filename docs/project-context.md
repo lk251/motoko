@@ -536,6 +536,10 @@ Current implementation progress:
   `motoko_core.retrieval`. The root script still builds live prompts, sources,
   and formatted source lists, but prompt-section extraction, source-kind counts,
   truncation, and diagnostic report layout are importable and tested.
+- Step 6 now also has pure retrieval eval/debug report formatting in
+  `motoko_core.retrieval`. The root script still builds and saves reports from
+  live indexes, evidence stores, and vector stores, while core owns the
+  inspectable diagnostic text layout.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript

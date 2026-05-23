@@ -1407,6 +1407,55 @@ def test_core_retrieval_preview_formatting_is_injectable(m):
     assert "Evidence block" in report
 
 
+def test_core_retrieval_reports_are_injectable(m):
+    eval_text = m.format_retrieval_eval_report_core(
+        {
+            "status": "fail",
+            "passed": 0,
+            "total": 1,
+            "id": "eval-1",
+            "fixtures": [
+                {
+                    "status": "fail",
+                    "id": "fixture-1",
+                    "chunk_source_count": 0,
+                    "answer_audit_status": "fail",
+                    "selected_paths": [],
+                    "missing_paths": ["logbook.org"],
+                }
+            ],
+        }
+    )
+    debug_text = m.format_retrieval_debug_report_core(
+        {
+            "query": "logbook.org",
+            "id": "debug-1",
+            "query_terms": ["logbook"],
+            "path_mentions": ["logbook.org"],
+            "indexes": [
+                {
+                    "id": "idx",
+                    "freshness": "fresh",
+                    "files_considered": 1,
+                    "chunks_considered": 1,
+                    "production_retrieval": "hybrid",
+                    "diagnosis": ["recall ok"],
+                    "files": [{"total": 10, "path": "/tmp/logbook.org", "matched_terms": ["logbook"]}],
+                    "chunks": [{"total": 9, "path": "/tmp/logbook.org", "chunk": 1, "summary": "Recent notes"}],
+                    "vector_store": {"id": "vec", "method": "embedding-v1", "rerank": True, "rerank_fallback": False},
+                    "vector_chunks": [{"score": 1.2, "vector_score": 0.9, "path": "/tmp/logbook.org", "chunk": 1}],
+                }
+            ],
+        }
+    )
+
+    assert "retrieval eval: fail (0/1)" in eval_text
+    assert "missing paths logbook.org" in eval_text
+    assert "retrieval debug: logbook.org" in debug_text
+    assert "diagnosis: recall ok" in debug_text
+    assert "vector store: vec method=embedding-v1 rerank=True fallback=False" in debug_text
+
+
 def test_named_file_query_boosts_matching_path(m):
     with isolated_state():
         index = {
