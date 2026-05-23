@@ -747,6 +747,14 @@ Current implementation progress:
   boundary. Future command work should be tactical, such as moving these root
   request builders behind narrower service modules after those services are
   extracted further.
+- The current refactor milestone is complete for the safe pure-helper/service
+  boundary pass. The root `motoko` facade still intentionally owns live
+  orchestration: argparse setup, model-backed indexing/vector builds, retrieval
+  over live stores, background study/maintenance threads, TUI event draining,
+  terminal mode changes, and compatibility wrappers used by tests. Those areas
+  should move only behind narrower designs with focused tests, because they
+  coordinate cancellation, persistence, per-realm state, terminal recovery, and
+  local model route side effects.
 
 ## Roadmap Candidates
 
