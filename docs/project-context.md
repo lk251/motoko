@@ -514,6 +514,11 @@ Current implementation progress:
   `motoko_core.retrieval`, with input size and per-parent subspan limits passed
   in from the root script. Environment/config reads remain in `motoko`; pure
   model-input slicing is importable.
+- Step 6 now also has context-item rendering in `motoko_core.retrieval`, with
+  index/topic/dossier loading and retrieval supplied as callbacks from the root
+  script. This keeps source rendering, repo/file context formatting, and
+  unavailable-source warnings importable while preserving realm-local state and
+  live retrieval ownership in `motoko`.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript

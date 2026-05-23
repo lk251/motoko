@@ -192,6 +192,7 @@ from motoko_core.retrieval import (  # noqa: E402
     query_aware_content_selection as core_query_aware_content_selection,
     query_term_window_excerpt,
     recent_org_dated_sections_excerpt,
+    render_context_items_with_sources as core_render_context_items_with_sources,
     retrieval_chunk_key,
     retrieval_haystack_terms,
     retrieval_score_parts as core_retrieval_score_parts,
@@ -11808,103 +11809,46 @@ def render_memories_with_sources(conv: dict, query: str = "") -> tuple[str, list
     return "\n".join(lines), sources
 
 
-def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
-    if not items:
-        return "No explicit documents are attached.", []
-    parts = []
-    sources = []
-
-    def unavailable_source(kind: str, item: dict, exc: BaseException) -> dict:
-        return {
-            "kind": "context-warning",
-            "context_kind": kind,
-            "id": item.get("id", ""),
-            "path": item.get("path", ""),
-            "warning": str(exc),
-        }
-
-    for item in items:
-        if item.get("kind") == "index":
-            try:
-                index = load_index(item["id"])
-            except (KeyError, SystemExit, OSError, json.JSONDecodeError) as exc:
-                sources.append(unavailable_source("index", item, exc))
-                continue
-            if query:
-                text, index_sources = retrieve_from_index(index, query)
-                parts.append(text)
-                sources.extend(index_sources)
-            else:
-                status, warnings = index_staleness(index)
-                parts.append(
-                    textwrap.dedent(
-                        f"""
-                        === Document index: {index.get('name', index.get('id'))} ===
-                        Root: {index.get('root', '')}
-                        Freshness: {status}
-                        Corpus summary:
-                        {index.get('corpus_summary', '')}
-                        Corpus profile:
-                        {corpus_profile_text(index)}
-                        """
-                    ).strip()
-                )
-                sources.append(
-                    {
-                        "kind": "index",
-                        "id": index.get("id", ""),
-                        "name": index.get("name", ""),
-                        "root": index.get("root", ""),
-                        "status": status,
-                        "warnings": warnings[:8],
-                    }
-            )
-            continue
-        if item.get("kind") == "topic":
-            try:
-                topic = load_topic(item["id"])
-            except (KeyError, SystemExit, OSError, json.JSONDecodeError) as exc:
-                sources.append(unavailable_source("topic", item, exc))
-                continue
-            text, topic_sources = retrieve_from_topic(topic, query)
-            parts.append(text)
-            sources.extend(topic_sources)
-            continue
-        if item.get("kind") == "dossier":
-            try:
-                dossier = load_dossier(item["id"])
-            except (KeyError, SystemExit, OSError, json.JSONDecodeError) as exc:
-                sources.append(unavailable_source("dossier", item, exc))
-                continue
-            text, dossier_sources = retrieve_from_dossier(dossier, query)
-            parts.append(text)
-            sources.extend(dossier_sources)
-            continue
-        if item.get("kind") == "repo":
-            label = f"{item.get('command', 'repo')} {item.get('root', '')}".strip()
-            content = item.get("content", "")
-            parts.append(f"--- [repo:{label}] ---\n{content}")
-            sources.append(
-                {
-                    "kind": "repo",
-                    "command": item.get("command", ""),
-                    "root": item.get("root", ""),
-                    "bytes": item.get("bytes", 0),
-                    "created": item.get("created", ""),
-                }
-            )
-            continue
-        label = item.get("path", "context")
-        content = item.get("content", "")
-        parts.append(f"--- [file:{label}] {label} ---\n{content}")
-        sources.append(
+def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
+    status, warnings = index_staleness(index)
+    text = textwrap.dedent(
+        f"""
+        === Document index: {index.get('name', index.get('id'))} ===
+        Root: {index.get('root', '')}
+        Freshness: {status}
+        Corpus summary:
+        {index.get('corpus_summary', '')}
+        Corpus profile:
+        {corpus_profile_text(index)}
+        """
+    ).strip()
+    return (
+        text,
+        [
             {
-                "kind": "file",
-                "path": label,
-                "bytes": item.get("bytes", 0),
+                "kind": "index",
+                "id": index.get("id", ""),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "status": status,
+                "warnings": warnings[:8],
             }
-        )
-    return "\n\n".join(parts), sources
+        ],
+    )
+
+
+def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
+    return core_render_context_items_with_sources(
+        items,
+        query,
+        load_index=load_index,
+        render_index_query=retrieve_from_index,
+        render_index_overview=render_index_overview_context,
+        load_topic=load_topic,
+        render_topic=retrieve_from_topic,
+        load_dossier=load_dossier,
+        render_dossier=retrieve_from_dossier,
+    )
 
 
 def render_conversation_summary(conv: dict) -> str:

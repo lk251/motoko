@@ -4668,6 +4668,31 @@ def test_repo_context_item(m):
         assert sources[0]["command"] == "status"
 
 
+def test_core_context_renderer_uses_injected_loaders(m):
+    items = [
+        {"kind": "index", "id": "idx"},
+        {"kind": "repo", "command": "status", "root": "/repo", "content": "clean", "bytes": 5},
+        {"kind": "file", "path": "/tmp/a.txt", "content": "alpha", "bytes": 5},
+    ]
+
+    text, sources = m.core_render_context_items_with_sources(
+        items,
+        "alpha",
+        load_index=lambda index_id: {"id": index_id},
+        render_index_query=lambda index, query: (f"index {index['id']} query {query}", [{"kind": "index", "id": index["id"]}]),
+        render_index_overview=lambda index: ("overview", [{"kind": "index", "id": index["id"]}]),
+        load_topic=lambda topic_id: {"id": topic_id},
+        render_topic=lambda topic, query: ("topic", [{"kind": "topic", "id": topic["id"]}]),
+        load_dossier=lambda dossier_id: {"id": dossier_id},
+        render_dossier=lambda dossier, query: ("dossier", [{"kind": "dossier", "id": dossier["id"]}]),
+    )
+
+    assert "index idx query alpha" in text
+    assert "repo:status /repo" in text
+    assert "file:/tmp/a.txt" in text
+    assert [source["kind"] for source in sources] == ["index", "repo", "file"]
+
+
 def test_repo_command_request_attaches_context(m):
     with isolated_state() as tmp:
         conv = m.new_conversation("Repo request")

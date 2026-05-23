@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections
 import hashlib
+import json
 import pathlib
 import re
 
@@ -53,6 +54,102 @@ def retrieval_haystack_terms(query_counts: collections.Counter, text: str) -> li
         return []
     counts = token_counts(text)
     return [term for term in query_counts if counts.get(term)]
+
+
+def unavailable_context_source(kind: str, item: dict, exc: BaseException) -> dict:
+    return {
+        "kind": "context-warning",
+        "context_kind": kind,
+        "id": item.get("id", ""),
+        "path": item.get("path", ""),
+        "warning": str(exc),
+    }
+
+
+def repo_context_text_and_source(item: dict) -> tuple[str, dict]:
+    label = f"{item.get('command', 'repo')} {item.get('root', '')}".strip()
+    content = item.get("content", "")
+    return (
+        f"--- [repo:{label}] ---\n{content}",
+        {
+            "kind": "repo",
+            "command": item.get("command", ""),
+            "root": item.get("root", ""),
+            "bytes": item.get("bytes", 0),
+            "created": item.get("created", ""),
+        },
+    )
+
+
+def file_context_text_and_source(item: dict) -> tuple[str, dict]:
+    label = item.get("path", "context")
+    content = item.get("content", "")
+    return (
+        f"--- [file:{label}] {label} ---\n{content}",
+        {
+            "kind": "file",
+            "path": label,
+            "bytes": item.get("bytes", 0),
+        },
+    )
+
+
+def render_context_items_with_sources(
+    items: list[dict],
+    query: str = "",
+    *,
+    load_index,
+    render_index_query,
+    render_index_overview,
+    load_topic,
+    render_topic,
+    load_dossier,
+    render_dossier,
+) -> tuple[str, list[dict]]:
+    if not items:
+        return "No explicit documents are attached.", []
+    parts = []
+    sources = []
+    warning_exceptions = (KeyError, SystemExit, OSError, json.JSONDecodeError)
+    for item in items:
+        kind = item.get("kind")
+        if kind == "index":
+            try:
+                index = load_index(item["id"])
+            except warning_exceptions as exc:
+                sources.append(unavailable_context_source("index", item, exc))
+                continue
+            text, index_sources = render_index_query(index, query) if query else render_index_overview(index)
+            parts.append(text)
+            sources.extend(index_sources)
+            continue
+        if kind == "topic":
+            try:
+                topic = load_topic(item["id"])
+            except warning_exceptions as exc:
+                sources.append(unavailable_context_source("topic", item, exc))
+                continue
+            text, topic_sources = render_topic(topic, query)
+            parts.append(text)
+            sources.extend(topic_sources)
+            continue
+        if kind == "dossier":
+            try:
+                dossier = load_dossier(item["id"])
+            except warning_exceptions as exc:
+                sources.append(unavailable_context_source("dossier", item, exc))
+                continue
+            text, dossier_sources = render_dossier(dossier, query)
+            parts.append(text)
+            sources.extend(dossier_sources)
+            continue
+        if kind == "repo":
+            text, source = repo_context_text_and_source(item)
+        else:
+            text, source = file_context_text_and_source(item)
+        parts.append(text)
+        sources.append(source)
+    return "\n\n".join(parts), sources
 
 
 def retrieval_score_parts(
