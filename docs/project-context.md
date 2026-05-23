@@ -358,6 +358,74 @@ Current sequencing notes:
   later model-assisted audit passes. Do not build an opaque open-ended
   self-reflection loop.
 
+## Internal Refactor Roadmap
+
+Motoko should be refactored incrementally, not rewritten. The current single
+script has grown large enough that careful internal boundaries will improve
+maintainability, testing, and future intelligence work, but every step must
+preserve the stable `motoko` command, stdlib-only runtime, per-realm state
+boundaries, and existing schema/migration rules.
+
+Baseline evidence from 2026-05-23:
+
+- `motoko` is about 20k lines with hundreds of top-level functions.
+- The largest functions include chat/TUI dispatch, vector-store building,
+  retrieval, CLI dispatch, and report formatting.
+- Terminal rendering, text utilities, state layout, model I/O, indexing,
+  retrieval, vector stores, dossiers, memory, and command dispatch currently
+  live in one import surface.
+
+Refactor rules:
+
+- Avoid a big-bang rewrite. Each step should be behavior-preserving and
+  separately testable.
+- Keep the root `motoko` executable as the compatibility facade until later
+  phases prove a new entrypoint is safe.
+- Add no runtime dependencies without Javier's explicit approval.
+- Do not change private state formats or derived-artifact schemas unless the
+  same change includes an upgrade or source-reprocessing path.
+- Prefer extracting pure helpers first, then boundaries with side effects, and
+  leave the TUI/control-flow split until enough low-level code is already
+  isolated.
+- Run the syntax, regression, evaluation, TTY, whitespace, and flake checks
+  before committing refactor steps.
+
+Phased plan:
+
+1. Architecture baseline. Record the intended subsystem boundaries, metrics,
+   invariants, and validation path in docs before moving code.
+2. Extract pure utilities first. Move text, time, ANSI/style, width/wrapping,
+   and report-highlighting helpers into an internal stdlib package while
+   preserving root-level imports for tests and compatibility.
+3. Extract state, paths, and JSON I/O. Centralize config/state path resolution,
+   atomic JSON writes, JSONL append/read helpers, locks, and timestamp helpers.
+   This creates a reliable foundation for migrations and background job
+   checkpointing.
+4. Extract the model boundary. Isolate route discovery, Unix-socket HTTP,
+   retry/loading behavior, endpoint errors, cache-policy reporting, and
+   request construction. This is the right place to enforce "no request body in
+   logs" and preserve NixOS-owned service control.
+5. Extract corpus selection and freshness. Move allowlists, `.motokoignore`,
+   skip rules, fingerprints, source metadata, and stale/deleted-source handling
+   behind a corpus-selection API.
+6. Extract retrieval layers. Separate lexical/structured candidate generation,
+   evidence-store spans, vector-store recall, rerank fusion, source packing,
+   and retrieval diagnostics. Keep hybrid retrieval inspectable and keep
+   lexical/structured evidence first-class.
+7. Extract memory and conversation services. Separate conversation storage,
+   rename/delete/prune behavior, recency context, explicit memories, memory
+   maintenance, and user-feedback eval fixtures from chat orchestration.
+8. Refactor the TUI last. Split rendering, input editing, overlay pages,
+   background worker/report tasks, answer streaming/cancellation, and scrollback
+   behavior after the supporting services are importable and tested.
+9. Unify command dispatch. Replace the very large CLI/TUI command conditionals
+   with a small command registry only after service boundaries exist, so each
+   command has a narrow handler and test surface.
+
+The approved first implementation is steps 1 and 2 only: create the internal
+package, move pure helpers, update packaging/tests to include package imports,
+and make no user-visible behavior changes.
+
 ## Roadmap Candidates
 
 The following path looks attractive, but it is not mandatory and should remain

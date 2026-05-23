@@ -16,6 +16,7 @@
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
       pkgsFor = system: import nixpkgs { inherit system; };
+      src = ./.;
     in
     {
       packages = forAllSystems (
@@ -27,7 +28,7 @@
           default = self.packages.${system}.motoko;
           motoko = pkgs.writeShellScriptBin "motoko" ''
             export MOTOKO_REVISION="${self.rev or self.dirtyRev or "unknown"}"
-            exec ${pkgs.python312}/bin/python3 ${./motoko} "$@"
+            exec ${pkgs.python312}/bin/python3 ${src}/motoko "$@"
           '';
         }
       );
@@ -46,19 +47,27 @@
         in
         {
           syntax = pkgs.runCommand "motoko-syntax-check" { nativeBuildInputs = [ pkgs.python312 ]; } ''
-            python3 -m py_compile ${./motoko}
+            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+            mkdir -p "$PYTHONPYCACHEPREFIX"
+            python3 -m py_compile ${src}/motoko
             touch "$out"
           '';
           regression = pkgs.runCommand "motoko-regression-tests" { nativeBuildInputs = [ pkgs.python312 ]; } ''
-            MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_regression.py}
+            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+            mkdir -p "$PYTHONPYCACHEPREFIX"
+            MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_regression.py
             touch "$out"
           '';
           evaluation = pkgs.runCommand "motoko-evaluation-harness" { nativeBuildInputs = [ pkgs.python312 ]; } ''
-            MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_eval.py}
+            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+            mkdir -p "$PYTHONPYCACHEPREFIX"
+            MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_eval.py
             touch "$out"
           '';
           tty = pkgs.runCommand "motoko-tty-tests" { nativeBuildInputs = [ pkgs.python312 ]; } ''
-            MOTOKO_SOURCE=${./motoko} python3 ${./tests/motoko_tty.py}
+            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+            mkdir -p "$PYTHONPYCACHEPREFIX"
+            MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_tty.py
             touch "$out"
           '';
         }
