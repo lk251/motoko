@@ -630,6 +630,10 @@ Current implementation progress:
   still keep special control-flow commands explicit, but report-like,
   settings, context-attachment, and memory mutation families now share one
   dispatch path.
+- Step 9 now also routes `/repo status|diff|log|review` through the shared
+  command-request path. Repo reports still attach bounded read-only context to
+  the current conversation, but TUI and line mode no longer duplicate the
+  parsing, saving, and report construction logic.
 
 ## Roadmap Candidates
 

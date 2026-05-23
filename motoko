@@ -13296,6 +13296,7 @@ def shared_command_request(text: str, conv: dict):
         lambda: memory_profile_report_command_request(text),
         lambda: memory_mutation_command_request(text, conv),
         lambda: context_attachment_command_request(text, conv),
+        lambda: repo_command_request(text, conv),
     ]
     for build in builders:
         request = build()
@@ -13548,6 +13549,26 @@ def context_item_from_repo_report(command: str, repo: pathlib.Path, report: str)
         "bytes": len(content.encode("utf-8")),
         "content": content,
     }
+
+
+def repo_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary != "/repo":
+        return None
+    parts = body.split(maxsplit=1)
+    command = parts[0] if parts else ""
+    path = parts[1] if len(parts) > 1 else None
+
+    def run_repo() -> str:
+        repo, report = repo_report(command, path)
+        item = context_item_from_repo_report(command, repo, report)
+        conv.setdefault("context_items", []).append(item)
+        save_conversation(conv)
+        return f"attached repo {command} report for {repo}\n\n{item['content']}"
+
+    return "/repo", run_repo
 
 
 def print_command_menu() -> None:
@@ -14193,8 +14214,6 @@ class MotokoTui:
             elif (command_request := shared_command_request(text, self.conv)) is not None:
                 label, func = command_request
                 self.start_report_command(label, func)
-            elif text == "/repo" or text.startswith("/repo "):
-                self.attach_repo_report(text[len("/repo") :].strip())
             elif text == "/profile-refresh":
                 self.run_blocking_command("Refreshing profile dossier...", refresh_profile_dossier)
                 self.append("system", format_profile())
@@ -14383,16 +14402,6 @@ class MotokoTui:
         dossier = build_dossier_from_chat(self.conv, body)
         self.conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
         save_conversation(self.conv)
-
-    def attach_repo_report(self, body: str) -> None:
-        parts = body.split(maxsplit=1)
-        command = parts[0] if parts else ""
-        path = parts[1] if len(parts) > 1 else None
-        repo, report = repo_report(command, path)
-        item = context_item_from_repo_report(command, repo, report)
-        self.conv.setdefault("context_items", []).append(item)
-        save_conversation(self.conv)
-        self.append("system", f"attached repo {command} report for {repo}\n\n{item['content']}")
 
     def study_from_body(self, body: str) -> None:
         query, focus = parse_study_directive(body)
@@ -15346,22 +15355,6 @@ def chat_loop(conv: dict) -> None:
                 print(format_feedback_saved(record_response_feedback(conv, rating, note)))
             except SystemExit as exc:
                 print(exc)
-            continue
-        if user_text == "/repo" or user_text.startswith("/repo "):
-            body = user_text[len("/repo") :].strip()
-            parts = body.split(maxsplit=1)
-            command = parts[0] if parts else ""
-            path = parts[1] if len(parts) > 1 else None
-            try:
-                repo, report = repo_report(command, path)
-            except SystemExit as exc:
-                print(exc)
-                continue
-            item = context_item_from_repo_report(command, repo, report)
-            conv.setdefault("context_items", []).append(item)
-            save_conversation(conv)
-            print(f"attached repo {command} report for {repo}")
-            print(item["content"])
             continue
         if user_text == "/profile-refresh":
             profile = refresh_profile_dossier()

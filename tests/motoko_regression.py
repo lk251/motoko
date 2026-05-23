@@ -4668,6 +4668,26 @@ def test_repo_context_item(m):
         assert sources[0]["command"] == "status"
 
 
+def test_repo_command_request_attaches_context(m):
+    with isolated_state() as tmp:
+        conv = m.new_conversation("Repo request")
+        old_repo_report = m.repo_report
+        try:
+            m.repo_report = lambda command, path=None: (tmp, f"repo: fake\n{command} {path}")
+            request = m.repo_command_request("/repo status /tmp/example", conv)
+            assert request is not None
+            label, run = request
+            assert label == "/repo"
+            output = run()
+            assert "attached repo status report" in output
+            assert "status /tmp/example" in output
+            assert conv.get("context_items", [])[0]["kind"] == "repo"
+            assert conv["context_items"][0]["command"] == "status"
+            assert m.conversation_path(conv["id"]).exists()
+        finally:
+            m.repo_report = old_repo_report
+
+
 def test_cwd_indexing_ignores_light_study_done(m):
     progress = {
         "status": "running",
