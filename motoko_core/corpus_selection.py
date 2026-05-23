@@ -36,6 +36,23 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def source_fingerprint(path: pathlib.Path) -> dict:
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": sha256_file(path),
+    }
+
+
 def is_under(path: pathlib.Path, root: pathlib.Path) -> bool:
     try:
         path.relative_to(root)
@@ -329,4 +346,35 @@ def selection_policy_staleness(index: dict) -> tuple[str, list[str]]:
         if ignored_indexed_paths:
             examples = ", ".join(ignored_indexed_paths[:3])
             return "stale", [f"source selection policy now excludes indexed file(s): {examples}"]
+    return "fresh", []
+
+
+def file_staleness(file_item: dict) -> tuple[str, list[str]]:
+    path = pathlib.Path(file_item.get("path", "")).expanduser()
+    expected = file_item.get("source_fingerprint") or {}
+    if not expected:
+        return "unknown", [f"{path}: no fingerprint stored; rebuild index to enable stale checks"]
+    if not path.exists():
+        return "stale", [f"{path}: missing"]
+    try:
+        current_stat = path.stat()
+    except OSError as exc:
+        return "stale", [f"{path}: cannot stat file: {exc}"]
+
+    warnings = []
+    if current_stat.st_size != expected.get("size"):
+        warnings.append(
+            f"{path}: size changed from {expected.get('size')} to {current_stat.st_size}"
+        )
+    if current_stat.st_mtime_ns != expected.get("mtime_ns"):
+        warnings.append(f"{path}: mtime changed")
+    if warnings:
+        try:
+            current_hash = sha256_file(path)
+            if current_hash == expected.get("sha256"):
+                return "mtime-only", [f"{path}: metadata changed but content hash still matches"]
+            warnings.append(f"{path}: content hash changed")
+        except OSError as exc:
+            warnings.append(f"{path}: cannot hash current file: {exc}")
+        return "stale", warnings
     return "fresh", []

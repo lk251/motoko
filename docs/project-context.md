@@ -465,6 +465,12 @@ Current implementation progress:
   `.motokoignore` parsing/matching, source-selection policy fingerprints,
   candidate discovery, ignored-path examples, and selection-policy staleness
   checks live in `motoko_core.corpus_selection`.
+- Step 5 now also has source-file metadata helpers in
+  `motoko_core.corpus_selection`: streaming SHA256 file hashes, stored
+  source-fingerprint construction, and per-file freshness/staleness checks for
+  missing, changed, and metadata-only-changed files. The root script still
+  combines these checks with artifact-health warnings in its compatibility
+  `index_staleness` facade.
 
 ## Roadmap Candidates
 
