@@ -604,6 +604,9 @@ Current implementation progress:
 - Step 9 now also gives `/indexes` and `/corpus-profile` formatter-backed
   output, so they can use the shared index report-command path without
   redirecting stdout from report worker threads.
+- Step 9 now also gives topic and dossier list/show commands formatter-backed
+  output (`/topics`, `/topic-show`, `/dossiers`, `/dossier-show`) and routes
+  them through a shared read-only report-command helper.
 
 ## Roadmap Candidates
 

@@ -13112,6 +13112,23 @@ def index_report_command_request(text: str, conv: dict):
     return None
 
 
+def topic_dossier_report_command_request(text: str):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/topics" and not body:
+        return "/topics", format_topics_text
+    if primary == "/topic-show":
+        selector = body or None
+        return "/topic-show", lambda: format_topic_report(load_topic(selector), evidence=False)
+    if primary == "/dossiers" and not body:
+        return "/dossiers", format_dossiers_text
+    if primary == "/dossier-show":
+        selector = body or None
+        return "/dossier-show", lambda: format_dossier_report(load_dossier(selector), evidence=False)
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -14027,16 +14044,9 @@ class MotokoTui:
             elif (vector_request := vector_command_request(text, self.conv)) is not None:
                 label, func = vector_request
                 self.start_report_command(label, func)
-            elif text == "/topics":
-                self.append("system", self.capture_text(command_topics_text))
-            elif text == "/topic-show" or text.startswith("/topic-show "):
-                selector = text[len("/topic-show") :].strip() or None
-                self.append("system", self.capture_text(lambda: print_topic(load_topic(selector), evidence=False)))
-            elif text == "/dossiers":
-                self.append("system", self.capture_text(command_dossiers_text))
-            elif text == "/dossier-show" or text.startswith("/dossier-show "):
-                selector = text[len("/dossier-show") :].strip() or None
-                self.append("system", self.capture_text(lambda: print_dossier(load_dossier(selector), evidence=False)))
+            elif (topic_dossier_request := topic_dossier_report_command_request(text)) is not None:
+                label, func = topic_dossier_request
+                self.start_report_command(label, func)
             elif text == "/study" or text.startswith("/study "):
                 body = text[len("/study") :].strip()
                 self.run_blocking_command("Studying context...", lambda: self.study_from_body(body))
@@ -15273,19 +15283,13 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        if user_text == "/topics":
-            command_topics_text()
-            continue
-        if user_text == "/topic-show" or user_text.startswith("/topic-show "):
-            selector = user_text[len("/topic-show") :].strip() or None
-            print_topic(load_topic(selector), evidence=False)
-            continue
-        if user_text == "/dossiers":
-            command_dossiers_text()
-            continue
-        if user_text == "/dossier-show" or user_text.startswith("/dossier-show "):
-            selector = user_text[len("/dossier-show") :].strip() or None
-            print_dossier(load_dossier(selector), evidence=False)
+        topic_dossier_request = topic_dossier_report_command_request(user_text)
+        if topic_dossier_request is not None:
+            _label, func = topic_dossier_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text == "/dossier" or user_text.startswith("/dossier "):
             try:
@@ -16163,31 +16167,48 @@ def command_topics(_args) -> None:
     command_topics_text()
 
 
-def command_topics_text() -> None:
+def format_topics_text() -> str:
     rows = list_topics()
     if not rows:
-        print("No topic dossiers yet.")
-        return
+        return "No topic dossiers yet."
+    lines = []
     for topic in rows:
-        print(
+        lines.append(
             f"{topic.get('created', '')}  {topic.get('id')}  "
             f"{topic.get('selected_chunk_count', 0)} chunk(s)  "
             f"{topic.get('name', '')}  {topic.get('query', '')}"
         )
+    return "\n".join(lines)
+
+
+def command_topics_text() -> None:
+    print(format_topics_text())
+
+
+def format_topic_report(topic: dict, *, evidence: bool = False) -> str:
+    lines = [
+        f"{topic.get('name', 'Untitled')} [{topic.get('id')}]",
+        "",
+        f"query> {topic.get('query', '')}",
+        "",
+        str(topic.get("summary", "")),
+    ]
+    if evidence:
+        lines.extend(["", "Evidence:"])
+        for item in topic.get("evidence", []):
+            lines.extend(
+                [
+                    "",
+                    f"--- index:{item.get('index')} file:{item.get('path')} "
+                    f"chunk:{item.get('chunk')} score:{item.get('score')} ---",
+                    str(item.get("excerpt", "")),
+                ]
+            )
+    return "\n".join(lines)
 
 
 def print_topic(topic: dict, *, evidence: bool = False) -> None:
-    print(f"{topic.get('name', 'Untitled')} [{topic.get('id')}]\n")
-    print(f"query> {topic.get('query', '')}\n")
-    print(topic.get("summary", ""))
-    if evidence:
-        print("\nEvidence:")
-        for item in topic.get("evidence", []):
-            print(
-                f"\n--- index:{item.get('index')} file:{item.get('path')} "
-                f"chunk:{item.get('chunk')} score:{item.get('score')} ---"
-            )
-            print(item.get("excerpt", ""))
+    print(format_topic_report(topic, evidence=evidence))
 
 
 def command_topic_show(args) -> None:
@@ -16217,39 +16238,59 @@ def command_dossiers(_args) -> None:
     command_dossiers_text()
 
 
-def command_dossiers_text() -> None:
+def format_dossiers_text() -> str:
     rows = list_dossiers()
     if not rows:
-        print("No memory dossiers yet.")
-        return
+        return "No memory dossiers yet."
+    lines = []
     for dossier in rows:
-        print(
+        lines.append(
             f"{dossier.get('created', '')}  {dossier.get('id')}  "
             f"{dossier.get('source_memory_count', 0)} memories  "
             f"{dossier.get('source_conversation_count', 0)} conversations  "
             f"{dossier.get('name', '')}  {dossier.get('query', '')}"
         )
+    return "\n".join(lines)
+
+
+def command_dossiers_text() -> None:
+    print(format_dossiers_text())
+
+
+def format_dossier_report(dossier: dict, *, evidence: bool = False) -> str:
+    lines = [
+        f"{dossier.get('name', 'Untitled')} [{dossier.get('id')}]",
+        "",
+        f"query> {dossier.get('query', '')}",
+        "",
+        str(dossier.get("summary", "")),
+    ]
+    if evidence:
+        lines.extend(["", "Memory Evidence:"])
+        for item in dossier.get("source_memories", []):
+            lines.extend(
+                [
+                    "",
+                    f"--- memory:{item.get('id')} importance:{item.get('importance')} "
+                    f"score:{item.get('score')} ---",
+                    str(item.get("excerpt", "")),
+                ]
+            )
+        lines.extend(["", "Conversation Evidence:"])
+        for item in dossier.get("source_conversations", []):
+            lines.extend(
+                [
+                    "",
+                    f"--- conversation:{item.get('id')} title:{item.get('title')} "
+                    f"updated:{item.get('updated')} ---",
+                    str(item.get("excerpt", "")),
+                ]
+            )
+    return "\n".join(lines)
 
 
 def print_dossier(dossier: dict, *, evidence: bool = False) -> None:
-    print(f"{dossier.get('name', 'Untitled')} [{dossier.get('id')}]\n")
-    print(f"query> {dossier.get('query', '')}\n")
-    print(dossier.get("summary", ""))
-    if evidence:
-        print("\nMemory Evidence:")
-        for item in dossier.get("source_memories", []):
-            print(
-                f"\n--- memory:{item.get('id')} importance:{item.get('importance')} "
-                f"score:{item.get('score')} ---"
-            )
-            print(item.get("excerpt", ""))
-        print("\nConversation Evidence:")
-        for item in dossier.get("source_conversations", []):
-            print(
-                f"\n--- conversation:{item.get('id')} title:{item.get('title')} "
-                f"updated:{item.get('updated')} ---"
-            )
-            print(item.get("excerpt", ""))
+    print(format_dossier_report(dossier, evidence=evidence))
 
 
 def command_dossier_show(args) -> None:
