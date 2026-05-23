@@ -547,6 +547,82 @@ def select_non_overlapping_spans(spans: list[dict], *, max_chars: int) -> list[d
     return []
 
 
+def query_aware_content_selection(
+    query: str,
+    content: str,
+    max_chars: int,
+    *,
+    use_models: bool = False,
+    model_scorer=None,
+) -> dict:
+    content = content.strip()
+    if not content:
+        return {"excerpt": "", "spans": [], "warnings": [], "method": "empty"}
+    max_chars = max(1, int(max_chars or 1))
+    mandatory_spans = mandatory_date_evidence_spans(query, content)
+    if mandatory_spans:
+        selected = fit_evidence_spans_to_budget(mandatory_spans, max_chars=max_chars)
+        excerpt = "\n\n".join(str(span.get("text", "")).strip() for span in selected if span.get("text"))
+        return {
+            "excerpt": excerpt[:max_chars].strip(),
+            "spans": [
+                {
+                    key: row.get(key)
+                    for key in ["kind", "label", "start", "end", "score", "lexical_score"]
+                    if row.get(key) is not None
+                }
+                for row in selected
+            ],
+            "warnings": [],
+            "method": "date-span",
+        }
+    spans = score_evidence_spans(query, base_evidence_spans(query, content, max_chars=max_chars))
+    warnings = []
+    if use_models and model_scorer is not None:
+        spans, warnings = model_scorer(query, spans)
+    selected = select_non_overlapping_spans(spans, max_chars=max_chars)
+    if not selected:
+        fallback = query_term_window_excerpt(query, content, max_chars=max_chars)
+        span = make_evidence_span(
+            kind="term-window",
+            label="fallback",
+            start=max(0, content.find(fallback[: min(len(fallback), 80)])),
+            end=max(0, content.find(fallback[: min(len(fallback), 80)])) + len(fallback),
+            text=fallback,
+            base_score=0,
+        )
+        selected = [span] if span else []
+    excerpt = "\n\n".join(str(span.get("text", "")).strip() for span in selected if span.get("text"))
+    return {
+        "excerpt": excerpt[:max_chars].strip(),
+        "spans": [
+            {
+                key: row.get(key)
+                for key in [
+                    "kind",
+                    "label",
+                    "start",
+                    "end",
+                    "score",
+                    "lexical_score",
+                    "span_vector_score",
+                    "span_embedding_route",
+                    "span_rerank_score",
+                    "span_rerank_route",
+                    "selected_sub_start",
+                    "selected_sub_end",
+                ]
+                if row.get(key) is not None
+            }
+            for row in selected
+        ],
+        "warnings": warnings,
+        "method": "model-span"
+        if use_models and any(row.get("span_rerank_score") or row.get("span_vector_score") for row in selected)
+        else "deterministic-span",
+    }
+
+
 def retrieval_chunk_key(file_item: dict, chunk: dict) -> tuple[str, str]:
     return file_item.get("path", ""), str(chunk.get("chunk", ""))
 

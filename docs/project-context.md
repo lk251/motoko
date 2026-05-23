@@ -498,6 +498,10 @@ Current implementation progress:
   non-overlapping span selection. Model-assisted span embedding/reranking stays
   in the root script for now because it still depends on live route discovery
   and local-model calls.
+- Step 6 now also has query-aware content packing in `motoko_core.retrieval`,
+  with model-assisted span scoring supplied as an injected callback from the
+  root script. This keeps deterministic excerpt selection importable while
+  preserving the NixOS-owned local-model route boundary.
 
 ## Roadmap Candidates
 
