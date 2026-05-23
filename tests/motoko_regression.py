@@ -2372,6 +2372,31 @@ def test_tui_report_commands_do_not_persist_system_output(m):
 
         assert ui.overlay_title == "/evidence-query"
         assert ui.overlay_lines == ["evidence query: texere"]
+
+        old_latest_vector_store = m.latest_vector_store
+        old_query_vector_store = m.query_vector_store
+        old_format_vector_query_report = m.format_vector_query_report
+        try:
+            m.latest_vector_store = lambda: {"id": "vector-store"}
+            m.query_vector_store = lambda store, query, rerank=False: {
+                "store": store,
+                "query": query,
+                "rerank": rerank,
+            }
+            m.format_vector_query_report = lambda report: f"vector query: {report['query']} rerank={report['rerank']}"
+            ui.handle_command("/vector-query --rerank texere")
+            deadline = time.monotonic() + 2
+            while ui.report_running and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.latest_vector_store = old_latest_vector_store
+            m.query_vector_store = old_query_vector_store
+            m.format_vector_query_report = old_format_vector_query_report
+
+        assert ui.overlay_title == "/vector-query"
+        assert ui.overlay_lines == ["vector query: texere rerank=True"]
         assert ui.messages == []
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))

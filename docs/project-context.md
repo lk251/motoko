@@ -590,6 +590,10 @@ Current implementation progress:
   `/evidence-build`, `/evidence-refresh`, and `/evidence-query`, so those
   report-style commands use the same request builder in the TUI and line mode
   while preserving realm-local evidence-store behavior.
+- Step 9 now also shares vector report-command dispatch for `/vector-plan`,
+  `/vector-build`, `/vector-refresh`, `/vector-query`, and `/vector-eval`.
+  Vector commands still run through the existing realm-local vector-store
+  builders and query paths; the refactor only unifies command routing.
 
 ## Roadmap Candidates
 

@@ -13035,6 +13035,38 @@ def evidence_command_request(text: str, conv: dict):
     return None
 
 
+def vector_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/vector-plan":
+        selector = body or None
+        return "/vector-plan", lambda: format_vector_plan(vector_plan(selector))
+    if primary == "/vector-build":
+        selector = body or None
+        return (
+            "/vector-build",
+            lambda: format_vector_store(
+                build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(conv))
+            ),
+        )
+    if primary == "/vector-refresh":
+        selector = body or None
+        return (
+            "/vector-refresh",
+            lambda: format_vector_refresh_report(
+                refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)
+            ),
+        )
+    if primary == "/vector-query":
+        query, rerank = parse_vector_query_input(body)
+        query = query or context_query_text(conv, conv.get("title", ""))
+        return "/vector-query", lambda: format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank))
+    if primary == "/vector-eval" and not body:
+        return "/vector-eval", lambda: format_vector_eval_report(run_vector_eval())
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -13966,29 +13998,9 @@ class MotokoTui:
                         cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)
                     ),
                 )
-            elif text == "/vector-plan" or text.startswith("/vector-plan "):
-                selector = text[len("/vector-plan") :].strip() or None
-                self.start_report_command("/vector-plan", lambda: format_vector_plan(vector_plan(selector)))
-            elif text == "/vector-build" or text.startswith("/vector-build "):
-                selector = text[len("/vector-build") :].strip() or None
-                store = build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(self.conv))
-                self.append("system", format_vector_store(store))
-            elif text == "/vector-refresh" or text.startswith("/vector-refresh "):
-                selector = text[len("/vector-refresh") :].strip() or None
-                report = refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)
-                self.append("system", format_vector_refresh_report(report))
-            elif text == "/vector-query" or text.startswith("/vector-query "):
-                query, rerank = parse_vector_query_input(text[len("/vector-query") :].strip())
-                query = query or context_query_text(self.conv, self.conv.get("title", ""))
-                try:
-                    self.start_report_command(
-                        "/vector-query",
-                        lambda: format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank)),
-                    )
-                except SystemExit as exc:
-                    self.append("error", str(exc))
-            elif text == "/vector-eval":
-                self.start_report_command("/vector-eval", lambda: format_vector_eval_report(run_vector_eval()))
+            elif (vector_request := vector_command_request(text, self.conv)) is not None:
+                label, func = vector_request
+                self.start_report_command(label, func)
             elif text == "/index-repair" or text.startswith("/index-repair "):
                 selector = text[len("/index-repair") :].strip() or None
                 _repaired, _changed, note = repair_index_artifacts(load_index(selector))
@@ -15248,29 +15260,13 @@ def chat_loop(conv: dict) -> None:
                 )
             )
             continue
-        if user_text == "/vector-plan" or user_text.startswith("/vector-plan "):
-            selector = user_text[len("/vector-plan") :].strip() or None
-            print_report(format_vector_plan(vector_plan(selector)))
-            continue
-        if user_text == "/vector-build" or user_text.startswith("/vector-build "):
-            selector = user_text[len("/vector-build") :].strip() or None
-            store = build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(conv))
-            print_report(format_vector_store(store))
-            continue
-        if user_text == "/vector-refresh" or user_text.startswith("/vector-refresh "):
-            selector = user_text[len("/vector-refresh") :].strip() or None
-            print_report(format_vector_refresh_report(refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)))
-            continue
-        if user_text == "/vector-query" or user_text.startswith("/vector-query "):
-            query, rerank = parse_vector_query_input(user_text[len("/vector-query") :].strip())
-            query = query or context_query_text(conv, conv.get("title", ""))
+        vector_request = vector_command_request(user_text, conv)
+        if vector_request is not None:
+            _label, func = vector_request
             try:
-                print_report(format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank)))
+                print_report(func())
             except SystemExit as exc:
                 print(exc)
-            continue
-        if user_text == "/vector-eval":
-            print_report(format_vector_eval_report(run_vector_eval()))
             continue
         if user_text == "/index-repair" or user_text.startswith("/index-repair "):
             selector = user_text[len("/index-repair") :].strip() or None
