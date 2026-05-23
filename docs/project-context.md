@@ -629,6 +629,10 @@ Current implementation progress:
   `motoko_core.tui_render`. The root TUI still gathers live-answer, dropdown,
   input, and status rows and emits terminal control sequences, while core owns
   live-output clipping, row ordering, and cursor placement.
+- Step 8 now also has pure overlay-page frame helpers in
+  `motoko_core.tui_render`: scroll clamping, fixed-height row padding, and
+  screen-sequence composition. The root TUI still owns alternate-screen state
+  and terminal writes.
 - Step 8 also has direct tty/input regression coverage for the new pure input
   editing and TUI rendering helpers, in addition to the existing
   pseudo-terminal resize/render check.

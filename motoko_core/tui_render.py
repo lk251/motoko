@@ -132,6 +132,21 @@ def overlay_display_lines(title: str, body_lines: list[str], width: int) -> list
     return rows or [""]
 
 
+def overlay_page_frame(body_lines: list[str], height: int, scroll: int) -> tuple[list[str], int]:
+    height = max(1, height)
+    max_scroll = max(0, len(body_lines) - height)
+    scroll = min(max(0, scroll), max_scroll)
+    visible = body_lines[scroll : scroll + height]
+    rows = visible + [""] * max(0, height - len(visible))
+    return rows[:height], scroll
+
+
+def overlay_page_sequence(rows: list[str], height: int) -> str:
+    height = max(1, height)
+    visible_rows = rows[:height] + [""] * max(0, height - len(rows))
+    return "\033[H" + "\n".join(f"{row}\033[K" for row in visible_rows[:height]) + "\033[J\033[?25h"
+
+
 def dropdown_display_lines(
     options: list[dict],
     selected_index: int,

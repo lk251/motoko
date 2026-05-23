@@ -49,6 +49,8 @@ from motoko_core.tui_render import (
     lines_at_cursor_sequence,
     message_display_lines,
     overlay_display_lines,
+    overlay_page_frame,
+    overlay_page_sequence,
     status_display_lines,
     study_status_label_core,
 )
@@ -209,6 +211,10 @@ def main() -> int:
     assert frame_lines[-2:] == ["> prompt", "status"]
     assert frame_cursor_row == len(frame_lines) - 2
     assert frame_cursor_col == 4
+    overlay_rows, overlay_scroll = overlay_page_frame(["one", "two", "three"], 2, 9)
+    assert overlay_rows == ["two", "three"]
+    assert overlay_scroll == 1
+    assert overlay_page_sequence(["one"], 2) == "\033[Hone\033[K\n\033[K\033[J\033[?25h"
     assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
     assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
     with tempfile.TemporaryDirectory() as tmp:
