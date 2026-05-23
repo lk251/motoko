@@ -619,6 +619,9 @@ Current implementation progress:
 - Step 9 now also removes the TUI's ad hoc stdout-capture helper by giving the
   remaining captured commands return-value paths (`/index-plan`,
   `/permissions set`, and profile display after `/profile-refresh`).
+- Step 9 now routes `/index-plan PATH` through the shared index report helper
+  and `/permissions set MODE` through a small settings command helper, reducing
+  another pair of TUI/line-mode duplicate branches.
 
 ## Roadmap Candidates
 

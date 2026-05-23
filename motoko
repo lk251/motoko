@@ -13124,6 +13124,8 @@ def index_report_command_request(text: str, conv: dict):
     text = text.strip()
     primary = command_primary(text)
     body = command_body(text)
+    if primary == "/index-plan" and body:
+        return "/index-plan", lambda: format_index_plan(body)
     if primary == "/indexes" and not body:
         return "/indexes", format_indexes_text
     if primary == "/corpus-profile":
@@ -13150,6 +13152,17 @@ def index_report_command_request(text: str, conv: dict):
         return "/index-repair", run_repair
     if primary == "/tasks":
         return "/tasks", lambda: format_task_candidates_from_chat(conv, body)
+    return None
+
+
+def settings_command_request(text: str):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/permissions":
+        parts = body.split(maxsplit=1)
+        if len(parts) == 2 and parts[0] == "set":
+            return "/permissions set", lambda: command_permissions_set_text(parts[1])
     return None
 
 
@@ -14121,9 +14134,9 @@ class MotokoTui:
             elif (model_request := model_command_request(text)) is not None:
                 label, func = model_request
                 self.start_report_command(label, func)
-            elif text.startswith("/permissions set "):
-                mode = text[len("/permissions set ") :].strip()
-                self.append("system", command_permissions_set_text(mode))
+            elif (settings_request := settings_command_request(text)) is not None:
+                label, func = settings_request
+                self.start_report_command(label, func)
             elif text == "/repo" or text.startswith("/repo "):
                 self.attach_repo_report(text[len("/repo") :].strip())
             elif (memory_profile_request := memory_profile_report_command_request(text)) is not None:
@@ -14190,8 +14203,6 @@ class MotokoTui:
                 self.conv.setdefault("context_items", []).append(item)
                 save_conversation(self.conv)
                 self.append("system", f"attached: {item['path']}")
-            elif text.startswith("/index-plan "):
-                self.append("system", format_index_plan(text[len("/index-plan ") :].strip()))
             elif text == "/attach-index" or text.startswith("/attach-index "):
                 selector = text[len("/attach-index") :].strip() or None
                 index = load_index(selector)
@@ -15259,9 +15270,6 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             print(f"attached: {item['path']}")
             continue
-        if user_text.startswith("/index-plan "):
-            print_index_plan(user_text[len("/index-plan ") :].strip())
-            continue
         if user_text.startswith("/index "):
             index = build_document_index(user_text[len("/index ") :].strip(), AUTO_INDEX_GLOB)
             conv.setdefault("context_items", []).append(context_item_from_index(index))
@@ -15388,8 +15396,13 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        if user_text.startswith("/permissions set "):
-            command_permissions_set(user_text[len("/permissions set ") :].strip())
+        settings_request = settings_command_request(user_text)
+        if settings_request is not None:
+            _label, func = settings_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text == "/repo" or user_text.startswith("/repo "):
             body = user_text[len("/repo") :].strip()
