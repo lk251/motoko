@@ -41,6 +41,8 @@ from motoko_core.input_edit import (
     move_word_right,
     next_history_entry,
     previous_history_entry,
+    remember_input_history_entry,
+    seed_input_history_from_messages,
 )
 from motoko_core.terminal import strip_ansi
 from motoko_core.tui_render import (
@@ -138,6 +140,17 @@ def main() -> int:
     assert delete_word_left("alpha beta", 10) == ("alpha ", 6, "beta")
     assert previous_history_entry(["one", "two"], None) == (1, "two")
     assert next_history_entry(["one", "two"], 1) == (None, "")
+    history = seed_input_history_from_messages(
+        [
+            {"role": "assistant", "content": "ignore"},
+            {"role": "user", "content": " first "},
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ]
+    )
+    assert history == ["first", "second"]
+    assert remember_input_history_entry(history, "second") == ["first", "second"]
+    assert remember_input_history_entry(history, "third", limit=2) == ["second", "third"]
     commands = [("/help", "show help"), ("/memory search TEXT", "search memories")]
     assert slash_command_value("/memory search TEXT") == "/memory search"
     assert command_primary("/models qwen35-2b-worker") == "/models"

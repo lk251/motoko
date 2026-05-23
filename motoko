@@ -96,6 +96,8 @@ from motoko_core.input_edit import (  # noqa: E402
     move_word_right as edit_move_word_right,
     next_history_entry,
     previous_history_entry,
+    remember_input_history_entry,
+    seed_input_history_from_messages,
 )
 from motoko_core.tui_render import (  # noqa: E402
     bottom_clear_sequence as render_bottom_clear_sequence,
@@ -12806,26 +12808,10 @@ class MotokoTui:
         return rows
 
     def seed_input_history(self, conv: dict) -> list[str]:
-        history = []
-        messages = conv.get("messages", [])
-        for msg in messages if isinstance(messages, list) else []:
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("role") != "user":
-                continue
-            content = str(msg.get("content", "")).strip()
-            if content and (not history or history[-1] != content):
-                history.append(content)
-        return history[-200:]
+        return seed_input_history_from_messages(conv.get("messages", []), limit=200)
 
     def remember_input_history(self, text: str) -> None:
-        text = text.strip()
-        if not text:
-            return
-        if not self.history or self.history[-1] != text:
-            self.history.append(text)
-        if len(self.history) > 200:
-            self.history = self.history[-200:]
+        self.history = remember_input_history_entry(self.history, text, limit=200)
 
     def clear_queued_prompts(self) -> int:
         count = len(self.pending_prompts)

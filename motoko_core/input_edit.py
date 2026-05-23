@@ -49,3 +49,26 @@ def next_history_entry(history: list[str], history_index: int | None) -> tuple[i
     if history_index >= len(history):
         return None, ""
     return history_index, history[history_index]
+
+
+def seed_input_history_from_messages(messages, *, limit: int = 200) -> list[str]:
+    history = []
+    for msg in messages if isinstance(messages, list) else []:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("role") != "user":
+            continue
+        content = str(msg.get("content", "")).strip()
+        if content and (not history or history[-1] != content):
+            history.append(content)
+    return history[-max(1, int(limit or 1)) :]
+
+
+def remember_input_history_entry(history: list[str], text: str, *, limit: int = 200) -> list[str]:
+    text = text.strip()
+    if not text:
+        return list(history)
+    rows = list(history)
+    if not rows or rows[-1] != text:
+        rows.append(text)
+    return rows[-max(1, int(limit or 1)) :]
