@@ -543,6 +543,11 @@ Current implementation progress:
   incomplete-job detection, begin/update, and interrupted-job resume/abandon
   decisions. The root script still owns when maintenance runs and all model
   proposal calls.
+- Step 7 now also has private feedback/eval shaping in
+  `motoko_core.feedback`: rating normalization, last-message selection,
+  source compaction, response-feedback row construction, eval fixture/report
+  construction, eval report formatting, and `/feedback` command parsing. The
+  root script still owns realm selection and state-path writes.
 
 ## Roadmap Candidates
 
