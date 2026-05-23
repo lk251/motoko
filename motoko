@@ -26,7 +26,6 @@ import select
 import shlex
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import termios
@@ -72,6 +71,16 @@ from motoko_core.terminal import (  # noqa: E402
     wrap_display_part,
     worked_line,
     working_text,
+)
+from motoko_core.model_io import (  # noqa: E402
+    UnixSocketHTTPConnection,
+    endpoint_is_unix,
+    iter_cancelable_response_lines,
+    model_loading_response,
+    raise_if_cancelled,
+    read_json_response,
+    sleep_with_cancel,
+    transient_model_connection_error,
 )
 from motoko_core.state import (  # noqa: E402
     allowdirs_path,
@@ -1801,10 +1810,6 @@ def normalize_model_route(route: str | None, *, strict: bool = True) -> str:
 def model_route_env_key(route: str, key: str) -> str:
     token = normalize_model_route(route).upper()
     return f"MOTOKO_ROUTE_{token}_{key.upper()}"
-
-
-def endpoint_is_unix(endpoint_text: str) -> bool:
-    return str(endpoint_text).startswith("unix://")
 
 
 def local_model_catalog_routes(catalog: dict | None = None) -> dict:
@@ -14214,18 +14219,6 @@ def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]
     return messages, sources
 
 
-class UnixSocketHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, socket_path: str, *, timeout: float) -> None:
-        super().__init__("localhost", timeout=timeout)
-        self.socket_path = socket_path
-
-    def connect(self) -> None:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(self.timeout)
-        sock.connect(self.socket_path)
-        self.sock = sock
-
-
 def model_request_timeout(route_info: dict, timeout: float) -> float:
     if endpoint_is_unix(route_info.get("endpoint", "")):
         return max(float(timeout), SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS)
@@ -14279,13 +14272,6 @@ def compact_local_model_status(raw: str) -> str:
     return " ".join(fields) if fields else raw.strip()[:240]
 
 
-def model_loading_response(status: int, body: str) -> bool:
-    if status != 503:
-        return False
-    lowered = body.lower()
-    return "loading model" in lowered or "model loading" in lowered
-
-
 def local_model_status_activating(route_info: dict) -> bool:
     status = local_model_status_text(route_info).lower()
     if not status:
@@ -14293,18 +14279,6 @@ def local_model_status_activating(route_info: dict) -> bool:
     if "backend=activating" in status or "proxy=activating" in status:
         return True
     return "loading model" in status or "model loading" in status
-
-
-def transient_model_connection_error(exc: BaseException) -> bool:
-    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
-        return True
-    text = str(exc).lower()
-    return (
-        "connection reset by peer" in text
-        or "remote end closed connection" in text
-        or "broken pipe" in text
-        or "connection aborted" in text
-    )
 
 
 def local_model_verify_hint(route_info: dict) -> str:
@@ -14355,30 +14329,6 @@ def local_model_verify_hint(route_info: dict) -> str:
     if route_info.get("download_hash"):
         lines.append(f"hash: {route_info['download_hash']}")
     return "\n".join(lines)
-
-
-def raise_if_cancelled(cancel_event) -> None:
-    if cancel_event is not None and cancel_event.is_set():
-        raise RuntimeError("__motoko_stopped__")
-
-
-def sleep_with_cancel(seconds: float, cancel_event) -> None:
-    deadline = time.monotonic() + max(0.0, seconds)
-    while True:
-        raise_if_cancelled(cancel_event)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return
-        time.sleep(min(0.1, remaining))
-
-
-def iter_cancelable_response_lines(resp, cancel_event):
-    while True:
-        raise_if_cancelled(cancel_event)
-        raw = resp.readline()
-        if not raw:
-            return
-        yield raw
 
 
 @contextlib.contextmanager
@@ -14659,15 +14609,6 @@ def call_model_with_callback(
         raise SystemExit(detail) from exc
     raise_if_cancelled(cancel_event)
     return "".join(collected)
-
-
-def read_json_response(resp) -> str:
-    event = json.loads(resp.read().decode("utf-8", errors="replace"))
-    choices = event.get("choices") or []
-    if not choices:
-        return ""
-    message = choices[0].get("message") or {}
-    return message.get("content") or ""
 
 
 def read_streaming_response(
