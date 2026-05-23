@@ -633,6 +633,9 @@ Current implementation progress:
   `motoko_core.tui_render`: scroll clamping, fixed-height row padding, and
   screen-sequence composition. The root TUI still owns alternate-screen state
   and terminal writes.
+- Step 8 now also has pure live-answer display composition in
+  `motoko_core.tui_render`. The root TUI still owns timing state and answer
+  lifecycle events, while core owns active-answer markers and body formatting.
 - Step 8 also has direct tty/input regression coverage for the new pure input
   editing and TUI rendering helpers, in addition to the existing
   pseudo-terminal resize/render check.

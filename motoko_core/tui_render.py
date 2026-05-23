@@ -234,6 +234,26 @@ def message_display_lines(
     return lines or [""]
 
 
+def live_answer_display_lines(
+    entry: dict | None,
+    width: int,
+    *,
+    assistant_color: str,
+    answer_phase: str,
+    answer_phase_elapsed: float,
+) -> list[str]:
+    if entry is None:
+        return []
+    return message_display_lines(
+        entry,
+        width,
+        assistant_color=assistant_color,
+        active_answer=True,
+        answer_phase=answer_phase,
+        answer_phase_elapsed=answer_phase_elapsed,
+    )
+
+
 def bottom_clear_sequence(rendered_rows: int, cursor_row_offset: int) -> str:
     if rendered_rows <= 0:
         return ""

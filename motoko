@@ -62,10 +62,8 @@ from motoko_core.terminal import (  # noqa: E402
     strip_ansi,
     style,
     trim_trailing_space_tokens,
-    tui_marker,
     wrap_display_line,
     wrap_display_part,
-    working_text,
 )
 from motoko_core.feedback import (  # noqa: E402
     compact_feedback_sources,
@@ -97,6 +95,7 @@ from motoko_core.tui_render import (  # noqa: E402
     bottom_area_frame as render_bottom_area_frame,
     dropdown_display_lines,
     lines_at_cursor_sequence as render_lines_at_cursor_sequence,
+    live_answer_display_lines as render_live_answer_display_lines,
     message_display_lines as render_message_display_lines,
     overlay_display_lines,
     overlay_page_frame as render_overlay_page_frame,
@@ -14652,15 +14651,13 @@ class MotokoTui:
         if self.answer_entry is None or not self.generating:
             return []
         phase_started = self.answer_phase_started_monotonic or self.answer_started_monotonic or time.monotonic()
-        lines = [
-            tui_marker(assistant_color(), active=True)
-            + working_text(self.answer_phase, time.monotonic() - phase_started),
-            "",
-        ]
-        content = self.answer_entry.get("content", "")
-        if content:
-            lines.extend(self.message_display_lines(self.answer_entry, width))
-        return lines
+        return render_live_answer_display_lines(
+            self.answer_entry,
+            width,
+            assistant_color=assistant_color(),
+            answer_phase=getattr(self, "answer_phase", ""),
+            answer_phase_elapsed=time.monotonic() - phase_started,
+        )
 
     def render_overlay_page(self, width: int, height: int) -> None:
         self.clear_bottom_area()

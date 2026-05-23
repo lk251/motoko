@@ -42,11 +42,13 @@ from motoko_core.input_edit import (
     next_history_entry,
     previous_history_entry,
 )
+from motoko_core.terminal import strip_ansi
 from motoko_core.tui_render import (
     bottom_area_frame,
     bottom_clear_sequence,
     dropdown_display_lines,
     lines_at_cursor_sequence,
+    live_answer_display_lines,
     message_display_lines,
     overlay_display_lines,
     overlay_page_frame,
@@ -171,6 +173,18 @@ def main() -> int:
         )
     )
     assert "copy this" in message
+    live_answer = "\n".join(
+        live_answer_display_lines(
+            {"role": "assistant", "content": "answer text"},
+            60,
+            assistant_color="cyan",
+            answer_phase="answering",
+            answer_phase_elapsed=12,
+        )
+    )
+    live_answer = strip_ansi(live_answer)
+    assert "Answering (12s)" in live_answer
+    assert "answer text" in live_answer
     status = "\n".join(
         status_display_lines(
             title="Chat",
