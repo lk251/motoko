@@ -2412,6 +2412,21 @@ def test_tui_report_commands_do_not_persist_system_output(m):
 
         assert ui.overlay_title == "/model-stop"
         assert ui.overlay_lines == ["stopped model route: qwen35-2b-worker"]
+
+        old_format_task_candidates = m.format_task_candidates_from_chat
+        try:
+            m.format_task_candidates_from_chat = lambda conv_arg, query="": f"tasks query: {query.strip()}"
+            ui.handle_command("/tasks tomorrow")
+            deadline = time.monotonic() + 2
+            while ui.report_running and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.format_task_candidates_from_chat = old_format_task_candidates
+
+        assert ui.overlay_title == "/tasks"
+        assert ui.overlay_lines == ["tasks query: tomorrow"]
         assert ui.messages == []
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))

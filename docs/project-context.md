@@ -597,6 +597,10 @@ Current implementation progress:
 - Step 9 now also routes `/model-stop` through a shared command request helper.
   Service control remains limited to the approved `motoko-model` helper path;
   the refactor only removes duplicated TUI/line-mode selector handling.
+- Step 9 now also shares report-style index command dispatch for
+  `/index-quality`, `/index-storage`, `/index-cleanup`, `/index-repair`, and
+  `/tasks`. Print-only index commands remain explicit until they have
+  formatter functions instead of captured stdout.
 
 ## Roadmap Candidates
 

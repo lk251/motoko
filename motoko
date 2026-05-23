@@ -13079,6 +13079,34 @@ def model_command_request(text: str):
     return None
 
 
+def index_report_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/index-quality":
+        selector = body or None
+        return "/index-quality", lambda: format_index_quality_gate(index_quality_gate(load_index(selector)))
+    if primary == "/index-storage" and not body:
+        return "/index-storage", lambda: format_index_storage_audit(index_storage_audit())
+    if primary == "/index-cleanup":
+        apply_cleanup = body in {"yes", "--yes", "apply"}
+        return (
+            "/index-cleanup",
+            lambda: format_index_cleanup_report(cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)),
+        )
+    if primary == "/index-repair":
+        selector = body or None
+
+        def run_repair() -> str:
+            _repaired, _changed, note = repair_index_artifacts(load_index(selector))
+            return note
+
+        return "/index-repair", run_repair
+    if primary == "/tasks":
+        return "/tasks", lambda: format_task_candidates_from_chat(conv, body)
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -13993,29 +14021,12 @@ class MotokoTui:
             elif text == "/corpus-profile" or text.startswith("/corpus-profile "):
                 selector = text[len("/corpus-profile") :].strip() or None
                 self.append("system", self.capture_text(lambda: print_corpus_profile(load_index(selector))))
-            elif text == "/index-quality" or text.startswith("/index-quality "):
-                selector = text[len("/index-quality") :].strip() or None
-                self.append("system", format_index_quality_gate(index_quality_gate(load_index(selector))))
-            elif text == "/index-storage":
-                self.append("system", format_index_storage_audit(index_storage_audit()))
-            elif text == "/index-cleanup" or text.startswith("/index-cleanup "):
-                tail = text[len("/index-cleanup") :].strip()
-                apply_cleanup = tail in {"yes", "--yes", "apply"}
-                self.start_report_command(
-                    "/index-cleanup",
-                    lambda: format_index_cleanup_report(
-                        cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)
-                    ),
-                )
+            elif (index_request := index_report_command_request(text, self.conv)) is not None:
+                label, func = index_request
+                self.start_report_command(label, func)
             elif (vector_request := vector_command_request(text, self.conv)) is not None:
                 label, func = vector_request
                 self.start_report_command(label, func)
-            elif text == "/index-repair" or text.startswith("/index-repair "):
-                selector = text[len("/index-repair") :].strip() or None
-                _repaired, _changed, note = repair_index_artifacts(load_index(selector))
-                self.append("system", note)
-            elif text == "/tasks" or text.startswith("/tasks "):
-                self.start_report_command("/tasks", lambda: format_task_candidates_from_chat(self.conv, text[len("/tasks") :]))
             elif text == "/topics":
                 self.append("system", self.capture_text(command_topics_text))
             elif text == "/topic-show" or text.startswith("/topic-show "):
@@ -15253,21 +15264,13 @@ def chat_loop(conv: dict) -> None:
             selector = user_text[len("/corpus-profile") :].strip() or None
             print_corpus_profile(load_index(selector))
             continue
-        if user_text == "/index-quality" or user_text.startswith("/index-quality "):
-            selector = user_text[len("/index-quality") :].strip() or None
-            print_report(format_index_quality_gate(index_quality_gate(load_index(selector))))
-            continue
-        if user_text == "/index-storage":
-            print_report(format_index_storage_audit(index_storage_audit()))
-            continue
-        if user_text == "/index-cleanup" or user_text.startswith("/index-cleanup "):
-            tail = user_text[len("/index-cleanup") :].strip()
-            apply_cleanup = tail in {"yes", "--yes", "apply"}
-            print_report(
-                format_index_cleanup_report(
-                    cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)
-                )
-            )
+        index_request = index_report_command_request(user_text, conv)
+        if index_request is not None:
+            _label, func = index_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         vector_request = vector_command_request(user_text, conv)
         if vector_request is not None:
@@ -15276,14 +15279,6 @@ def chat_loop(conv: dict) -> None:
                 print_report(func())
             except SystemExit as exc:
                 print(exc)
-            continue
-        if user_text == "/index-repair" or user_text.startswith("/index-repair "):
-            selector = user_text[len("/index-repair") :].strip() or None
-            _repaired, _changed, note = repair_index_artifacts(load_index(selector))
-            print(note)
-            continue
-        if user_text == "/tasks" or user_text.startswith("/tasks "):
-            print_report(format_task_candidates_from_chat(conv, user_text[len("/tasks") :]))
             continue
         if user_text == "/topics":
             command_topics_text()
