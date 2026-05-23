@@ -2417,6 +2417,22 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         assert ui.overlay_lines[0].startswith("memory pinned:")
         assert m.read_memory_rows()[0]["pinned"] is True
 
+        old_context_item_from_file = m.context_item_from_file
+        try:
+            m.context_item_from_file = lambda path: {"kind": "file", "path": path, "content": "stub"}
+            ui.handle_command("/read /tmp/context.txt")
+            deadline = time.monotonic() + 2
+            while ui.report_running and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.context_item_from_file = old_context_item_from_file
+
+        assert ui.overlay_title == "/read"
+        assert ui.overlay_lines == ["attached: /tmp/context.txt"]
+        assert conv["context_items"][-1]["path"] == "/tmp/context.txt"
+
         old_latest_evidence_store = m.latest_evidence_store
         old_query_evidence_store = m.query_evidence_store
         old_format_evidence_query_report = m.format_evidence_query_report

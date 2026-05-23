@@ -13239,6 +13239,51 @@ def memory_mutation_command_request(text: str, conv: dict):
     return None
 
 
+def context_attachment_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/read" and body:
+        def run_read() -> str:
+            item = context_item_from_file(body)
+            conv.setdefault("context_items", []).append(item)
+            save_conversation(conv)
+            return f"attached: {item['path']}"
+
+        return "/read", run_read
+    if primary == "/attach-index":
+        selector = body or None
+
+        def run_attach_index() -> str:
+            index = load_index(selector)
+            conv.setdefault("context_items", []).append(context_item_from_index(index))
+            save_conversation(conv)
+            return f"attached index: {index['id']}"
+
+        return "/attach-index", run_attach_index
+    if primary == "/attach-topic":
+        selector = body or None
+
+        def run_attach_topic() -> str:
+            topic = load_topic(selector)
+            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+            save_conversation(conv)
+            return f"attached topic: {topic['id']}"
+
+        return "/attach-topic", run_attach_topic
+    if primary == "/attach-dossier":
+        selector = body or None
+
+        def run_attach_dossier() -> str:
+            dossier = load_dossier(selector)
+            conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
+            save_conversation(conv)
+            return f"attached dossier: {dossier['id']}"
+
+        return "/attach-dossier", run_attach_dossier
+    return None
+
+
 def maybe_set_title(conv: dict, text: str) -> None:
     if conv.get("title") == "Untitled":
         conv["title"] = slug_title(text)
@@ -14198,29 +14243,9 @@ class MotokoTui:
                 self.history_index = None
                 message_count = len(self.conv.get("messages", []))
                 self.status = "conversation resumed" if message_count else "conversation resumed (0 messages)"
-            elif text.startswith("/read "):
-                item = context_item_from_file(text[len("/read ") :].strip())
-                self.conv.setdefault("context_items", []).append(item)
-                save_conversation(self.conv)
-                self.append("system", f"attached: {item['path']}")
-            elif text == "/attach-index" or text.startswith("/attach-index "):
-                selector = text[len("/attach-index") :].strip() or None
-                index = load_index(selector)
-                self.conv.setdefault("context_items", []).append(context_item_from_index(index))
-                save_conversation(self.conv)
-                self.append("system", f"attached index: {index['id']}")
-            elif text == "/attach-topic" or text.startswith("/attach-topic "):
-                selector = text[len("/attach-topic") :].strip() or None
-                topic = load_topic(selector)
-                self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
-                save_conversation(self.conv)
-                self.append("system", f"attached topic: {topic['id']}")
-            elif text == "/attach-dossier" or text.startswith("/attach-dossier "):
-                selector = text[len("/attach-dossier") :].strip() or None
-                dossier = load_dossier(selector)
-                self.conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
-                save_conversation(self.conv)
-                self.append("system", f"attached dossier: {dossier['id']}")
+            elif (attachment_request := context_attachment_command_request(text, self.conv)) is not None:
+                label, func = attachment_request
+                self.start_report_command(label, func)
             elif (memory_mutation_request := memory_mutation_command_request(text, self.conv)) is not None:
                 label, func = memory_mutation_request
                 self.start_report_command(label, func)
@@ -15264,12 +15289,6 @@ def chat_loop(conv: dict) -> None:
             else:
                 print("not deleted")
             continue
-        if user_text.startswith("/read "):
-            item = context_item_from_file(user_text[len("/read ") :].strip())
-            conv.setdefault("context_items", []).append(item)
-            save_conversation(conv)
-            print(f"attached: {item['path']}")
-            continue
         if user_text.startswith("/index "):
             index = build_document_index(user_text[len("/index ") :].strip(), AUTO_INDEX_GLOB)
             conv.setdefault("context_items", []).append(context_item_from_index(index))
@@ -15288,26 +15307,12 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             print(f"attached index: {index['id']}")
             continue
-        if user_text == "/attach-index" or user_text.startswith("/attach-index "):
-            selector = user_text[len("/attach-index") :].strip() or None
-            index = load_index(selector)
-            conv.setdefault("context_items", []).append(context_item_from_index(index))
-            save_conversation(conv)
-            print(f"attached index: {index['id']}")
-            continue
         if user_text == "/topic" or user_text.startswith("/topic "):
             try:
                 topic = build_topic_from_chat(conv, user_text[len("/topic") :])
             except SystemExit as exc:
                 print(exc)
                 continue
-            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
-            save_conversation(conv)
-            print(f"attached topic: {topic['id']}")
-            continue
-        if user_text == "/attach-topic" or user_text.startswith("/attach-topic "):
-            selector = user_text[len("/attach-topic") :].strip() or None
-            topic = load_topic(selector)
             conv.setdefault("context_items", []).append(context_item_from_topic(topic))
             save_conversation(conv)
             print(f"attached topic: {topic['id']}")
@@ -15363,12 +15368,13 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        if user_text == "/attach-dossier" or user_text.startswith("/attach-dossier "):
-            selector = user_text[len("/attach-dossier") :].strip() or None
-            dossier = load_dossier(selector)
-            conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
-            save_conversation(conv)
-            print(f"attached dossier: {dossier['id']}")
+        attachment_request = context_attachment_command_request(user_text, conv)
+        if attachment_request is not None:
+            _label, func = attachment_request
+            try:
+                print_report(func())
+            except SystemExit as exc:
+                print(exc)
             continue
         if user_text == "/compact":
             compact_conversation(conv)

@@ -622,6 +622,9 @@ Current implementation progress:
 - Step 9 now routes `/index-plan PATH` through the shared index report helper
   and `/permissions set MODE` through a small settings command helper, reducing
   another pair of TUI/line-mode duplicate branches.
+- Step 9 now also routes context attachment commands (`/read`, `/attach-index`,
+  `/attach-topic`, `/attach-dossier`) through a shared helper that mutates the
+  current conversation context and returns an explicit status string.
 
 ## Roadmap Candidates
 
