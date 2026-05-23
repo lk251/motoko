@@ -548,6 +548,11 @@ Current implementation progress:
   source compaction, response-feedback row construction, eval fixture/report
   construction, eval report formatting, and `/feedback` command parsing. The
   root script still owns realm selection and state-path writes.
+- Step 7 now also has conversation-delete support helpers in
+  `motoko_core.conversations`: JSON row filtering for conversation references
+  and delete-report formatting. The root script still coordinates the actual
+  deletion across memories, feedback, study jobs, dossiers, profile state, and
+  conversation files.
 
 ## Roadmap Candidates
 

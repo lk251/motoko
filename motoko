@@ -227,6 +227,8 @@ from motoko_core.conversations import (  # noqa: E402
     conversation_recall_text as core_conversation_recall_text,
     conversation_transcript_for_model as core_conversation_transcript_for_model,
     delete_json_artifacts_referencing_conversation,
+    filter_json_rows_without_conversation,
+    format_conversation_delete_report,
     json_references_conversation,
     list_conversation_records,
     make_conversation_record,
@@ -1732,8 +1734,7 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
     }
 
     rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
-    kept_memories = [row for row in rows if not json_references_conversation(row, conversation_id)]
-    report["memories_deleted"] = len(rows) - len(kept_memories)
+    kept_memories, report["memories_deleted"] = filter_json_rows_without_conversation(rows, conversation_id)
     if report["memories_deleted"]:
         write_memory_rows(kept_memories)
 
@@ -1768,31 +1769,6 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         conversation_path(conversation_id).unlink()
         report["conversation_deleted"] = True
     return report
-
-
-def format_conversation_delete_report(report: dict) -> str:
-    lines = [
-        f"deleted conversation: {report.get('conversation_id', '')}",
-        f"memories deleted: {report.get('memories_deleted', 0)}",
-        f"feedback rows deleted: {report.get('feedback_deleted', 0)}",
-        f"study job events deleted: {report.get('study_job_events_deleted', 0)}",
-        f"topic dossiers deleted: {report.get('topics_deleted', 0)}",
-        f"memory dossiers deleted: {report.get('dossiers_deleted', 0)}",
-        f"feedback evals deleted: {report.get('feedback_evals_deleted', 0)}",
-    ]
-    flags = []
-    for key, label in [
-        ("profile_deleted", "profile dossier"),
-        ("maintenance_deleted", "maintenance state"),
-        ("study_state_deleted", "study state"),
-        ("context_catalog_deleted", "context catalog"),
-    ]:
-        if report.get(key):
-            flags.append(label)
-    if flags:
-        lines.append("invalidated: " + ", ".join(flags))
-    return "\n".join(lines)
-
 
 def endpoint() -> str:
     env_endpoint = os.environ.get("MOTOKO_ENDPOINT")

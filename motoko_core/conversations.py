@@ -118,6 +118,35 @@ def delete_json_artifacts_referencing_conversation(directory: pathlib.Path, conv
     return removed
 
 
+def filter_json_rows_without_conversation(rows: list[dict], conversation_id: str) -> tuple[list[dict], int]:
+    kept = [row for row in rows if not json_references_conversation(row, conversation_id)]
+    return kept, len(rows) - len(kept)
+
+
+def format_conversation_delete_report(report: dict) -> str:
+    lines = [
+        f"deleted conversation: {report.get('conversation_id', '')}",
+        f"memories deleted: {report.get('memories_deleted', 0)}",
+        f"feedback rows deleted: {report.get('feedback_deleted', 0)}",
+        f"study job events deleted: {report.get('study_job_events_deleted', 0)}",
+        f"topic dossiers deleted: {report.get('topics_deleted', 0)}",
+        f"memory dossiers deleted: {report.get('dossiers_deleted', 0)}",
+        f"feedback evals deleted: {report.get('feedback_evals_deleted', 0)}",
+    ]
+    flags = []
+    for key, label in [
+        ("profile_deleted", "profile dossier"),
+        ("maintenance_deleted", "maintenance state"),
+        ("study_state_deleted", "study state"),
+        ("context_catalog_deleted", "context catalog"),
+    ]:
+        if report.get(key):
+            flags.append(label)
+    if flags:
+        lines.append("invalidated: " + ", ".join(flags))
+    return "\n".join(lines)
+
+
 def conversation_recall_text(conv: dict, *, recent_message_limit: int) -> str:
     parts = [conv.get("title", "")]
     if conv.get("summary"):
