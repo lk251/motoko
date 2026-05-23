@@ -378,3 +378,31 @@ def file_staleness(file_item: dict) -> tuple[str, list[str]]:
             warnings.append(f"{path}: cannot hash current file: {exc}")
         return "stale", warnings
     return "fresh", []
+
+
+def index_staleness(
+    index: dict,
+    *,
+    artifact_warning_provider=None,
+) -> tuple[str, list[str]]:
+    selection_status, selection_warnings = selection_policy_staleness(index)
+    if selection_status == "stale":
+        return "stale", selection_warnings
+    statuses = []
+    warnings = list(selection_warnings)
+    for file_item in index.get("files", []):
+        status, file_warnings = file_staleness(file_item)
+        statuses.append(status)
+        warnings.extend(file_warnings)
+    if not statuses:
+        return "empty", ["index has no files"]
+    if "stale" in statuses:
+        return "stale", warnings
+    if "unknown" in statuses:
+        return "unknown", warnings
+    if "mtime-only" in statuses:
+        return "metadata-changed", warnings
+    artifact_warnings = artifact_warning_provider(index) if artifact_warning_provider else []
+    if artifact_warnings:
+        return "stale", warnings + artifact_warnings
+    return "fresh", warnings

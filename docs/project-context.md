@@ -469,8 +469,12 @@ Current implementation progress:
   `motoko_core.corpus_selection`: streaming SHA256 file hashes, stored
   source-fingerprint construction, and per-file freshness/staleness checks for
   missing, changed, and metadata-only-changed files. The root script still
-  combines these checks with artifact-health warnings in its compatibility
-  `index_staleness` facade.
+  exposes compatibility imports for callers and tests.
+- Step 5 now also has whole-index freshness aggregation in
+  `motoko_core.corpus_selection`, with artifact-health checks supplied as an
+  injected warning provider from the root script. This keeps source-selection
+  and source-staleness policy together without merging it into derived-artifact
+  migration logic.
 
 ## Roadmap Candidates
 

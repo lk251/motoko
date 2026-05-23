@@ -135,6 +135,7 @@ from motoko_core.corpus_selection import (  # noqa: E402
     ignore_directory_match,
     ignored_path_record,
     index_candidate_report,
+    index_staleness as corpus_index_staleness,
     is_probably_text_file,
     is_under,
     iter_index_candidates,
@@ -6701,27 +6702,7 @@ def sha256_hex(data: bytes) -> str:
 
 
 def index_staleness(index: dict) -> tuple[str, list[str]]:
-    selection_status, selection_warnings = selection_policy_staleness(index)
-    if selection_status == "stale":
-        return "stale", selection_warnings
-    statuses = []
-    warnings = list(selection_warnings)
-    for file_item in index.get("files", []):
-        status, file_warnings = file_staleness(file_item)
-        statuses.append(status)
-        warnings.extend(file_warnings)
-    if not statuses:
-        return "empty", ["index has no files"]
-    if "stale" in statuses:
-        return "stale", warnings
-    if "unknown" in statuses:
-        return "unknown", warnings
-    if "mtime-only" in statuses:
-        return "metadata-changed", warnings
-    artifact_warnings = index_artifact_warnings(index)
-    if artifact_warnings:
-        return "stale", warnings + artifact_warnings
-    return "fresh", warnings
+    return corpus_index_staleness(index, artifact_warning_provider=index_artifact_warnings)
 
 
 def quiet_model(
