@@ -601,6 +601,9 @@ Current implementation progress:
   `/index-quality`, `/index-storage`, `/index-cleanup`, `/index-repair`, and
   `/tasks`. Print-only index commands remain explicit until they have
   formatter functions instead of captured stdout.
+- Step 9 now also gives `/indexes` and `/corpus-profile` formatter-backed
+  output, so they can use the shared index report-command path without
+  redirecting stdout from report worker threads.
 
 ## Roadmap Candidates
 

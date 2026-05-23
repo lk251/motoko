@@ -13083,6 +13083,11 @@ def index_report_command_request(text: str, conv: dict):
     text = text.strip()
     primary = command_primary(text)
     body = command_body(text)
+    if primary == "/indexes" and not body:
+        return "/indexes", format_indexes_text
+    if primary == "/corpus-profile":
+        selector = body or None
+        return "/corpus-profile", lambda: format_corpus_profile_report(load_index(selector))
     if primary == "/index-quality":
         selector = body or None
         return "/index-quality", lambda: format_index_quality_gate(index_quality_gate(load_index(selector)))
@@ -14016,11 +14021,6 @@ class MotokoTui:
                 self.append("system", self.capture_text(print_profile))
             elif text == "/memories":
                 self.append("system", self.capture_text(print_memories))
-            elif text == "/indexes":
-                self.append("system", self.capture_text(command_indexes_text))
-            elif text == "/corpus-profile" or text.startswith("/corpus-profile "):
-                selector = text[len("/corpus-profile") :].strip() or None
-                self.append("system", self.capture_text(lambda: print_corpus_profile(load_index(selector))))
             elif (index_request := index_report_command_request(text, self.conv)) is not None:
                 label, func = index_request
                 self.start_report_command(label, func)
@@ -15257,13 +15257,6 @@ def chat_loop(conv: dict) -> None:
             save_conversation(conv)
             print(f"attached deep topic: {topic['id']}")
             continue
-        if user_text == "/indexes":
-            command_indexes_text()
-            continue
-        if user_text == "/corpus-profile" or user_text.startswith("/corpus-profile "):
-            selector = user_text[len("/corpus-profile") :].strip() or None
-            print_corpus_profile(load_index(selector))
-            continue
         index_request = index_report_command_request(user_text, conv)
         if index_request is not None:
             _label, func = index_request
@@ -15925,19 +15918,26 @@ def command_tasks(args) -> None:
     print_report(format_task_candidates_from_chat(conv, " ".join(args.query)))
 
 
-def print_corpus_profile(index: dict) -> None:
+def format_corpus_profile_report(index: dict) -> str:
     profile = index.get("corpus_profile")
     if index_needs_corpus_profile(index) or not isinstance(profile, dict):
-        print(
+        return (
             f"No current corpus profile for {index.get('id', '')}. "
             f"Run 'motoko index-upgrade {index.get('id', '')}' to build {CORPUS_PROFILE_SCHEMA_VERSION}."
         )
-        return
-    print(f"{index.get('name', index.get('id', 'Untitled'))} [{index.get('id', '')}]")
-    print(f"root: {index.get('root', '')}")
-    print(f"generated: {profile.get('generated', '')}")
-    print()
-    print(format_corpus_profile(profile, max_files=40, max_tasks=30, max_dates=30))
+    return "\n".join(
+        [
+            f"{index.get('name', index.get('id', 'Untitled'))} [{index.get('id', '')}]",
+            f"root: {index.get('root', '')}",
+            f"generated: {profile.get('generated', '')}",
+            "",
+            format_corpus_profile(profile, max_files=40, max_tasks=30, max_dates=30),
+        ]
+    )
+
+
+def print_corpus_profile(index: dict) -> None:
+    print(format_corpus_profile_report(index))
 
 
 def command_corpus_profile(args) -> None:
@@ -16090,31 +16090,31 @@ def command_vector_eval(args) -> None:
         print_report(format_vector_eval_report(report))
 
 
-def command_indexes_text() -> None:
+def format_indexes_text() -> str:
     rows = list_indexes()
     jobs = active_index_progress()
     partials = list_resumable_partial_indexes()
     superseded_partials = list_superseded_partial_indexes()
+    lines = []
     if not rows and not jobs and not partials and not superseded_partials:
-        print("No document indexes yet.")
-        return
+        return "No document indexes yet."
     for job in jobs:
-        print(f"job  {format_index_progress_line(job)}")
+        lines.append(f"job  {format_index_progress_line(job)}")
     for partial in partials:
         completed = int(partial.get("completed_files", len(partial.get("files", []))) or 0)
         total = int(partial.get("total_files", completed) or completed)
         derived_bytes = int(partial.get("derived_content_bytes", 0) or 0)
         updated = relative_time(str(partial.get("updated", partial.get("created", ""))))
-        print(
+        lines.append(
             f"partial  {partial.get('id', '')}  {partial.get('status', 'unknown')}  "
             f"{completed}/{total} file(s)  {human_bytes(derived_bytes)}  "
             f"updated {updated}  {partial.get('name', '')}  {partial.get('root', '')}"
         )
         if partial.get("error"):
-            print(f"  error: {partial.get('error')}")
-        print(f"  resume: motoko index-resume {partial.get('id', '')}")
+            lines.append(f"  error: {partial.get('error')}")
+        lines.append(f"  resume: motoko index-resume {partial.get('id', '')}")
     if superseded_partials:
-        print(
+        lines.append(
             f"superseded partials: {len(superseded_partials)} "
             "(newer completed index exists for the same corpus)"
         )
@@ -16125,13 +16125,18 @@ def command_indexes_text() -> None:
         status, warnings = index_staleness(index)
         health = format_index_health(index_change_summary(index))
         signals = format_index_signal_state(index)
-        print(
+        lines.append(
             f"{index.get('created', '')}  {index.get('id')}  "
             f"{files} file(s)  {chunks} chunk(s)  {human_bytes(derived_bytes)}  "
             f"{status}  {health}  {signals}  {index.get('name', '')}  {index.get('root', '')}"
         )
         for warning in warnings[:3]:
-            print(f"  warning: {warning}")
+            lines.append(f"  warning: {warning}")
+    return "\n".join(lines)
+
+
+def command_indexes_text() -> None:
+    print(format_indexes_text())
 
 
 def command_topic(args) -> None:
