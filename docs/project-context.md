@@ -461,6 +461,10 @@ Current implementation progress:
   `systemctl` and does not log request or response bodies.
 - Step 4 is effectively complete. Future model-boundary changes should be
   tactical follow-ups, not blockers for moving to corpus selection/freshness.
+- Step 5 has started: corpus-selection constants, text-file detection,
+  `.motokoignore` parsing/matching, source-selection policy fingerprints,
+  candidate discovery, ignored-path examples, and selection-policy staleness
+  checks live in `motoko_core.corpus_selection`.
 
 ## Roadmap Candidates
 
