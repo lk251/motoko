@@ -202,6 +202,8 @@ from motoko_core.retrieval import (  # noqa: E402
     select_non_overlapping_spans,
     selected_evidence_excerpt,
     answer_grounding_audit_core,
+    context_plan_from_lanes_core,
+    format_context_plan_core,
     sources_with_answer_audit_core,
     token_counts,
     token_words,
@@ -11830,30 +11832,11 @@ def render_conversation_summary(conv: dict) -> str:
 
 
 def context_plan_from_lanes(lanes: list[dict]) -> dict:
-    total_chars = sum(int(lane.get("chars", 0) or 0) for lane in lanes)
-    return {
-        "kind": "context-plan",
-        "budget_chars": CONTEXT_PLAN_BUDGET_CHARS,
-        "total_chars": total_chars,
-        "status": "over-budget" if total_chars > CONTEXT_PLAN_BUDGET_CHARS else "ok",
-        "lanes": lanes,
-    }
+    return context_plan_from_lanes_core(lanes, budget_chars=CONTEXT_PLAN_BUDGET_CHARS)
 
 
 def format_context_plan(plan: dict) -> str:
-    lines = [
-        (
-            "Context plan: "
-            f"{plan.get('total_chars', 0)}/{plan.get('budget_chars', CONTEXT_PLAN_BUDGET_CHARS)} "
-            f"chars ({plan.get('status', 'unknown')})"
-        )
-    ]
-    for lane in plan.get("lanes", []):
-        lines.append(
-            f"- {lane.get('lane')}: {lane.get('chars', 0)} chars, "
-            f"{lane.get('sources', 0)} source(s), {lane.get('purpose', '')}"
-        )
-    return "\n".join(lines)
+    return format_context_plan_core(plan, default_budget_chars=CONTEXT_PLAN_BUDGET_CHARS)
 
 
 def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:

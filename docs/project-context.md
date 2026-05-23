@@ -524,6 +524,10 @@ Current implementation progress:
   source-kind policy from the root script. `/sources` and answer audit
   behavior remain unchanged, but the reasoning about strong evidence, context
   evidence, stale warnings, and recommended actions is importable and tested.
+- Step 6 now also has context-plan construction and formatting in
+  `motoko_core.retrieval`, with the root script supplying the active prompt
+  budget. This keeps `/retrieval-preview` and system-prompt context planning
+  behavior stable while making the lane accounting independently testable.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript

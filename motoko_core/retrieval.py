@@ -251,6 +251,33 @@ def sources_with_answer_audit_core(
     ]
 
 
+def context_plan_from_lanes_core(lanes: list[dict], *, budget_chars: int) -> dict:
+    total_chars = sum(int(lane.get("chars", 0) or 0) for lane in lanes)
+    return {
+        "kind": "context-plan",
+        "budget_chars": budget_chars,
+        "total_chars": total_chars,
+        "status": "over-budget" if total_chars > budget_chars else "ok",
+        "lanes": lanes,
+    }
+
+
+def format_context_plan_core(plan: dict, *, default_budget_chars: int) -> str:
+    lines = [
+        (
+            "Context plan: "
+            f"{plan.get('total_chars', 0)}/{plan.get('budget_chars', default_budget_chars)} "
+            f"chars ({plan.get('status', 'unknown')})"
+        )
+    ]
+    for lane in plan.get("lanes", []):
+        lines.append(
+            f"- {lane.get('lane')}: {lane.get('chars', 0)} chars, "
+            f"{lane.get('sources', 0)} source(s), {lane.get('purpose', '')}"
+        )
+    return "\n".join(lines)
+
+
 def retrieval_score_parts(
     query: str,
     query_counts: collections.Counter,

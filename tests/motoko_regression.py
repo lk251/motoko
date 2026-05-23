@@ -1340,6 +1340,22 @@ def test_core_answer_grounding_audit_is_injectable(m):
     assert audit["paths"] == ["/tmp/docs"]
 
 
+def test_core_context_plan_is_injectable(m):
+    lanes = [
+        {"lane": "identity", "chars": 10, "sources": 1, "purpose": "realm"},
+        {"lane": "attached context", "chars": 45, "sources": 3, "purpose": "evidence"},
+    ]
+
+    plan = m.context_plan_from_lanes_core(lanes, budget_chars=40)
+    text = m.format_context_plan_core(plan, default_budget_chars=100)
+
+    assert plan["kind"] == "context-plan"
+    assert plan["total_chars"] == 55
+    assert plan["status"] == "over-budget"
+    assert "55/40 chars (over-budget)" in text
+    assert "- attached context: 45 chars, 3 source(s), evidence" in text
+
+
 def test_named_file_query_boosts_matching_path(m):
     with isolated_state():
         index = {
