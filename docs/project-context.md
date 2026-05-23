@@ -519,6 +519,11 @@ Current implementation progress:
   empty-chat detection, recall text generation, and bounded model transcript
   rendering. Persistence, deletion, artifact cleanup, and memory maintenance
   still stay in the root script.
+- Step 7 now also has conversation JSON persistence helpers in
+  `motoko_core.conversations`: save, close/prune empty, and list records using
+  explicit state paths supplied by the root script. Conversation deletion and
+  cross-artifact cleanup still stay in `motoko` until the memory/artifact
+  boundary is split.
 
 ## Roadmap Candidates
 

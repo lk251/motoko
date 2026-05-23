@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
+import pathlib
+
+from motoko_core.state import atomic_write
 from motoko_core.text import compact_text
 
 
@@ -36,6 +41,31 @@ def conversation_has_chat_content(conv: dict) -> bool:
         if isinstance(msg, dict) and str(msg.get("content", "")).strip():
             return True
     return False
+
+
+def save_conversation_record(conv: dict, path: pathlib.Path, *, updated: str) -> None:
+    conv["updated"] = updated
+    atomic_write(path, json.dumps(conv, ensure_ascii=False, indent=2) + "\n")
+
+
+def close_conversation_record(conv: dict, path: pathlib.Path, *, updated: str) -> bool:
+    if conversation_has_chat_content(conv):
+        save_conversation_record(conv, path, updated=updated)
+        return True
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    return False
+
+
+def list_conversation_records(directory: pathlib.Path) -> list[dict]:
+    rows = []
+    for path in sorted(directory.glob("*.json"), reverse=True):
+        try:
+            conv = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        rows.append(conv)
+    return rows
 
 
 def conversation_recall_text(conv: dict, *, recent_message_limit: int) -> str:

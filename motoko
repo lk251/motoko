@@ -188,10 +188,13 @@ from motoko_core.corpus_selection import (  # noqa: E402
     source_selection_mode,
 )
 from motoko_core.conversations import (  # noqa: E402
+    close_conversation_record,
     conversation_has_chat_content,
     conversation_recall_text as core_conversation_recall_text,
     conversation_transcript_for_model as core_conversation_transcript_for_model,
+    list_conversation_records,
     make_conversation_record,
+    save_conversation_record,
 )
 from motoko_core.state import (  # noqa: E402
     allowdirs_path,
@@ -1540,30 +1543,18 @@ def new_conversation(title: str | None = None) -> dict:
 
 
 def save_conversation(conv: dict) -> None:
-    conv["updated"] = now()
-    atomic_write(conversation_path(conv["id"]), json.dumps(conv, ensure_ascii=False, indent=2) + "\n")
+    save_conversation_record(conv, conversation_path(conv["id"]), updated=now())
 
 
 def close_conversation(conv: dict) -> bool:
-    if conversation_has_chat_content(conv):
-        save_conversation(conv)
-        return True
     conversation_id = str(conv.get("id", "")).strip()
-    if conversation_id:
-        with contextlib.suppress(FileNotFoundError):
-            conversation_path(conversation_id).unlink()
-    return False
+    if not conversation_id:
+        return False
+    return close_conversation_record(conv, conversation_path(conversation_id), updated=now())
 
 
 def list_conversations() -> list[dict]:
-    rows = []
-    for path in sorted(conversations_dir().glob("*.json"), reverse=True):
-        try:
-            conv = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        rows.append(conv)
-    return rows
+    return list_conversation_records(conversations_dir())
 
 
 def item_matches_selector(item: dict, selector: str) -> bool:
