@@ -546,6 +546,10 @@ Current implementation progress:
   embedding text assembly, and vector-query option parsing. The root facade
   still owns live route I/O, store construction, persistence, and refresh
   orchestration.
+- Step 6 now also has vector plan/refresh/query/eval report formatting in
+  `motoko_core.vector_store`, keeping text layout importable while the root
+  facade continues to own freshness checks, live vector queries, and CLI/TUI
+  command plumbing.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript

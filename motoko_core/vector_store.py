@@ -12,6 +12,9 @@ DEFAULT_LEXICAL_VECTOR_DIMS = 256
 VECTOR_METHOD_AUTO = "auto"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
+VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
+VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
+DEFAULT_VECTOR_DIMS = 1024
 
 
 def dense_normalize(values) -> list[float]:
@@ -186,3 +189,136 @@ def parse_vector_query_input(text: str) -> tuple[str, bool]:
     if rerank:
         pieces = [piece for piece in pieces if piece != "--rerank"]
     return " ".join(pieces).strip(), rerank
+
+
+def format_vector_plan(plan: dict, *, human_bytes) -> str:
+    stats = plan.get("source_stats", {})
+    lines = [
+        f"vector plan: {plan.get('schema', VECTOR_PLAN_SCHEMA_VERSION)} -> {plan.get('target_vector_schema', VECTOR_STORE_SCHEMA_VERSION)}",
+        f"status: {plan.get('status', 'unknown')} (production enabled: {str(bool(plan.get('production_enabled'))).lower()})",
+        f"created: {plan.get('created', '')}",
+        f"realm: {plan.get('realm', '')}",
+        f"store root: {plan.get('store_root', '')}",
+        f"estimate: {plan.get('dims', DEFAULT_VECTOR_DIMS)} dims {plan.get('float', 'float32 estimate')}",
+        (
+            "sources: "
+            f"{stats.get('index_count', 0)} index(es), "
+            f"{stats.get('file_count', 0)} file(s), "
+            f"{stats.get('chunk_count', 0)} chunk(s), "
+            f"{stats.get('unique_chunk_bodies', 0)} unique body/bodies, "
+            f"{stats.get('raw_embedding_row_estimate', 0)} bounded embedding row(s), "
+            f"{stats.get('evidence_row_estimate', 0)} evidence row(s), "
+            f"{stats.get('duplicate_reference_chunks', 0)} duplicate ref(s)"
+        ),
+        (
+            "estimated storage: "
+            f"{human_bytes(plan.get('estimated_total_bytes', 0))} total "
+            f"({human_bytes(plan.get('estimated_vector_bytes', 0))} vectors, "
+            f"{human_bytes(plan.get('estimated_metadata_bytes', 0))} metadata)"
+        ),
+        "",
+        "planned stores:",
+    ]
+    for row in plan.get("row_plans", []):
+        lines.append(
+            f"- {row.get('kind', '')}: {row.get('rows', 0)} row(s), "
+            f"{human_bytes(row.get('estimated_bytes', 0))}; {row.get('source', '')}"
+        )
+    lines.extend(["", "readiness gates:"])
+    for gate in plan.get("gates", []):
+        lines.append(f"- {gate.get('status', '')}: {gate.get('name', '')} - {gate.get('detail', '')}")
+    lines.extend(
+        [
+            "",
+            "provenance fields: " + ", ".join(plan.get("provenance_fields", [])[:14]),
+            f"migration: {plan.get('migration_policy', '')}",
+            f"security: {plan.get('security_policy', '')}",
+            "",
+            "next: keep lexical/evidence evals as the control, refresh stale vector stores, then measure reranker quality on real feedback fixtures.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_vector_refresh_report(report: dict) -> str:
+    lines = [
+        f"vector refresh: {report.get('status', 'unknown')} built={report.get('built', 0)} method={report.get('method', '')}",
+        f"created: {report.get('created', '')}",
+    ]
+    if not report.get("items"):
+        lines.append("no vector refresh candidates")
+        return "\n".join(lines)
+    for item in report.get("items", []):
+        lines.append(
+            f"- {item.get('status', 'unknown')}: {item.get('index', '')} "
+            f"{item.get('name', '')} ({item.get('reason', '')})"
+        )
+        if item.get("store_id"):
+            lines.append(
+                f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)} "
+                f"batches={item.get('batches', 0)} parallel={item.get('parallelism', 1)} "
+                f"requested={item.get('requested_parallelism', item.get('parallelism', 1))} "
+                f"fallbacks={item.get('fallbacks', 0)}"
+            )
+        if item.get("error"):
+            lines.append(f"  error: {item.get('error', '')}")
+        if item.get("note"):
+            lines.append(f"  note: {item.get('note', '')}")
+        if item.get("progress_id"):
+            lines.append(f"  progress: {item.get('progress_id', '')}")
+    return "\n".join(lines)
+
+
+def format_vector_query_report(report: dict) -> str:
+    lines = [
+        f"vector query: {report.get('query', '')}",
+        f"store: {report.get('store_id', '')}  method={report.get('method', '')}  freshness={report.get('freshness', '')}",
+    ]
+    if report.get("rerank"):
+        route = report.get("rerank_route") if isinstance(report.get("rerank_route"), dict) else {}
+        lines.append(f"rerank: {route.get('catalog_route', '') or 'enabled'} {route.get('model', '')}".rstrip())
+    for warning in report.get("warnings", [])[:5]:
+        lines.append(f"warning: {warning}")
+    if not report.get("rows"):
+        lines.append("no vector rows matched")
+        return "\n".join(lines)
+    for idx, row in enumerate(report.get("rows", []), 1):
+        lines.append(
+            f"{idx}. score={row.get('score', 0)} vec={row.get('vector_score', 0)} "
+            f"lex={row.get('lexical', 0)} path={row.get('path_boost', 0)}  "
+            f"{row.get('path', '')} chunk {row.get('chunk', '')}"
+        )
+        if row.get("vector_hit_count", 1) > 1 or row.get("embedding_part_count", 1) > 1:
+            lines.append(
+                f"   vector row: {row.get('row_id', '')} "
+                f"part {row.get('embedding_part', 1)}/{row.get('embedding_part_count', 1)} "
+                f"hits={row.get('vector_hit_count', 1)}"
+            )
+        if "rerank_score" in row:
+            lines.append(f"   rerank_score: {row.get('rerank_score', 0)}")
+        if row.get("evidence_id"):
+            lines.append(
+                f"   evidence: {row.get('evidence_kind', '')} {row.get('evidence_title', '')} "
+                f"{row.get('evidence_date', '')}".strip()
+            )
+        if row.get("summary"):
+            lines.append(f"   summary: {row.get('summary', '')}")
+    return "\n".join(lines)
+
+
+def format_vector_eval_report(report: dict) -> str:
+    lines = [
+        f"vector eval: {report.get('status', 'unknown')} "
+        f"({report.get('passed', 0)}/{report.get('total', 0)})",
+        f"method: {report.get('method', '')} dims={report.get('dims', '')}",
+        f"id: {report.get('id', '')}",
+    ]
+    for row in report.get("fixtures", []):
+        lines.append(
+            f"- {row.get('status', 'unknown')}: {row.get('id', '')} "
+            f"top_score={row.get('top_score', 0)}"
+        )
+        lines.append("  selected: " + (", ".join(row.get("selected_paths", [])[:4]) or "-"))
+        if row.get("missing_paths"):
+            lines.append("  missing paths: " + ", ".join(row.get("missing_paths", [])[:6]))
+    return "\n".join(lines)
