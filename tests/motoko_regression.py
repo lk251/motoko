@@ -2523,6 +2523,43 @@ def test_core_memory_report_formatters_are_injectable(m):
     assert m.format_memory_search_rows([]) == "No matching memories."
 
 
+def test_core_memory_context_renderer_is_injectable(m):
+    text, sources = m.render_memories_with_sources_core(
+        [
+            {
+                "id": "mem-1",
+                "text": "Javier likes grounded retrieval.",
+                "source": "test",
+                "conversation_id": "conv-1",
+                "created": "2026-05-23T00:00:00+00:00",
+                "importance": 4,
+                "pinned": True,
+                "_score": 20,
+                "_matched_terms": 3,
+                "_thread_matched_terms": 1,
+            }
+        ],
+        has_any_memory=True,
+    )
+
+    assert "[memory:mem-1; pinned, importance=4, match=3, thread=1]" in text
+    assert sources == [
+        {
+            "kind": "memory",
+            "id": "mem-1",
+            "source": "test",
+            "conversation_id": "conv-1",
+            "created": "2026-05-23T00:00:00+00:00",
+            "importance": 4,
+            "pinned": True,
+            "score": 20,
+            "matched_terms": 3,
+        }
+    ]
+    assert m.render_memories_with_sources_core([], has_any_memory=True)[0] == "No saved memories matched this turn strongly."
+    assert m.render_memories_with_sources_core([], has_any_memory=False)[0] == "No saved memories yet."
+
+
 def test_close_conversation_prunes_empty_chats(m):
     with isolated_state():
         empty = m.new_conversation()

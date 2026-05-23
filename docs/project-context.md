@@ -568,6 +568,10 @@ Current implementation progress:
   `motoko_core.memory`. The root script still loads, mutates, and searches
   realm-local memory rows, while core owns the inspectable text layout for
   memory reports.
+- Step 7 now also has durable-memory prompt context rendering in
+  `motoko_core.memory`. The root script still loads and ranks realm-local
+  memories, while core owns the bounded memory text and source-record shape
+  inserted into chat prompts.
 - Step 7 now also has durable memory-maintenance checkpoint helpers in
   `motoko_core.maintenance`: maintenance state read/write, clear,
   incomplete-job detection, begin/update, and interrupted-job resume/abandon

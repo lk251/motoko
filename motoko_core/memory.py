@@ -299,3 +299,42 @@ def format_memory_search_rows(
             f"{row.get('text', '')}"
         )
     return "\n".join(lines)
+
+
+def render_memories_with_sources_core(
+    memories: list[dict],
+    *,
+    has_any_memory: bool,
+    default_importance: int = DEFAULT_MEMORY_IMPORTANCE,
+) -> tuple[str, list[dict]]:
+    if not memories:
+        if has_any_memory:
+            return "No saved memories matched this turn strongly.", []
+        return "No saved memories yet.", []
+    lines = []
+    sources = []
+    for row in memories:
+        memory_ref = row.get("id", "unknown")
+        markers = []
+        if row.get("pinned"):
+            markers.append("pinned")
+        markers.append(f"importance={row.get('importance', default_importance)}")
+        if row.get("_matched_terms", 0):
+            markers.append(f"match={row.get('_matched_terms')}")
+        if row.get("_thread_matched_terms", 0):
+            markers.append(f"thread={row.get('_thread_matched_terms')}")
+        lines.append(f"- [memory:{memory_ref}; {', '.join(markers)}] {row.get('text', '')}")
+        sources.append(
+            {
+                "kind": "memory",
+                "id": memory_ref,
+                "source": row.get("source", "unknown"),
+                "conversation_id": row.get("conversation_id", ""),
+                "created": row.get("created", ""),
+                "importance": row.get("importance", default_importance),
+                "pinned": bool(row.get("pinned")),
+                "score": row.get("_score", 0),
+                "matched_terms": row.get("_matched_terms", 0),
+            }
+        )
+    return "\n".join(lines), sources
