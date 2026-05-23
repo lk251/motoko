@@ -524,6 +524,12 @@ Current implementation progress:
   explicit state paths supplied by the root script. Conversation deletion and
   cross-artifact cleanup still stay in `motoko` until the memory/artifact
   boundary is split.
+- Step 7 now also has reusable conversation-reference cleanup helpers in
+  `motoko_core.conversations`: recursive JSON reference detection, JSONL
+  rewriting, and deletion of JSON artifacts that reference a conversation.
+  The high-level delete command still stays in the root script because it
+  coordinates memories, feedback, study jobs, topics, dossiers, and profile
+  state.
 
 ## Roadmap Candidates
 

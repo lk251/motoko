@@ -192,8 +192,11 @@ from motoko_core.conversations import (  # noqa: E402
     conversation_has_chat_content,
     conversation_recall_text as core_conversation_recall_text,
     conversation_transcript_for_model as core_conversation_transcript_for_model,
+    delete_json_artifacts_referencing_conversation,
+    json_references_conversation,
     list_conversation_records,
     make_conversation_record,
+    rewrite_jsonl_without_conversation,
     save_conversation_record,
 )
 from motoko_core.state import (  # noqa: E402
@@ -1673,56 +1676,6 @@ def load_conversation(conversation_id: str | None = None) -> dict:
         label_func=conversation_label,
         selector=conversation_id,
     )
-
-
-def json_references_conversation(value, conversation_id: str) -> bool:
-    if isinstance(value, dict):
-        for key, item in value.items():
-            if key in {
-                "conversation_id",
-                "owner_conversation_id",
-                "created_by_conversation_id",
-            } and str(item) == conversation_id:
-                return True
-            if key in {"conversation_ids", "source_conversation_ids"} and isinstance(item, list):
-                if any(str(row) == conversation_id for row in item):
-                    return True
-            if key == "source_conversations" and isinstance(item, list):
-                if any(isinstance(row, dict) and str(row.get("id", "")) == conversation_id for row in item):
-                    return True
-            if json_references_conversation(item, conversation_id):
-                return True
-        return False
-    if isinstance(value, list):
-        return any(json_references_conversation(item, conversation_id) for item in value)
-    return False
-
-
-def rewrite_jsonl_without_conversation(path: pathlib.Path, conversation_id: str) -> int:
-    rows = read_jsonl(path)
-    if not rows:
-        return 0
-    kept = [row for row in rows if not json_references_conversation(row, conversation_id)]
-    removed = len(rows) - len(kept)
-    if not removed:
-        return 0
-    if kept:
-        atomic_write(path, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in kept))
-    else:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-    return removed
-
-
-def delete_json_artifacts_referencing_conversation(directory: pathlib.Path, conversation_id: str) -> int:
-    removed = 0
-    for path in sorted(directory.glob("*.json")):
-        data = safe_load_json(path)
-        if data is not None and json_references_conversation(data, conversation_id):
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-                removed += 1
-    return removed
 
 
 def delete_conversation_and_artifacts(conv: dict) -> dict:

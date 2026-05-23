@@ -6,7 +6,7 @@ import contextlib
 import json
 import pathlib
 
-from motoko_core.state import atomic_write
+from motoko_core.state import atomic_write, read_jsonl, safe_load_json
 from motoko_core.text import compact_text
 
 
@@ -66,6 +66,56 @@ def list_conversation_records(directory: pathlib.Path) -> list[dict]:
             continue
         rows.append(conv)
     return rows
+
+
+def json_references_conversation(value, conversation_id: str) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {
+                "conversation_id",
+                "owner_conversation_id",
+                "created_by_conversation_id",
+            } and str(item) == conversation_id:
+                return True
+            if key in {"conversation_ids", "source_conversation_ids"} and isinstance(item, list):
+                if any(str(row) == conversation_id for row in item):
+                    return True
+            if key == "source_conversations" and isinstance(item, list):
+                if any(isinstance(row, dict) and str(row.get("id", "")) == conversation_id for row in item):
+                    return True
+            if json_references_conversation(item, conversation_id):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(json_references_conversation(item, conversation_id) for item in value)
+    return False
+
+
+def rewrite_jsonl_without_conversation(path: pathlib.Path, conversation_id: str) -> int:
+    rows = read_jsonl(path)
+    if not rows:
+        return 0
+    kept = [row for row in rows if not json_references_conversation(row, conversation_id)]
+    removed = len(rows) - len(kept)
+    if not removed:
+        return 0
+    if kept:
+        atomic_write(path, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in kept))
+    else:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    return removed
+
+
+def delete_json_artifacts_referencing_conversation(directory: pathlib.Path, conversation_id: str) -> int:
+    removed = 0
+    for path in sorted(directory.glob("*.json")):
+        data = safe_load_json(path)
+        if data is not None and json_references_conversation(data, conversation_id):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+                removed += 1
+    return removed
 
 
 def conversation_recall_text(conv: dict, *, recent_message_limit: int) -> str:
