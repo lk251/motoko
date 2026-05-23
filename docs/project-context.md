@@ -550,6 +550,10 @@ Current implementation progress:
   `motoko_core.vector_store`, keeping text layout importable while the root
   facade continues to own freshness checks, live vector queries, and CLI/TUI
   command plumbing.
+- Step 6 now also has `/sources` report formatting in `motoko_core.sources`,
+  including source span details and context-lane explanations. The root facade
+  still gathers live source records from conversations, indexes, memory,
+  dossiers, and repo attachments.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript
