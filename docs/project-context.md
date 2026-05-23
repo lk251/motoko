@@ -510,6 +510,10 @@ Current implementation progress:
   in `motoko_core.retrieval`, with task-signal boosts injected by the root
   script. This keeps lexical/path scoring and failure classification reusable
   without absorbing Org/task signal ownership yet.
+- Step 6 now also has bounded model-subspan preparation in
+  `motoko_core.retrieval`, with input size and per-parent subspan limits passed
+  in from the root script. Environment/config reads remain in `motoko`; pure
+  model-input slicing is importable.
 
 ## Roadmap Candidates
 

@@ -813,3 +813,108 @@ def diagnose_retrieval_debug(index_report: dict, query: str) -> list[str]:
         notes.append("summary issue: top chunk has source text but no chunk summary")
     notes.append("prompt-use check: if /sources shows the right chunk but the answer ignores it, the issue is final synthesis/prompt use")
     return notes
+
+
+def span_model_text(span: dict, *, input_chars_limit: int) -> str:
+    kind = str(span.get("kind", "") or "").strip()
+    label = str(span.get("label", "") or "").strip()
+    text = str(span.get("text", "") or "").strip()
+    limit = max(1, int(input_chars_limit or 1))
+    prefix = ": ".join(part for part in [kind, label] if part)
+    if not prefix:
+        return compact_text_middle(text, limit)
+    budget = max(120, limit - len(prefix) - 1)
+    return (prefix + "\n" + compact_text_middle(text, budget))[:limit].strip()
+
+
+def span_model_subspans(
+    span: dict,
+    *,
+    input_chars_limit: int,
+    max_subspans_per_parent: int,
+) -> list[dict]:
+    text = str(span.get("text", "") or "").strip()
+    if not text:
+        return []
+    limit = max(1, int(input_chars_limit or 1))
+    prefix = ": ".join(
+        part
+        for part in [
+            str(span.get("kind", "") or "").strip(),
+            str(span.get("label", "") or "").strip(),
+        ]
+        if part
+    )
+    budget = max(180, limit - len(prefix) - 20)
+    start_offset = int(span.get("start", 0) or 0)
+    if len(text) <= budget:
+        row = dict(span)
+        row["model_text"] = span_model_text(span, input_chars_limit=limit)
+        row["parent_start"] = start_offset
+        row["parent_end"] = int(span.get("end", 0) or 0)
+        row["sub_start"] = start_offset
+        row["sub_end"] = start_offset + len(text)
+        return [row]
+    rows = []
+    step = max(1, int(budget * 0.75))
+    local_start = 0
+    max_rows = max(1, int(max_subspans_per_parent or 1))
+    loop_limit = max(1, max_rows - 1)
+    while local_start < len(text) and len(rows) < loop_limit:
+        local_end = min(len(text), local_start + budget)
+        boundary = text.rfind("\n\n", local_start, local_end)
+        if boundary > local_start + budget // 2:
+            local_end = boundary
+        fragment = text[local_start:local_end].strip()
+        if fragment:
+            row = dict(span)
+            row["kind"] = f"{span.get('kind', '')}-subspan".strip("-")
+            row["parent_kind"] = span.get("kind")
+            row["parent_label"] = span.get("label")
+            row["parent_start"] = int(span.get("start", 0) or 0)
+            row["parent_end"] = int(span.get("end", 0) or 0)
+            row["label"] = str(span.get("label", "") or "")
+            row["text"] = fragment
+            row["sub_start"] = start_offset + local_start
+            row["sub_end"] = start_offset + local_end
+            row["model_text"] = span_model_text(row, input_chars_limit=limit)
+            rows.append(row)
+        if local_end >= len(text):
+            break
+        local_start = max(local_start + step, local_end - budget // 4)
+    if rows and int(rows[-1].get("sub_end", 0) or 0) < start_offset + len(text) and len(rows) < max_rows:
+        tail_start = max(0, len(text) - budget)
+        row = dict(span)
+        row["kind"] = f"{span.get('kind', '')}-subspan".strip("-")
+        row["parent_kind"] = span.get("kind")
+        row["parent_label"] = span.get("label")
+        row["parent_start"] = int(span.get("start", 0) or 0)
+        row["parent_end"] = int(span.get("end", 0) or 0)
+        row["label"] = str(span.get("label", "") or "")
+        row["text"] = text[tail_start:].strip()
+        row["sub_start"] = start_offset + tail_start
+        row["sub_end"] = start_offset + len(text)
+        row["model_text"] = span_model_text(row, input_chars_limit=limit)
+        rows.append(row)
+    return rows
+
+
+def model_span_rows_for_candidates(
+    spans: list[dict],
+    *,
+    limit: int,
+    max_subspans: int,
+    input_chars_limit: int,
+    max_subspans_per_parent: int,
+) -> list[dict]:
+    rows = []
+    for span in spans[: max(0, int(limit or 0))]:
+        for row in span_model_subspans(
+            span,
+            input_chars_limit=input_chars_limit,
+            max_subspans_per_parent=max_subspans_per_parent,
+        ):
+            if len(rows) >= max(0, int(max_subspans or 0)):
+                return rows
+            rows.append(row)
+    return rows
