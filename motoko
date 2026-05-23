@@ -88,6 +88,10 @@ from motoko_core.input_edit import (  # noqa: E402
     next_history_entry,
     previous_history_entry,
 )
+from motoko_core.tui_render import (  # noqa: E402
+    dropdown_display_lines,
+    overlay_display_lines,
+)
 from motoko_core.model_io import (  # noqa: E402
     chat_completion_payload,
     endpoint_is_unix,
@@ -15074,47 +15078,10 @@ class MotokoTui:
         return lines or [""]
 
     def overlay_display(self, width: int) -> list[str]:
-        rows = []
-        title = self.overlay_title or "help"
-        rows.extend(wrap_display_line(style(title, "purple", "bold") + style("  Enter/Esc closes", "dim"), width))
-        rows.append("")
-        for raw in self.overlay_lines or []:
-            if raw.startswith("error "):
-                text = style(raw, "red")
-            elif raw.endswith(":") and not raw.startswith(" "):
-                text = style(raw, "turquoise", "bold")
-            elif raw.startswith("  /") or raw.startswith("  motoko"):
-                command, sep, rest = raw.strip().partition("  ")
-                text = "  " + style(command, "turquoise", "bold") + (sep + style(rest, "dim") if sep else "")
-            else:
-                text = highlight_report_line(raw)
-            rows.extend(wrap_display_line(text, width))
-        return rows or [""]
+        return overlay_display_lines(self.overlay_title or "help", self.overlay_lines or [], width)
 
     def dropdown_display(self, width: int, options: list[dict]) -> list[str]:
-        if not options:
-            return []
-        max_rows = min(8, len(options))
-        start = min(
-            max(0, self.dropdown_index - max_rows + 1),
-            max(0, len(options) - max_rows),
-        )
-        visible_options = options[start : start + max_rows]
-        rows = []
-        for offset, option in enumerate(visible_options):
-            idx = start + offset
-            marker = ">" if idx == self.dropdown_index else " "
-            label = strip_ansi(str(option.get("label", "")))
-            description = strip_ansi(str(option.get("description", "")))
-            text = f" {marker} {label}"
-            if description:
-                remaining = max(0, width - len(strip_ansi(text)) - 3)
-                text += "  " + description[:remaining]
-            if idx == self.dropdown_index:
-                rows.append(style(text[:width], "bold", "purple"))
-            else:
-                rows.append(text[:width])
-        return rows
+        return dropdown_display_lines(options, self.dropdown_index, width)
 
     def input_display(self, width: int) -> tuple[list[str], int, int]:
         return fixed_prompt_input_display(self.input_buffer, self.cursor, width)

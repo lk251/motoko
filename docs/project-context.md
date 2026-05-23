@@ -557,6 +557,9 @@ Current implementation progress:
   `motoko_core.input_edit`: word-left/right cursor movement, word deletion,
   and previous/next input-history selection. Terminal rendering and command
   dispatch still stay in `motoko`.
+- Step 8 now also has pure TUI overlay/dropdown formatting in
+  `motoko_core.tui_render`. Terminal control, scrollback synchronization, live
+  answer display, and command dispatch still stay in `motoko`.
 
 ## Roadmap Candidates
 
