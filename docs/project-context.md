@@ -578,6 +578,10 @@ Current implementation progress:
   source compaction, response-feedback row construction, eval fixture/report
   construction, eval report formatting, and `/feedback` command parsing. The
   root script still owns realm selection and state-path writes.
+- Step 7 now also has profile dossier rendering helpers in
+  `motoko_core.profile`. Profile source gathering, model synthesis, and
+  realm-local writes remain in the root script, while `/profile` formatting and
+  chat prompt profile source rendering are importable and tested.
 - Step 7 now also has conversation-delete support helpers in
   `motoko_core.conversations`: JSON row filtering for conversation references
   and delete-report formatting. The root script still coordinates the actual

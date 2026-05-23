@@ -206,6 +206,32 @@ def test_profile_dossier(m):
             m.quiet_model = old_quiet
 
 
+def test_core_profile_rendering_is_injectable(m):
+    profile = {
+        "updated": "2026-05-23T00:00:00+00:00",
+        "memory_ids": ["mem-1", "mem-2"],
+        "conversation_ids": ["conv-1"],
+        "text": "Javier values grounded retrieval.",
+    }
+
+    text, sources = m.render_profile_with_sources_core(profile)
+    report = m.format_profile_dossier(profile)
+
+    assert text == "Javier values grounded retrieval."
+    assert sources == [
+        {
+            "kind": "profile",
+            "updated": "2026-05-23T00:00:00+00:00",
+            "memory_count": 2,
+            "conversation_count": 1,
+        }
+    ]
+    assert "memories: 2" in report
+    assert "conversations: 1" in report
+    assert m.render_profile_with_sources_core(None)[1] == []
+    assert "No profile dossier yet" in m.format_profile_dossier(None)
+
+
 def test_memory_dossier(m):
     with isolated_state():
         conv = m.new_conversation("Dossier source")

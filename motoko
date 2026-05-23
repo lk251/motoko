@@ -171,6 +171,10 @@ from motoko_core.memory import (  # noqa: E402
     text_similarity,
     write_memory_rows_file,
 )
+from motoko_core.profile import (  # noqa: E402
+    format_profile_dossier,
+    render_profile_with_sources_core,
+)
 from motoko_core.retrieval import (  # noqa: E402
     add_hybrid_candidate,
     base_evidence_spans,
@@ -3627,17 +3631,7 @@ def refresh_profile_dossier() -> dict:
 
 
 def render_profile_with_sources() -> tuple[str, list[dict]]:
-    profile = load_profile_dossier()
-    if not profile or not profile.get("text", "").strip():
-        return "No profile dossier yet. Run /profile-refresh to build one.", []
-    return profile.get("text", ""), [
-        {
-            "kind": "profile",
-            "updated": profile.get("updated", ""),
-            "memory_count": len(profile.get("memory_ids", [])),
-            "conversation_count": len(profile.get("conversation_ids", [])),
-        }
-    ]
+    return render_profile_with_sources_core(load_profile_dossier())
 
 
 def print_profile() -> None:
@@ -3645,18 +3639,7 @@ def print_profile() -> None:
 
 
 def format_profile() -> str:
-    profile = load_profile_dossier()
-    if not profile:
-        return "No profile dossier yet. Run 'motoko profile refresh' or /profile-refresh."
-    return "\n".join(
-        [
-            f"updated: {profile.get('updated', '')}",
-            f"memories: {len(profile.get('memory_ids', []))}",
-            f"conversations: {len(profile.get('conversation_ids', []))}",
-            "",
-            str(profile.get("text", "")),
-        ]
-    )
+    return format_profile_dossier(load_profile_dossier())
 
 
 def require_allowed(path: pathlib.Path) -> None:
