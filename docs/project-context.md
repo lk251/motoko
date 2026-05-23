@@ -646,6 +646,11 @@ Current implementation progress:
 - Step 9 now also has shared conversation lifecycle helpers for starting,
   resuming, deleting, and banner-formatting chats, plus a shared private
   feedback command request for `/feedback`, `/up`, and `/down`.
+- Step 9 now routes `/help` through the shared report-command path. The
+  remaining explicit TUI/line-mode slash branches are session/control commands
+  whose behavior is intentionally UI-specific: menu display, exit, new/resume,
+  stop, queue clearing, pause, delete confirmation, shared reports, and
+  foreground blocking work.
 
 ## Roadmap Candidates
 

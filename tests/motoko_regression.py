@@ -4741,6 +4741,16 @@ def test_feedback_command_request_records_private_feedback(m):
         assert rows[0]["note"] == "missed source"
 
 
+def test_help_uses_shared_report_command_request(m):
+    with isolated_state():
+        conv = m.new_conversation("Help")
+        request = m.shared_command_request("/help", conv)
+        assert request is not None
+        label, run = request
+        assert label == "/help"
+        assert "/status" in run()
+
+
 def test_blocking_command_request_attaches_index(m):
     with isolated_state():
         conv = m.new_conversation("Index attach")

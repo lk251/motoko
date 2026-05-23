@@ -13034,6 +13034,8 @@ def report_command_request(text: str, conv: dict):
     text = text.strip()
     primary = command_primary(text)
     body = command_body(text)
+    if primary == "/help" and not body:
+        return "/help", format_help
     if primary == "/about" and not body:
         return "/about", format_about
     if primary == "/sources" and not body:
@@ -14306,8 +14308,6 @@ class MotokoTui:
         try:
             if text in {"/", "/commands"}:
                 self.append("system", self.compact_command_menu())
-            elif text == "/help":
-                self.open_overlay("help", format_help())
             elif text == "/exit":
                 close_conversation(self.conv)
                 self.running = False
@@ -15321,9 +15321,6 @@ def chat_loop(conv: dict) -> None:
             title = user_text[len("/new") :].strip() or None
             conv = start_new_conversation_from_current(conv, title)
             print(format_conversation_banner(conv))
-            continue
-        if user_text == "/help":
-            print(format_help())
             continue
         if user_text == "/resume" or user_text.startswith("/resume "):
             selector = user_text[len("/resume") :].strip() or None
