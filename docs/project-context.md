@@ -492,6 +492,12 @@ Current implementation progress:
   nested dated-section pruning, mandatory date evidence spans, and query-term
   window excerpts. These preserve the "right container, wrong span" fix as a
   reusable retrieval primitive.
+- Step 6 now also has pure source-span selection in `motoko_core.retrieval`:
+  Org/Markdown heading spans, rolling text windows, base evidence-span
+  generation, lexical evidence-span scoring, budget fitting, and
+  non-overlapping span selection. Model-assisted span embedding/reranking stays
+  in the root script for now because it still depends on live route discovery
+  and local-model calls.
 
 ## Roadmap Candidates
 
