@@ -255,6 +255,32 @@ def test_memory_dossier(m):
             m.summarize_blocks = old_summarize
 
 
+def test_core_dossier_formatters_are_injectable(m):
+    dossier = {
+        "id": "dossier-1",
+        "created": "2026-05-23T00:00:00+00:00",
+        "name": "Craft",
+        "query": "craftsmanship",
+        "summary": "Careful work.",
+        "source_memory_count": 1,
+        "source_conversation_count": 1,
+        "source_memories": [{"id": "mem-1", "importance": 4, "score": 10, "excerpt": "Memory excerpt."}],
+        "source_conversations": [{"id": "conv-1", "title": "Chat", "updated": "today", "excerpt": "Chat excerpt."}],
+    }
+
+    listing = m.format_dossiers_list([dossier])
+    report = m.format_dossier_report_core(dossier, evidence=True)
+
+    assert "dossier-1" in listing
+    assert "1 memories" in listing
+    assert "Craft [dossier-1]" in report
+    assert "query> craftsmanship" in report
+    assert "Memory Evidence:" in report
+    assert "Memory excerpt." in report
+    assert "Conversation Evidence:" in report
+    assert m.format_dossiers_list([]) == "No memory dossiers yet."
+
+
 def test_spinner_and_input_wrapping(m):
     old_term = os.environ.get("TERM")
     old_spinner = os.environ.get("MOTOKO_SPINNER")

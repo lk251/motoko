@@ -582,6 +582,9 @@ Current implementation progress:
   `motoko_core.profile`. Profile source gathering, model synthesis, and
   realm-local writes remain in the root script, while `/profile` formatting and
   chat prompt profile source rendering are importable and tested.
+- Step 7 now also has memory-dossier list/show report formatting in
+  `motoko_core.dossiers`. Dossier loading, selector prompts, model-backed
+  dossier construction, and state writes remain in the root script.
 - Step 7 now also has conversation-delete support helpers in
   `motoko_core.conversations`: JSON row filtering for conversation references
   and delete-report formatting. The root script still coordinates the actual
