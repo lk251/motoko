@@ -2351,6 +2351,27 @@ def test_tui_report_commands_do_not_persist_system_output(m):
 
         assert ui.overlay_title == "/sources"
         assert any("answer audit" in line for line in ui.overlay_lines or [])
+
+        old_latest_evidence_store = m.latest_evidence_store
+        old_query_evidence_store = m.query_evidence_store
+        old_format_evidence_query_report = m.format_evidence_query_report
+        try:
+            m.latest_evidence_store = lambda: {"id": "store"}
+            m.query_evidence_store = lambda store, query: {"store": store, "query": query}
+            m.format_evidence_query_report = lambda report: f"evidence query: {report['query']}"
+            ui.handle_command("/evidence-query texere")
+            deadline = time.monotonic() + 2
+            while ui.report_running and time.monotonic() < deadline:
+                ui.drain_events()
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.latest_evidence_store = old_latest_evidence_store
+            m.query_evidence_store = old_query_evidence_store
+            m.format_evidence_query_report = old_format_evidence_query_report
+
+        assert ui.overlay_title == "/evidence-query"
+        assert ui.overlay_lines == ["evidence query: texere"]
         assert ui.messages == []
         assert conv["messages"] == saved_before["messages"]
         saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))

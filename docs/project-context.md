@@ -586,6 +586,10 @@ Current implementation progress:
   command primaries (`/feedback`, `/up`, `/down`) so the TUI and line mode no
   longer duplicate prefix checks, and near-miss commands cannot be parsed as
   feedback by accident.
+- Step 9 now also shares evidence report-command dispatch for
+  `/evidence-build`, `/evidence-refresh`, and `/evidence-query`, so those
+  report-style commands use the same request builder in the TUI and line mode
+  while preserving realm-local evidence-store behavior.
 
 ## Roadmap Candidates
 
