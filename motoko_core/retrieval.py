@@ -627,6 +627,66 @@ def retrieval_chunk_key(file_item: dict, chunk: dict) -> tuple[str, str]:
     return file_item.get("path", ""), str(chunk.get("chunk", ""))
 
 
+def add_hybrid_candidate(
+    candidates: dict[tuple[str, str], dict],
+    file_item: dict,
+    chunk: dict,
+    method: str,
+    score: int | float,
+    details: dict | None = None,
+    *,
+    evidence_context_limit: int = 8,
+) -> dict:
+    key = retrieval_chunk_key(file_item, chunk)
+    row = candidates.get(key)
+    if row is None:
+        row = {
+            "key": key,
+            "file_item": file_item,
+            "chunk": chunk,
+            "methods": set(),
+            "lexical_score": 0,
+            "vector_score": None,
+            "vector_rank_score": 0,
+            "structured_score": 0,
+            "path_boost": 0,
+            "task_boost": 0,
+            "evidence_score": 0,
+            "evidence_rows": [],
+            "score": 0,
+        }
+        candidates[key] = row
+    row["methods"].add(method)
+    details = details or {}
+    numeric_score = float(score or 0)
+    if method == "lexical":
+        row["lexical_score"] = max(float(row.get("lexical_score", 0) or 0), numeric_score)
+        row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))
+        task_boost = float(details.get("file_task_boost", 0) or 0) + float(details.get("chunk_task_boost", 0) or 0)
+        row["task_boost"] = max(float(row.get("task_boost", 0) or 0), task_boost)
+    elif method == "vector":
+        row["vector_rank_score"] = max(float(row.get("vector_rank_score", 0) or 0), numeric_score)
+        if details.get("vector_score") is not None:
+            row["vector_score"] = max(float(row.get("vector_score") or 0), float(details.get("vector_score") or 0))
+        row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))
+    elif method == "structured":
+        row["structured_score"] = max(float(row.get("structured_score", 0) or 0), numeric_score)
+        row["task_boost"] = max(float(row.get("task_boost", 0) or 0), numeric_score)
+        if details.get("task"):
+            row["structured_task"] = details.get("task")
+    elif method == "evidence":
+        row["evidence_score"] = max(float(row.get("evidence_score", 0) or 0), numeric_score)
+        row["structured_score"] = max(float(row.get("structured_score", 0) or 0), float(details.get("structured", 0) or 0))
+        row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))
+        if details:
+            current = list(row.get("evidence_rows", []) or [])
+            current.append(details)
+            current.sort(key=lambda item: float(item.get("total", 0) or 0), reverse=True)
+            row["evidence_rows"] = current[: max(1, int(evidence_context_limit or 1))]
+    row["score"] = max(float(row.get("score", 0) or 0), hybrid_candidate_base_score(row))
+    return row
+
+
 def hybrid_candidate_base_score(candidate: dict) -> float:
     return max(
         float(candidate.get("lexical_score", 0) or 0),
@@ -640,3 +700,49 @@ def hybrid_candidate_guard_bonus(candidate: dict) -> float:
     path_boost = min(float(candidate.get("path_boost", 0) or 0), 2000.0)
     task_boost = min(float(candidate.get("task_boost", 0) or 0), 120.0)
     return path_boost + task_boost
+
+
+def selected_evidence_excerpt(
+    rows: list[dict],
+    *,
+    max_chars: int,
+    evidence_context_limit: int = 8,
+) -> tuple[str, list[dict]]:
+    selected = []
+    used = 0
+    seen = set()
+    for row in rows:
+        text = str(row.get("text", "")).strip()
+        if not text:
+            continue
+        key = (row.get("id"), row.get("start"), row.get("end"))
+        if key in seen:
+            continue
+        seen.add(key)
+        separator = 2 if selected else 0
+        if selected and used + len(text) + separator > max_chars:
+            continue
+        item = dict(row)
+        if not selected and len(text) > max_chars:
+            item["text"] = compact_source_text_middle(text, max_chars)
+            selected.append(item)
+            break
+        selected.append(item)
+        used += len(text) + separator
+        if len(selected) >= max(1, int(evidence_context_limit or 1)) or used >= max_chars:
+            break
+    excerpt = "\n\n".join(str(row.get("text", "")).strip() for row in selected)
+    spans = [
+        {
+            "kind": row.get("kind", "evidence"),
+            "label": row.get("title") or row.get("date") or row.get("id", ""),
+            "start": row.get("start"),
+            "end": row.get("end"),
+            "evidence_id": row.get("id"),
+            "date": row.get("date", ""),
+            "todo": row.get("todo", ""),
+            "priority": row.get("priority", ""),
+        }
+        for row in selected
+    ]
+    return excerpt[:max_chars].strip(), spans

@@ -502,6 +502,10 @@ Current implementation progress:
   with model-assisted span scoring supplied as an injected callback from the
   root script. This keeps deterministic excerpt selection importable while
   preserving the NixOS-owned local-model route boundary.
+- Step 6 now also has pure hybrid candidate bookkeeping and evidence excerpt
+  packing in `motoko_core.retrieval`. Live hybrid orchestration still stays in
+  the root script where it can call index stores, vector stores, rerank routes,
+  and source-content readers explicitly.
 
 ## Roadmap Candidates
 
