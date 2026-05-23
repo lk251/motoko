@@ -122,6 +122,15 @@ from motoko_core.model_services import (  # noqa: E402
     resolve_model_service_route as resolve_model_service_route_core,
     run_local_model_helper_process,
 )
+from motoko_core.maintenance import (  # noqa: E402
+    begin_maintenance_state_file,
+    clear_maintenance_state_file,
+    maintenance_incomplete,
+    read_maintenance_state_file,
+    resume_interrupted_maintenance_file,
+    update_maintenance_state_file,
+    write_maintenance_state_file,
+)
 from motoko_core.memory import (  # noqa: E402
     find_similar_memory as core_find_similar_memory,
     load_memory_rows,
@@ -3225,56 +3234,19 @@ def find_similar_memory(text: str, rows: list[dict]) -> dict | None:
 
 
 def read_maintenance_state() -> dict | None:
-    path = maintenance_path()
-    if not path.exists():
-        return None
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return state if isinstance(state, dict) else None
+    return read_maintenance_state_file(maintenance_path())
 
 
 def write_maintenance_state(state: dict) -> None:
-    state["updated"] = now()
-    atomic_write(maintenance_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
-    maintenance_path().chmod(0o600)
+    write_maintenance_state_file(maintenance_path(), state)
 
 
 def clear_maintenance_state(job_id: str | None = None) -> None:
-    state = read_maintenance_state()
-    if job_id and state and state.get("job_id") != job_id:
-        return
-    try:
-        maintenance_path().unlink()
-    except FileNotFoundError:
-        pass
-
-
-def maintenance_incomplete(state: dict | None) -> bool:
-    if not state:
-        return False
-    return state.get("status") in {"running", "resuming"}
+    clear_maintenance_state_file(maintenance_path(), job_id)
 
 
 def begin_maintenance_state(conv: dict, *, resumed: bool = False) -> dict:
-    previous = read_maintenance_state()
-    retry_count = 0
-    if resumed and previous and previous.get("conversation_id") == conv.get("id"):
-        retry_count = int(previous.get("retry_count", 0) or 0)
-    state = {
-        "job_id": "maint-" + uuid.uuid4().hex[:10],
-        "kind": "auto-maintenance",
-        "conversation_id": conv.get("id", ""),
-        "conversation_title": conv.get("title", "Untitled"),
-        "started": now(),
-        "updated": now(),
-        "phase": "memory: checking",
-        "status": "resuming" if resumed else "running",
-        "retry_count": retry_count,
-    }
-    write_maintenance_state(state)
-    return state
+    return begin_maintenance_state_file(maintenance_path(), conv, resumed=resumed)
 
 
 def update_maintenance_state(
@@ -3285,36 +3257,22 @@ def update_maintenance_state(
     note: str | None = None,
     error: str | None = None,
 ) -> None:
-    state["phase"] = phase
-    state["status"] = status
-    if note is not None:
-        state["note"] = note
-    if error is not None:
-        state["error"] = error
-    write_maintenance_state(state)
+    update_maintenance_state_file(
+        maintenance_path(),
+        state,
+        phase,
+        status=status,
+        note=note,
+        error=error,
+    )
 
 
 def resume_interrupted_maintenance(conv: dict) -> tuple[bool, str | None]:
-    state = read_maintenance_state()
-    if not maintenance_incomplete(state):
-        return False, None
-    if state.get("conversation_id") != conv.get("id"):
-        state["status"] = "abandoned"
-        state["abandoned"] = now()
-        state["abandoned_reason"] = "opened different conversation"
-        write_maintenance_state(state)
-        return False, None
-    retry_count = int(state.get("retry_count", 0) or 0)
-    if retry_count >= MAINTENANCE_MAX_RETRIES:
-        state["status"] = "abandoned"
-        state["abandoned"] = now()
-        write_maintenance_state(state)
-        return False, "abandoned interrupted maintenance after repeated retries"
-    state["retry_count"] = retry_count + 1
-    state["status"] = "resuming"
-    state["phase"] = "memory: queued"
-    write_maintenance_state(state)
-    return True, "resuming interrupted memory maintenance"
+    return resume_interrupted_maintenance_file(
+        maintenance_path(),
+        conv,
+        max_retries=MAINTENANCE_MAX_RETRIES,
+    )
 
 
 def add_memory(
