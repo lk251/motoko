@@ -404,7 +404,9 @@ Phased plan:
 4. Extract the model boundary. Isolate route discovery, Unix-socket HTTP,
    retry/loading behavior, endpoint errors, cache-policy reporting, and
    request construction. This is the right place to enforce "no request body in
-   logs" and preserve NixOS-owned service control.
+   logs" and preserve NixOS-owned service control. This phase should be split:
+   transport/cancel/response helpers first, route-catalog/config discovery
+   second, and request construction/error diagnostics last.
 5. Extract corpus selection and freshness. Move allowlists, `.motokoignore`,
    skip rules, fingerprints, source metadata, and stale/deleted-source handling
    behind a corpus-selection API.
@@ -422,9 +424,20 @@ Phased plan:
    with a small command registry only after service boundaries exist, so each
    command has a narrow handler and test surface.
 
-The approved first implementation is steps 1 and 2 only: create the internal
-package, move pure helpers, update packaging/tests to include package imports,
-and make no user-visible behavior changes.
+Current implementation progress:
+
+- Steps 1 and 2 are complete: the roadmap exists, and pure text/time/terminal
+  helpers live in `motoko_core.text` and `motoko_core.terminal`.
+- Step 3 is complete for the first state layer: realm-local state/config path
+  constructors, atomic writes, JSON loading, and JSONL helpers live in
+  `motoko_core.state`.
+- Step 4 has started: Unix-socket HTTP transport, loading/transient detection,
+  cancellation helpers, and JSON response parsing live in
+  `motoko_core.model_io`.
+- The remaining step-4 work is to extract route catalog/config discovery,
+  route cache/metrics reporting, request construction, and user-facing model
+  error diagnostics without weakening the NixOS-owned service boundary or
+  leaking prompt/request/response content.
 
 ## Roadmap Candidates
 
