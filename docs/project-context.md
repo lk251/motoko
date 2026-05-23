@@ -554,6 +554,10 @@ Current implementation progress:
   including source span details and context-lane explanations. The root facade
   still gathers live source records from conversations, indexes, memory,
   dossiers, and repo attachments.
+- Step 6 now also has worker-model eval prompt/scoring helpers in
+  `motoko_core.evals`: JSON artifact extraction, required/forbidden fact
+  checks, strict worker prompt construction, and score assembly. The root
+  facade still owns fixture selection, model calls, timing, and report writes.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript
