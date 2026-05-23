@@ -447,9 +447,14 @@ Current implementation progress:
   `motoko_core.model_services`: helper route names, content-free
   `motoko-model status` parsing/compaction, route cache-policy report
   formatting, and service selector token generation.
-- The remaining step-4 work is to extract the local `motoko-model` helper
-  diagnostics and live model-service report/control orchestration without
-  weakening the NixOS-owned service boundary or leaking
+- Step 4 now also has reusable `motoko-model` helper orchestration in
+  `motoko_core.model_services`: helper subprocess execution, status retrieval
+  with bounded diagnostics, activation-state parsing, and verify hints for
+  group membership, missing model files, helper availability, download URLs,
+  and hashes. The root script keeps thin wrappers so tests and runtime
+  monkeypatching still exercise the live facade.
+- The remaining step-4 work is to extract live model-service report/control
+  orchestration without weakening the NixOS-owned service boundary or leaking
   prompt/request/response content.
 
 ## Roadmap Candidates

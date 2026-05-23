@@ -14,7 +14,6 @@ import concurrent.futures
 import contextlib
 import datetime as _dt
 import fnmatch
-import grp
 import hashlib
 import http.client
 import io
@@ -114,8 +113,12 @@ from motoko_core.model_services import (  # noqa: E402
     compact_local_model_status,
     format_route_cache_policy,
     local_model_helper_route,
+    local_model_status_is_activating,
+    local_model_status_text_with_runner,
+    local_model_verify_hint as local_model_verify_hint_core,
     model_service_selector_tokens,
     parse_local_model_status,
+    run_local_model_helper_process,
 )
 from motoko_core.state import (  # noqa: E402
     allowdirs_path,
@@ -13875,90 +13878,33 @@ def model_request_timeout(route_info: dict, timeout: float) -> float:
 
 
 def run_local_model_helper(command: str, route_info: dict, *, timeout: float = LOCAL_MODEL_HELPER_TIMEOUT_SECONDS) -> str:
-    helper = shutil.which("motoko-model")
-    if not helper:
-        raise FileNotFoundError("motoko-model helper is not on PATH")
-    route = local_model_helper_route(route_info)
-    result = subprocess.run(
-        [helper, command, route],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    return run_local_model_helper_process(
+        command,
+        route_info,
         timeout=timeout,
-        check=False,
+        helper_path=shutil.which("motoko-model"),
     )
-    detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-    if result.returncode != 0:
-        raise RuntimeError(detail or f"motoko-model {command} {route} failed")
-    return detail
 
 
 def local_model_status_text(route_info: dict) -> str:
     if not endpoint_is_unix(str(route_info.get("endpoint", ""))):
         return ""
-    try:
-        return run_local_model_helper("status", route_info)
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        return f"motoko-model status could not run: {exc}"
+    return local_model_status_text_with_runner(route_info, run_local_model_helper)
 
 
 def local_model_status_activating(route_info: dict) -> bool:
-    status = local_model_status_text(route_info).lower()
-    if not status:
-        return False
-    if "backend=activating" in status or "proxy=activating" in status:
-        return True
-    return "loading model" in status or "model loading" in status
+    return local_model_status_is_activating(local_model_status_text(route_info))
 
 
 def local_model_verify_hint(route_info: dict) -> str:
     endpoint_text = str(route_info.get("endpoint", ""))
     if not endpoint_is_unix(endpoint_text):
         return ""
-    lines = []
-    parsed = urllib.parse.urlparse(endpoint_text)
-    socket_path = pathlib.Path(urllib.parse.unquote(parsed.path))
-    try:
-        parent_stat = socket_path.parent.stat()
-    except OSError:
-        parent_stat = None
-    if parent_stat is not None:
-        current_groups = set(os.getgroups())
-        try:
-            group_name = grp.getgrgid(parent_stat.st_gid).gr_name
-        except KeyError:
-            group_name = str(parent_stat.st_gid)
-        if parent_stat.st_gid not in current_groups:
-            try:
-                current_names = ", ".join(grp.getgrgid(gid).gr_name for gid in sorted(current_groups))
-            except KeyError:
-                current_names = ", ".join(str(gid) for gid in sorted(current_groups))
-            lines.append(
-                f"current process groups do not include {group_name}; groups are: {current_names or 'none'}"
-            )
-            lines.append(
-                f"start Motoko from a fresh login/tmux session after the rebuild, or run: sg {group_name} -c 'motoko'"
-            )
-    status = local_model_status_text(route_info)
-    if status:
-        lines.append("motoko-model status:")
-        lines.append(status[:1200])
-    model_path = str(route_info.get("model_path") or "")
-    if model_path:
-        try:
-            if not pathlib.Path(model_path).exists():
-                lines.append(f"declared model file is missing: {model_path}")
-        except OSError as exc:
-            lines.append(f"declared model file could not be checked: {exc}")
-    if shutil.which("motoko-model"):
-        lines.append(f"verify declared model files with: motoko-model verify {local_model_helper_route(route_info)}")
-    else:
-        lines.append("motoko-model helper is not on PATH")
-    if route_info.get("download_url"):
-        lines.append(f"download: {route_info['download_url']}")
-    if route_info.get("download_hash"):
-        lines.append(f"hash: {route_info['download_hash']}")
-    return "\n".join(lines)
+    return local_model_verify_hint_core(
+        route_info,
+        status_provider=local_model_status_text,
+        helper_available=bool(shutil.which("motoko-model")),
+    )
 
 
 @contextlib.contextmanager
