@@ -534,6 +534,10 @@ Current implementation progress:
   ID creation, row normalization, bounded JSONL loading, and atomic row
   writing. The root script still owns user-facing memory commands,
   maintenance, proposal generation, ranking, and source rendering.
+- Step 7 now also has deterministic memory scoring in `motoko_core.memory`:
+  duplicate detection, tag derivation, conversation-aware query text, relevance
+  scoring, and ranked memory selection. The root script still loads realm-local
+  memory state and renders selected memories into chat context.
 
 ## Roadmap Candidates
 

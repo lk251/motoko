@@ -123,10 +123,16 @@ from motoko_core.model_services import (  # noqa: E402
     run_local_model_helper_process,
 )
 from motoko_core.memory import (  # noqa: E402
+    find_similar_memory as core_find_similar_memory,
     load_memory_rows,
+    memory_query_text,
+    memory_relevance,
     memory_id,
+    memory_tags,
     normalize_memory_row as core_normalize_memory_row,
+    rank_memory_rows,
     read_memory_rows_file,
+    text_similarity,
     write_memory_rows_file,
 )
 from motoko_core.retrieval import (  # noqa: E402
@@ -3214,6 +3220,10 @@ def write_memory_rows(rows: list[dict]) -> None:
     write_memory_rows_file(memories_path(), rows)
 
 
+def find_similar_memory(text: str, rows: list[dict]) -> dict | None:
+    return core_find_similar_memory(text, rows, duplicate_threshold=MEMORY_DUPLICATE_THRESHOLD)
+
+
 def read_maintenance_state() -> dict | None:
     path = maintenance_path()
     if not path.exists():
@@ -3305,60 +3315,6 @@ def resume_interrupted_maintenance(conv: dict) -> tuple[bool, str | None]:
     state["phase"] = "memory: queued"
     write_maintenance_state(state)
     return True, "resuming interrupted memory maintenance"
-
-
-def text_similarity(left: str, right: str) -> float:
-    left_terms = set(token_counts(left))
-    right_terms = set(token_counts(right))
-    if not left_terms or not right_terms:
-        return 0.0
-    overlap = left_terms & right_terms
-    return len(overlap) / max(1, min(len(left_terms), len(right_terms)))
-
-
-def memory_tags(text: str) -> list[str]:
-    counts = token_counts(text)
-    stop = {
-        "about",
-        "after",
-        "also",
-        "because",
-        "before",
-        "could",
-        "from",
-        "have",
-        "into",
-        "javier",
-        "motoko",
-        "should",
-        "that",
-        "their",
-        "there",
-        "this",
-        "with",
-        "would",
-    }
-    tags = []
-    for word, _count in counts.most_common(20):
-        if word in stop:
-            continue
-        tags.append(word)
-        if len(tags) >= 8:
-            break
-    return tags
-
-
-def find_similar_memory(text: str, rows: list[dict]) -> dict | None:
-    best = None
-    best_score = 0.0
-    for row in rows:
-        score = text_similarity(text, row.get("text", ""))
-        if score > best_score:
-            best = row
-            best_score = score
-    if best is not None and best_score >= MEMORY_DUPLICATE_THRESHOLD:
-        return best
-    return None
 
 
 def add_memory(
@@ -3538,17 +3494,6 @@ def print_memories(*, verbose: bool = False) -> None:
                 print(f"     seen: {row.get('seen_count')} time(s)")
 
 
-def memory_query_text(conv: dict | None, query: str = "") -> str:
-    parts = [query, conv.get("title", "") if conv else ""]
-    if conv:
-        if conv.get("summary"):
-            parts.append(conv.get("summary", "")[-4000:])
-        for msg in conv.get("messages", [])[-MEMORY_CONTEXT_RECENT_MESSAGES:]:
-            if msg.get("role") == "user":
-                parts.append(msg.get("content", ""))
-    return "\n".join(part for part in parts if part)
-
-
 def context_query_text(conv: dict | None, query: str = "") -> str:
     parts = [query, conv.get("title", "") if conv else ""]
     if conv:
@@ -3560,27 +3505,6 @@ def context_query_text(conv: dict | None, query: str = "") -> str:
     return "\n".join(part for part in parts if part)
 
 
-def memory_relevance(
-    row: dict,
-    query_counts: collections.Counter,
-    recency_bonus: int,
-    conversation_terms: collections.Counter | None = None,
-) -> int:
-    text = "\n".join(
-        [
-            row.get("text", ""),
-            " ".join(str(tag) for tag in row.get("tags", [])),
-            row.get("source", ""),
-        ]
-    )
-    lexical = score_text(query_counts, text)
-    thread_match = score_text(conversation_terms or collections.Counter(), text)
-    importance = int(row.get("importance", MEMORY_DEFAULT_IMPORTANCE))
-    pinned = 40 if row.get("pinned") else 0
-    seen = min(8, int(row.get("seen_count", 1)))
-    return lexical * 8 + thread_match * 3 + importance * 4 + recency_bonus + pinned + seen
-
-
 def ranked_memories(
     *,
     conv: dict | None = None,
@@ -3588,66 +3512,14 @@ def ranked_memories(
     limit: int = MEMORY_RETRIEVAL_LIMIT,
 ) -> list[dict]:
     rows = load_memories(limit=500)
-    if not rows:
-        return []
-    combined_query = memory_query_text(conv, query)
-    query_counts = token_counts(combined_query)
-    conversation_terms = token_counts(memory_query_text(conv, ""))
-    scored = []
-    total = len(rows)
-    for idx, row in enumerate(rows):
-        recency_bonus = 1 + min(10, idx * 10 // max(1, total - 1)) if total > 1 else 10
-        score = memory_relevance(row, query_counts, recency_bonus, conversation_terms)
-        matched = score_text(query_counts, row.get("text", "")) if query_counts else 0
-        thread_matched = score_text(conversation_terms, row.get("text", "")) if conversation_terms else 0
-        enriched = dict(row)
-        enriched["_score"] = score
-        enriched["_matched_terms"] = matched
-        enriched["_thread_matched_terms"] = thread_matched
-        enriched["_recency_bonus"] = recency_bonus
-        scored.append(enriched)
-    scored.sort(
-        key=lambda row: (
-            bool(row.get("pinned")),
-            row.get("_matched_terms", 0),
-            row.get("_score", 0),
-            row.get("importance", MEMORY_DEFAULT_IMPORTANCE),
-            row.get("created", ""),
-        ),
-        reverse=True,
+    return rank_memory_rows(
+        rows,
+        conv=conv,
+        query=query,
+        limit=limit,
+        default_importance=MEMORY_DEFAULT_IMPORTANCE,
+        recent_message_limit=MEMORY_CONTEXT_RECENT_MESSAGES,
     )
-
-    selected = []
-    seen: set[str] = set()
-    for row in scored:
-        if len(selected) >= limit:
-            break
-        if (
-            not row.get("pinned")
-            and row.get("_matched_terms", 0) <= 0
-            and row.get("_thread_matched_terms", 0) <= 0
-            and query_counts
-        ):
-            continue
-        memory_ref = row.get("id", "")
-        if memory_ref in seen:
-            continue
-        seen.add(memory_ref)
-        selected.append(row)
-
-    if len(selected) < min(6, len(rows)):
-        for row in reversed(rows):
-            memory_ref = row.get("id", "")
-            if memory_ref in seen:
-                continue
-            enriched = dict(row)
-            enriched.setdefault("_score", 0)
-            enriched.setdefault("_matched_terms", 0)
-            selected.append(enriched)
-            seen.add(memory_ref)
-            if len(selected) >= min(limit, 6):
-                break
-    return selected[:limit]
 
 
 def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT) -> list[dict]:
