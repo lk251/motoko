@@ -560,6 +560,9 @@ Current implementation progress:
 - Step 8 now also has pure TUI overlay/dropdown formatting in
   `motoko_core.tui_render`. Terminal control, scrollback synchronization, live
   answer display, and command dispatch still stay in `motoko`.
+- Step 8 also has direct tty/input regression coverage for the new pure input
+  editing and overlay/dropdown rendering helpers, in addition to the existing
+  pseudo-terminal resize/render check.
 
 ## Roadmap Candidates
 

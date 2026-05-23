@@ -16,9 +16,23 @@ import pathlib
 import pty
 import select
 import struct
+import sys
 import termios
 import tempfile
 import time
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from motoko_core.input_edit import (
+    delete_word_left,
+    move_word_left,
+    move_word_right,
+    next_history_entry,
+    previous_history_entry,
+)
+from motoko_core.tui_render import dropdown_display_lines, overlay_display_lines
 
 
 SOURCE = pathlib.Path(os.environ.get("MOTOKO_SOURCE", "motoko"))
@@ -96,6 +110,24 @@ def fake_tui(m, slave_fd: int):
 def main() -> int:
     old_state = os.environ.get("MOTOKO_STATE_HOME")
     old_config = os.environ.get("MOTOKO_CONFIG_HOME")
+    assert move_word_left("alpha beta", 10) == 6
+    assert move_word_right("alpha beta", 0) == 5
+    assert delete_word_left("alpha beta", 10) == ("alpha ", 6, "beta")
+    assert previous_history_entry(["one", "two"], None) == (1, "two")
+    assert next_history_entry(["one", "two"], 1) == (None, "")
+    overlay = "\n".join(overlay_display_lines("status", ["routes:", "  /status  show state"], 60))
+    assert "status" in overlay
+    assert "routes:" in overlay
+    dropdown = dropdown_display_lines(
+        [
+            {"label": "/status", "description": "show state"},
+            {"label": "/sources", "description": "show evidence"},
+        ],
+        1,
+        60,
+    )
+    assert len(dropdown) == 2
+    assert "/sources" in dropdown[1]
     with tempfile.TemporaryDirectory() as tmp:
         os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
         os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
@@ -132,7 +164,7 @@ def main() -> int:
                 os.environ.pop("MOTOKO_CONFIG_HOME", None)
             else:
                 os.environ["MOTOKO_CONFIG_HOME"] = old_config
-    print("1 motoko tty render check passed")
+    print("3 motoko tty render/input checks passed")
     return 0
 
 
