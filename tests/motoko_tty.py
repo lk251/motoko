@@ -25,6 +25,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from motoko_core.commands import command_menu_text, command_names, slash_command_value
 from motoko_core.input_edit import (
     delete_word_left,
     move_word_left,
@@ -121,6 +122,10 @@ def main() -> int:
     assert delete_word_left("alpha beta", 10) == ("alpha ", 6, "beta")
     assert previous_history_entry(["one", "two"], None) == (1, "two")
     assert next_history_entry(["one", "two"], 1) == (None, "")
+    commands = [("/help", "show help"), ("/memory search TEXT", "search memories")]
+    assert slash_command_value("/memory search TEXT") == "/memory search"
+    assert command_names(commands) == ["/help", "/memory search"]
+    assert "search memories" in command_menu_text(commands)
     overlay = "\n".join(overlay_display_lines("status", ["routes:", "  /status  show state"], 60))
     assert "status" in overlay
     assert "routes:" in overlay

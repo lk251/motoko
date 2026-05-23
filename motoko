@@ -247,6 +247,11 @@ from motoko_core.conversations import (  # noqa: E402
     rewrite_jsonl_without_conversation,
     save_conversation_record,
 )
+from motoko_core.commands import (  # noqa: E402
+    command_menu_text,
+    command_names,
+    slash_command_value,
+)
 from motoko_core.state import (  # noqa: E402
     allowdirs_path,
     append_jsonl,
@@ -811,15 +816,6 @@ def assistant_label(text: str = "Motoko") -> str:
 
 def print_report(text: str) -> None:
     print(highlight_report_text(text))
-
-
-def slash_command_value(command: str) -> str:
-    parts = command.split()
-    if not parts:
-        return command
-    if parts[0] == "/memory" and len(parts) > 1:
-        return " ".join(parts[:2])
-    return parts[0]
 
 
 def current_git_branch() -> str:
@@ -13248,7 +13244,7 @@ def setup_readline_completion() -> None:
     if readline is None or not sys.stdin.isatty():
         return
 
-    slash_names = sorted({slash_command_value(command) for command, _description in SLASH_COMMANDS})
+    slash_names = command_names(SLASH_COMMANDS)
 
     def complete(text: str, state: int):
         buffer = readline.get_line_buffer()
@@ -14680,10 +14676,7 @@ class MotokoTui:
         threading.Thread(target=worker, daemon=True).start()
 
     def compact_command_menu(self) -> str:
-        lines = ["Chat commands:"]
-        for command, description in SLASH_COMMANDS:
-            lines.append(f"  {command:<24} {description}")
-        return "\n".join(lines)
+        return command_menu_text(SLASH_COMMANDS)
 
     def dropdown_options(self) -> list[dict]:
         text = self.input_buffer[: self.cursor]

@@ -571,6 +571,10 @@ Current implementation progress:
 - Step 8 also has direct tty/input regression coverage for the new pure input
   editing and TUI rendering helpers, in addition to the existing
   pseudo-terminal resize/render check.
+- Step 9 has started with small command-list helpers in `motoko_core.commands`:
+  slash command value normalization, compact command-menu text, and sorted
+  command-name extraction. The large TUI and line-mode dispatch conditionals
+  still stay in `motoko` until a command registry can be introduced safely.
 
 ## Roadmap Candidates
 
