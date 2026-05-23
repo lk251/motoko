@@ -4704,6 +4704,45 @@ def test_conversation_mutation_command_request_renames_chat(m):
         assert saved["title"] == "New title"
 
 
+def test_blocking_command_request_attaches_index(m):
+    with isolated_state():
+        conv = m.new_conversation("Index attach")
+        old_build = m.build_document_index
+        try:
+            m.build_document_index = lambda path, glob: {
+                "id": "idx1",
+                "name": "docs",
+                "root": path,
+                "files": [],
+                "corpus_summary": "summary",
+            }
+            request = m.blocking_command_request("/index /tmp/docs", conv)
+            assert request is not None
+            label, run = request
+            assert label == "Building document index..."
+            assert run() == "attached index: idx1"
+            assert conv.get("context_items", [])[0]["id"] == "idx1"
+            saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+            assert saved["context_items"][0]["kind"] == "index"
+        finally:
+            m.build_document_index = old_build
+
+
+def test_blocking_command_request_studies_context(m):
+    with isolated_state():
+        conv = m.new_conversation("Study")
+        old_study_query = m.study_query
+        try:
+            m.study_query = lambda conv_arg, query, *, focus=None: f"{conv_arg['id']} {query} {focus}"
+            request = m.blocking_command_request("/study tomorrow --focus recent", conv)
+            assert request is not None
+            label, run = request
+            assert label == "Studying context..."
+            assert run() == f"{conv['id']} tomorrow recent"
+        finally:
+            m.study_query = old_study_query
+
+
 def test_cwd_indexing_ignores_light_study_done(m):
     progress = {
         "status": "running",

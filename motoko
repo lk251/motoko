@@ -13300,6 +13300,93 @@ def conversation_mutation_command_request(text: str, conv: dict):
     return primary, run_rename
 
 
+def attach_index_from_path_text(conv: dict, path: str) -> str:
+    if not path:
+        raise SystemExit("usage: /index PATH")
+    index = build_document_index(path, AUTO_INDEX_GLOB)
+    conv.setdefault("context_items", []).append(context_item_from_index(index))
+    save_conversation(conv)
+    return f"attached index: {index['id']}"
+
+
+def attach_index_from_resume_text(conv: dict, index_id: str) -> str:
+    if not index_id:
+        raise SystemExit("usage: /index-resume INDEX_ID")
+    index = resume_document_index(index_id)
+    conv.setdefault("context_items", []).append(context_item_from_index(index))
+    save_conversation(conv)
+    return f"attached index: {index['id']}"
+
+
+def attach_resumed_work_text(conv: dict, index_id: str | None = None) -> str:
+    index = resume_partial_index(index_id)
+    conv.setdefault("context_items", []).append(context_item_from_index(index))
+    save_conversation(conv)
+    return f"attached index: {index['id']}"
+
+
+def attach_topic_from_body_text(conv: dict, body: str) -> str:
+    topic = build_topic_from_chat(conv, body)
+    conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+    save_conversation(conv)
+    return f"attached topic: {topic['id']}"
+
+
+def attach_deep_topic_from_body_text(conv: dict, body: str) -> str:
+    topic = deepen_topic_from_chat(conv, body)
+    conv.setdefault("context_items", []).append(context_item_from_topic(topic))
+    save_conversation(conv)
+    return f"attached deep topic: {topic['id']}"
+
+
+def attach_dossier_from_body_text(conv: dict, body: str) -> str:
+    dossier = build_dossier_from_chat(conv, body)
+    conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
+    save_conversation(conv)
+    return f"attached dossier: {dossier['id']}"
+
+
+def study_from_body_text(conv: dict, body: str) -> str:
+    query, focus = parse_study_directive(body)
+    return study_query(conv, query, focus=focus)
+
+
+def compact_conversation_text(conv: dict) -> str:
+    return "conversation compacted" if compact_conversation(conv, quiet=True) else "conversation is already compact enough"
+
+
+def refresh_profile_dossier_text() -> str:
+    profile = refresh_profile_dossier()
+    return f"profile refreshed: {profile.get('updated', '')}"
+
+
+def blocking_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary == "/profile-refresh" and not body:
+        return "Refreshing profile dossier...", refresh_profile_dossier_text
+    if primary == "/study":
+        return "Studying context...", lambda: study_from_body_text(conv, body)
+    if primary == "/compact" and not body:
+        return "Compacting conversation...", lambda: compact_conversation_text(conv)
+    if primary == "/memorize" and not body:
+        return "Running memory proposal...", lambda: memorize_conversation(conv)
+    if primary == "/index" and body:
+        return "Building document index...", lambda: attach_index_from_path_text(conv, body)
+    if primary == "/index-resume":
+        return "Resuming document index...", lambda: attach_index_from_resume_text(conv, body)
+    if primary == "/resume-work":
+        return "Resuming Motoko work...", lambda: attach_resumed_work_text(conv, body or None)
+    if primary == "/topic":
+        return "Building topic dossier...", lambda: attach_topic_from_body_text(conv, body)
+    if primary == "/deepen":
+        return "Building deep topic dossier...", lambda: attach_deep_topic_from_body_text(conv, body)
+    if primary == "/dossier":
+        return "Building memory dossier...", lambda: attach_dossier_from_body_text(conv, body)
+    return None
+
+
 def shared_command_request(text: str, conv: dict):
     builders = [
         lambda: report_command_request(text, conv),
@@ -14231,12 +14318,6 @@ class MotokoTui:
             elif (command_request := shared_command_request(text, self.conv)) is not None:
                 label, func = command_request
                 self.start_report_command(label, func)
-            elif text == "/profile-refresh":
-                self.run_blocking_command("Refreshing profile dossier...", refresh_profile_dossier)
-                self.append("system", format_profile())
-            elif text == "/study" or text.startswith("/study "):
-                body = text[len("/study") :].strip()
-                self.run_blocking_command("Studying context...", lambda: self.study_from_body(body))
             elif text == "/delete" or text.startswith("/delete "):
                 if self.generating or self.maintaining or self.study_running:
                     self.append("system", "finish or stop active work before deleting this conversation")
@@ -14271,28 +14352,9 @@ class MotokoTui:
                 self.history_index = None
                 message_count = len(self.conv.get("messages", []))
                 self.status = "conversation resumed" if message_count else "conversation resumed (0 messages)"
-            elif text == "/compact":
-                self.run_blocking_command("Compacting conversation...", lambda: compact_conversation(self.conv))
-            elif text == "/memorize":
-                self.run_blocking_command("Running memory proposal...", lambda: memorize_conversation(self.conv))
-            elif text.startswith("/index "):
-                path = text[len("/index ") :].strip()
-                self.run_blocking_command("Building document index...", lambda: self.attach_index_from_path(path))
-            elif text == "/index-resume" or text.startswith("/index-resume "):
-                index_id = text[len("/index-resume ") :].strip()
-                self.run_blocking_command("Resuming document index...", lambda: self.attach_index_from_resume(index_id))
-            elif text == "/resume-work" or text.startswith("/resume-work "):
-                index_id = text[len("/resume-work ") :].strip() or None
-                self.run_blocking_command("Resuming Motoko work...", lambda: self.attach_resumed_work(index_id))
-            elif text == "/topic" or text.startswith("/topic "):
-                body = text[len("/topic") :].strip()
-                self.run_blocking_command("Building topic dossier...", lambda: self.attach_topic_from_body(body))
-            elif text == "/deepen" or text.startswith("/deepen "):
-                body = text[len("/deepen") :].strip()
-                self.run_blocking_command("Building deep topic dossier...", lambda: self.attach_deep_topic_from_body(body))
-            elif text == "/dossier" or text.startswith("/dossier "):
-                body = text[len("/dossier") :].strip()
-                self.run_blocking_command("Building memory dossier...", lambda: self.attach_dossier_from_body(body))
+            elif (blocking_request := blocking_command_request(text, self.conv)) is not None:
+                label, func = blocking_request
+                self.run_blocking_command(label, func)
             else:
                 self.append("system", "unknown command; type /help")
         except SystemExit as exc:
@@ -14365,25 +14427,6 @@ class MotokoTui:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def attach_index_from_path(self, path: str) -> None:
-        if not path:
-            raise SystemExit("usage: /index PATH")
-        index = build_document_index(path, AUTO_INDEX_GLOB)
-        self.conv.setdefault("context_items", []).append(context_item_from_index(index))
-        save_conversation(self.conv)
-
-    def attach_index_from_resume(self, index_id: str) -> None:
-        if not index_id:
-            raise SystemExit("usage: /index-resume INDEX_ID")
-        index = resume_document_index(index_id)
-        self.conv.setdefault("context_items", []).append(context_item_from_index(index))
-        save_conversation(self.conv)
-
-    def attach_resumed_work(self, index_id: str | None = None) -> None:
-        index = resume_partial_index(index_id)
-        self.conv.setdefault("context_items", []).append(context_item_from_index(index))
-        save_conversation(self.conv)
-
     def request_pause(self) -> None:
         active = self.generating or self.maintaining or self.study_running or self.cwd_indexing
         if not active:
@@ -14397,25 +14440,6 @@ class MotokoTui:
             "system",
             "pause requested; active work will pause at the next durable checkpoint",
         )
-
-    def attach_topic_from_body(self, body: str) -> None:
-        topic = build_topic_from_chat(self.conv, body)
-        self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
-        save_conversation(self.conv)
-
-    def attach_deep_topic_from_body(self, body: str) -> None:
-        topic = deepen_topic_from_chat(self.conv, body)
-        self.conv.setdefault("context_items", []).append(context_item_from_topic(topic))
-        save_conversation(self.conv)
-
-    def attach_dossier_from_body(self, body: str) -> None:
-        dossier = build_dossier_from_chat(self.conv, body)
-        self.conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
-        save_conversation(self.conv)
-
-    def study_from_body(self, body: str) -> None:
-        query, focus = parse_study_directive(body)
-        print(study_query(self.conv, query, focus=focus))
 
     def start_report_command(self, label: str, func) -> None:
         token = getattr(self, "report_token", 0) + 1
@@ -14446,7 +14470,9 @@ class MotokoTui:
         try:
             print()
             print(style(label, "turquoise", "bold"))
-            func()
+            result = func()
+            if result:
+                print_report(str(result))
             print(style("Done. Returning to Motoko TUI.", "green"))
         except WorkPaused as exc:
             text = str(exc)
@@ -15293,63 +15319,15 @@ def chat_loop(conv: dict) -> None:
             else:
                 print("not deleted")
             continue
-        if user_text.startswith("/index "):
-            index = build_document_index(user_text[len("/index ") :].strip(), AUTO_INDEX_GLOB)
-            conv.setdefault("context_items", []).append(context_item_from_index(index))
-            save_conversation(conv)
-            print(f"attached index: {index['id']}")
-            continue
-        if user_text == "/index-resume" or user_text.startswith("/index-resume "):
-            index = resume_document_index(user_text[len("/index-resume ") :].strip())
-            conv.setdefault("context_items", []).append(context_item_from_index(index))
-            save_conversation(conv)
-            print(f"attached index: {index['id']}")
-            continue
-        if user_text == "/resume-work" or user_text.startswith("/resume-work "):
-            index = resume_partial_index(user_text[len("/resume-work ") :].strip() or None)
-            conv.setdefault("context_items", []).append(context_item_from_index(index))
-            save_conversation(conv)
-            print(f"attached index: {index['id']}")
-            continue
-        if user_text == "/topic" or user_text.startswith("/topic "):
+        blocking_request = blocking_command_request(user_text, conv)
+        if blocking_request is not None:
+            _label, func = blocking_request
             try:
-                topic = build_topic_from_chat(conv, user_text[len("/topic") :])
+                result = func()
+                if result:
+                    print_report(str(result))
             except SystemExit as exc:
                 print(exc)
-                continue
-            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
-            save_conversation(conv)
-            print(f"attached topic: {topic['id']}")
-            continue
-        if user_text == "/deepen" or user_text.startswith("/deepen "):
-            try:
-                topic = deepen_topic_from_chat(conv, user_text[len("/deepen") :])
-            except SystemExit as exc:
-                print(exc)
-                continue
-            conv.setdefault("context_items", []).append(context_item_from_topic(topic))
-            save_conversation(conv)
-            print(f"attached deep topic: {topic['id']}")
-            continue
-        if user_text == "/dossier" or user_text.startswith("/dossier "):
-            try:
-                dossier = build_dossier_from_chat(conv, user_text[len("/dossier") :])
-            except SystemExit as exc:
-                print(exc)
-                continue
-            conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
-            save_conversation(conv)
-            print(f"attached dossier: {dossier['id']}")
-            continue
-        if user_text == "/study" or user_text.startswith("/study "):
-            try:
-                query, focus = parse_study_directive(user_text[len("/study") :])
-                print(study_query(conv, query, focus=focus))
-            except SystemExit as exc:
-                print(exc)
-            continue
-        if user_text == "/compact":
-            compact_conversation(conv)
             continue
         if is_feedback_command(user_text):
             try:
@@ -15357,13 +15335,6 @@ def chat_loop(conv: dict) -> None:
                 print(format_feedback_saved(record_response_feedback(conv, rating, note)))
             except SystemExit as exc:
                 print(exc)
-            continue
-        if user_text == "/profile-refresh":
-            profile = refresh_profile_dossier()
-            print(f"profile refreshed: {profile.get('updated', '')}")
-            continue
-        if user_text == "/memorize":
-            memorize_conversation(conv)
             continue
         if user_text.startswith("/"):
             print("unknown command; type /help")

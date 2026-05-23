@@ -637,6 +637,12 @@ Current implementation progress:
 - Step 9 now also routes `/title` and `/rename` through a shared conversation
   mutation helper backed by `motoko_core.conversations`, so manual title state
   is updated in one place across TUI and line mode.
+- Step 9 now also has a shared blocking-command request path for foreground
+  work commands: `/index`, `/index-resume`, `/resume-work`, `/topic`,
+  `/deepen`, `/dossier`, `/study`, `/compact`, `/profile-refresh`, and
+  `/memorize`. The TUI still runs these as foreground blocking jobs so prompts
+  and durable checkpoints behave as before, but command parsing and context
+  attachment are no longer duplicated with line mode.
 
 ## Roadmap Candidates
 
