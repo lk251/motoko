@@ -530,6 +530,10 @@ Current implementation progress:
   The high-level delete command still stays in the root script because it
   coordinates memories, feedback, study jobs, topics, dossiers, and profile
   state.
+- Step 7 now also has durable memory-row helpers in `motoko_core.memory`: memory
+  ID creation, row normalization, bounded JSONL loading, and atomic row
+  writing. The root script still owns user-facing memory commands,
+  maintenance, proposal generation, ranking, and source rendering.
 
 ## Roadmap Candidates
 

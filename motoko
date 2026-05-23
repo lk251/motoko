@@ -122,6 +122,13 @@ from motoko_core.model_services import (  # noqa: E402
     resolve_model_service_route as resolve_model_service_route_core,
     run_local_model_helper_process,
 )
+from motoko_core.memory import (  # noqa: E402
+    load_memory_rows,
+    memory_id,
+    normalize_memory_row as core_normalize_memory_row,
+    read_memory_rows_file,
+    write_memory_rows_file,
+)
 from motoko_core.retrieval import (  # noqa: E402
     add_hybrid_candidate,
     base_evidence_spans,
@@ -3181,55 +3188,30 @@ def env_int(name: str, default: int, *, minimum: int = 0) -> int:
         return default
 
 
-def memory_id() -> str:
-    return "mem-" + uuid.uuid4().hex[:10]
-
-
 def read_memory_rows() -> list[dict]:
-    path = memories_path()
-    if not path.exists():
-        return []
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return rows
+    return read_memory_rows_file(memories_path())
 
 
 def normalize_memory_row(row: dict, ordinal: int) -> dict:
-    normalized = dict(row)
-    normalized.setdefault("id", f"legacy-{ordinal:04d}")
-    normalized.setdefault("created", "")
-    normalized.setdefault("source", "unknown")
-    normalized.setdefault("text", "")
-    normalized.setdefault("importance", MEMORY_DEFAULT_IMPORTANCE)
-    normalized.setdefault("pinned", False)
-    normalized.setdefault("tags", [])
-    try:
-        normalized["importance"] = max(
-            1,
-            min(MEMORY_MAX_IMPORTANCE, int(normalized.get("importance", MEMORY_DEFAULT_IMPORTANCE))),
-        )
-    except (TypeError, ValueError):
-        normalized["importance"] = MEMORY_DEFAULT_IMPORTANCE
-    if not isinstance(normalized.get("tags"), list):
-        normalized["tags"] = []
-    normalized["pinned"] = bool(normalized.get("pinned"))
-    return normalized
+    return core_normalize_memory_row(
+        row,
+        ordinal,
+        default_importance=MEMORY_DEFAULT_IMPORTANCE,
+        max_importance=MEMORY_MAX_IMPORTANCE,
+    )
 
 
 def load_memories(limit: int = 80) -> list[dict]:
-    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
-    return rows[-limit:]
+    return load_memory_rows(
+        memories_path(),
+        limit=limit,
+        default_importance=MEMORY_DEFAULT_IMPORTANCE,
+        max_importance=MEMORY_MAX_IMPORTANCE,
+    )
 
 
 def write_memory_rows(rows: list[dict]) -> None:
-    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
-    atomic_write(memories_path(), text)
+    write_memory_rows_file(memories_path(), rows)
 
 
 def read_maintenance_state() -> dict | None:
