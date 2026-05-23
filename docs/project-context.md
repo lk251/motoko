@@ -528,6 +528,10 @@ Current implementation progress:
   `motoko_core.retrieval`, with the root script supplying the active prompt
   budget. This keeps `/retrieval-preview` and system-prompt context planning
   behavior stable while making the lane accounting independently testable.
+- Step 6 now also has context-sufficiency policy in `motoko_core.retrieval`,
+  with live ranked topics, dossiers, indexes, and attached-item ids supplied by
+  the root script. This keeps the "answer now versus suggest /study" note
+  importable without moving persistence or index discovery into core retrieval.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript

@@ -1356,6 +1356,24 @@ def test_core_context_plan_is_injectable(m):
     assert "- attached context: 45 chars, 3 source(s), evidence" in text
 
 
+def test_core_context_sufficiency_note_is_injectable(m):
+    note = m.context_sufficiency_note_core(
+        [{"kind": "recent-conversation"}],
+        has_conversation_summary=False,
+        ranked_topics=[{"id": "topic-1", "_score": 50}],
+        ranked_dossiers=[{"id": "dossier-1", "_score": 10}],
+        best_index={"id": "idx-1"},
+        attached_topic_ids=set(),
+        attached_dossier_ids={"dossier-1"},
+        study_reuse_min_score=20,
+    )
+
+    assert "partial; answer from available memory" in note
+    assert "existing topic dossier topic-1" in note
+    assert "document index idx-1" in note
+    assert "dossier-1" not in note
+
+
 def test_named_file_query_boosts_matching_path(m):
     with isolated_state():
         index = {

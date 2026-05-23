@@ -278,6 +278,50 @@ def format_context_plan_core(plan: dict, *, default_budget_chars: int) -> str:
     return "\n".join(lines)
 
 
+def context_sufficiency_note_core(
+    sources: list[dict],
+    *,
+    has_conversation_summary: bool,
+    ranked_topics: list[dict],
+    ranked_dossiers: list[dict],
+    best_index: dict | None,
+    attached_topic_ids: set[str],
+    attached_dossier_ids: set[str],
+    study_reuse_min_score: int,
+) -> str:
+    kinds = collections.Counter(source.get("kind", "unknown") for source in sources)
+    has_deep_context = any(
+        kind in kinds
+        for kind in (
+            "dossier",
+            "dossier-memory",
+            "dossier-conversation",
+            "topic",
+            "topic-evidence",
+            "chunk",
+            "index",
+        )
+    )
+    if has_deep_context:
+        status = "likely enough for a grounded answer if the selected sources match the question"
+    elif kinds.get("memory", 0) or kinds.get("recent-conversation", 0) or has_conversation_summary:
+        status = "partial; answer from available memory, but suggest /study if details matter"
+    else:
+        status = "thin; say what is missing and suggest /study or attaching/indexing documents"
+
+    reusable = []
+    topic = next((row for row in ranked_topics if row.get("_score", 0) >= study_reuse_min_score), None)
+    dossier = next((row for row in ranked_dossiers if row.get("_score", 0) >= study_reuse_min_score), None)
+    if topic and topic.get("id") not in attached_topic_ids:
+        reusable.append(f"existing topic dossier {topic.get('id')}")
+    if dossier and dossier.get("id") not in attached_dossier_ids:
+        reusable.append(f"existing memory dossier {dossier.get('id')}")
+    if best_index:
+        reusable.append(f"document index {best_index.get('id')}")
+    action = "; relevant stored context: " + ", ".join(reusable) if reusable else ""
+    return f"Context sufficiency: {status}.{action}"
+
+
 def retrieval_score_parts(
     query: str,
     query_counts: collections.Counter,
