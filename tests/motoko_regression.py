@@ -1084,6 +1084,134 @@ def test_local_model_catalog_task_routes(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_chat_context_governor_selects_q4_for_max_context(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                        "tasks": ["chat", "deep_synthesis"],
+                        "args": ["--ctx-size", "131072"],
+                    },
+                    "qwen36-chat-q4": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-q4.sock",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "deep_synthesis", "max_context"],
+                        "args": ["--ctx-size", "262144"],
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            small, small_governor = m.select_chat_route([{"role": "user", "content": "hello"}])
+            assert small["catalog_route"] == "qwen36-chat"
+            assert small_governor["selected_tier"] == "chat_default"
+
+            large = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEEP_SOFT_TOKENS + 1000) * 4)}]
+            selected, governor = m.select_chat_route(large)
+            assert selected["catalog_route"] == "qwen36-chat-q4"
+            assert governor["selected_tier"] == "chat_max"
+            assert governor["max_route_available"] is True
+            assert "Chat context governor:" in m.format_model_routes(include_defaults=True)
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_chat_context_governor_falls_back_without_q4(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                        "tasks": ["chat", "deep_synthesis"],
+                        "args": ["--ctx-size", "262144"],
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            large = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEEP_SOFT_TOKENS + 1000) * 4)}]
+            selected, governor = m.select_chat_route(large)
+            assert selected["catalog_route"] == "qwen36-chat"
+            assert governor["preferred_tier"] == "chat_max"
+            assert "max route unavailable" in governor["reason"]
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_last_call_telemetry_is_content_free(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    FakeHandler.payloads = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        os.environ["MOTOKO_ENDPOINT"] = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+        with isolated_state():
+            reply = m.call_model(
+                [{"role": "user", "content": "secret phrase that must not be stored"}],
+                echo=False,
+                timeout=2,
+                source_count=3,
+            )
+            assert reply == "hello"
+            record = m.read_last_model_call()
+            assert record["status"] == "completed"
+            assert record["source_count"] == 3
+            serialized = json.dumps(record, ensure_ascii=False)
+            assert "secret phrase" not in serialized
+            assert "hello" not in serialized
+            text = m.format_last_model_call(record)
+            assert "last model call:" in text
+            assert "estimated prompt tok" in text
+    finally:
+        server.shutdown()
+        server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+
+
+def test_context_bench_dry_run_uses_governor_without_model_call(m):
+    with isolated_state():
+        report = m.run_context_bench(dry_run=True, targets=[1000])
+        assert report["dry_run"] is True
+        assert report["rows"][0]["estimated_prompt_tokens"] > 0
+        assert "dry-run" in m.format_context_bench(report)
+
+
 def test_embedding_route_fails_fast_when_model_file_missing(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -5248,6 +5376,10 @@ def main() -> int:
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
+        test_chat_context_governor_selects_q4_for_max_context,
+        test_chat_context_governor_falls_back_without_q4,
+        test_last_call_telemetry_is_content_free,
+        test_context_bench_dry_run_uses_governor_without_model_call,
         test_embedding_route_fails_fast_when_model_file_missing,
         test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
         test_model_service_status_and_stop_use_motoko_model_helper,

@@ -432,6 +432,8 @@ motoko delete CONVERSATION_ID --yes
 motoko show
 motoko show CONVERSATION_ID
 motoko status
+motoko last-call
+motoko context-bench
 motoko model-routes
 motoko models
 motoko models qwen36-chat
@@ -453,6 +455,18 @@ motoko permissions
 
 When an ID is omitted in an interactive terminal, Motoko opens a numbered
 picker. This avoids typing long conversation IDs for normal use.
+
+`motoko last-call` and `/last-call` show the most recent content-free model
+call record: route, catalog route, selected context tier, estimated prompt and
+completion tokens, context pressure, source count, elapsed time, and estimated
+generation speed. The record deliberately omits prompt text, response text,
+filenames, excerpts, summaries, and other corpus-derived content.
+
+`motoko context-bench` is dry-run by default. It builds synthetic content-free
+prompt sizes and shows which approved chat route the context governor would
+choose. Use `--run` only when you explicitly want to send real synthetic model
+requests.
+
 `motoko list` displays compact `created`, `updated`, `branch`, and
 `conversation` columns. Full timestamps remain stored in the conversation JSON.
 `/rename TEXT` and `/title TEXT` both set the current conversation title.

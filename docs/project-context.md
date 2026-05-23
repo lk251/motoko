@@ -823,13 +823,24 @@ requirements, and NixOS-owned service boundary.
 
 ## NixOS-Facing Model Boundary
 
-Motoko has repo-local support for named model routes and deterministic
-model-output caching. NixOS owns approved model files, worker users, sockets,
-VRAM residency, service hardening, and llama.cpp flags. Motoko owns route
-selection, provenance, quality gates, private output-cache hits, and graceful
-user-visible handling of queued/loading/missing-model states. Do not fake
+Motoko has repo-local support for named model routes, deterministic
+model-output caching, and a chat context governor. NixOS owns approved model
+files, worker users, sockets, VRAM residency, service hardening, and llama.cpp
+flags. Motoko owns route selection, provenance, quality gates, private
+output-cache hits, and graceful user-visible handling of queued/loading/missing
+model states. The chat context governor estimates prompt size, prefers the
+normal strongest Qwen3.6 chat route for ordinary turns, and uses approved
+deep/max-context routes only when the prompt genuinely needs them or an
+explicit `MOTOKO_CHAT_CONTEXT_MODE=deep|max` override is set. Do not fake
 server-side KV caching inside Motoko; prompt-prefix/KV reuse belongs in the
 deployed local model service if measurement shows it is worthwhile.
+
+Model-call telemetry must remain content-free. `last-model-call.json`,
+`/last-call`, and `motoko context-bench` may record route names, model ids,
+configured context size, estimated prompt/completion token counts, source
+counts, timing, and estimated token rates. They must not record prompt text,
+response text, filenames, excerpts, summaries, private memory text, or
+corpus-derived content.
 
 When NixOS declares route cache fields such as `route.cache.prompt`,
 `reuseMinTokens`, `cacheRamMiB`, `slotPromptSimilarity`, `metrics`, and

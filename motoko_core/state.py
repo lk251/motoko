@@ -136,6 +136,11 @@ def model_evals_dir() -> pathlib.Path:
     return ensure_private_dir(root / "model-evals")
 
 
+def last_model_call_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "last-model-call.json"
+
+
 def retrieval_evals_dir() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return ensure_private_dir(root / "retrieval-evals")

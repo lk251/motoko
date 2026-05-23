@@ -342,6 +342,7 @@ from motoko_core.state import (  # noqa: E402
     index_path,
     index_progress_path,
     indexes_dir,
+    last_model_call_path,
     local_models_path,
     maintenance_path,
     memories_path,
@@ -398,6 +399,11 @@ LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
 SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
 LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
 MODEL_LOADING_RETRY_SECONDS = 2.0
+CHAT_CONTEXT_MODE_ENV = "MOTOKO_CHAT_CONTEXT_MODE"
+CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
+CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
+CHAT_CONTEXT_MAX_SOFT_TOKENS = 262_144
+TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
 FILE_SUMMARY_SCHEMA_VERSION = "file-summary-v1"
 CORPUS_SUMMARY_SCHEMA_VERSION = "corpus-summary-v1"
@@ -410,6 +416,8 @@ TITLE_SCHEMA_VERSION = "title-v1"
 MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
 MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
 MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
+MODEL_CALL_TELEMETRY_SCHEMA_VERSION = "model-call-telemetry-v1"
+CONTEXT_GOVERNOR_SCHEMA_VERSION = "context-governor-v1"
 RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
 RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
@@ -698,6 +706,7 @@ SLASH_COMMANDS = [
     ("/model-stop ROUTE", "stop a local model service through motoko-model"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
     ("/feedback-eval", "turn private feedback into eval fixtures"),
+    ("/last-call", "show content-free model-call route and timing telemetry"),
     ("/retrieval-debug QUERY", "explain retrieval scoring for a query"),
     ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
     ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
@@ -767,6 +776,8 @@ SHELL_COMMANDS = [
     "profile",
     "remember",
     "status",
+    "last-call",
+    "context-bench",
     "feedback",
     "model-routes",
     "models",
@@ -806,6 +817,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/up",
     "/down",
     "/status",
+    "/last-call",
     "/model-routes",
     "/models",
     "/model-status",
@@ -1864,6 +1876,76 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         report["conversation_deleted"] = True
     return report
 
+
+def route_args_ctx_size(args) -> int | None:
+    if not isinstance(args, list):
+        return None
+    for idx, item in enumerate(args):
+        if str(item) != "--ctx-size" or idx + 1 >= len(args):
+            continue
+        try:
+            value = int(args[idx + 1])
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def route_context_size(raw: dict) -> int | None:
+    return (
+        route_int_value(raw, "ctx_size", "ctxSize")
+        or route_int_value(raw, "context_size", "contextSize")
+        or route_int_value(raw, "context_tokens", "contextTokens")
+        or route_args_ctx_size(raw.get("args"))
+    )
+
+
+def route_quant_label(raw: dict) -> str:
+    for key in ("quant", "model_quant", "modelQuant"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    haystack = " ".join(
+        str(raw.get(key, ""))
+        for key in ("model", "modelId", "model_id", "displayName", "file", "model_path", "modelPath")
+    ).lower()
+    for pattern in ("ud-q5", "ud-q4", "q8_0", "q6_k", "q5_k", "q4_k"):
+        if pattern in haystack:
+            return pattern.upper().replace("_", "-")
+    return ""
+
+
+def catalog_route_info(route_id: str, *, logical_route: str = MODEL_ROUTE_CHAT) -> dict | None:
+    catalog = load_local_model_catalog()
+    raw = local_model_catalog_routes(catalog).get(route_id)
+    if isinstance(raw, str):
+        raw = {"endpoint": raw}
+    if not isinstance(raw, dict):
+        return None
+    summary = local_model_route_summary(route_id, raw, catalog)
+    info = {
+        "route": logical_route,
+        "endpoint": str(summary.get("endpoint") or raw.get("endpoint") or ""),
+        "model": str(summary.get("model") or route_model_name(raw, catalog) or DEFAULT_MODEL),
+        "request_path": str(summary.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH),
+        "endpoint_paths": normalize_endpoint_paths(summary.get("endpoint_paths")),
+        "manager_kind": str(summary.get("manager_kind") or ""),
+        "catalog_route": route_id,
+        "model_path": str(summary.get("model_path") or raw.get("model_path") or raw.get("modelPath") or ""),
+        "max_parallel": summary.get("max_parallel") or raw.get("maxParallel") or raw.get("max_parallel") or 1,
+        "download_url": str(summary.get("download_url") or raw.get("download_url") or raw.get("downloadUrl") or ""),
+        "download_hash": str(summary.get("download_hash") or raw.get("sha256") or raw.get("hash") or ""),
+        "cache": normalize_route_cache_policy(raw.get("cache")),
+        "metrics_endpoint": str(raw.get("metrics_endpoint") or ""),
+        "metrics_path": str(raw.get("metrics_path") or ""),
+        "description": MODEL_ROUTE_DESCRIPTIONS.get(logical_route, ""),
+        "ctx_size": route_context_size(raw) or route_context_size(summary) or 0,
+        "quant": route_quant_label(raw),
+    }
+    return info if info["endpoint"] and info["model"] else None
+
+
 def endpoint() -> str:
     env_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     if env_endpoint:
@@ -1916,8 +1998,417 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "cache": normalize_route_cache_policy(local_route.get("cache")) if uses_catalog_endpoint else {},
         "metrics_endpoint": str(local_route.get("metrics_endpoint") or "") if uses_catalog_endpoint else "",
         "metrics_path": str(local_route.get("metrics_path") or "") if uses_catalog_endpoint else "",
+        "ctx_size": route_context_size(local_route) or 0,
+        "quant": route_quant_label(local_route),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
     }
+
+
+def estimate_text_tokens(text: str) -> int:
+    if not text:
+        return 0
+    chars = len(text)
+    words = len(re.findall(r"\S+", text))
+    return max(1, words, (chars + TOKEN_ESTIMATE_CHARS_PER_TOKEN - 1) // TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+
+
+def estimate_messages_tokens(messages: list[dict]) -> int:
+    total = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        total += 4
+        total += estimate_text_tokens(str(msg.get("role", "")))
+        total += estimate_text_tokens(str(msg.get("content", "")))
+    return total + 3
+
+
+def chat_context_mode() -> str:
+    mode = os.environ.get(CHAT_CONTEXT_MODE_ENV, "auto").strip().lower()
+    return mode if mode in {"auto", "default", "deep", "max"} else "auto"
+
+
+def route_is_qwen36_chat(info: dict) -> bool:
+    haystack = " ".join(
+        str(info.get(key, ""))
+        for key in ("catalog_route", "model", "model_path", "quant")
+    ).lower()
+    return ("qwen3.6" in haystack or "qwen36" in haystack or "27b" in haystack) and "chat" in haystack
+
+
+def route_is_q4(info: dict) -> bool:
+    haystack = " ".join(
+        str(info.get(key, ""))
+        for key in ("catalog_route", "model", "model_path", "quant")
+    ).lower()
+    return "q4" in haystack or "ud-q4" in haystack
+
+
+def route_is_deep(info: dict) -> bool:
+    route_id = str(info.get("catalog_route") or info.get("route", "")).lower()
+    return "deep" in route_id or "128" in route_id
+
+
+def chat_route_candidates() -> list[dict]:
+    candidates: list[dict] = []
+    base = model_route(MODEL_ROUTE_CHAT)
+    if base.get("endpoint") and base.get("model"):
+        base = dict(base)
+        base["governor_source"] = "logical-chat"
+        candidates.append(base)
+    catalog = load_local_model_catalog()
+    for route_id, raw in local_model_catalog_routes(catalog).items():
+        if not isinstance(route_id, str):
+            continue
+        if route_id == base.get("catalog_route"):
+            continue
+        raw_dict = raw if isinstance(raw, dict) else {}
+        tasks = {str(item) for item in raw_dict.get("tasks", [])} if isinstance(raw_dict.get("tasks"), list) else set()
+        if not ({"chat", "deep_synthesis", "max_context"} & tasks or "qwen36" in route_id):
+            continue
+        info = catalog_route_info(route_id, logical_route=MODEL_ROUTE_CHAT)
+        if not info or not route_is_qwen36_chat(info):
+            continue
+        info["governor_source"] = "catalog"
+        candidates.append(info)
+    deduped = []
+    seen = set()
+    for info in candidates:
+        key = (info.get("catalog_route"), info.get("endpoint"), info.get("model"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(info)
+    return deduped
+
+
+def route_context_limit(info: dict) -> int:
+    try:
+        value = int(info.get("ctx_size") or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else CHAT_CONTEXT_MAX_SOFT_TOKENS
+
+
+def route_governor_tier(info: dict) -> str:
+    if route_is_q4(info):
+        return "chat_max"
+    if route_is_deep(info):
+        return "chat_deep"
+    return "chat_default"
+
+
+def route_governor_rank(info: dict, preferred_tier: str) -> tuple:
+    tier = route_governor_tier(info)
+    route_id = str(info.get("catalog_route") or info.get("route", ""))
+    q5 = 0 if "q5" in " ".join(str(info.get(key, "")) for key in ("quant", "model", "model_path")).lower() else 1
+    tier_rank = {"chat_default": 0, "chat_deep": 1, "chat_max": 2}
+    preferred_rank = 0 if tier == preferred_tier else 1
+    if preferred_tier == "chat_default" and tier == "chat_max":
+        preferred_rank = 3
+    if preferred_tier == "chat_deep" and tier == "chat_max":
+        preferred_rank = 2
+    if preferred_tier == "chat_max" and tier != "chat_max":
+        preferred_rank = 2
+    base_rank = 0 if route_id == "qwen36-chat" else 1
+    return (
+        preferred_rank,
+        tier_rank.get(tier, 9),
+        q5,
+        base_rank,
+        route_context_limit(info),
+        route_id,
+    )
+
+
+def preferred_chat_tier(prompt_tokens: int, mode: str) -> str:
+    if mode == "max":
+        return "chat_max"
+    if mode == "deep":
+        return "chat_deep"
+    if mode == "default":
+        return "chat_default"
+    if prompt_tokens > CHAT_CONTEXT_DEEP_SOFT_TOKENS:
+        return "chat_max"
+    if prompt_tokens > CHAT_CONTEXT_DEFAULT_SOFT_TOKENS:
+        return "chat_deep"
+    return "chat_default"
+
+
+def select_chat_route(messages: list[dict], *, mode: str | None = None) -> tuple[dict, dict]:
+    prompt_tokens = estimate_messages_tokens(messages)
+    mode = mode or chat_context_mode()
+    preferred_tier = preferred_chat_tier(prompt_tokens, mode)
+    candidates = chat_route_candidates() or [model_route(MODEL_ROUTE_CHAT)]
+    viable = [row for row in candidates if route_context_limit(row) >= prompt_tokens]
+    pool = viable or candidates
+    if preferred_tier == "chat_max" and not any(route_governor_tier(row) == "chat_max" for row in pool):
+        pool = sorted(pool, key=lambda row: (-route_context_limit(row), str(row.get("catalog_route") or "")))
+    else:
+        pool = sorted(pool, key=lambda row: route_governor_rank(row, preferred_tier))
+    selected = dict(pool[0])
+    selected_tier = route_governor_tier(selected)
+    reason = f"{mode}:{preferred_tier}"
+    if preferred_tier == "chat_max" and selected_tier != "chat_max":
+        reason += "; max route unavailable, using largest declared chat route"
+    if not viable:
+        reason += "; prompt estimate exceeds declared context"
+    return selected, {
+        "schema": CONTEXT_GOVERNOR_SCHEMA_VERSION,
+        "mode": mode,
+        "preferred_tier": preferred_tier,
+        "selected_tier": selected_tier,
+        "reason": reason,
+        "prompt_tokens_estimate": prompt_tokens,
+        "candidate_count": len(candidates),
+        "max_route_available": any(route_governor_tier(row) == "chat_max" for row in candidates),
+    }
+
+
+def model_route_for_request(route: str, messages: list[dict]) -> tuple[dict, dict]:
+    route = normalize_model_route(route)
+    if route != MODEL_ROUTE_CHAT:
+        return model_route(route), {
+            "schema": CONTEXT_GOVERNOR_SCHEMA_VERSION,
+            "mode": "fixed",
+            "preferred_tier": route,
+            "selected_tier": route,
+            "reason": "non-chat route uses configured logical route",
+            "prompt_tokens_estimate": estimate_messages_tokens(messages),
+            "candidate_count": 1,
+            "max_route_available": False,
+        }
+    return select_chat_route(messages)
+
+
+def model_call_started_record(
+    route_info: dict,
+    governor: dict,
+    *,
+    source_count: int | None = None,
+    stream: bool = True,
+    temperature: float = 0.7,
+) -> dict:
+    prompt_tokens = int(governor.get("prompt_tokens_estimate", 0) or 0)
+    ctx_size = route_context_limit(route_info)
+    context_percent = round((prompt_tokens / ctx_size) * 100, 3) if ctx_size else 0.0
+    return {
+        "schema": MODEL_CALL_TELEMETRY_SCHEMA_VERSION,
+        "created": now(),
+        "status": "started",
+        "route": str(route_info.get("route", "")),
+        "catalog_route": str(route_info.get("catalog_route", "")),
+        "tier": str(governor.get("selected_tier", "")),
+        "mode": str(governor.get("mode", "")),
+        "model": str(route_info.get("model", "")),
+        "quant": str(route_info.get("quant", "")),
+        "ctx_size": ctx_size,
+        "prompt_tokens_estimate": prompt_tokens,
+        "completion_tokens_estimate": 0,
+        "context_percent": context_percent,
+        "source_count": int(source_count) if source_count is not None else None,
+        "stream": bool(stream),
+        "temperature": temperature,
+        "governor_reason": str(governor.get("reason", "")),
+        "candidate_count": int(governor.get("candidate_count", 0) or 0),
+        "max_route_available": bool(governor.get("max_route_available")),
+        "token_counting": "estimated-content-free",
+    }
+
+
+def write_last_model_call(record: dict) -> None:
+    redacted = {
+        key: value
+        for key, value in record.items()
+        if key
+        in {
+            "schema",
+            "created",
+            "finished",
+            "status",
+            "route",
+            "catalog_route",
+            "tier",
+            "mode",
+            "model",
+            "quant",
+            "ctx_size",
+            "prompt_tokens_estimate",
+            "completion_tokens_estimate",
+            "context_percent",
+            "source_count",
+            "stream",
+            "temperature",
+            "governor_reason",
+            "candidate_count",
+            "max_route_available",
+            "token_counting",
+            "duration_seconds",
+            "time_to_first_token_seconds",
+            "generation_tokens_per_second_estimate",
+            "error_type",
+        }
+    }
+    with contextlib.suppress(OSError, PermissionError):
+        atomic_write(last_model_call_path(), json.dumps(redacted, ensure_ascii=False, indent=2) + "\n")
+
+
+def finish_model_call_record(
+    record: dict,
+    *,
+    started: float,
+    first_token_at: float = 0.0,
+    completion_text: str = "",
+    error: BaseException | None = None,
+) -> None:
+    record = dict(record)
+    duration = max(0.0, time.monotonic() - started)
+    record["finished"] = now()
+    record["duration_seconds"] = round(duration, 3)
+    record["completion_tokens_estimate"] = estimate_text_tokens(completion_text)
+    if first_token_at:
+        record["time_to_first_token_seconds"] = round(max(0.0, first_token_at - started), 3)
+    if duration > 0 and record.get("completion_tokens_estimate"):
+        record["generation_tokens_per_second_estimate"] = round(
+            float(record["completion_tokens_estimate"]) / duration,
+            3,
+        )
+    if error is not None:
+        record["status"] = "failed"
+        record["error_type"] = type(error).__name__
+    else:
+        record["status"] = "completed"
+    write_last_model_call(record)
+
+
+def read_last_model_call() -> dict:
+    with contextlib.suppress(OSError, PermissionError):
+        data = safe_load_json(last_model_call_path())
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def format_last_model_call(record: dict | None = None) -> str:
+    record = record if isinstance(record, dict) else read_last_model_call()
+    if not record:
+        return "last model call: none recorded yet"
+    lines = [
+        "last model call:",
+        f"status: {record.get('status', 'unknown')}",
+        f"created: {record.get('created', '')}",
+        f"route: {record.get('route', '')}"
+        + (f" -> {record.get('catalog_route', '')}" if record.get("catalog_route") else ""),
+        f"tier: {record.get('tier', '')}  mode: {record.get('mode', '')}",
+        f"model: {record.get('model', '')}",
+    ]
+    if record.get("quant"):
+        lines.append(f"quant: {record.get('quant')}")
+    lines.extend(
+        [
+            (
+                "context: "
+                f"{record.get('prompt_tokens_estimate', 0)} estimated prompt tok / "
+                f"{record.get('ctx_size', 0)} ctx "
+                f"({record.get('context_percent', 0)}%)"
+            ),
+            f"completion: {record.get('completion_tokens_estimate', 0)} estimated tok",
+        ]
+    )
+    if record.get("source_count") is not None:
+        lines.append(f"sources: {record.get('source_count')}")
+    if record.get("duration_seconds") is not None:
+        lines.append(f"duration: {record.get('duration_seconds')}s")
+    if record.get("time_to_first_token_seconds") is not None:
+        lines.append(f"time to first token: {record.get('time_to_first_token_seconds')}s")
+    if record.get("generation_tokens_per_second_estimate") is not None:
+        lines.append(f"generation: {record.get('generation_tokens_per_second_estimate')} estimated tok/s")
+    lines.append(f"governor: {record.get('governor_reason', '')}")
+    lines.append(f"token counting: {record.get('token_counting', 'estimated-content-free')}")
+    if record.get("error_type"):
+        lines.append(f"error type: {record.get('error_type')}")
+    return "\n".join(lines)
+
+
+def synthetic_messages_for_token_estimate(target_tokens: int) -> list[dict]:
+    target_tokens = max(32, int(target_tokens or 0))
+    unit = "benchmark-token "
+    text = unit * max(1, target_tokens // max(1, estimate_text_tokens(unit)))
+    return [
+        {
+            "role": "system",
+            "content": "Synthetic content-free Motoko route benchmark. Reply with exactly OK.",
+        },
+        {"role": "user", "content": text},
+    ]
+
+
+def context_bench_targets(raw_targets: list[int] | None = None) -> list[int]:
+    if raw_targets:
+        return [max(32, int(value)) for value in raw_targets]
+    return [8_000, 80_000, 160_000]
+
+
+def run_context_bench(*, dry_run: bool = True, targets: list[int] | None = None) -> dict:
+    rows = []
+    for target in context_bench_targets(targets):
+        messages = synthetic_messages_for_token_estimate(target)
+        route_info, governor = select_chat_route(messages)
+        row = {
+            "target_tokens": target,
+            "estimated_prompt_tokens": governor.get("prompt_tokens_estimate", 0),
+            "route": route_info.get("route", ""),
+            "catalog_route": route_info.get("catalog_route", ""),
+            "tier": governor.get("selected_tier", ""),
+            "model": route_info.get("model", ""),
+            "ctx_size": route_context_limit(route_info),
+            "governor_reason": governor.get("reason", ""),
+            "dry_run": dry_run,
+        }
+        if not dry_run:
+            started = time.monotonic()
+            try:
+                reply = call_model(messages, temperature=0.0, stream=False, echo=False, source_count=0)
+            except SystemExit as exc:
+                row["status"] = "failed"
+                row["error"] = str(exc).splitlines()[0][:240]
+            else:
+                row["status"] = "completed"
+                row["duration_seconds"] = round(time.monotonic() - started, 3)
+                row["completion_tokens_estimate"] = estimate_text_tokens(reply)
+        rows.append(row)
+    return {
+        "schema": "context-bench-v1",
+        "created": now(),
+        "dry_run": dry_run,
+        "mode": chat_context_mode(),
+        "rows": rows,
+    }
+
+
+def format_context_bench(report: dict) -> str:
+    lines = [
+        "context bench:",
+        f"created: {report.get('created', '')}",
+        f"mode: {report.get('mode', '')}",
+        "status: dry-run, no model requests sent" if report.get("dry_run") else "status: model requests sent",
+    ]
+    for row in report.get("rows", []):
+        route = row.get("catalog_route") or row.get("route", "")
+        lines.append(
+            f"- target={row.get('target_tokens', 0)}tok "
+            f"estimated={row.get('estimated_prompt_tokens', 0)}tok "
+            f"tier={row.get('tier', '')} route={route} ctx={row.get('ctx_size', 0)}"
+        )
+        lines.append(f"  model: {row.get('model', '')}")
+        lines.append(f"  governor: {row.get('governor_reason', '')}")
+        if row.get("status"):
+            lines.append(
+                f"  result: {row.get('status')} duration={row.get('duration_seconds', '-')}s "
+                f"completion={row.get('completion_tokens_estimate', 0)}tok"
+            )
+        if row.get("error"):
+            lines.append(f"  error: {row.get('error')}")
+    return "\n".join(lines)
 
 
 def model_badge() -> str:
@@ -2006,6 +2497,36 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
         lines.append(
             f"  {route}: {info['model']} endpoint={info['endpoint']} "
             f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}{cache}; {info['description']})"
+        )
+    lines.append("")
+    lines.append(format_chat_route_governor())
+    return "\n".join(lines)
+
+
+def format_chat_route_governor() -> str:
+    candidates = chat_route_candidates()
+    lines = [
+        "Chat context governor:",
+        f"  schema: {CONTEXT_GOVERNOR_SCHEMA_VERSION}",
+        f"  mode: {chat_context_mode()} ({CHAT_CONTEXT_MODE_ENV}=auto|default|deep|max)",
+        (
+            "  soft tiers: "
+            f"default<={CHAT_CONTEXT_DEFAULT_SOFT_TOKENS}tok, "
+            f"deep<={CHAT_CONTEXT_DEEP_SOFT_TOKENS}tok, "
+            f"max<={CHAT_CONTEXT_MAX_SOFT_TOKENS}tok"
+        ),
+    ]
+    if not candidates:
+        lines.append("  candidates: none; using configured chat route")
+        return "\n".join(lines)
+    lines.append("  candidates:")
+    for info in candidates:
+        route_id = info.get("catalog_route") or info.get("route", "")
+        tier = route_governor_tier(info)
+        ctx = route_context_limit(info)
+        quant = f" quant={info.get('quant')}" if info.get("quant") else ""
+        lines.append(
+            f"    - {route_id}: {tier} ctx={ctx}{quant} model={info.get('model', '')}"
         )
     return "\n".join(lines)
 
@@ -11244,20 +11765,38 @@ def call_model(
     echo: bool = True,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
+    source_count: int | None = None,
 ) -> str:
-    route_info = model_route(route)
+    route_info, governor = model_route_for_request(route, messages)
     payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=stream)
+    started = time.monotonic()
+    record = model_call_started_record(
+        route_info,
+        governor,
+        source_count=source_count,
+        stream=stream,
+        temperature=temperature,
+    )
+    write_last_model_call(record)
     spinner = ThinkingSpinner(enabled=echo)
     try:
         spinner.start()
         with open_model_response(route_info, payload, timeout=timeout) as resp:
             if stream:
-                return read_streaming_response(resp, echo=echo, spinner=spinner)
+                reply = read_streaming_response(resp, echo=echo, spinner=spinner)
+                finish_model_call_record(record, started=started, completion_text=reply)
+                return reply
             spinner.stop()
-            return read_json_response(resp)
+            reply = read_json_response(resp)
+            finish_model_call_record(record, started=started, completion_text=reply)
+            return reply
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        finish_model_call_record(record, started=started, error=exc)
         hint = local_model_verify_hint(route_info)
         raise SystemExit(model_request_failure_detail("model request failed", exc, hint)) from exc
+    except BaseException as exc:
+        finish_model_call_record(record, started=started, error=exc)
+        raise
     finally:
         spinner.stop()
 
@@ -11361,10 +11900,21 @@ def call_model_with_callback(
     cancel_event=None,
     on_connection=None,
     on_response=None,
+    source_count: int | None = None,
 ) -> str:
-    route_info = model_route(route)
+    route_info, governor = model_route_for_request(route, messages)
     payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=True)
     collected = []
+    first_token_at = 0.0
+    started = time.monotonic()
+    record = model_call_started_record(
+        route_info,
+        governor,
+        source_count=source_count,
+        stream=True,
+        temperature=temperature,
+    )
+    write_last_model_call(record)
     try:
         raise_if_cancelled(cancel_event)
         with open_model_response(
@@ -11381,15 +11931,50 @@ def call_model_with_callback(
                 if done:
                     break
                 if content:
+                    if not first_token_at:
+                        first_token_at = time.monotonic()
                     collected.append(content)
                     on_token(content)
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        finish_model_call_record(
+            record,
+            started=started,
+            first_token_at=first_token_at,
+            completion_text="".join(collected),
+            error=exc,
+        )
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("__motoko_stopped__") from exc
         hint = local_model_verify_hint(route_info)
         raise SystemExit(model_request_failure_detail("model request failed", exc, hint)) from exc
-    raise_if_cancelled(cancel_event)
-    return "".join(collected)
+    except BaseException as exc:
+        finish_model_call_record(
+            record,
+            started=started,
+            first_token_at=first_token_at,
+            completion_text="".join(collected),
+            error=exc,
+        )
+        raise
+    try:
+        raise_if_cancelled(cancel_event)
+    except BaseException as exc:
+        finish_model_call_record(
+            record,
+            started=started,
+            first_token_at=first_token_at,
+            completion_text="".join(collected),
+            error=exc,
+        )
+        raise
+    reply = "".join(collected)
+    finish_model_call_record(
+        record,
+        started=started,
+        first_token_at=first_token_at,
+        completion_text=reply,
+    )
+    return reply
 
 
 def read_streaming_response(
@@ -11433,6 +12018,7 @@ HELP_SECTIONS = [
             ("/feedback up|down|ok [TEXT]", "rate the last answer with an optional note"),
             ("/up [TEXT] / /down [TEXT]", "shortcuts for feedback on the last answer"),
             ("/status", "show model, memory, and context state"),
+            ("/last-call", "show content-free model-call route and timing telemetry"),
             ("/model-routes", "show chat and background worker model routes"),
             ("/models [ROUTE]", "show local model service status from motoko-model"),
             ("/model-stop ROUTE", "stop a local model service through motoko-model"),
@@ -11850,6 +12436,8 @@ def report_command_request(text: str, conv: dict):
         return "/sources", lambda: format_conversation_sources(conv)
     if primary == "/status" and not body:
         return "/status", lambda: format_status(conv)
+    if primary == "/last-call" and not body:
+        return "/last-call", format_last_model_call
     if primary == "/model-routes" and not body:
         return "/model-routes", lambda: format_model_routes(include_defaults=True)
     if primary in {"/models", "/model-status"}:
@@ -13411,6 +13999,7 @@ class MotokoTui:
                     cancel_event=cancel_event,
                     on_connection=self.set_active_model_connection,
                     on_response=self.set_active_model_response,
+                    source_count=len(sources),
                 )
                 self.put_event(("done", reply, sources_with_answer_audit(user_text, reply, sources)))
             except RuntimeError as exc:
@@ -14123,7 +14712,7 @@ def chat_loop(conv: dict) -> None:
             print(f"sys memory saved from this prompt ({explicit_saved})")
         print("\n" + assistant_label("Motoko "), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
-        reply = call_model(messages)
+        reply = call_model(messages, source_count=len(sources))
         conv["last_sources"] = sources_with_answer_audit(user_text, reply, sources)
         conv["messages"].append({"role": "assistant", "content": reply})
         save_conversation(conv)
@@ -15001,6 +15590,18 @@ def command_status(_args) -> None:
     print_status()
 
 
+def command_last_call(_args) -> None:
+    print_report(format_last_model_call())
+
+
+def command_context_bench(args) -> None:
+    report = run_context_bench(dry_run=not args.run, targets=args.target_tokens)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_context_bench(report))
+
+
 def command_feedback(args) -> None:
     conv = load_conversation(args.conversation)
     row = record_response_feedback(conv, args.rating, " ".join(args.note))
@@ -15166,6 +15767,15 @@ def main(argv: list[str]) -> int:
 
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
+
+    last_call = sub.add_parser("last-call", help="show content-free model-call route and timing telemetry")
+    last_call.set_defaults(func=command_last_call)
+
+    context_bench = sub.add_parser("context-bench", help="dry-run or run synthetic chat-route context benchmarks")
+    context_bench.add_argument("--run", action="store_true", help="send real content-free model requests")
+    context_bench.add_argument("--json", action="store_true", help="print JSON")
+    context_bench.add_argument("--target-tokens", type=int, action="append", help="estimated prompt-token target")
+    context_bench.set_defaults(func=command_context_bench)
 
     feedback = sub.add_parser("feedback", help="rate the last answer in a saved conversation")
     feedback.add_argument("rating", choices=["up", "down", "ok", "good", "bad"])

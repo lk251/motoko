@@ -5,6 +5,13 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added a chat context governor that estimates prompt size, keeps normal chat on
+  the Qwen3.6 Q5 route, and switches to an approved max-context Q4 route only
+  for very large chat prompts or explicit context-mode overrides.
+- Added content-free model-call telemetry plus `/last-call`,
+  `motoko last-call`, and `motoko context-bench` so route choice, context
+  pressure, timing, and estimated token rates can be inspected without storing
+  prompt or response text.
 - Added `/rename` and guarded `/delete` for conversations. Conversation delete
   removes the chat plus Motoko-owned derived artifacts that explicitly reference
   that conversation, and new topic/memory dossiers record their owner
