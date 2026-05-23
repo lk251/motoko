@@ -487,6 +487,11 @@ Current implementation progress:
   mention boosts, and base hybrid-candidate scoring. The root script still owns
   live retrieval orchestration, evidence/vector/rerank calls, and source
   packing.
+- Step 6 now also has deterministic evidence-span helpers in
+  `motoko_core.retrieval`: exact date mentions, recent dated Org sections,
+  nested dated-section pruning, mandatory date evidence spans, and query-term
+  window excerpts. These preserve the "right container, wrong span" fix as a
+  reusable retrieval primitive.
 
 ## Roadmap Candidates
 
