@@ -5,6 +5,7 @@ from __future__ import annotations
 import grp
 import os
 import pathlib
+import re
 import subprocess
 import urllib.parse
 
@@ -66,6 +67,184 @@ def model_service_selector_tokens(info: dict) -> set[str]:
     }
     tokens.update(str(route) for route in info.get("_logical_routes", []))
     return {token for token in tokens if token}
+
+
+def add_model_service_route(
+    rows: dict[str, dict],
+    info: dict,
+    *,
+    logical_route: str = "",
+    summary: dict | None = None,
+) -> None:
+    service_route = local_model_helper_route(info)
+    if not service_route:
+        return
+    endpoint_text = str(info.get("endpoint") or "")
+    if not endpoint_text.startswith("unix://") and not info.get("manager_kind"):
+        return
+    row = rows.get(service_route)
+    if row is None:
+        row = dict(info)
+        row["_logical_routes"] = []
+        row["_tasks"] = []
+        row["_kind"] = ""
+        row["_embedding_dimensions"] = None
+        rows[service_route] = row
+    if logical_route and logical_route not in row["_logical_routes"]:
+        row["_logical_routes"].append(logical_route)
+    if summary:
+        row["_kind"] = str(summary.get("kind") or row.get("_kind") or "")
+        row["_tasks"] = list(summary.get("tasks") or row.get("_tasks") or [])
+        row["_embedding_dimensions"] = summary.get("embedding_dimensions") or row.get("_embedding_dimensions")
+        row["max_parallel"] = summary.get("max_parallel") or row.get("max_parallel") or 1
+        if not row.get("model"):
+            row["model"] = summary.get("model", "")
+        if not row.get("endpoint"):
+            row["endpoint"] = summary.get("endpoint", "")
+        if not row.get("manager_kind"):
+            row["manager_kind"] = summary.get("manager_kind", "")
+        if not row.get("request_path"):
+            row["request_path"] = summary.get("request_path", "")
+        if not row.get("endpoint_paths"):
+            row["endpoint_paths"] = summary.get("endpoint_paths", [])
+
+
+def build_model_service_rows(
+    configured_routes: list[tuple[str, dict]],
+    catalog_summaries: list[tuple[str, dict]],
+    *,
+    default_request_path: str,
+) -> list[dict]:
+    rows: dict[str, dict] = {}
+    for logical_route, info in configured_routes:
+        add_model_service_route(rows, info, logical_route=logical_route)
+    for route_id, summary in catalog_summaries:
+        info = {
+            "route": route_id,
+            "catalog_route": route_id,
+            "endpoint": summary.get("endpoint", ""),
+            "model": summary.get("model", ""),
+            "request_path": summary.get("request_path") or default_request_path,
+            "endpoint_paths": summary.get("endpoint_paths", []),
+            "manager_kind": summary.get("manager_kind", ""),
+            "model_path": summary.get("model_path", ""),
+            "max_parallel": summary.get("max_parallel") or 1,
+            "description": ", ".join(summary.get("tasks", [])),
+        }
+        add_model_service_route(rows, info, summary=summary)
+    return list(rows.values())
+
+
+def resolve_model_service_route(rows: list[dict], selector: str) -> dict:
+    selector = selector.strip()
+    if not selector:
+        raise SystemExit("usage: /models [ROUTE] or /model-stop ROUTE")
+    for row in rows:
+        if selector in model_service_selector_tokens(row):
+            return row
+    normalized = re.sub(r"[^a-z0-9]+", "_", selector.lower()).strip("_")
+    matches = [
+        row
+        for row in rows
+        if any(
+            re.sub(r"[^a-z0-9]+", "_", token.lower()).strip("_").startswith(normalized)
+            for token in model_service_selector_tokens(row)
+        )
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    available = ", ".join(local_model_helper_route(row) for row in rows) or "none"
+    if matches:
+        raise SystemExit(f"ambiguous model route {selector!r}; choose one of: {available}")
+    raise SystemExit(f"unknown model route {selector!r}; choose one of: {available}")
+
+
+def format_model_service_status(info: dict, *, include_status: bool = True, status_provider=None) -> str:
+    route_name = local_model_helper_route(info)
+    lines = [f"- {route_name}: {info.get('model', '') or '(model unknown)'}"]
+    endpoint_text = str(info.get("endpoint") or "")
+    if endpoint_text:
+        lines.append(f"  endpoint: {endpoint_text}")
+    logical = ", ".join(info.get("_logical_routes", []) or [])
+    if logical:
+        lines.append(f"  logical routes: {logical}")
+    kind = str(info.get("_kind") or "")
+    tasks = ", ".join(info.get("_tasks", []) or [])
+    if kind or tasks:
+        lines.append(f"  catalog: kind={kind or '-'} tasks={tasks or '-'}")
+    if info.get("_embedding_dimensions"):
+        lines.append(f"  embedding dimensions: {info.get('_embedding_dimensions')}")
+    lines.append(f"  max parallel: {info.get('max_parallel', 1)}")
+    if info.get("manager_kind"):
+        lines.append(f"  manager: {info.get('manager_kind')}")
+    if include_status and endpoint_text.startswith("unix://") and status_provider is not None:
+        raw = status_provider(info)
+        values = parse_local_model_status(raw)
+        lines.append(f"  status source: motoko-model status {route_name}")
+        if values:
+            state = " ".join(
+                f"{key}={values[key]}"
+                for key in ("socket", "proxy", "backend")
+                if values.get(key)
+            )
+            if state:
+                lines.append(f"  state: {state}")
+            if values.get("cache"):
+                lines.append(f"  cache: {values['cache']}")
+            for key in (
+                "resident",
+                "loaded",
+                "active_requests",
+                "requests",
+                "vram_mib",
+                "gpu_memory_mib",
+                "last_exit",
+                "last_error",
+            ):
+                if values.get(key):
+                    lines.append(f"  {key}: {values[key]}")
+        elif raw.strip():
+            lines.append(f"  status: {raw.strip()[:240]}")
+    elif include_status:
+        lines.append("  status source: not a NixOS Unix-socket route")
+    return "\n".join(lines)
+
+
+def format_model_services_report(
+    rows: list[dict],
+    *,
+    current_endpoint: str,
+    status_formatter,
+) -> str:
+    if not rows:
+        return "\n".join(
+            [
+                "Model services:",
+                "No NixOS local model service routes are declared for this realm.",
+                f"Current endpoint: {current_endpoint}",
+            ]
+        )
+    header = [
+        "Model services:",
+        "status source: motoko-model status ROUTE (content-free)",
+        "control: /model-stop ROUTE uses motoko-model stop ROUTE; Motoko never calls systemctl",
+        "note: backend=active is service/process state; it does not prove full weights are resident in VRAM",
+    ]
+    return "\n".join(header) + "\n\n" + "\n\n".join(status_formatter(row) for row in rows)
+
+
+def format_model_stop_report(route_name: str, *, before: str, output: str, after: str) -> str:
+    lines = [
+        f"model stop requested: {route_name}",
+        f"control source: motoko-model stop {route_name}",
+    ]
+    if before:
+        lines.append(f"before: {before}")
+    if output.strip():
+        lines.append(f"helper: {output.strip()[:500]}")
+    if after:
+        lines.append(f"after: {after}")
+    return "\n".join(lines)
 
 
 def run_local_model_helper_process(

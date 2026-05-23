@@ -453,9 +453,14 @@ Current implementation progress:
   group membership, missing model files, helper availability, download URLs,
   and hashes. The root script keeps thin wrappers so tests and runtime
   monkeypatching still exercise the live facade.
-- The remaining step-4 work is to extract live model-service report/control
-  orchestration without weakening the NixOS-owned service boundary or leaking
-  prompt/request/response content.
+- Step 4 now also has live model-service row/report/control assembly in
+  `motoko_core.model_services`: service row merging, route selector
+  resolution, `/models` report formatting, individual service-status
+  formatting, and `/model-stop` report formatting. The root script still owns
+  live model route discovery and invokes `motoko-model`; it does not call
+  `systemctl` and does not log request or response bodies.
+- Step 4 is effectively complete. Future model-boundary changes should be
+  tactical follow-ups, not blockers for moving to corpus selection/freshness.
 
 ## Roadmap Candidates
 
