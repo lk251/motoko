@@ -15337,14 +15337,6 @@ def chat_loop(conv: dict) -> None:
             except SystemExit as exc:
                 print(exc)
             continue
-        attachment_request = context_attachment_command_request(user_text, conv)
-        if attachment_request is not None:
-            _label, func = attachment_request
-            try:
-                print_report(func())
-            except SystemExit as exc:
-                print(exc)
-            continue
         if user_text == "/compact":
             compact_conversation(conv)
             continue
