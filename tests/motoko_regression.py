@@ -1374,6 +1374,39 @@ def test_core_context_sufficiency_note_is_injectable(m):
     assert "dossier-1" not in note
 
 
+def test_core_retrieval_preview_formatting_is_injectable(m):
+    prompt = "Intro\n\nAttached documents and dossiers:\nEvidence block\n\nAvailable private context catalog:\nCatalog"
+    attached = m.extract_prompt_section_core(
+        prompt,
+        "Attached documents and dossiers",
+        ["Available private context catalog"],
+    )
+    report = m.format_retrieval_preview_core(
+        "what does plan.org say?",
+        audit={
+            "status": "pass",
+            "strong_evidence_sources": 1,
+            "context_sources": 0,
+            "total_sources": 2,
+            "source_kinds": {"chunk": 1, "context-plan": 1},
+            "warnings": ["stale source"],
+        },
+        context_plan={"kind": "context-plan"},
+        formatted_context_plan="Context plan: 10/100 chars (ok)",
+        formatted_sources="1  chunk  /tmp/plan.org",
+        attached_context=attached,
+        max_chars=100,
+    )
+
+    assert attached == "Evidence block"
+    assert "source audit: pass  strong 1  context 0  total 2" in report
+    assert "source kinds: chunk=1, context-plan=1" in report
+    assert "warning: stale source" in report
+    assert "Context plan: 10/100 chars (ok)" in report
+    assert "1  chunk  /tmp/plan.org" in report
+    assert "Evidence block" in report
+
+
 def test_named_file_query_boosts_matching_path(m):
     with isolated_state():
         index = {

@@ -204,7 +204,10 @@ from motoko_core.retrieval import (  # noqa: E402
     answer_grounding_audit_core,
     context_plan_from_lanes_core,
     context_sufficiency_note_core,
+    extract_prompt_section_core,
     format_context_plan_core,
+    format_retrieval_preview_core,
+    format_source_kind_counts_core,
     sources_with_answer_audit_core,
     token_counts,
     token_words,
@@ -11964,24 +11967,11 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
 
 
 def extract_prompt_section(prompt: str, heading: str, stop_headings: list[str]) -> str:
-    start_marker = f"{heading}:\n"
-    start = prompt.find(start_marker)
-    if start < 0:
-        return ""
-    start += len(start_marker)
-    stop = len(prompt)
-    for stop_heading in stop_headings:
-        marker = f"\n\n{stop_heading}:"
-        found = prompt.find(marker, start)
-        if found >= 0:
-            stop = min(stop, found)
-    return prompt[start:stop].strip()
+    return extract_prompt_section_core(prompt, heading, stop_headings)
 
 
 def format_source_kind_counts(source_kinds: dict) -> str:
-    if not source_kinds:
-        return "-"
-    return ", ".join(f"{kind}={count}" for kind, count in sorted(source_kinds.items()))
+    return format_source_kind_counts_core(source_kinds)
 
 
 def format_retrieval_preview(conv: dict, query: str = "", *, max_chars: int = RETRIEVAL_PREVIEW_CHARS) -> str:
@@ -11996,34 +11986,15 @@ def format_retrieval_preview(conv: dict, query: str = "", *, max_chars: int = RE
         "Attached documents and dossiers",
         ["Available private context catalog", "Context selection plan"],
     )
-    lines = [
-        f"retrieval preview: {compact_text(query, 180)}",
-        (
-            f"source audit: {audit.get('status', 'unknown')}  "
-            f"strong {audit.get('strong_evidence_sources', 0)}  "
-            f"context {audit.get('context_sources', 0)}  "
-            f"total {audit.get('total_sources', 0)}"
-        ),
-        f"source kinds: {format_source_kind_counts(audit.get('source_kinds', {}))}",
-    ]
-    if audit.get("warnings"):
-        for warning in audit.get("warnings", [])[:4]:
-            lines.append(f"warning: {warning}")
-    if context_plan:
-        lines.extend(["", format_context_plan(context_plan)])
-    lines.extend(
-        [
-            "",
-            "sources:",
-            format_sources([source for source in sources if source.get("kind") != "context-plan"][:40]),
-            "",
-            "attached context excerpt:",
-            bounded_output(attached_context or "No explicit documents, indexes, topics, or dossiers were selected.", max_chars),
-            "",
-            "diagnosis guide: if the right excerpt is absent, investigate recall/ranking/staleness with /retrieval-debug. If it is present but the answer was weak, investigate prompt/final synthesis.",
-        ]
+    return format_retrieval_preview_core(
+        query,
+        audit=audit,
+        context_plan=context_plan,
+        formatted_context_plan=format_context_plan(context_plan) if context_plan else "",
+        formatted_sources=format_sources([source for source in sources if source.get("kind") != "context-plan"][:40]),
+        attached_context=attached_context,
+        max_chars=max_chars,
     )
-    return "\n".join(lines)
 
 
 def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]:

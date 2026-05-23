@@ -322,6 +322,77 @@ def context_sufficiency_note_core(
     return f"Context sufficiency: {status}.{action}"
 
 
+def extract_prompt_section_core(prompt: str, heading: str, stop_headings: list[str]) -> str:
+    start_marker = f"{heading}:\n"
+    start = prompt.find(start_marker)
+    if start < 0:
+        return ""
+    start += len(start_marker)
+    stop = len(prompt)
+    for stop_heading in stop_headings:
+        marker = f"\n\n{stop_heading}:"
+        found = prompt.find(marker, start)
+        if found >= 0:
+            stop = min(stop, found)
+    return prompt[start:stop].strip()
+
+
+def format_source_kind_counts_core(source_kinds: dict) -> str:
+    if not source_kinds:
+        return "-"
+    return ", ".join(f"{kind}={count}" for kind, count in sorted(source_kinds.items()))
+
+
+def bounded_retrieval_preview_text(text: str, max_chars: int) -> str:
+    text = text.rstrip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + f"\n... truncated after {max_chars} characters ..."
+
+
+def format_retrieval_preview_core(
+    query: str,
+    *,
+    audit: dict,
+    context_plan: dict | None,
+    formatted_context_plan: str,
+    formatted_sources: str,
+    attached_context: str,
+    max_chars: int,
+) -> str:
+    lines = [
+        f"retrieval preview: {compact_text(query, 180)}",
+        (
+            f"source audit: {audit.get('status', 'unknown')}  "
+            f"strong {audit.get('strong_evidence_sources', 0)}  "
+            f"context {audit.get('context_sources', 0)}  "
+            f"total {audit.get('total_sources', 0)}"
+        ),
+        f"source kinds: {format_source_kind_counts_core(audit.get('source_kinds', {}))}",
+    ]
+    if audit.get("warnings"):
+        for warning in audit.get("warnings", [])[:4]:
+            lines.append(f"warning: {warning}")
+    if context_plan:
+        lines.extend(["", formatted_context_plan])
+    lines.extend(
+        [
+            "",
+            "sources:",
+            formatted_sources,
+            "",
+            "attached context excerpt:",
+            bounded_retrieval_preview_text(
+                attached_context or "No explicit documents, indexes, topics, or dossiers were selected.",
+                max_chars,
+            ),
+            "",
+            "diagnosis guide: if the right excerpt is absent, investigate recall/ranking/staleness with /retrieval-debug. If it is present but the answer was weak, investigate prompt/final synthesis.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def retrieval_score_parts(
     query: str,
     query_counts: collections.Counter,

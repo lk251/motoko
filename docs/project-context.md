@@ -532,6 +532,10 @@ Current implementation progress:
   with live ranked topics, dossiers, indexes, and attached-item ids supplied by
   the root script. This keeps the "answer now versus suggest /study" note
   importable without moving persistence or index discovery into core retrieval.
+- Step 6 now also has pure `/retrieval-preview` report assembly in
+  `motoko_core.retrieval`. The root script still builds live prompts, sources,
+  and formatted source lists, but prompt-section extraction, source-kind counts,
+  truncation, and diagnostic report layout are importable and tested.
 - Step 7 has started with pure conversation-record helpers in
   `motoko_core.conversations`: new conversation record construction,
   empty-chat detection, recall text generation, and bounded model transcript
