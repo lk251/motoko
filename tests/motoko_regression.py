@@ -4688,6 +4688,22 @@ def test_repo_command_request_attaches_context(m):
             m.repo_report = old_repo_report
 
 
+def test_conversation_mutation_command_request_renames_chat(m):
+    with isolated_state():
+        conv = m.new_conversation("Old title")
+        conv["title_generated"] = True
+        request = m.conversation_mutation_command_request("/rename New title", conv)
+        assert request is not None
+        label, run = request
+        assert label == "/rename"
+        assert run() == "title: New title"
+        assert conv["title"] == "New title"
+        assert conv["title_kind"] == "manual"
+        assert "title_generated" not in conv
+        saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved["title"] == "New title"
+
+
 def test_cwd_indexing_ignores_light_study_done(m):
     progress = {
         "status": "running",

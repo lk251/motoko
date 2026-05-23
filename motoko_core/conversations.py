@@ -43,6 +43,14 @@ def conversation_has_chat_content(conv: dict) -> bool:
     return False
 
 
+def rename_conversation_record(conv: dict, title: str) -> str:
+    next_title = str(title or "").strip() or str(conv.get("title", "") or "Untitled")
+    conv["title"] = next_title
+    conv["title_kind"] = "manual"
+    conv.pop("title_generated", None)
+    return next_title
+
+
 def save_conversation_record(conv: dict, path: pathlib.Path, *, updated: str) -> None:
     conv["updated"] = updated
     atomic_write(path, json.dumps(conv, ensure_ascii=False, indent=2) + "\n")

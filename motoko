@@ -245,6 +245,7 @@ from motoko_core.conversations import (  # noqa: E402
     json_references_conversation,
     list_conversation_records,
     make_conversation_record,
+    rename_conversation_record,
     rewrite_jsonl_without_conversation,
     save_conversation_record,
 )
@@ -13284,6 +13285,21 @@ def context_attachment_command_request(text: str, conv: dict):
     return None
 
 
+def conversation_mutation_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary not in {"/title", "/rename"}:
+        return None
+
+    def run_rename() -> str:
+        title = rename_conversation_record(conv, body)
+        save_conversation(conv)
+        return f"title: {title}"
+
+    return primary, run_rename
+
+
 def shared_command_request(text: str, conv: dict):
     builders = [
         lambda: report_command_request(text, conv),
@@ -13297,6 +13313,7 @@ def shared_command_request(text: str, conv: dict):
         lambda: memory_mutation_command_request(text, conv),
         lambda: context_attachment_command_request(text, conv),
         lambda: repo_command_request(text, conv),
+        lambda: conversation_mutation_command_request(text, conv),
     ]
     for build in builders:
         request = build()
@@ -14220,13 +14237,6 @@ class MotokoTui:
             elif text == "/study" or text.startswith("/study "):
                 body = text[len("/study") :].strip()
                 self.run_blocking_command("Studying context...", lambda: self.study_from_body(body))
-            elif text.startswith("/title ") or text.startswith("/rename "):
-                prefix = "/rename " if text.startswith("/rename ") else "/title "
-                self.conv["title"] = text[len(prefix) :].strip() or self.conv["title"]
-                self.conv["title_kind"] = "manual"
-                self.conv.pop("title_generated", None)
-                save_conversation(self.conv)
-                self.append("system", f"title: {self.conv['title']}")
             elif text == "/delete" or text.startswith("/delete "):
                 if self.generating or self.maintaining or self.study_running:
                     self.append("system", "finish or stop active work before deleting this conversation")
@@ -15270,14 +15280,6 @@ def chat_loop(conv: dict) -> None:
             selector = user_text[len("/resume") :].strip() or None
             conv = load_conversation(selector)
             print(f"{assistant_label('Motoko')} {style('conversation:', 'turquoise', 'bold')} {style(conv['title'], 'turquoise')} [{style(conv['id'], 'yellow')}]")
-            continue
-        if user_text.startswith("/title ") or user_text.startswith("/rename "):
-            prefix = "/rename " if user_text.startswith("/rename ") else "/title "
-            conv["title"] = user_text[len(prefix) :].strip() or conv["title"]
-            conv["title_kind"] = "manual"
-            conv.pop("title_generated", None)
-            save_conversation(conv)
-            print(f"title: {conv['title']}")
             continue
         if user_text == "/delete" or user_text.startswith("/delete "):
             answer = user_text[len("/delete") :].strip().lower()

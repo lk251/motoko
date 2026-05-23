@@ -634,6 +634,9 @@ Current implementation progress:
   command-request path. Repo reports still attach bounded read-only context to
   the current conversation, but TUI and line mode no longer duplicate the
   parsing, saving, and report construction logic.
+- Step 9 now also routes `/title` and `/rename` through a shared conversation
+  mutation helper backed by `motoko_core.conversations`, so manual title state
+  is updated in one place across TUI and line mode.
 
 ## Roadmap Candidates
 
