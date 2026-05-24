@@ -315,6 +315,42 @@ def save_skill(
     return load_skill(root, name)
 
 
+def upgrade_skill_files(root: pathlib.Path, *, writer) -> dict:
+    report = {
+        "schema": "motoko-skill-upgrade-report-v1",
+        "checked": 0,
+        "upgraded": 0,
+        "errors": [],
+        "paths": [],
+    }
+    for path in iter_skill_files(root):
+        report["checked"] += 1
+        try:
+            original = path.read_text(encoding="utf-8")
+            row = parse_skill_markdown(original, path=path)
+            canonical = format_skill_markdown(
+                name=row.get("name", ""),
+                description=row.get("description", ""),
+                body=row.get("body", ""),
+                kind=row.get("kind", DEFAULT_SKILL_KIND),
+                handler=row.get("handler", DEFAULT_SKILL_HANDLER),
+                allowed_effects=row.get("allowed_effects", list(DEFAULT_SKILL_EFFECTS)),
+                triggers=row.get("triggers", []),
+                support_files=row.get("support_files", []),
+                security=row.get("security", "prompt-only learned skill; no script execution"),
+                source=row.get("source", "manual"),
+                created_at=row.get("created_at", ""),
+                updated_at=row.get("updated_at", ""),
+            )
+            if canonical != original:
+                writer(path, canonical)
+                report["upgraded"] += 1
+                report["paths"].append(str(path))
+        except (OSError, SystemExit) as exc:
+            report["errors"].append(f"{path}: {exc}")
+    return report
+
+
 def delete_skill(root: pathlib.Path, name: str) -> dict:
     row = load_skill(root, name)
     if row.get("builtin"):

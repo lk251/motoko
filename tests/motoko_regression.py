@@ -304,6 +304,39 @@ def test_manual_skill_review_and_suggestion_detail(m):
         assert "motoko skill accept" in detail
 
 
+def test_skill_upgrade_rewrites_legacy_skill_files(m):
+    with isolated_state():
+        path = m.skills_dir() / "legacy-debug" / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join(
+                [
+                    "---",
+                    "schema: motoko-skill-v1",
+                    "name: legacy-debug",
+                    "description: Legacy debugging skill",
+                    "---",
+                    "",
+                    "Check sources before changing the prompt.",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        report = m.upgrade_skills()
+        assert report["checked"] == 1
+        assert report["upgraded"] == 1
+        upgraded = path.read_text(encoding="utf-8")
+        assert "schema: motoko-skill-v2" in upgraded
+        assert "handler: prompt_only" in upgraded
+        assert "allowed_effects: prompt_context" in upgraded
+
+        second = m.upgrade_skills()
+        assert second["checked"] == 1
+        assert second["upgraded"] == 0
+
+
 def test_interrupted_maintenance_resume(m):
     with isolated_state():
         conv = m.new_conversation("Resume")
@@ -6156,6 +6189,7 @@ def main() -> int:
         test_skill_registry_downgrades_unknown_handlers_and_effects,
         test_auto_maintenance_suggests_skill_without_saving_it,
         test_manual_skill_review_and_suggestion_detail,
+        test_skill_upgrade_rewrites_legacy_skill_files,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

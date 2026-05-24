@@ -191,6 +191,10 @@ Current UI direction:
 - Skill handlers and effects must pass through a code-owned allowlist. Unknown
   model-suggested handlers degrade to prompt-only guidance rather than gaining
   retrieval, filesystem, shell, or other behavioral power.
+- Skill schema changes should have deterministic migrations. `motoko skill
+  upgrade` and the cheap maintenance pass rewrite old learned `SKILL.md` files
+  into the current schema instead of relying on chat memory or one-off manual
+  repair.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.

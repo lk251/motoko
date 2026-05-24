@@ -501,6 +501,7 @@ motoko skill learn NAME --description "short description" --body "procedure to f
 motoko skill learn NAME --description "short description" --file SKILL.md --replace
 motoko skill delete NAME --yes
 motoko skill review [CONVERSATION_ID]
+motoko skill upgrade
 motoko skill suggestions
 motoko skill suggestion SUGGESTION_ID
 motoko skill accept SUGGESTION_ID
@@ -539,6 +540,11 @@ Motoko does not yet execute arbitrary skill scripts. Future support for
 `references/`, `templates/`, and `scripts/` should keep script execution
 constrained, stdlib-first, realm-local, timeout-bounded, and visible in
 `/sources`.
+
+Skill schema changes include a deterministic upgrade path. Run
+`motoko skill upgrade` to rewrite learned `SKILL.md` files to the current
+schema; after-answer maintenance also runs this cheap upgrade pass so old
+realm-local skills converge without one-off manual repair.
 
 After-answer maintenance may also suggest skill candidates when a conversation
 contains repeatable procedural knowledge: user corrections, workflow changes,

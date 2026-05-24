@@ -211,6 +211,7 @@ from motoko_core.skills import (  # noqa: E402
     render_skills_with_sources as core_render_skills_with_sources,
     save_skill as core_save_skill,
     skill_slug,
+    upgrade_skill_files as core_upgrade_skill_files,
 )
 from motoko_core.retrieval import (  # noqa: E402
     add_hybrid_candidate,
@@ -4190,6 +4191,35 @@ def learn_skill_text(
 def delete_skill_text(name: str) -> str:
     row = core_delete_skill(skills_dir(), name)
     return f"skill deleted: {row.get('slug', '')}"
+
+
+def upgrade_skills() -> dict:
+    return core_upgrade_skill_files(skills_dir(), writer=atomic_write)
+
+
+def format_skill_upgrade_report(report: dict) -> str:
+    lines = [
+        "skill upgrade:",
+        f"checked: {report.get('checked', 0)}",
+        f"upgraded: {report.get('upgraded', 0)}",
+    ]
+    paths = report.get("paths", [])
+    if paths:
+        lines.append("paths:")
+        lines.extend(f"- {path}" for path in paths[:20])
+        if len(paths) > 20:
+            lines.append(f"- ... {len(paths) - 20} more")
+    errors = report.get("errors", [])
+    if errors:
+        lines.append("errors:")
+        lines.extend(f"- {error}" for error in errors[:20])
+        if len(errors) > 20:
+            lines.append(f"- ... {len(errors) - 20} more")
+    return "\n".join(lines)
+
+
+def upgrade_skills_text() -> str:
+    return format_skill_upgrade_report(upgrade_skills())
 
 
 def read_skill_suggestion_state() -> dict:
@@ -12496,6 +12526,7 @@ HELP_SECTIONS = [
             ("/skill suggestions", "list pending skill suggestions"),
             ("/skill suggestion ID", "show a pending skill suggestion"),
             ("/skill review", "review this chat for reusable skill suggestions"),
+            ("/skill upgrade", "deterministically upgrade learned skill files"),
             ("/skill accept ID", "accept a pending skill suggestion"),
             ("/skill reject ID", "reject a pending skill suggestion"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
@@ -12559,6 +12590,7 @@ HELP_SECTIONS = [
             ("motoko skill suggestions", "show pending skill suggestions"),
             ("motoko skill suggestion ID", "show a skill suggestion"),
             ("motoko skill review [ID]", "review a conversation for reusable skill suggestions"),
+            ("motoko skill upgrade", "deterministically upgrade learned skill files"),
             ("motoko skill accept ID", "accept a pending skill suggestion"),
             ("motoko skill reject ID", "reject a pending skill suggestion"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
@@ -13138,6 +13170,8 @@ def skill_mutation_command_request(text: str, conv: dict):
         return "/skill reject", lambda: reject_skill_suggestion_text(subbody)
     if subcommand == "review":
         return "/skill review", lambda: review_skill_suggestions_text(conv)
+    if subcommand == "upgrade":
+        return "/skill upgrade", upgrade_skills_text
     return None
 
 
@@ -15711,6 +15745,12 @@ def auto_maintain_conversation(
     set_phase("memory: checking")
     messages = conv.get("messages", [])
     message_count = len(messages)
+    set_phase("skills: upgrading")
+    skill_upgrade_report = upgrade_skills()
+    if skill_upgrade_report.get("upgraded"):
+        notes.append(f"upgraded {skill_upgrade_report.get('upgraded')} skill file(s)")
+    if skill_upgrade_report.get("errors"):
+        notes.append(f"skill upgrade errors: {len(skill_upgrade_report.get('errors', []))}")
     if should_generate_conversation_title(conv):
         set_phase("title: naming")
         try:
@@ -16339,6 +16379,8 @@ def command_skill(args) -> None:
     elif args.skill_command == "review":
         conv = load_conversation(args.conversation)
         print_report(review_skill_suggestions_text(conv))
+    elif args.skill_command == "upgrade":
+        print_report(upgrade_skills_text())
     elif args.skill_command == "accept":
         print(accept_skill_suggestion_text(args.id))
     elif args.skill_command == "reject":
@@ -16871,6 +16913,8 @@ def main(argv: list[str]) -> int:
     skill_review = skill_sub.add_parser("review", help="review a conversation for reusable skill suggestions")
     skill_review.add_argument("conversation", nargs="?", help="conversation selector; prompts if omitted in a TTY")
     skill_review.set_defaults(func=command_skill)
+    skill_upgrade = skill_sub.add_parser("upgrade", help="deterministically upgrade skill files to the current schema")
+    skill_upgrade.set_defaults(func=command_skill)
     skill_accept = skill_sub.add_parser("accept", help="accept a pending skill suggestion")
     skill_accept.add_argument("id")
     skill_accept.set_defaults(func=command_skill)

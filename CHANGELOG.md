@@ -17,6 +17,9 @@ not the easiest place to review what changed after a long work session.
 - Added a code-owned skill handler/effect registry. Unsupported suggested
   handlers degrade to prompt-only skills, which preserves the planner boundary
   before any future script or tool work.
+- Added deterministic skill schema upgrades through `motoko skill upgrade` and
+  the cheap after-answer maintenance lane, so old learned `SKILL.md` files can
+  converge to the current schema.
 - Converted the built-in `org-temporal-retrieval` skill into a real retrieval
   skill that declares `builtin:org_temporal_latest_entries`; `/sources` now
   shows the activated skill plan and handler when source-scoped temporal
