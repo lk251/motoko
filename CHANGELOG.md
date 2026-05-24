@@ -9,6 +9,9 @@ not the easiest place to review what changed after a long work session.
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without
   storing reasoning text in conversations or content-free telemetry.
+- Documented the remaining retrieval/lifecycle refactor follow-ups and added
+  an explicit design gate for future skill-script execution, tool running, and
+  user-approved goal loops.
 - Added an internal, review-first `skill_manage` action layer for skill
   suggestions. Motoko can now propose creating a skill, patching an existing
   `SKILL.md`, or writing/removing confined support files under `references/`,

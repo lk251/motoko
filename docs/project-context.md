@@ -1135,6 +1135,24 @@ Completion criteria for this next stretch:
 - All changes remain stdlib-only, realm-local, and compatible with the stable
   `motoko` command.
 
+Remaining follow-up items from this stretch:
+
+- Finish moving context/source construction out of the root facade where it
+  still owns final prompt wording, non-index lane excerpt choices, and some
+  `/sources` source-record assembly.
+- Reduce retrieval preview/debug/vector reports into thin renderers over one
+  richer retrieval result shape, so diagnostics, chat context, and `/sources`
+  cannot drift into parallel interpretations of the same query.
+- Add broader source-level lifecycle apply support after rebuilds materialize
+  replacement state: vectors, evidence stores, dossiers, memories, feedback
+  fixtures, profiles, and conversation-derived artifacts should have one clear
+  cleanup/rebuild path for changed, deleted, ignored, or reprocessed source
+  files.
+- Add finer cooperative cancellation checkpoints for foreground study, index,
+  vector, and dossier work. Foreground work is now tracked by the job
+  supervisor, but long-running functions still need narrower pause/stop
+  boundaries before cancellation can feel as responsive as chat answering.
+
 ## Roadmap Candidates
 
 The following path looks attractive, but it is not mandatory and should remain
@@ -1250,6 +1268,62 @@ that was actually in play. The local Motoko review heuristic is whether the
 action would save tokens, reduce errors, improve reliability, or encode
 project-specific craft; do not present that sentence as an upstream Hermes
 quote.
+
+## Agentic Capability Design Gate
+
+Motoko should eventually support tightly scoped tool and skill-script
+execution, but this is a reviewed architecture change, not a background
+refactor. The goal is to gain the useful parts of agent harnesses such as
+Hermes Agent and modern Codex-style goal loops while keeping Motoko smaller,
+stricter, realm-local, dependency-light, and inspectable.
+
+Before enabling script execution or a general tool runner, review and document:
+
+- Authority model: which effects exist, which are prompt-only, which are
+  built-in handlers, which are script-backed, and which require explicit user
+  confirmation every time.
+- Skill package format: script assets under `scripts/` need metadata declaring
+  interpreter, allowed arguments, allowed effects, input/output schemas, source
+  fingerprint, provenance, and whether the script is executable or inert text.
+- Planner boundary: the model may propose or select actions, but execution must
+  go through typed Motoko action records validated by code. No free-form shell
+  command should be executed directly from model text.
+- Filesystem and realm boundaries: scripts must stay inside the current user's
+  Motoko realm, respect document allowlists and `.motokoignore`, avoid
+  `/home/personal` from `mares`, avoid copied cross-account state, and never
+  get sudo or system-service authority.
+- Environment and sandboxing: strip secrets from environment variables, set a
+  controlled working directory, bound runtime and output size, decide whether
+  network is forbidden by default, and prefer NixOS-declared wrappers if OS
+  sandboxing becomes necessary.
+- User experience: provide dry-run/preview, concise explanation of the planned
+  effect, confirmation for mutating actions, visible progress, `/stop` and
+  pause behavior, and an inspectable result in `/sources` or a tool ledger.
+- Observability and privacy: job status, telemetry, and admin-visible service
+  logs must remain content-free. Prompts, retrieved excerpts, filenames,
+  summaries, script inputs/outputs, and tool results stay in the user's Motoko
+  state only.
+- Provenance and artifact lifecycle: every tool-produced artifact needs schema,
+  builder, skill/tool id, input hashes, source spans where applicable,
+  created-at, quality status, and a migration or source-reprocess path when
+  schemas change.
+- Evaluation gate: add synthetic fixtures and private feedback-derived evals
+  before a runner affects production behavior. Evals should cover refusal of
+  unsafe actions, argument validation, output parsing, interruption, stale
+  artifact handling, and source-grounding quality.
+- NixOS boundary: if a tool requires system packages, sandboxes, helper users,
+  service control, model files, or network policy, NixOS declares that surface;
+  Motoko consumes approved interfaces and does not call `sudo` or `systemctl`.
+
+Goal loops should be added after the planner/handler/tool boundary is solid.
+The intended shape is a durable, user-approved loop record with objective,
+scope, allowed skills/tools, context sources, budgets, stop conditions,
+checkpoint ledger, and final audit. A loop should run explicit phases: plan,
+retrieve, act through approved handlers/tools, observe, reflect/audit, persist
+artifacts or feedback, and either continue or stop. Loops must be pauseable,
+resumable, visible in job status, and conservative by default: read-only loops
+first, then user-confirmed local mutations, and only later any broader
+automation after separate review.
 
 ## NixOS-Facing Model Boundary
 
