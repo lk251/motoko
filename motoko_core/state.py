@@ -96,6 +96,11 @@ def maintenance_path() -> pathlib.Path:
     return root / "maintenance.json"
 
 
+def memory_proposal_queue_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "memory-proposal-queue.jsonl"
+
+
 def profile_path() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return root / "profile.json"

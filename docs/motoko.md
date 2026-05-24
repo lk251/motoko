@@ -898,6 +898,11 @@ visible immediately after `/study`.
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to
 herself and saves them automatically with provenance `auto-model-proposed`.
+When a conversation reaches a memory-proposal interval, Motoko first writes a
+realm-local durable queue row under her own state and only clears that row after
+the proposal pass finishes. If Motoko exits, loses power, or the local worker is
+not ready, the queued proposal is retried by later maintenance instead of being
+forgotten.
 For model compatibility, memory proposal sends recent turns as a quoted
 conversation transcript inside a user request instead of replaying raw
 assistant turns as chat history; this avoids assistant-prefill behavior on

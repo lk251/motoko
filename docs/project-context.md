@@ -208,6 +208,12 @@ Current UI direction:
   upgrade` and the cheap maintenance pass rewrite old learned `SKILL.md` files
   into the current schema instead of relying on chat memory or one-off manual
   repair.
+- Automatic memory proposal should be durable, not best-effort. Once a
+  conversation reaches a proposal interval, Motoko queues a realm-local
+  memory-proposal job and clears it only after the proposal pass succeeds or the
+  source conversation is deleted. Cold workers, shutdowns, and power loss
+  should leave retryable queue state rather than losing the opportunity to form
+  useful memories.
 - Skill planning should be inspectable without model calls. `/skill plan QUERY`
   should show prompt skill selection and deterministic handler activation
   before any future scripts or tools can affect behavior.

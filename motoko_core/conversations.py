@@ -135,6 +135,7 @@ def format_conversation_delete_report(report: dict) -> str:
     lines = [
         f"deleted conversation: {report.get('conversation_id', '')}",
         f"memories deleted: {report.get('memories_deleted', 0)}",
+        f"memory proposal jobs deleted: {report.get('memory_proposals_deleted', 0)}",
         f"feedback rows deleted: {report.get('feedback_deleted', 0)}",
         f"study job events deleted: {report.get('study_job_events_deleted', 0)}",
         f"topic dossiers deleted: {report.get('topics_deleted', 0)}",

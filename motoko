@@ -443,6 +443,7 @@ from motoko_core.state import (  # noqa: E402
     last_model_call_path,
     local_models_path,
     maintenance_path,
+    memory_proposal_queue_path,
     memories_path,
     model_cache_dir,
     model_cache_path,
@@ -526,6 +527,7 @@ MEMORY_DOSSIER_SCHEMA_VERSION = "memory-dossier-v1"
 PROFILE_DOSSIER_SCHEMA_VERSION = "profile-dossier-v1"
 CONVERSATION_SUMMARY_SCHEMA_VERSION = "conversation-summary-v1"
 MEMORY_PROPOSAL_SCHEMA_VERSION = "memory-proposal-v1"
+MEMORY_PROPOSAL_QUEUE_SCHEMA_VERSION = "memory-proposal-queue-v1"
 SKILL_SUGGESTION_SCHEMA_VERSION = "skill-suggestion-v2"
 TITLE_SCHEMA_VERSION = "title-v1"
 MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
@@ -735,6 +737,7 @@ RECENT_CONVERSATION_RELEVANCE_LANE = 4
 AUTO_MEMORY_MIN_MESSAGES = 4
 AUTO_MEMORY_INTERVAL_MESSAGES = 4
 AUTO_MEMORY_MAX_PROPOSALS = 5
+MEMORY_PROPOSAL_QUEUE_DRAIN_LIMIT = 2
 MODEL_TIMEOUT_SECONDS = 600
 INDEX_MODEL_TIMEOUT_SECONDS = 1800
 MAINTENANCE_MODEL_TIMEOUT_SECONDS = 90
@@ -1989,6 +1992,7 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         "conversation_id": conversation_id,
         "conversation_deleted": False,
         "memories_deleted": 0,
+        "memory_proposals_deleted": 0,
         "feedback_deleted": 0,
         "study_job_events_deleted": 0,
         "topics_deleted": 0,
@@ -2006,6 +2010,10 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         write_memory_rows(kept_memories)
 
     report["feedback_deleted"] = rewrite_jsonl_without_conversation(response_feedback_path(), conversation_id)
+    report["memory_proposals_deleted"] = rewrite_jsonl_without_conversation(
+        memory_proposal_queue_path(),
+        conversation_id,
+    )
     report["study_job_events_deleted"] = rewrite_jsonl_without_conversation(study_jobs_path(), conversation_id)
     report["topics_deleted"] = delete_json_artifacts_referencing_conversation(topics_dir(), conversation_id)
     report["dossiers_deleted"] = delete_json_artifacts_referencing_conversation(dossiers_dir(), conversation_id)
@@ -14657,6 +14665,167 @@ def memory_proposal_helper_timeout(timeout: float) -> float:
     return max(float(timeout) + 5, float(effective) + 15)
 
 
+def read_memory_proposal_queue() -> list[dict]:
+    rows = []
+    for row in read_jsonl(memory_proposal_queue_path()):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("artifact_schema", "")) not in {"", MEMORY_PROPOSAL_QUEUE_SCHEMA_VERSION}:
+            continue
+        rows.append(dict(row))
+    return rows
+
+
+def write_memory_proposal_queue(rows: list[dict]) -> None:
+    active = [row for row in rows if row.get("status") not in {"completed", "skipped"}]
+    inactive = [row for row in rows if row.get("status") in {"completed", "skipped"}][-50:]
+    kept = active + inactive
+    path = memory_proposal_queue_path()
+    if not kept:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
+    atomic_write(path, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in kept))
+
+
+def memory_proposal_queue_retry_statuses() -> set[str]:
+    return {"pending", "running", "failed"}
+
+
+def queued_memory_proposal_count() -> int:
+    return sum(
+        1
+        for row in read_memory_proposal_queue()
+        if str(row.get("status", "pending")) in memory_proposal_queue_retry_statuses()
+    )
+
+
+def load_conversation_exact(conversation_id: str) -> dict | None:
+    value = safe_load_json(conversation_path(conversation_id))
+    return value if isinstance(value, dict) else None
+
+
+def enqueue_memory_proposal(conv: dict, *, message_count: int, reason: str = "auto-maintenance") -> dict:
+    conversation_id = str(conv.get("id", "")).strip()
+    if not conversation_id:
+        raise ValueError("conversation has no id")
+    rows = read_memory_proposal_queue()
+    for row in rows:
+        if (
+            str(row.get("conversation_id", "")) == conversation_id
+            and str(row.get("status", "pending")) in memory_proposal_queue_retry_statuses()
+        ):
+            row["due_message_count"] = max(int(row.get("due_message_count", 0) or 0), int(message_count))
+            row["conversation_title"] = conv.get("title", "Untitled")
+            row["status"] = "pending"
+            row["updated"] = now()
+            row.setdefault("reasons", [])
+            if reason not in row["reasons"]:
+                row["reasons"].append(reason)
+            write_memory_proposal_queue(rows)
+            return row
+    row = {
+        "artifact_schema": MEMORY_PROPOSAL_QUEUE_SCHEMA_VERSION,
+        "id": "memprop-" + uuid.uuid4().hex[:10],
+        "status": "pending",
+        "created": now(),
+        "updated": now(),
+        "conversation_id": conversation_id,
+        "conversation_title": conv.get("title", "Untitled"),
+        "due_message_count": int(message_count),
+        "attempts": 0,
+        "reasons": [reason],
+    }
+    rows.append(row)
+    write_memory_proposal_queue(rows)
+    return row
+
+
+def save_memory_proposals_from_conversation(conv: dict, proposals: list[str]) -> int:
+    saved = 0
+    for text in proposals or []:
+        add_memory(
+            text,
+            source="auto-model-proposed",
+            conversation_id=conv["id"],
+            derived_from="auto-memory",
+        )
+        saved += 1
+    return saved
+
+
+def run_queued_memory_proposals(
+    *,
+    current_conv: dict | None = None,
+    limit: int = MEMORY_PROPOSAL_QUEUE_DRAIN_LIMIT,
+    phase_callback=None,
+) -> list[str]:
+    rows = read_memory_proposal_queue()
+    if not rows:
+        return []
+    notes = []
+    processed = 0
+    retry_statuses = memory_proposal_queue_retry_statuses()
+    for row in rows:
+        if processed >= limit:
+            break
+        if str(row.get("status", "pending")) not in retry_statuses:
+            continue
+        conversation_id = str(row.get("conversation_id", ""))
+        if phase_callback is not None:
+            phase_callback("memory: proposing")
+        row["status"] = "running"
+        row["attempts"] = int(row.get("attempts", 0) or 0) + 1
+        row["updated"] = now()
+        write_memory_proposal_queue(rows)
+        if current_conv is not None and str(current_conv.get("id", "")) == conversation_id:
+            conv = current_conv
+        else:
+            conv = load_conversation_exact(conversation_id)
+        if conv is None:
+            row["status"] = "skipped"
+            row["updated"] = now()
+            row["last_error"] = "conversation no longer exists"
+            notes.append("dropped queued memory proposal for deleted conversation")
+            write_memory_proposal_queue(rows)
+            processed += 1
+            continue
+        try:
+            proposals = propose_memories_bounded(
+                conv,
+                timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+            )
+        except (Exception, SystemExit) as exc:
+            row["status"] = "pending"
+            row["updated"] = now()
+            row["last_error"] = f"{type(exc).__name__}: {exc}"
+            notes.append("memory proposal queued for retry")
+            write_memory_proposal_queue(rows)
+            processed += 1
+            continue
+        if phase_callback is not None:
+            phase_callback("memory: saving")
+        saved = save_memory_proposals_from_conversation(conv, proposals)
+        conv["last_auto_memory_message_count"] = max(
+            int(conv.get("last_auto_memory_message_count", 0) or 0),
+            int(row.get("due_message_count", 0) or 0),
+        )
+        save_conversation(conv)
+        row["status"] = "completed"
+        row["updated"] = now()
+        row["completed"] = now()
+        row["saved_count"] = saved
+        row.pop("last_error", None)
+        notes.append(
+            f"saved {saved} queued durable memor{'y' if saved == 1 else 'ies'}"
+            if saved
+            else "queued memory proposal completed with no durable memory"
+        )
+        write_memory_proposal_queue(rows)
+        processed += 1
+    return notes
+
+
 def propose_memories_subprocess(conv: dict, *, timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS) -> list[str]:
     payload = json.dumps({"conversation": conv, "timeout": timeout}, ensure_ascii=False)
     env = dict(os.environ)
@@ -15356,6 +15525,7 @@ def format_status(conv: dict | None = None) -> str:
     conversations = list_conversations()
     profile = load_profile_dossier()
     maintenance = read_maintenance_state()
+    queued_memory = queued_memory_proposal_count()
     study_state = read_study_state()
     study_jobs = read_study_jobs(limit=1)
     index_jobs = active_index_progress()
@@ -15409,6 +15579,7 @@ def format_status(conv: dict | None = None) -> str:
         f"skills: {len(skills)}",
         f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",
         f"maintenance: {maintenance.get('phase', maintenance.get('status', 'unknown')) if maintenance else 'idle'}",
+        f"queued memory proposals: {queued_memory}",
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
         f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
         f"active index jobs: {len(index_jobs)}",
@@ -16501,6 +16672,9 @@ class MotokoTui:
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
             self.append("system", resume_note)
+        elif queued_memory_proposal_count():
+            self.resume_maintenance_on_start = True
+            self.append("system", f"resuming {queued_memory_proposal_count()} queued memory proposal(s)")
         self.maybe_offer_cwd_learning()
         if self.cwd_index_offer is None:
             note = unfinished_work_notice()
@@ -17977,6 +18151,9 @@ def chat_loop(conv: dict) -> None:
     resume_maintenance, resume_note = resume_interrupted_maintenance(conv)
     if resume_note:
         print(f"sys {resume_note}")
+    elif queued_memory_proposal_count():
+        resume_maintenance = True
+        print(f"sys resuming {queued_memory_proposal_count()} queued memory proposal(s)")
     if resume_maintenance:
         print("sys resuming memory maintenance")
         state = begin_maintenance_state(conv, resumed=True)
@@ -18577,24 +18754,17 @@ def auto_maintain_conversation(
         message_count >= AUTO_MEMORY_MIN_MESSAGES
         and message_count - last_memory >= AUTO_MEMORY_INTERVAL_MESSAGES
     ):
-        set_phase("memory: proposing")
-        saved = 0
-        proposals = propose_memories_bounded(
-            conv,
-            timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
-        )
-        for text in proposals or []:
-            set_phase("memory: saving")
-            add_memory(
-                text,
-                source="auto-model-proposed",
-                conversation_id=conv["id"],
-                derived_from="auto-memory",
+        set_phase("memory: queueing")
+        enqueue_memory_proposal(conv, message_count=message_count)
+
+    if queued_memory_proposal_count():
+        notes.extend(
+            run_queued_memory_proposals(
+                current_conv=conv,
+                limit=MEMORY_PROPOSAL_QUEUE_DRAIN_LIMIT,
+                phase_callback=set_phase,
             )
-            saved += 1
-        conv["last_auto_memory_message_count"] = message_count
-        if saved:
-            notes.append(f"saved {saved} durable memor{'y' if saved == 1 else 'ies'}")
+        )
 
     last_skill = int(conv.get("last_auto_skill_message_count", 0) or 0)
     skill_reasons = skill_review_triggers(conv, message_count=message_count, last_skill=last_skill)

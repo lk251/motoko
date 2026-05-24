@@ -114,7 +114,7 @@ def test_maintenance_state_and_phases(m):
             assert "memory: proposing" in phases
             assert "memory: saving" in phases
             assert phases[-1] == "memory: done"
-            assert notes == ["saved 1 durable memory"]
+            assert notes == ["saved 1 queued durable memory"]
             assert m.read_maintenance_state()["phase"] == "memory: done"
             m.clear_maintenance_state(state["job_id"])
             assert m.read_maintenance_state() is None
@@ -164,6 +164,86 @@ def test_memory_proposal_helper_timeout_respects_socket_activation(m):
             assert m.memory_proposal_helper_timeout(90) == 105
         finally:
             m.model_route = old_model_route
+
+
+def test_memory_proposal_queue_retries_until_saved(m):
+    with isolated_state():
+        conv = m.new_conversation("Queued memory")
+        conv["id"] = "queued-memory"
+        conv["title_kind"] = "manual"
+        conv["title_generated"] = m.now()
+        conv["messages"] = [
+            {"role": "user", "content": "I prefer careful local memory."},
+            {"role": "assistant", "content": "Understood."},
+            {"role": "user", "content": "Motoko should retry memory proposals."},
+            {"role": "assistant", "content": "I will keep the queue durable."},
+        ]
+        conv["last_auto_compact_message_count"] = len(conv["messages"])
+        write_conversation(m, conv)
+
+        calls = {"count": 0}
+        old_propose = m.propose_memories_bounded
+        try:
+            def fake_propose(_conv, **_kwargs):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise TimeoutError("cold worker")
+                return ["Javier wants Motoko memory proposals to retry durably."]
+
+            m.propose_memories_bounded = fake_propose
+            first_notes = m.auto_maintain_conversation(conv)
+            assert "memory proposal queued for retry" in first_notes
+            assert m.queued_memory_proposal_count() == 1
+            assert int(conv.get("last_auto_memory_message_count", 0) or 0) == 0
+
+            second_notes = m.auto_maintain_conversation(conv)
+            assert any("saved 1 queued durable memory" in note for note in second_notes)
+            assert m.queued_memory_proposal_count() == 0
+            assert int(conv.get("last_auto_memory_message_count", 0) or 0) == len(conv["messages"])
+            assert any(
+                row.get("text") == "Javier wants Motoko memory proposals to retry durably."
+                for row in m.read_memory_rows()
+            )
+        finally:
+            m.propose_memories_bounded = old_propose
+
+
+def test_running_memory_proposal_queue_recovers_after_restart(m):
+    with isolated_state():
+        conv = m.new_conversation("Running memory")
+        conv["id"] = "running-memory"
+        conv["messages"] = [
+            {"role": "user", "content": "Recover running memory jobs."},
+            {"role": "assistant", "content": "Yes."},
+            {"role": "user", "content": "Treat running rows as retryable."},
+            {"role": "assistant", "content": "Understood."},
+        ]
+        write_conversation(m, conv)
+        m.enqueue_memory_proposal(conv, message_count=len(conv["messages"]))
+        rows = m.read_memory_proposal_queue()
+        rows[0]["status"] = "running"
+        m.write_memory_proposal_queue(rows)
+
+        old_propose = m.propose_memories_bounded
+        try:
+            m.propose_memories_bounded = lambda _conv, **_kwargs: ["Running memory proposal jobs are retryable."]
+            notes = m.run_queued_memory_proposals(current_conv=conv)
+        finally:
+            m.propose_memories_bounded = old_propose
+
+        assert any("saved 1 queued durable memory" in note for note in notes)
+        assert m.queued_memory_proposal_count() == 0
+
+
+def test_delete_conversation_removes_memory_proposal_jobs(m):
+    with isolated_state():
+        conv = m.new_conversation("Delete queued memory")
+        conv["id"] = "delete-queued-memory"
+        write_conversation(m, conv)
+        m.enqueue_memory_proposal(conv, message_count=4)
+        report = m.delete_conversation_and_artifacts(conv)
+        assert report["memory_proposals_deleted"] == 1
+        assert m.queued_memory_proposal_count() == 0
 
 
 def test_skill_suggestion_parser_uses_local_review_signal(m):
