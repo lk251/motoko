@@ -505,8 +505,11 @@ motoko skill support NAME [references/file.md]
 motoko skill patch NAME --old "old text" --new "new text"
 motoko skill write-file NAME references/file.md --content "supporting detail"
 motoko skill remove-file NAME references/file.md --yes
+motoko skill tools NAME
+motoko skill approve-tool NAME TOOL --yes
 motoko skill delete NAME --yes
 motoko skill plan "query"
+motoko action preview ACTION.json
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -522,12 +525,12 @@ Motoko state as `SKILL.md` files. Motoko ranks skills against the current
 prompt, includes only relevant ones in chat context, and lists selected skills
 in `/sources`.
 
-Current `motoko-skill-v2` skills can declare a kind, trigger hints, handler,
-and allowed effects. Prompt-only learned skills use `handler: prompt_only`.
-Built-in skills may declare deterministic handlers that Motoko's planner can
-activate before a subsystem runs. This borrows the useful progressive
-disclosure idea from Hermes Agent while keeping Motoko realm-local,
-dependency-light, and inspectable.
+Current `motoko-skill-v3` skills can declare a kind, trigger hints, handler,
+allowed effects, support files, and inert script-tool metadata. Prompt-only
+learned skills use `handler: prompt_only`. Built-in skills may declare
+deterministic handlers that Motoko's planner can activate before a subsystem
+runs. This borrows the useful progressive disclosure idea from Hermes Agent
+while keeping Motoko realm-local, dependency-light, and inspectable.
 
 Handlers and effects are allowlisted in Motoko's code. Unknown or model-suggested
 handler names degrade to `prompt_only`, and unsupported effects are discarded.
@@ -546,6 +549,14 @@ When a relevant skill is selected for a prompt, Motoko may include a bounded
 matching support-file excerpt as additional procedural context and record it in
 `/sources` as `skill-support`.
 
+Script files under `scripts/` remain inert unless they have adjacent
+`*.tool.json` metadata and a matching user approval record. `motoko skill tools
+NAME` validates and displays those declarations, fingerprints, effects, and
+approval status. `motoko skill approve-tool NAME TOOL --yes` approves only the
+current script and metadata fingerprints. `motoko action preview ACTION.json`
+validates a typed `motoko-action-v1` record and writes a private user-state
+ledger row; it does not execute scripts.
+
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the
 `builtin:org_temporal_latest_entries` handler. For matching queries, Motoko
@@ -555,10 +566,11 @@ newest dates actually present. The deterministic retrieval layer still owns
 source scoping, Org date parsing, and evidence extraction; the skill records
 why and when that handler should run.
 
-Motoko does not execute arbitrary skill scripts. A future reviewed script runner
-would need to stay constrained, stdlib-first, realm-local, timeout-bounded, and
-visible in `/sources`. The current design review for that future runner lives
-in `docs/agentic-capability-design.md`.
+Motoko does not execute arbitrary skill scripts. The runner substrate validates
+metadata, approvals, typed action records, and ledgers first. Future execution
+must stay constrained, stdlib-first, realm-local, timeout-bounded, and visible
+in `/sources`. The accepted design for that runner lives in
+`docs/agentic-capability-design.md`.
 
 Skill schema changes include a deterministic upgrade path. Run
 `motoko skill upgrade` to rewrite learned `SKILL.md` files to the current

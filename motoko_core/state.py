@@ -171,6 +171,16 @@ def skill_suggestions_path() -> pathlib.Path:
     return root / "skill-suggestions.json"
 
 
+def tool_approvals_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "tool-approvals.json"
+
+
+def action_ledger_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "action-ledger.jsonl"
+
+
 def feedback_eval_path(eval_id: str) -> pathlib.Path:
     return feedback_evals_dir() / f"{_safe_component(eval_id, 'feedback-eval')}.json"
 

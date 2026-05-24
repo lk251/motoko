@@ -201,10 +201,13 @@ Current UI direction:
 - Skill-management actions should stay review-first and allowlisted. Motoko may
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to
-  `references/`, `templates/`, and `scripts/`; scripts are inert text until a
-  separate reviewed runner exists. Support files should be inspectable with
-  explicit commands and loaded into chat only by bounded progressive disclosure
-  when they match the current prompt.
+  `references/`, `templates/`, and `scripts/`. Scripts are inert until they
+  have adjacent `*.tool.json` metadata, current fingerprint approval, and a
+  typed action record accepted by Motoko validators; the current substrate
+  validates and previews that boundary but does not execute arbitrary scripts.
+  Support files should be inspectable with explicit commands and loaded into
+  chat only by bounded progressive disclosure when they match the current
+  prompt.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.
@@ -1257,17 +1260,18 @@ that shape through a narrower internal action model: `create`, `patch`,
 `write_file`, and `remove_file` suggestions are pending realm-local proposals,
 not direct writes. Accepting a suggestion applies it through Motoko validators.
 Support files may live under `references/`, `templates/`, or `scripts/`, but
-scripts are stored text only until a separate reviewed runner exists. Motoko
-should expose support files through explicit listing/view commands and include
-bounded matching support-file excerpts as `skill-support` sources when a
-selected skill needs them. The background reviewer should not rely only on a
-fixed message interval: explicit recent phrases such as "reusable procedure" or
-"make this a skill" can trigger an early review, and recently loaded skills
-should be passed into the review prompt so Motoko prefers patching the skill
-that was actually in play. The local Motoko review heuristic is whether the
-action would save tokens, reduce errors, improve reliability, or encode
-project-specific craft; do not present that sentence as an upstream Hermes
-quote.
+scripts require adjacent `*.tool.json` metadata and a fingerprinted approval
+before they can even be considered for execution. Motoko should expose support
+files and tool metadata through explicit listing/view commands, validate typed
+action records before execution, and include bounded matching support-file
+excerpts as `skill-support` sources when a selected skill needs them. The
+background reviewer should not rely only on a fixed message interval: explicit
+recent phrases such as "reusable procedure" or "make this a skill" can trigger
+an early review, and recently loaded skills should be passed into the review
+prompt so Motoko prefers patching the skill that was actually in play. The
+local Motoko review heuristic is whether the action would save tokens, reduce
+errors, improve reliability, or encode project-specific craft; do not present
+that sentence as an upstream Hermes quote.
 
 ## Agentic Capability Design Gate
 

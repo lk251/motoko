@@ -587,6 +587,20 @@ reviewed boundary:
 7. Add focused deterministic tests for safe and unsafe paths.
 8. Run repository validation and commit locally.
 
+Implementation checkpoint, 2026-05-24:
+
+- Added the validation/preview substrate: effect registry, strict
+  `scripts/*.tool.json` validation, script and metadata fingerprinting,
+  persistent tool approvals, typed action validation, session-repeat approval
+  keys, and a realm-local content-safe action ledger.
+- Added inspection surfaces: `motoko skill tools NAME`,
+  `motoko skill approve-tool NAME TOOL --yes`, `motoko action preview FILE`,
+  `/skill tools NAME`, `/skill approve-tool NAME TOOL --yes`, and
+  `/action preview FILE`.
+- Script execution remains deliberately disabled. The current implementation
+  lets Motoko inspect, approve, and preview tool contracts before any future
+  runner executes them.
+
 ## Goal Loops
 
 Goal loops should come after the planner/handler/tool boundary is solid. The

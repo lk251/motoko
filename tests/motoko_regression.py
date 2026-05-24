@@ -539,7 +539,7 @@ def test_skill_upgrade_rewrites_legacy_skill_files(m):
         assert report["checked"] == 1
         assert report["upgraded"] == 1
         upgraded = path.read_text(encoding="utf-8")
-        assert "schema: motoko-skill-v2" in upgraded
+        assert "schema: motoko-skill-v3" in upgraded
         assert "handler: prompt_only" in upgraded
         assert "allowed_effects: prompt_context" in upgraded
 
@@ -6567,7 +6567,7 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         assert "Source-scoped retrieval" in listed
         assert "builtin:org_temporal_latest_entries" in listed
         shown = m.format_skill("org-temporal-retrieval")
-        assert "schema: motoko-skill-v2" in shown
+        assert "schema: motoko-skill-v3" in shown
         assert "kind: retrieval" in shown
         assert "handler: builtin:org_temporal_latest_entries" in shown
 
@@ -6621,6 +6621,149 @@ def test_procedural_skill_commands(m):
         assert "org-temporal-retrieval" in m.format_skills()
 
 
+def write_demo_tool(m, skill_name="tool-backed-skill"):
+    m.learn_skill_text(
+        skill_name,
+        description="Skill with an inert script-backed tool",
+        body="Use the tool only through Motoko action validation.",
+    )
+    scripts = m.skills_dir() / skill_name / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "demo.py").write_text(
+        "import json, sys\n"
+        "data = json.loads(sys.stdin.read() or '{}')\n"
+        "print(json.dumps({'ok': True, 'path': data.get('path', '')}))\n",
+        encoding="utf-8",
+    )
+    (scripts / "demo.tool.json").write_text(
+        json.dumps(
+            {
+                "schema": "motoko-tool-v1",
+                "name": "demo",
+                "description": "Read an allowed path and write Motoko state.",
+                "script": "demo.py",
+                "interpreter": "python3",
+                "wrapper": "motoko-tool-python-stdlib",
+                "allowed_effects": ["read_allowed_files", "write_motoko_state"],
+                "argument_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+                "timeout_seconds": 30,
+                "max_stdout_bytes": 65536,
+                "max_stderr_bytes": 16384,
+                "network": False,
+                "writes_project_files": False,
+                "requires_confirmation": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_skill_tool_metadata_validation_and_approval(m):
+    with isolated_state():
+        write_demo_tool(m)
+        tools = m.format_skill_tools("tool-backed-skill")
+        assert "demo: not approved" in tools
+        assert "read_allowed_files, write_motoko_state" in tools
+        assert "script sha256:" in tools
+
+        refused = m.approve_skill_tool_text("tool-backed-skill", "demo", yes=False)
+        assert "refusing to approve without --yes" in refused
+
+        approved = m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        assert "tool approved: demo" in approved
+        assert "requires confirmation: no" in approved
+        tools = m.format_skill_tools("tool-backed-skill")
+        assert "demo: approved" in tools
+
+
+def test_action_preview_requires_approval_then_validates(m):
+    with isolated_state() as tmp:
+        write_demo_tool(m)
+        action_path = tmp / "action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "tool-backed-skill",
+                    "tool": "demo",
+                    "arguments": {"path": "notes.org"},
+                    "reason": "Need a bounded deterministic helper.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        preview = m.validate_action_text(str(action_path), preview=True)
+        assert "status: needs_approval" in preview
+        assert "approval: missing" in preview
+        assert m.action_ledger_path().exists()
+
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        preview = m.validate_action_text(str(action_path), preview=True)
+        assert "status: valid" in preview
+        assert "approval: persistent" in preview
+        assert "tool: demo" in preview
+
+
+def test_action_preview_rejects_shell_and_bad_tool_metadata(m):
+    with isolated_state() as tmp:
+        bad_action = tmp / "shell.json"
+        bad_action.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "shell",
+                    "command": "rm -rf /",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        preview = m.validate_action_text(str(bad_action), preview=True)
+        assert "status: rejected" in preview
+        assert "unsupported action kind" in preview
+
+        m.learn_skill_text(
+            "bad-tool-skill",
+            description="Bad tool metadata",
+            body="This skill has an invalid script declaration.",
+        )
+        scripts = m.skills_dir() / "bad-tool-skill" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / "bad.tool.json").write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-tool-v1",
+                    "name": "bad",
+                    "description": "Bad path",
+                    "script": "../bad.py",
+                    "interpreter": "python3",
+                    "wrapper": "motoko-tool-python-stdlib",
+                    "allowed_effects": ["read_allowed_files"],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        tools = m.format_skill_tools("bad-tool-skill")
+        assert "bad: invalid" in tools
+        assert "traversal" in tools
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -6638,6 +6781,9 @@ def main() -> int:
         test_skill_manage_support_file_commands,
         test_skill_upgrade_rewrites_legacy_skill_files,
         test_skill_plan_shows_prompt_and_retrieval_selection,
+        test_skill_tool_metadata_validation_and_approval,
+        test_action_preview_requires_approval_then_validates,
+        test_action_preview_rejects_shell_and_bad_tool_metadata,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

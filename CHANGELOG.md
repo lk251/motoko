@@ -14,6 +14,10 @@ not the easiest place to review what changed after a long work session.
 - Accepted the remaining agentic runner review items: realm/filesystem
   boundaries, scrubbed tool environments, session-repeat approvals, private
   ledgers, provenance, incremental evals, and the NixOS capability boundary.
+- Added the first safe agentic runner substrate without script execution:
+  validated `*.tool.json` skill metadata, fingerprinted tool approvals, typed
+  action previews, private action ledgers, and `/skill tools` /
+  `motoko action preview` inspection commands.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

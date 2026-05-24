@@ -18,8 +18,9 @@ from motoko_core.skill_registry import (
 from motoko_core.text import compact_text
 
 
-SKILL_SCHEMA = "motoko-skill-v2"
+SKILL_SCHEMA = "motoko-skill-v3"
 LEGACY_SKILL_SCHEMA = "motoko-skill-v1"
+PREVIOUS_SKILL_SCHEMA = "motoko-skill-v2"
 SKILL_MANAGE_SCHEMA = "motoko-skill-manage-v1"
 SKILL_MANAGE_ACTIONS = {"create", "patch", "write_file", "remove_file"}
 MAX_SKILL_NAME = 64
@@ -40,7 +41,7 @@ BUILTIN_SKILLS = [
         "name": ORG_TEMPORAL_SKILL,
         "slug": ORG_TEMPORAL_SKILL,
         "description": "Source-scoped retrieval for latest dated Org entries",
-        "version": "2",
+        "version": "3",
         "kind": "retrieval",
         "triggers": [
             "last/latest/recent N dated entries",
@@ -86,6 +87,12 @@ def skill_slug(value: str) -> str:
     return slug[:MAX_SKILL_NAME].strip(".-")
 
 
+def frontmatter_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
 def skill_directory(root: pathlib.Path, name: str) -> pathlib.Path:
     slug = skill_slug(name)
     if not slug:
@@ -98,57 +105,65 @@ def skill_markdown_path(root: pathlib.Path, name: str) -> pathlib.Path:
 
 
 def parse_skill_markdown(text: str, *, path: pathlib.Path | None = None) -> dict:
-    frontmatter: dict[str, str] = {}
+    frontmatter: dict[str, str | list[str]] = {}
     body = text
     if text.startswith("---\n"):
         end = text.find("\n---\n", 4)
         if end >= 0:
             raw_frontmatter = text[4:end]
             body = text[end + 5 :]
+            current_key = ""
             for line in raw_frontmatter.splitlines():
+                stripped = line.strip()
+                if current_key and stripped.startswith("- "):
+                    value = stripped[2:].strip().strip("'\"")
+                    existing = frontmatter.setdefault(current_key, [])
+                    if isinstance(existing, list) and value:
+                        existing.append(value)
+                    continue
+                current_key = ""
                 if ":" not in line:
                     continue
                 key, value = line.split(":", 1)
-                frontmatter[key.strip()] = value.strip().strip("'\"")
-    name = frontmatter.get("name") or (path.parent.name if path else "")
-    description = frontmatter.get("description", "")
+                key = key.strip()
+                value = value.strip().strip("'\"")
+                frontmatter[key] = value
+                if not value:
+                    frontmatter[key] = []
+                    current_key = key
+    name = str(frontmatter.get("name") or (path.parent.name if path else ""))
+    description = str(frontmatter.get("description", ""))
     if not description:
         for line in body.splitlines():
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
                 description = stripped
                 break
-    source_schema = frontmatter.get("schema") or LEGACY_SKILL_SCHEMA
-    kind = frontmatter.get("kind") or DEFAULT_SKILL_KIND
-    handler = normalize_skill_handler(frontmatter.get("handler"))
+    source_schema = str(frontmatter.get("schema") or LEGACY_SKILL_SCHEMA)
+    kind = str(frontmatter.get("kind") or DEFAULT_SKILL_KIND)
+    handler = normalize_skill_handler(str(frontmatter.get("handler") or ""))
     allowed_effects = normalize_skill_effects(frontmatter.get("allowed_effects"), handler=handler)
-    triggers = [
-        item.strip()
-        for item in (frontmatter.get("triggers") or "").split(",")
-        if item.strip()
-    ]
-    support_files = [
-        item.strip()
-        for item in (frontmatter.get("support_files") or "").split(",")
-        if item.strip()
-    ]
+    triggers = frontmatter_list(frontmatter.get("triggers"))
+    support_files = frontmatter_list(frontmatter.get("support_files"))
+    tools = frontmatter_list(frontmatter.get("tools"))
     return {
         "schema": SKILL_SCHEMA,
         "source_schema": source_schema,
         "name": name,
         "slug": skill_slug(name),
         "description": compact_text(description, MAX_SKILL_DESCRIPTION) if description else "",
-        "version": frontmatter.get("version") or ("1" if source_schema == LEGACY_SKILL_SCHEMA else "2"),
+        "version": str(frontmatter.get("version") or ("1" if source_schema == LEGACY_SKILL_SCHEMA else "3")),
         "kind": kind,
         "triggers": triggers,
         "handler": handler,
         "allowed_effects": allowed_effects,
         "support_files": support_files,
-        "security": frontmatter.get("security") or "prompt-only learned skill; no script execution",
+        "tools": tools,
+        "security": str(frontmatter.get("security") or "prompt-only learned skill; no script execution"),
         "can_upgrade_deterministically": source_schema != SKILL_SCHEMA,
-        "created_at": frontmatter.get("created_at", ""),
-        "updated_at": frontmatter.get("updated_at", ""),
-        "source": frontmatter.get("source", ""),
+        "created_at": str(frontmatter.get("created_at", "")),
+        "updated_at": str(frontmatter.get("updated_at", "")),
+        "source": str(frontmatter.get("source", "")),
         "body": body.strip(),
         "path": str(path) if path else "",
     }
@@ -164,6 +179,7 @@ def format_skill_markdown(
     allowed_effects: list[str] | None = None,
     triggers: list[str] | None = None,
     support_files: list[str] | None = None,
+    tools: list[str] | None = None,
     security: str = "prompt-only learned skill; no script execution",
     source: str = "manual",
     created_at: str = "",
@@ -187,11 +203,12 @@ def format_skill_markdown(
     allowed_effects = normalize_skill_effects(allowed_effects, handler=handler)
     triggers = triggers or []
     support_files = support_files or []
+    tools = tools or []
     return "\n".join(
         [
             "---",
             f"schema: {SKILL_SCHEMA}",
-            "version: 2",
+            "version: 3",
             f"name: {name}",
             f"description: {description}",
             f"kind: {kind or DEFAULT_SKILL_KIND}",
@@ -199,6 +216,7 @@ def format_skill_markdown(
             f"allowed_effects: {', '.join(allowed_effects)}",
             f"triggers: {', '.join(triggers)}",
             f"support_files: {', '.join(support_files)}",
+            f"tools: {', '.join(tools)}",
             f"security: {security}",
             f"created_at: {created_at}",
             f"updated_at: {updated_at}",
@@ -284,6 +302,7 @@ def save_skill(
     allowed_effects: list[str] | None = None,
     triggers: list[str] | None = None,
     support_files: list[str] | None = None,
+    tools: list[str] | None = None,
     security: str = "prompt-only learned skill; no script execution",
     source: str = "manual",
     replace: bool = False,
@@ -311,6 +330,7 @@ def save_skill(
         allowed_effects=allowed_effects,
         triggers=triggers,
         support_files=support_files,
+        tools=tools,
         security=security,
         source=source,
         created_at=created_at,
@@ -462,6 +482,7 @@ def _update_skill_support_files(
         allowed_effects=row.get("allowed_effects", list(DEFAULT_SKILL_EFFECTS)),
         triggers=row.get("triggers", []),
         support_files=support_files,
+        tools=row.get("tools", []),
         security=row.get("security", "prompt-only learned skill; no script execution"),
         source=row.get("source", "manual"),
         created_at=row.get("created_at", ""),
@@ -580,6 +601,7 @@ def manage_skill(
     allowed_effects: list[str] | None = None,
     triggers: list[str] | None = None,
     support_files: list[str] | None = None,
+    tools: list[str] | None = None,
     security: str = "prompt-only learned skill; no script execution",
     source: str = "skill-manage",
     replace: bool = False,
@@ -602,6 +624,7 @@ def manage_skill(
             allowed_effects=allowed_effects,
             triggers=triggers,
             support_files=support_files,
+            tools=tools,
             security=security,
             source=source,
             replace=replace,
@@ -656,6 +679,7 @@ def upgrade_skill_files(root: pathlib.Path, *, writer) -> dict:
                 allowed_effects=row.get("allowed_effects", list(DEFAULT_SKILL_EFFECTS)),
                 triggers=row.get("triggers", []),
                 support_files=row.get("support_files", []),
+                tools=row.get("tools", []),
                 security=row.get("security", "prompt-only learned skill; no script execution"),
                 source=row.get("source", "manual"),
                 created_at=row.get("created_at", ""),
@@ -837,6 +861,7 @@ def format_skill(row: dict) -> str:
             "allowed effects: " + ", ".join(row.get("allowed_effects", []) or []),
             "triggers: " + ", ".join(row.get("triggers", []) or []),
             "support files: " + ", ".join(row.get("support_files", []) or []),
+            "tools: " + ", ".join(row.get("tools", []) or []),
             f"security: {row.get('security', '')}",
             f"source: {row.get('source', '')}",
             f"created: {row.get('created_at', '')}",
