@@ -352,8 +352,10 @@ from motoko_core.model_manager import (  # noqa: E402
     ModelRouteManager,
 )
 from motoko_core.retrieval_service import (  # noqa: E402
+    ContextLane,
     HybridRetrievalEnvironment,
     RetrievalService,
+    build_context_package,
     rerank_hybrid_candidates_with_environment,
     summarize_retrieval_sources,
 )
@@ -12431,89 +12433,59 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     catalog = read_context_catalog() or build_context_catalog()
     catalog_text = format_context_catalog(catalog)
     personality_text, personality_file, personality_exists = load_personality()
-    sources = []
-    sources.append(
-        {
-            "kind": "identity",
-            "name": identity.get("name", "Motoko"),
-            "realm": identity.get("realm", "personal"),
-            "description": identity.get("description", ""),
-        }
-    )
-    sources.append(
-        {
-            "kind": "personality",
-            "path": personality_file,
-            "status": "custom" if personality_exists else "default",
-        }
-    )
-    sources.extend(profile_sources)
-    sources.extend(memory_sources)
-    sources.extend(skill_sources)
-    sources.extend(recent_sources)
-    if conv.get("summary", "").strip():
-        sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
-    sources.extend(context_sources)
-    sources.append({"kind": "context-catalog", "updated": catalog.get("updated", "")})
-    context_plan = context_plan_from_lanes(
+    identity_text = format_identity()
+    summary_text = render_conversation_summary(conv)
+    context_package = build_context_package(
         [
-            {
-                "lane": "identity",
-                "chars": len(format_identity()),
-                "sources": 1,
-                "purpose": "assistant name and account realm",
-            },
-            {
-                "lane": "personality",
-                "chars": len(personality_text),
-                "sources": 1,
-                "purpose": "tone and behavior only",
-            },
-            {
-                "lane": "profile",
-                "chars": len(profile_text),
-                "sources": len(profile_sources),
-                "purpose": "stable Javier context",
-            },
-            {
-                "lane": "durable memories",
-                "chars": len(memory_text),
-                "sources": len(memory_sources),
-                "purpose": "ranked personal facts and preferences",
-            },
-            {
-                "lane": "procedural skills",
-                "chars": len(skill_text),
-                "sources": len(skill_sources),
-                "purpose": "relevant learned procedures and debugging lessons",
-            },
-            {
-                "lane": "recent conversations",
-                "chars": len(recent_text),
-                "sources": len(recent_sources),
-                "purpose": "bounded recency plus relevance recall",
-            },
-            {
-                "lane": "conversation summary",
-                "chars": len(render_conversation_summary(conv)),
-                "sources": 1 if conv.get("summary", "").strip() else 0,
-                "purpose": "compacted older turns",
-            },
-            {
-                "lane": "attached context",
-                "chars": len(context_text),
-                "sources": len(context_sources),
-                "purpose": "explicit files, indexes, topics, dossiers",
-            },
-            {
-                "lane": "catalog",
-                "chars": len(catalog_text),
-                "sources": 1,
-                "purpose": "available private context inventory",
-            },
-        ]
+            ContextLane(
+                "identity",
+                identity_text,
+                [
+                    {
+                        "kind": "identity",
+                        "name": identity.get("name", "Motoko"),
+                        "realm": identity.get("realm", "personal"),
+                        "description": identity.get("description", ""),
+                    }
+                ],
+                "assistant name and account realm",
+            ),
+            ContextLane(
+                "personality",
+                personality_text,
+                [
+                    {
+                        "kind": "personality",
+                        "path": personality_file,
+                        "status": "custom" if personality_exists else "default",
+                    }
+                ],
+                "tone and behavior only",
+            ),
+            ContextLane("profile", profile_text, profile_sources, "stable Javier context"),
+            ContextLane("durable memories", memory_text, memory_sources, "ranked personal facts and preferences"),
+            ContextLane("procedural skills", skill_text, skill_sources, "relevant learned procedures and debugging lessons"),
+            ContextLane("recent conversations", recent_text, recent_sources, "bounded recency plus relevance recall"),
+            ContextLane(
+                "conversation summary",
+                summary_text,
+                [{"kind": "conversation-summary", "conversation_id": conv.get("id", "")}]
+                if conv.get("summary", "").strip()
+                else [],
+                "compacted older turns",
+            ),
+            ContextLane("attached context", context_text, context_sources, "explicit files, indexes, topics, dossiers"),
+            ContextLane(
+                "catalog",
+                catalog_text,
+                [{"kind": "context-catalog", "updated": catalog.get("updated", "")}],
+                "available private context inventory",
+            ),
+        ],
+        budget_chars=CONTEXT_PLAN_BUDGET_CHARS,
     )
-    sources.append(context_plan)
+    sources = list(context_package.sources)
+    context_plan = context_package.context_plan
     sufficiency = context_sufficiency_note(conv, query, sources)
     return textwrap.dedent(
         f"""
@@ -12562,7 +12534,7 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         {recent_text}
 
         Compacted conversation summary:
-        {render_conversation_summary(conv)}
+        {summary_text}
 
         Attached documents and dossiers:
         {context_text}

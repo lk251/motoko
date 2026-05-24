@@ -1092,9 +1092,11 @@ Current progress on this stretch:
   deleted, and ignored indexed files.
 - Complete: source lifecycle plans count dependent derived artifacts and
   surface rebuild-first work in `index-storage`.
-- Remaining: prompt-level context packing and some `/sources` source-record
-  construction still need to become service-returned structured records rather
-  than root-facade assembly.
+- Progress: prompt-level lane packing and context-plan source accounting now
+  use a service-returned `context-package-v1` record. Remaining context work is
+  narrower: final prompt wording, excerpt/snippet choice across non-index
+  lanes, and some `/sources` source-record construction still live in the root
+  facade.
 - Remaining: retrieval report paths should be reduced to renderers over the
   same structured result.
 - Remaining: artifact lifecycle needs an apply path for vectors, evidence

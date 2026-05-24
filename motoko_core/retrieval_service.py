@@ -8,6 +8,7 @@ from typing import Callable
 
 from motoko_core.retrieval import (
     add_hybrid_candidate,
+    context_plan_from_lanes_core,
     file_context_text_and_source,
     hybrid_candidate_base_score,
     hybrid_candidate_guard_bonus,
@@ -32,6 +33,7 @@ from motoko_core.skills import ORG_TEMPORAL_HANDLER
 
 
 RETRIEVAL_SERVICE_SCHEMA = "retrieval-service-v1"
+CONTEXT_PACKAGE_SCHEMA = "context-package-v1"
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,68 @@ class RetrievalServiceResult:
     text: str
     sources: list[dict] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ContextLane:
+    lane: str
+    text: str
+    sources: list[dict] = field(default_factory=list)
+    purpose: str = ""
+
+
+@dataclass(frozen=True)
+class ContextPackage:
+    lanes: list[ContextLane]
+    sources: list[dict]
+    context_plan: dict
+    diagnostics: dict = field(default_factory=dict)
+
+    def text_for(self, lane: str) -> str:
+        for row in self.lanes:
+            if row.lane == lane:
+                return row.text
+        return ""
+
+
+def build_context_package(
+    lanes: list[ContextLane],
+    *,
+    budget_chars: int,
+) -> ContextPackage:
+    """Aggregate prompt-context lanes and source records.
+
+    The root facade still owns final prompt wording, but source accounting and
+    context-plan construction live here so chat, previews, and sources can keep
+    using the same structured lane result.
+    """
+
+    lane_rows = []
+    sources: list[dict] = []
+    for lane in lanes:
+        lane_sources = [source for source in lane.sources if isinstance(source, dict)]
+        sources.extend(lane_sources)
+        lane_rows.append(
+            {
+                "lane": lane.lane,
+                "chars": len(lane.text),
+                "sources": len(lane_sources),
+                "purpose": lane.purpose,
+            }
+        )
+    context_plan = context_plan_from_lanes_core(lane_rows, budget_chars=budget_chars)
+    context_plan["context_package_schema"] = CONTEXT_PACKAGE_SCHEMA
+    sources.append(context_plan)
+    return ContextPackage(
+        lanes=list(lanes),
+        sources=sources,
+        context_plan=context_plan,
+        diagnostics={
+            "schema": CONTEXT_PACKAGE_SCHEMA,
+            "lane_count": len(lanes),
+            "source_count": len(sources),
+        },
+    )
 
 
 @dataclass(frozen=True)

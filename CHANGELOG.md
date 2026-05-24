@@ -18,6 +18,9 @@ not the easiest place to review what changed after a long work session.
   tools: explicit reusable-procedure phrases can trigger early review, and
   recently loaded skills are passed into the review prompt so suggestions
   prefer patching the skill that was actually in use.
+- Moved top-level prompt context lane packing into the retrieval-service
+  boundary. Chat, `/sources`, and retrieval preview now share a structured
+  `context-package-v1` plan for lane source accounting.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

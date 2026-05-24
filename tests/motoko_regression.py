@@ -3118,6 +3118,36 @@ def test_identity_config(m):
         assert any(source.get("kind") == "identity" for source in sources)
 
 
+def test_context_package_builds_sources_and_plan(m):
+    package = m.build_context_package(
+        [
+            m.ContextLane("identity", "Motoko realm", [{"kind": "identity"}], "realm"),
+            m.ContextLane("attached context", "source excerpt", [{"kind": "chunk"}], "evidence"),
+        ],
+        budget_chars=100,
+    )
+
+    assert [source["kind"] for source in package.sources[:-1]] == ["identity", "chunk"]
+    assert package.sources[-1]["kind"] == "context-plan"
+    assert package.context_plan["context_package_schema"] == "context-package-v1"
+    assert package.context_plan["lanes"][1]["lane"] == "attached context"
+    assert package.context_plan["lanes"][1]["sources"] == 1
+    assert package.text_for("identity") == "Motoko realm"
+
+
+def test_system_prompt_uses_context_package_for_plan(m):
+    with isolated_state():
+        conv = m.new_conversation("Context package")
+        prompt, sources = m.build_system_prompt_and_sources(conv, "planning")
+        plan = next(source for source in sources if source.get("kind") == "context-plan")
+
+        assert "Context selection plan:" in prompt
+        assert plan["context_package_schema"] == "context-package-v1"
+        lane_names = [row.get("lane") for row in plan.get("lanes", [])]
+        assert lane_names[:2] == ["identity", "personality"]
+        assert "attached context" in lane_names
+
+
 def test_assistant_color_config(m):
     with isolated_state():
         assert m.assistant_color() == "purple"
@@ -6535,6 +6565,8 @@ def main() -> int:
         test_cwd_learning_plan_and_existing_index,
         test_permissions_config,
         test_identity_config,
+        test_context_package_builds_sources_and_plan,
+        test_system_prompt_uses_context_package_for_plan,
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
         test_report_highlighting_is_render_only,
