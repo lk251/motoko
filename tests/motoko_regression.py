@@ -1903,6 +1903,92 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
             os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
+def test_named_temporal_query_ignores_other_dated_org_files(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "orgfiles"
+            docs.mkdir()
+            logbook = docs / "logbook.org"
+            pluslife = docs / "pluslife.org"
+            logbook_content = (
+                "* [2026-05-18 Mon 11:14]\n"
+                "** log\n"
+                "May18 logbook third-latest action.\n\n"
+                "* [2026-05-19 Tue 12:34]\n"
+                "** log\n"
+                "May19 logbook second-latest action.\n\n"
+                "* [2026-05-23 Sat 00:52]\n"
+                "** log\n"
+                "May23 logbook latest action.\n"
+            )
+            pluslife_content = (
+                "* [2026-05-24 Sun 09:00]\n"
+                "** log\n"
+                "May24 pluslife distractor should not satisfy a logbook.org query.\n"
+            )
+            logbook.write_text(logbook_content, encoding="utf-8")
+            pluslife.write_text(pluslife_content, encoding="utf-8")
+            index = {
+                "id": "named-temporal-index",
+                "name": "orgfiles",
+                "root": str(docs),
+                "created": "2026-05-24T00:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(logbook),
+                        "source_fingerprint": m.source_fingerprint(logbook),
+                        "summary": "Daily logbook entries.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Logbook material.",
+                                "content": logbook_content,
+                                "content_sha256": m.sha256_hex(logbook_content.encode("utf-8")),
+                                "content_bytes": len(logbook_content.encode("utf-8")),
+                            }
+                        ],
+                    },
+                    {
+                        "path": str(pluslife),
+                        "source_fingerprint": m.source_fingerprint(pluslife),
+                        "summary": "Other Org notes with dates.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Pluslife material.",
+                                "content": pluslife_content,
+                                "content_sha256": m.sha256_hex(pluslife_content.encode("utf-8")),
+                                "content_bytes": len(pluslife_content.encode("utf-8")),
+                            }
+                        ],
+                    },
+                ],
+            }
+
+            text, sources = m.retrieve_from_index(index, "summarize the last three days present in logbook.org")
+            assert "May23 logbook latest action" in text
+            assert "May19 logbook second-latest action" in text
+            assert "May18 logbook third-latest action" in text
+            assert "pluslife distractor" not in text
+            index_source = next(source for source in sources if source.get("kind") == "index")
+            assert index_source["temporal_selected_dates"] == ["2026-05-23", "2026-05-19", "2026-05-18"]
+            chunks = [source for source in sources if source.get("kind") == "chunk"]
+            assert chunks and all(source["path"].endswith("logbook.org") for source in chunks)
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_live_index_retrieval_uses_service_boundary(m):
     with isolated_state() as tmp:
         docs = tmp / "orgfiles"
@@ -5818,6 +5904,7 @@ def main() -> int:
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
         test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates,
+        test_named_temporal_query_ignores_other_dated_org_files,
         test_live_index_retrieval_uses_service_boundary,
         test_render_context_with_sources_uses_live_retrieval_service,
         test_temporal_retrieval_finds_latest_org_dates_without_evidence_store,

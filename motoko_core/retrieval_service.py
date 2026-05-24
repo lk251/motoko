@@ -14,6 +14,7 @@ from motoko_core.retrieval import (
     org_dated_section_spans,
     query_date_mentions,
     query_path_match_boost,
+    query_path_mentions,
     query_requested_recent_section_count,
     repo_context_text_and_source,
     score_text,
@@ -131,9 +132,12 @@ def _temporal_evidence_rows(index: dict, query: str, env: HybridRetrievalEnviron
         return []
     rows = []
     query_counts = token_counts(query)
+    path_mentions = query_path_mentions(query)
     for file_item in index.get("files", []):
         path = file_item.get("path", "")
         path_boost = query_path_match_boost(query, path)
+        if path_mentions and path_boost <= 0:
+            continue
         file_match = path_boost > 0 or score_text(query_counts, "\n".join([path, file_item.get("summary", "")])) > 0
         if not file_match and not exact_dates:
             continue
