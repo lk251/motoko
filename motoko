@@ -337,6 +337,7 @@ from motoko_core.runtime import (  # noqa: E402
     make_runtime_context,
 )
 from motoko_core.artifact_lifecycle import (  # noqa: E402
+    source_lifecycle_state,
     superseded_index_cleanup_decision,
 )
 from motoko_core.observability import (  # noqa: E402
@@ -10468,6 +10469,8 @@ def index_change_summary(index: dict) -> dict:
             "ignored_count": 0,
             "ignored_file_count": 0,
             "ignored_dir_count": 0,
+            "source_lifecycle": [],
+            "source_lifecycle_counts": {},
             "coverage_score": 0,
         }
     current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
@@ -10475,6 +10478,33 @@ def index_change_summary(index: dict) -> dict:
         path for path_text, path in current_paths.items() if path_text not in known_paths
     )
     missing_paths = sorted(path_text for path_text in known_paths if path_text not in current_paths)
+    rules = candidate_report.get("selection_policy", {}).get("motokoignore", {}).get("rules", [])
+    source_lifecycle = []
+    for file_item in index.get("files", []):
+        path_text = file_item.get("path", "")
+        if not path_text:
+            continue
+        path = pathlib.Path(path_text).expanduser()
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            resolved = str(path)
+        exists = path.exists()
+        ignored = exists and resolved not in current_paths
+        if exists and rules and root.is_dir():
+            with contextlib.suppress(OSError, ValueError):
+                rel = path.resolve().relative_to(root).as_posix()
+                ignored = ignored or motoko_ignore_matches(rules, rel, is_dir=False) is not None
+        file_status, _file_warnings = file_staleness(file_item)
+        lifecycle = source_lifecycle_state(
+            path=path_text,
+            exists=exists,
+            ignored=ignored,
+            fingerprint_changed=file_status == "stale" and exists and not ignored,
+        )
+        if lifecycle.get("status") != "fresh":
+            source_lifecycle.append(lifecycle)
+    lifecycle_counts = dict(collections.Counter(item.get("status", "unknown") for item in source_lifecycle))
     covered_files = len(known_paths & set(current_paths))
     new_bytes = 0
     for path in new_files:
@@ -10502,6 +10532,8 @@ def index_change_summary(index: dict) -> dict:
         "ignored_count": candidate_report.get("ignored_count", 0),
         "ignored_file_count": candidate_report.get("ignored_file_count", 0),
         "ignored_dir_count": candidate_report.get("ignored_dir_count", 0),
+        "source_lifecycle": source_lifecycle[:50],
+        "source_lifecycle_counts": lifecycle_counts,
         "coverage_score": coverage_score,
     }
 
@@ -10513,10 +10545,17 @@ def format_index_health(summary: dict) -> str:
     parts = [f"health {score}%"]
     new_files = len(summary.get("new_files", []) or [])
     missing_files = len(summary.get("missing_files", []) or [])
+    lifecycle_counts = summary.get("source_lifecycle_counts") or {}
     if new_files:
         parts.append(f"new {new_files}")
     if missing_files:
         parts.append(f"missing {missing_files}")
+    if lifecycle_counts.get("changed"):
+        parts.append(f"changed {lifecycle_counts.get('changed')}")
+    if lifecycle_counts.get("deleted"):
+        parts.append(f"deleted {lifecycle_counts.get('deleted')}")
+    if lifecycle_counts.get("ignored"):
+        parts.append(f"ignored-indexed {lifecycle_counts.get('ignored')}")
     ignored = int(summary.get("ignored_count", 0) or 0)
     if ignored:
         parts.append(f"ignored {summary.get('ignored_count')}")

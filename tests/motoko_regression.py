@@ -5024,6 +5024,41 @@ def test_index_health_reports_new_files(m):
             m.quiet_model = old_quiet_model
 
 
+def test_index_change_summary_reports_source_lifecycle_decisions(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "a.org"
+        source.write_text("* TODO [#A] Alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+
+            source.write_text("* TODO [#A] Alpha\nUpdated body\n", encoding="utf-8")
+            summary = m.index_change_summary(index)
+            assert summary["source_lifecycle_counts"]["changed"] == 1
+            assert summary["source_lifecycle"][0]["recommended_action"] == "reprocess-from-source"
+            assert "changed 1" in m.format_index_health(summary)
+
+            source.unlink()
+            summary = m.index_change_summary(index)
+            assert summary["source_lifecycle_counts"]["deleted"] == 1
+            assert summary["source_lifecycle"][0]["recommended_action"] == "mark-stale-and-clean-derived-artifacts"
+            assert "deleted 1" in m.format_index_health(summary)
+
+            source.write_text("* TODO [#A] Alpha\nUpdated body\n", encoding="utf-8")
+            (docs / ".motokoignore").write_text("a.org\n", encoding="utf-8")
+            summary = m.index_change_summary(index)
+            assert summary["source_lifecycle_counts"]["ignored"] == 1
+            assert summary["source_lifecycle"][0]["recommended_action"] == "detach-derived-artifacts"
+            assert "ignored-indexed 1" in m.format_index_health(summary)
+        finally:
+            m.quiet_model = old_quiet_model
+
+
 def test_index_signal_enrichment_upgrades_legacy_index(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -5593,6 +5628,7 @@ def main() -> int:
         test_permissions_config,
         test_identity_config,
         test_assistant_color_config,
+        test_index_change_summary_reports_source_lifecycle_decisions,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
         test_tui_alt_backspace_deletes_previous_word,
