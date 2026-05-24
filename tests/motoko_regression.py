@@ -90,6 +90,82 @@ def test_recent_conversation_lanes(m):
         assert any("relevant" in source.get("selection", []) for source in sources)
 
 
+def test_conversation_recall_config_expands_saved_lanes_and_snippets(m):
+    with isolated_state():
+        config = m.load_config()
+        config["conversation_recall"] = {
+            "recent_conversations": 3,
+            "relevant_conversations": 3,
+            "conversation_messages": 1,
+            "matched_snippets": 1,
+            "snippet_chars": 140,
+            "max_chars": 5000,
+        }
+        m.save_config(config)
+
+        current = m.new_conversation("Current")
+        current["id"] = "current"
+        current["updated"] = "2026-05-17T10:00:00+00:00"
+        current["messages"] = [{"role": "user", "content": "Find violet harbor and copper bridge notes."}]
+        write_conversation(m, current)
+
+        for idx in range(4):
+            recent = m.new_conversation(f"Recent {idx}")
+            recent["id"] = f"recent-{idx}"
+            recent["updated"] = f"2026-05-17T09:5{idx}:00+00:00"
+            recent["messages"] = [{"role": "user", "content": f"Routine note {idx}."}]
+            write_conversation(m, recent)
+
+        for idx, phrase in enumerate(["violet harbor", "copper bridge", "violet harbor copper bridge"], 1):
+            relevant = m.new_conversation(f"Relevant {idx}")
+            relevant["id"] = f"relevant-{idx}"
+            relevant["updated"] = f"2026-05-17T08:0{idx}:00+00:00"
+            relevant["messages"] = [{"role": "user", "content": f"The project phrase is {phrase}."}]
+            write_conversation(m, relevant)
+
+        selected = m.ranked_recent_conversations(current, "violet harbor copper bridge")
+        assert len(selected) == 6
+        assert sum("recent" in row.get("_selection_reasons", []) for row in selected) == 3
+        assert sum("relevant" in row.get("_selection_reasons", []) for row in selected) == 3
+        assert any(row.get("_matched_snippets") for row in selected)
+
+        text, sources = m.render_recent_conversations_with_sources(current, "violet harbor copper bridge")
+        assert "matched snippets:" in text
+        assert "violet harbor copper bridge" in text
+        assert len(sources) == 6
+        assert "conversation recall: current 24 msg(s)" in m.format_status(current)
+
+
+def test_current_conversation_recall_config_controls_model_history(m):
+    with isolated_state():
+        config = m.load_config()
+        config["conversation_recall"] = {
+            "current_messages": "all",
+            "current_max_chars": 26,
+        }
+        m.save_config(config)
+
+        conv = m.new_conversation("Current")
+        conv["messages"] = [
+            {"role": "user", "content": "older message outside budget"},
+            {"role": "assistant", "content": "middle message outside budget"},
+            {"role": "user", "content": "latest message"},
+        ]
+
+        selected = m.current_conversation_messages_for_model(conv)
+        assert [row["content"] for row in selected] == ["latest message"]
+
+        config = m.load_config()
+        config["conversation_recall"]["current_max_chars"] = 0
+        m.save_config(config)
+        selected = m.current_conversation_messages_for_model(conv)
+        assert [row["content"] for row in selected] == [
+            "older message outside budget",
+            "middle message outside budget",
+            "latest message",
+        ]
+
+
 def test_maintenance_state_and_phases(m):
     with isolated_state():
         conv = m.new_conversation("Maintenance")

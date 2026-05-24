@@ -176,6 +176,17 @@ Per-user index defaults can also live in `config.json`:
     "max_files": 20000,
     "max_file_bytes": "8MiB"
   },
+  "conversation_recall": {
+    "current_messages": 24,
+    "current_max_chars": 0,
+    "recent_conversations": 2,
+    "relevant_conversations": 4,
+    "conversation_limit": 6,
+    "conversation_messages": 6,
+    "matched_snippets": 2,
+    "snippet_chars": 900,
+    "max_chars": 12000
+  },
   "ui": {
     "assistant_color": "purple"
   }
@@ -193,10 +204,19 @@ MOTOKO_INDEX_MAX_FILE_BYTES=20MiB motoko index ~/Documents
 
 To set defaults manually for `personal` or `mares`, log into that account and
 run `motoko permissions set MODE`, then edit `~/.config/motoko/config.json` if
-that account needs different index limits, identity text, or assistant label
-color. Valid `ui.assistant_color` values are `red`, `green`, `yellow`, `blue`,
+that account needs different index limits, conversation-recall budgets,
+identity text, or assistant label color. Valid `ui.assistant_color` values are
+`red`, `green`, `yellow`, `blue`,
 `purple`, `pink`, `turquoise`, `magenta`, `cyan`, and `white`. State and config
 remain under that account's own home directory.
+
+`conversation_recall` controls how much same-realm conversation history Motoko
+packs automatically. `current_messages` may be an integer or `"all"`; pair
+large values with `current_max_chars` so a long chat cannot crowd out source
+evidence. Saved conversations are selected by a recency lane plus a
+query-relevance lane, then packed as title, summary, matched snippets, recent
+turns, and provenance. If `conversation_limit` is omitted, Motoko uses at least
+`recent_conversations + relevant_conversations`.
 
 Suggested realm identities:
 
@@ -885,15 +905,25 @@ provenance before trusting a memory.
 
 Each turn receives an automatic ranked subset of cross-conversation memories
 plus a bounded set of recent saved conversation capsules. Recent conversation
-recall uses two lanes: a tiny recency lane for the newest useful conversations
-and a relevance lane scored against the current prompt and thread. Durable
-memory ranking remains separate and uses the current prompt, the conversation
-title, recent user turns, the compacted summary, memory importance, pinned
-status, repeated sightings, thread relevance, and recency. Use `/sources` after
-an answer to see which memories and recent conversations were selected and why.
+recall uses two lanes: a configurable recency lane for the newest useful
+conversations and a configurable relevance lane scored against the current
+prompt and thread. Each selected saved conversation is packed with title,
+summary, strongest lexical snippets for the current query, recent turns, and
+provenance. Durable memory ranking remains separate and uses the current
+prompt, the conversation title, recent user turns, the compacted summary,
+memory importance, pinned status, repeated sightings, thread relevance, and
+recency. Use `/sources` after an answer to see which memories and recent
+conversations were selected and why.
 If no answer has been generated yet, `/sources` falls back to the currently
 attached indexes, topic dossiers, and dossier evidence so study results are
 visible immediately after `/study`.
+
+Motoko can already select from attached indexes, evidence stores, vectors,
+memories, recent conversations, and deterministic skill handlers before an
+answer. A later bounded sufficiency planner should let her run an extra
+retrieval pass when the first context window is clearly thin, but that should
+remain code-owned, source-visible, and limited rather than a hidden autonomous
+loop.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to

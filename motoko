@@ -734,6 +734,7 @@ RECENT_CONVERSATION_SNIPPET_CHARS = 900
 RECENT_CONVERSATION_MAX_CHARS = 12000
 RECENT_CONVERSATION_RECENCY_LANE = 2
 RECENT_CONVERSATION_RELEVANCE_LANE = 4
+RECENT_CONVERSATION_MATCHED_SNIPPETS = 2
 AUTO_MEMORY_MIN_MESSAGES = 4
 AUTO_MEMORY_INTERVAL_MESSAGES = 4
 AUTO_MEMORY_MAX_PROPOSALS = 5
@@ -746,6 +747,7 @@ RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT_SECONDS = 20
 MAINTENANCE_MAX_RETRIES = 2
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
+MAX_RECENT_MESSAGE_CHARS = 0
 COMPACT_KEEP_MESSAGES = 8
 AUTO_SUMMARY_MIN_MESSAGES = 24
 AUTO_SUMMARY_INTERVAL_MESSAGES = 10
@@ -1612,6 +1614,17 @@ def default_config() -> dict:
         "ui": {
             "assistant_color": DEFAULT_ASSISTANT_COLOR,
         },
+        "conversation_recall": {
+            "current_messages": MAX_RECENT_MESSAGES,
+            "current_max_chars": MAX_RECENT_MESSAGE_CHARS,
+            "recent_conversations": RECENT_CONVERSATION_RECENCY_LANE,
+            "relevant_conversations": RECENT_CONVERSATION_RELEVANCE_LANE,
+            "conversation_limit": None,
+            "conversation_messages": RECENT_CONVERSATION_MESSAGES,
+            "matched_snippets": RECENT_CONVERSATION_MATCHED_SNIPPETS,
+            "snippet_chars": RECENT_CONVERSATION_SNIPPET_CHARS,
+            "max_chars": RECENT_CONVERSATION_MAX_CHARS,
+        },
         "model_routes": {},
     }
 
@@ -1639,6 +1652,21 @@ def merged_config(data: dict | None) -> dict:
     ui = data.get("ui")
     if isinstance(ui, dict):
         merged["ui"]["assistant_color"] = normalize_ui_color(ui.get("assistant_color"))
+    conversation_recall = data.get("conversation_recall")
+    if isinstance(conversation_recall, dict):
+        for key in (
+            "current_messages",
+            "current_max_chars",
+            "recent_conversations",
+            "relevant_conversations",
+            "conversation_limit",
+            "conversation_messages",
+            "matched_snippets",
+            "snippet_chars",
+            "max_chars",
+        ):
+            if key in conversation_recall:
+                merged["conversation_recall"][key] = conversation_recall[key]
     model_routes = data.get("model_routes")
     if isinstance(model_routes, dict):
         for raw_route, raw_config in model_routes.items():
@@ -1730,6 +1758,80 @@ def parse_optional_positive_int(raw, field: str) -> int | None:
     return value
 
 
+def parse_config_nonnegative_int(raw, field: str, *, minimum: int = 0, maximum: int | None = None) -> int:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{field} must be an integer >= {minimum}") from exc
+    if value < minimum:
+        raise SystemExit(f"{field} must be an integer >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise SystemExit(f"{field} must be an integer <= {maximum}")
+    return value
+
+
+def parse_config_message_limit(raw, field: str, *, minimum: int = 1) -> int | None:
+    if isinstance(raw, str) and raw.strip().lower() == "all":
+        return None
+    return parse_config_nonnegative_int(raw, field, minimum=minimum)
+
+
+def conversation_recall_config() -> dict:
+    raw = load_config().get("conversation_recall", {})
+    if not isinstance(raw, dict):
+        raw = {}
+
+    recent_conversations = parse_config_nonnegative_int(
+        raw.get("recent_conversations", RECENT_CONVERSATION_RECENCY_LANE),
+        "conversation_recall.recent_conversations",
+    )
+    relevant_conversations = parse_config_nonnegative_int(
+        raw.get("relevant_conversations", RECENT_CONVERSATION_RELEVANCE_LANE),
+        "conversation_recall.relevant_conversations",
+    )
+    if raw.get("conversation_limit") not in (None, ""):
+        conversation_limit = parse_config_nonnegative_int(
+            raw.get("conversation_limit"),
+            "conversation_recall.conversation_limit",
+        )
+    else:
+        conversation_limit = max(RECENT_CONVERSATION_LIMIT, recent_conversations + relevant_conversations)
+
+    return {
+        "current_messages": parse_config_message_limit(
+            raw.get("current_messages", MAX_RECENT_MESSAGES),
+            "conversation_recall.current_messages",
+            minimum=1,
+        ),
+        "current_max_chars": parse_config_nonnegative_int(
+            raw.get("current_max_chars", MAX_RECENT_MESSAGE_CHARS),
+            "conversation_recall.current_max_chars",
+        ),
+        "recent_conversations": recent_conversations,
+        "relevant_conversations": relevant_conversations,
+        "conversation_limit": conversation_limit,
+        "conversation_messages": parse_config_nonnegative_int(
+            raw.get("conversation_messages", RECENT_CONVERSATION_MESSAGES),
+            "conversation_recall.conversation_messages",
+        ),
+        "matched_snippets": parse_config_nonnegative_int(
+            raw.get("matched_snippets", RECENT_CONVERSATION_MATCHED_SNIPPETS),
+            "conversation_recall.matched_snippets",
+            maximum=10,
+        ),
+        "snippet_chars": parse_config_nonnegative_int(
+            raw.get("snippet_chars", RECENT_CONVERSATION_SNIPPET_CHARS),
+            "conversation_recall.snippet_chars",
+            minimum=100,
+            maximum=12000,
+        ),
+        "max_chars": parse_config_nonnegative_int(
+            raw.get("max_chars", RECENT_CONVERSATION_MAX_CHARS),
+            "conversation_recall.max_chars",
+        ),
+    }
+
+
 def index_max_files() -> int | None:
     return parse_optional_positive_int(
         os.environ.get("MOTOKO_INDEX_MAX_FILES") or config_index_value("max_files"),
@@ -1783,6 +1885,16 @@ def format_config_limit(raw, *, is_bytes: bool = False) -> str:
         except ValueError:
             return str(raw)
     return str(raw)
+
+
+def format_conversation_recall_config(recall: dict) -> str:
+    current = "all" if recall["current_messages"] is None else str(recall["current_messages"])
+    current_chars = "unbounded" if recall["current_max_chars"] <= 0 else f"{recall['current_max_chars']} chars"
+    return (
+        f"current {current} msg(s), {current_chars}; "
+        f"saved {recall['recent_conversations']} recent + {recall['relevant_conversations']} relevant "
+        f"(limit {recall['conversation_limit']}, {recall['conversation_messages']} msg(s) each)"
+    )
 
 
 def format_permissions() -> str:
@@ -4460,19 +4572,79 @@ def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT) -> list[dic
     return ranked_memories(query=query, limit=limit)
 
 
-def conversation_recall_text(conv: dict) -> str:
+def conversation_recall_text_with_config(conv: dict, recall: dict) -> str:
     return core_conversation_recall_text(
         conv,
-        recent_message_limit=RECENT_CONVERSATION_MESSAGES,
+        recent_message_limit=recall["conversation_messages"],
     )
 
 
+def conversation_recall_text(conv: dict) -> str:
+    return conversation_recall_text_with_config(conv, conversation_recall_config())
+
+
+def recent_conversation_matched_snippets(row: dict, query_counts, *, limit: int, snippet_chars: int) -> list[str]:
+    if limit <= 0 or not query_counts:
+        return []
+    candidates: list[tuple[int, int, str]] = []
+    order = 0
+    summary = str(row.get("summary", "") or "").strip()
+    if summary:
+        score = score_text(query_counts, summary)
+        if score > 0:
+            candidates.append((score, order, "summary: " + compact_text(summary, snippet_chars)))
+            order += 1
+    for msg in row.get("messages", []):
+        role = msg.get("role", "")
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(msg.get("content", "") or "").strip()
+        if not content:
+            continue
+        score = score_text(query_counts, content)
+        if score <= 0:
+            continue
+        label = "Javier" if role == "user" else "Motoko"
+        candidates.append((score, order, f"{label}: {compact_text(content, snippet_chars)}"))
+        order += 1
+    candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    snippets = []
+    seen = set()
+    for _score, _order, text in candidates:
+        if text in seen:
+            continue
+        snippets.append(text)
+        seen.add(text)
+        if len(snippets) >= limit:
+            break
+    return snippets
+
+
+def attach_recent_conversation_snippets(rows: list[dict], query_counts, recall: dict) -> list[dict]:
+    if not rows or recall["matched_snippets"] <= 0:
+        return rows
+    enriched_rows = []
+    for row in rows:
+        enriched = dict(row)
+        snippets = recent_conversation_matched_snippets(
+            enriched,
+            query_counts,
+            limit=recall["matched_snippets"],
+            snippet_chars=recall["snippet_chars"],
+        )
+        if snippets:
+            enriched["_matched_snippets"] = snippets
+        enriched_rows.append(enriched)
+    return enriched_rows
+
+
 def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
+    recall = conversation_recall_config()
     current_id = conv.get("id", "")
     rows = [
         row
         for row in list_conversations()
-        if row.get("id") != current_id and conversation_recall_text(row).strip()
+        if row.get("id") != current_id and conversation_recall_text_with_config(row, recall).strip()
     ]
     if not rows:
         return []
@@ -4483,25 +4655,27 @@ def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
         reverse=True,
     )
     query_counts = token_counts(context_query_text(conv, query))
-    return rank_recent_conversation_rows(
+    ranked = rank_recent_conversation_rows(
         rows,
         query_counts=query_counts,
-        recall_text_func=conversation_recall_text,
+        recall_text_func=lambda row: conversation_recall_text_with_config(row, recall),
         score_text_func=score_text,
-        recency_lane=RECENT_CONVERSATION_RECENCY_LANE,
-        relevance_lane=RECENT_CONVERSATION_RELEVANCE_LANE,
-        limit=RECENT_CONVERSATION_LIMIT,
+        recency_lane=recall["recent_conversations"],
+        relevance_lane=recall["relevant_conversations"],
+        limit=recall["conversation_limit"],
     )
+    return attach_recent_conversation_snippets(ranked, query_counts, recall)
 
 
 def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+    recall = conversation_recall_config()
     conversations = ranked_recent_conversations(conv, query)
     return render_recent_conversations_with_sources_core(
         conversations,
         relative_time_func=relative_time,
-        max_chars=RECENT_CONVERSATION_MAX_CHARS,
-        snippet_chars=RECENT_CONVERSATION_SNIPPET_CHARS,
-        recent_message_limit=RECENT_CONVERSATION_MESSAGES,
+        max_chars=recall["max_chars"],
+        snippet_chars=recall["snippet_chars"],
+        recent_message_limit=recall["conversation_messages"],
     )
 
 
@@ -14468,10 +14642,34 @@ def format_retrieval_preview(conv: dict, query: str = "", *, max_chars: int = RE
     )
 
 
+def current_conversation_messages_for_model(conv: dict) -> list[dict]:
+    recall = conversation_recall_config()
+    messages = list(conv.get("messages", []))
+    current_messages = recall["current_messages"]
+    if current_messages is not None:
+        messages = messages[-current_messages:]
+    max_chars = recall["current_max_chars"]
+    if max_chars <= 0:
+        return messages
+    selected: list[dict] = []
+    used = 0
+    for msg in reversed(messages):
+        content = str(msg.get("content", "") or "")
+        next_used = used + len(content)
+        if selected and next_used > max_chars:
+            break
+        selected.append(msg)
+        used = next_used
+        if used >= max_chars:
+            break
+    selected.reverse()
+    return selected
+
+
 def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]:
     prompt, sources = build_system_prompt_and_sources(conv, query)
     messages = [{"role": "system", "content": prompt}]
-    messages.extend(conv.get("messages", [])[-MAX_RECENT_MESSAGES:])
+    messages.extend(current_conversation_messages_for_model(conv))
     return messages, sources
 
 
@@ -15542,6 +15740,7 @@ def format_status(conv: dict | None = None) -> str:
     repo_items = [item for item in context_items if item.get("kind") == "repo"]
     config = load_config()
     index_config = config.get("index", {})
+    recall_config = conversation_recall_config()
     chat_route_info = model_route(MODEL_ROUTE_CHAT)
     if endpoint_is_unix(chat_route_info.get("endpoint", "")):
         readiness = model_route_manager().readiness(MODEL_ROUTE_CHAT)
@@ -15575,6 +15774,7 @@ def format_status(conv: dict | None = None) -> str:
             f"file {format_config_limit(index_config.get('max_file_bytes'), is_bytes=True)}"
         ),
         f"conversations: {len(conversations)}",
+        f"conversation recall: {format_conversation_recall_config(recall_config)}",
         f"memories: {len(memories)} total, {pinned} pinned",
         f"skills: {len(skills)}",
         f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",

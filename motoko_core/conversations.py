@@ -274,6 +274,13 @@ def render_recent_conversations_with_sources_core(
         body_parts = []
         if row.get("summary"):
             body_parts.append("summary: " + compact_text(row.get("summary", ""), snippet_chars))
+        matched_snippets = [
+            compact_text(str(item), snippet_chars)
+            for item in row.get("_matched_snippets", [])
+            if str(item).strip()
+        ]
+        if matched_snippets:
+            body_parts.append("matched snippets:\n  " + "\n  ".join(matched_snippets))
         recent_lines = []
         for msg in row.get("messages", [])[-recent_message_limit:]:
             role = msg.get("role", "")

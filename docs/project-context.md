@@ -192,8 +192,12 @@ Current UI direction:
   timestamps in JSON state.
 - Resume/list columns should be readable and compact:
   `created`, `updated`, `branch`, `conversation`.
-- Recent saved conversations should be available as bounded, inspectable context
-  in new chats. Durable memories remain separate from this recency recall.
+- Recent saved conversations should be available as bounded, inspectable,
+  per-realm configurable context in new chats. Durable memories remain separate
+  from this recency recall. Conversation recall should pack selected saved
+  conversations as title, summary, matched snippets, recent turns, and
+  provenance, with NixOS able to set different budgets per Unix account through
+  `~/.config/motoko/config.json`.
 - Query-focused memory dossiers should be available when Javier wants Motoko to
   study a subject across saved memories and prior conversations before
   continuing the chat.
@@ -255,6 +259,14 @@ Current UI direction:
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.
+- Future retrieval sufficiency should become a bounded pre-answer planner, not
+  a broad autonomous agent. When selected context is thin or conflicting, Motoko
+  may run one or two extra retrieval passes over already allowed sources
+  (current corpus indexes, evidence/vector stores, durable memories, saved
+  conversations, and applicable built-in handlers) before final synthesis, then
+  expose those extra passes in `/sources`. Skills can encode deterministic
+  retrieval procedures, but a code-owned planner should decide when those
+  procedures run.
 - The TUI should show the active model badge, including MTP/port information
   such as `qwen3.6-27b-mtp:8083`.
 - Background study may refresh the private context catalog, note stale indexes,
