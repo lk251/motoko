@@ -150,8 +150,11 @@ from motoko_core.model_routes import (  # noqa: E402
     normalize_endpoint_paths,
     normalize_model_route,
     normalize_route_cache_policy,
+    route_kv_cache_policy,
     route_int_value,
     route_model_name,
+    route_profile_value,
+    route_selection,
     route_string_value,
 )
 from motoko_core.model_services import (  # noqa: E402
@@ -2003,6 +2006,13 @@ def catalog_route_info(route_id: str, *, logical_route: str = MODEL_ROUTE_CHAT) 
         "description": MODEL_ROUTE_DESCRIPTIONS.get(logical_route, ""),
         "ctx_size": route_context_size(raw) or route_context_size(summary) or 0,
         "quant": route_quant_label(raw),
+        "tasks": summary.get("tasks", []),
+        "route_profile": str(summary.get("route_profile") or route_profile_value(raw) or ""),
+        "role": str(summary.get("role") or route_string_value(raw, "role") or ""),
+        "context_tokens": route_context_size(raw) or route_context_size(summary) or 0,
+        "kv_offload": raw.get("kv_offload") if isinstance(raw.get("kv_offload"), bool) else raw.get("kvOffload"),
+        "kv_cache": summary.get("kv_cache") if isinstance(summary.get("kv_cache"), dict) else route_kv_cache_policy(raw),
+        "selection": summary.get("selection") if isinstance(summary.get("selection"), dict) else route_selection(raw),
     }
     return info if info["endpoint"] and info["model"] else None
 
@@ -2021,6 +2031,14 @@ def route_catalog_args(route_info: dict) -> list[str]:
 def route_kv_offload_disabled(route_info: dict) -> bool:
     if route_info.get("kv_offload") is False:
         return True
+    if route_info.get("kv_offload") is True:
+        return False
+    kv_cache = route_info.get("kv_cache") if isinstance(route_info.get("kv_cache"), dict) else {}
+    location = str(kv_cache.get("location") or kv_cache.get("loc") or "").strip().lower()
+    if location in {"host-ram", "host_ram", "ram", "cpu", "system-ram", "system_ram"}:
+        return True
+    if location in {"gpu", "vram"}:
+        return False
     args = route_catalog_args(route_info)
     return "--no-kv-offload" in args
 
@@ -2079,6 +2097,13 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "metrics_path": str(local_route.get("metrics_path") or "") if uses_catalog_endpoint else "",
         "ctx_size": route_context_size(local_route) or 0,
         "quant": route_quant_label(local_route),
+        "tasks": [str(item) for item in local_route.get("tasks", [])] if isinstance(local_route.get("tasks"), list) else [],
+        "route_profile": str(local_route.get("route_profile") or local_route.get("routeProfile") or ""),
+        "role": str(local_route.get("role") or ""),
+        "context_tokens": route_context_size(local_route) or 0,
+        "kv_offload": local_route.get("kv_offload") if isinstance(local_route.get("kv_offload"), bool) else local_route.get("kvOffload"),
+        "kv_cache": route_kv_cache_policy(local_route),
+        "selection": route_selection(local_route),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
     }
 
@@ -2104,28 +2129,53 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
 
 def chat_context_mode() -> str:
     mode = os.environ.get(CHAT_CONTEXT_MODE_ENV, "auto").strip().lower()
-    return mode if mode in {"auto", "default", "deep", "max"} else "auto"
+    return mode if mode in {"auto", "default", "quality", "deep", "max"} else "auto"
 
 
-def route_is_qwen36_chat(info: dict) -> bool:
-    haystack = " ".join(
-        str(info.get(key, ""))
-        for key in ("catalog_route", "model", "model_path", "quant")
-    ).lower()
-    return ("qwen3.6" in haystack or "qwen36" in haystack or "27b" in haystack) and "chat" in haystack
+CHAT_CONTEXT_ROUTE_TASKS = {
+    "chat",
+    "default_chat",
+    "quality_chat",
+    "short_context_chat",
+    "long_context_chat",
+    "max_context_chat",
+    "max_context",
+    "deep_synthesis",
+}
 
 
-def route_is_q4(info: dict) -> bool:
-    haystack = " ".join(
-        str(info.get(key, ""))
-        for key in ("catalog_route", "model", "model_path", "quant")
-    ).lower()
-    return "q4" in haystack or "ud-q4" in haystack
+def route_profile(info: dict) -> str:
+    profile = str(info.get("route_profile") or "").strip().lower().replace("-", "_")
+    return profile if profile in {"default", "quality", "deep", "max"} else ""
 
 
-def route_is_deep(info: dict) -> bool:
-    route_id = str(info.get("catalog_route") or info.get("route", "")).lower()
-    return "deep" in route_id or "128" in route_id
+def route_tasks(info: dict) -> set[str]:
+    tasks = info.get("tasks")
+    return {str(item) for item in tasks} if isinstance(tasks, list) else set()
+
+
+def route_selection_priority_value(info: dict) -> int:
+    selection = info.get("selection") if isinstance(info.get("selection"), dict) else {}
+    try:
+        return int(selection.get("priority") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def route_selection_default_value(info: dict) -> bool:
+    selection = info.get("selection") if isinstance(info.get("selection"), dict) else {}
+    return selection.get("default") is True
+
+
+def route_chat_capable(route_id: str, raw: dict) -> bool:
+    profile = route_profile_value(raw)
+    if profile:
+        return True
+    tasks = {str(item) for item in raw.get("tasks", [])} if isinstance(raw.get("tasks"), list) else set()
+    if CHAT_CONTEXT_ROUTE_TASKS & tasks:
+        return True
+    # Backward compatibility for catalogs that predate explicit chat profiles.
+    return "qwen36" in str(route_id).lower()
 
 
 def chat_route_candidates() -> list[dict]:
@@ -2142,11 +2192,10 @@ def chat_route_candidates() -> list[dict]:
         if route_id == base.get("catalog_route"):
             continue
         raw_dict = raw if isinstance(raw, dict) else {}
-        tasks = {str(item) for item in raw_dict.get("tasks", [])} if isinstance(raw_dict.get("tasks"), list) else set()
-        if not ({"chat", "deep_synthesis", "max_context"} & tasks or "qwen36" in route_id):
+        if not route_chat_capable(route_id, raw_dict):
             continue
         info = catalog_route_info(route_id, logical_route=MODEL_ROUTE_CHAT)
-        if not info or not route_is_qwen36_chat(info):
+        if not info:
             continue
         info["governor_source"] = "catalog"
         candidates.append(info)
@@ -2170,9 +2219,20 @@ def route_context_limit(info: dict) -> int:
 
 
 def route_governor_tier(info: dict) -> str:
-    if route_is_q4(info):
+    profile = route_profile(info)
+    if profile:
+        return f"chat_{profile}"
+    tasks = route_tasks(info)
+    if tasks & {"max_context", "max_context_chat"}:
         return "chat_max"
-    if route_is_deep(info):
+    if tasks & {"quality_chat", "short_context_chat"}:
+        return "chat_quality"
+    if tasks & {"long_context_chat"}:
+        return "chat_deep"
+    limit = route_context_limit(info)
+    if limit >= CHAT_CONTEXT_MAX_SOFT_TOKENS:
+        return "chat_max"
+    if limit >= CHAT_CONTEXT_DEEP_SOFT_TOKENS:
         return "chat_deep"
     return "chat_default"
 
@@ -2180,22 +2240,20 @@ def route_governor_tier(info: dict) -> str:
 def route_governor_rank(info: dict, preferred_tier: str) -> tuple:
     tier = route_governor_tier(info)
     route_id = str(info.get("catalog_route") or info.get("route", ""))
-    q5 = 0 if "q5" in " ".join(str(info.get(key, "")) for key in ("quant", "model", "model_path")).lower() else 1
-    tier_rank = {"chat_default": 0, "chat_deep": 1, "chat_max": 2}
-    preferred_rank = 0 if tier == preferred_tier else 1
-    if preferred_tier == "chat_default" and tier == "chat_max":
-        preferred_rank = 3
-    if preferred_tier == "chat_deep" and tier == "chat_max":
-        preferred_rank = 2
-    if preferred_tier == "chat_max" and tier != "chat_max":
-        preferred_rank = 2
-    base_rank = 0 if route_id == "qwen36-chat" else 1
+    fallback_order = {
+        "chat_default": ["chat_default", "chat_quality", "chat_deep", "chat_max"],
+        "chat_quality": ["chat_quality", "chat_default", "chat_deep", "chat_max"],
+        "chat_deep": ["chat_deep", "chat_default", "chat_quality", "chat_max"],
+        "chat_max": ["chat_max", "chat_deep", "chat_default", "chat_quality"],
+    }.get(preferred_tier, ["chat_default", "chat_quality", "chat_deep", "chat_max"])
+    preferred_rank = fallback_order.index(tier) if tier in fallback_order else len(fallback_order)
+    context_limit = route_context_limit(info)
+    context_rank = -context_limit if preferred_tier == "chat_max" else context_limit
     return (
         preferred_rank,
-        tier_rank.get(tier, 9),
-        q5,
-        base_rank,
-        route_context_limit(info),
+        0 if preferred_tier == "chat_default" and route_selection_default_value(info) else 1,
+        -route_selection_priority_value(info),
+        context_rank,
         route_id,
     )
 
@@ -2205,6 +2263,8 @@ def preferred_chat_tier(prompt_tokens: int, mode: str) -> str:
         return "chat_max"
     if mode == "deep":
         return "chat_deep"
+    if mode == "quality":
+        return "chat_quality"
     if mode == "default":
         return "chat_default"
     if prompt_tokens > CHAT_CONTEXT_DEEP_SOFT_TOKENS:
@@ -2277,6 +2337,11 @@ def model_call_started_record(
         "status": "started",
         "route": str(route_info.get("route", "")),
         "catalog_route": str(route_info.get("catalog_route", "")),
+        "route_profile": str(route_info.get("route_profile", "")),
+        "kv_offload": route_info.get("kv_offload") if isinstance(route_info.get("kv_offload"), bool) else None,
+        "kv_cache_location": str((route_info.get("kv_cache") or {}).get("location") or "")
+        if isinstance(route_info.get("kv_cache"), dict)
+        else "",
         "tier": str(governor.get("selected_tier", "")),
         "mode": str(governor.get("mode", "")),
         "model": str(route_info.get("model", "")),
@@ -2307,6 +2372,9 @@ def write_last_model_call(record: dict) -> None:
             "status",
             "route",
             "catalog_route",
+            "route_profile",
+            "kv_offload",
+            "kv_cache_location",
             "tier",
             "mode",
             "model",
@@ -2382,6 +2450,12 @@ def format_last_model_call(record: dict | None = None) -> str:
     ]
     if record.get("quant"):
         lines.append(f"quant: {record.get('quant')}")
+    if record.get("route_profile"):
+        lines.append(f"profile: {record.get('route_profile')}")
+    if record.get("kv_cache_location") or record.get("kv_offload") is not None:
+        location = record.get("kv_cache_location") or "unknown"
+        offload = record.get("kv_offload")
+        lines.append(f"KV: {'GPU' if offload is True else location}")
     lines.extend(
         [
             (
@@ -2572,10 +2646,14 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
         marker = "default" if is_default else "configured"
         manager = f"; manager={info['manager_kind']}" if info.get("manager_kind") else ""
         catalog_route = f"; catalog={info['catalog_route']}" if info.get("catalog_route") else ""
+        profile = f"; profile={info['route_profile']}" if info.get("route_profile") else ""
+        kv_cache = info.get("kv_cache") if isinstance(info.get("kv_cache"), dict) else {}
+        kv_location = str(kv_cache.get("location") or "").strip()
+        kv = f"; KV={kv_location}" if kv_location else ""
         cache = format_route_cache_policy(info)
         lines.append(
             f"  {route}: {info['model']} endpoint={info['endpoint']} "
-            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}{cache}; {info['description']})"
+            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}{profile}{kv}{cache}; {info['description']})"
         )
     lines.append("")
     lines.append(format_chat_route_governor())
@@ -2587,7 +2665,7 @@ def format_chat_route_governor() -> str:
     lines = [
         "Chat context governor:",
         f"  schema: {CONTEXT_GOVERNOR_SCHEMA_VERSION}",
-        f"  mode: {chat_context_mode()} ({CHAT_CONTEXT_MODE_ENV}=auto|default|deep|max)",
+        f"  mode: {chat_context_mode()} ({CHAT_CONTEXT_MODE_ENV}=auto|default|quality|deep|max)",
         (
             "  soft tiers: "
             f"default<={CHAT_CONTEXT_DEFAULT_SOFT_TOKENS}tok, "
@@ -2604,8 +2682,13 @@ def format_chat_route_governor() -> str:
         tier = route_governor_tier(info)
         ctx = route_context_limit(info)
         quant = f" quant={info.get('quant')}" if info.get("quant") else ""
+        profile = f" profile={info.get('route_profile')}" if info.get("route_profile") else ""
+        default = " default" if route_selection_default_value(info) else ""
+        kv_cache = info.get("kv_cache") if isinstance(info.get("kv_cache"), dict) else {}
+        kv_location = str(kv_cache.get("location") or "").strip()
+        kv = f" KV={kv_location}" if kv_location else ""
         lines.append(
-            f"    - {route_id}: {tier} ctx={ctx}{quant} model={info.get('model', '')}"
+            f"    - {route_id}: {tier}{profile}{default} ctx={ctx}{quant}{kv} model={info.get('model', '')}"
         )
     return "\n".join(lines)
 

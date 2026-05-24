@@ -32,7 +32,16 @@ MODEL_ROUTE_DESCRIPTIONS = {
 }
 
 LOCAL_MODEL_ROUTE_TASK_ALIASES = {
-    MODEL_ROUTE_CHAT: ("chat", "deep_synthesis"),
+    MODEL_ROUTE_CHAT: (
+        "chat",
+        "default_chat",
+        "quality_chat",
+        "short_context_chat",
+        "long_context_chat",
+        "max_context_chat",
+        "max_context",
+        "deep_synthesis",
+    ),
     MODEL_ROUTE_INDEX_CHUNK: ("index_chunk",),
     MODEL_ROUTE_INDEX_FILE: ("index_file",),
     MODEL_ROUTE_INDEX_CORPUS: ("index_corpus", "synthesis"),
@@ -45,17 +54,19 @@ LOCAL_MODEL_ROUTE_TASK_ALIASES = {
 }
 
 LOCAL_MODEL_ROUTE_PREFERENCES = {
-    MODEL_ROUTE_CHAT: ("qwen36-chat",),
+    MODEL_ROUTE_CHAT: ("qwen36-chat-default", "qwen36-chat"),
     MODEL_ROUTE_INDEX_CHUNK: ("qwen35-2b-worker", "ministral-3b-worker"),
     MODEL_ROUTE_INDEX_FILE: ("qwen3-4b-instruct-worker", "ministral-3b-worker"),
     MODEL_ROUTE_INDEX_CORPUS: ("qwen35-9b-worker", "qwen3-4b-instruct-worker"),
     MODEL_ROUTE_INDEX_LABEL: ("ministral-3b-worker", "qwen35-2b-worker"),
-    MODEL_ROUTE_TOPIC: ("qwen35-9b-worker", "qwen36-chat"),
+    MODEL_ROUTE_TOPIC: ("qwen35-9b-worker", "qwen36-chat-deep", "qwen36-chat-default", "qwen36-chat"),
     MODEL_ROUTE_MEMORY: ("qwen35-2b-worker", "qwen35-9b-worker"),
-    MODEL_ROUTE_PROFILE: ("qwen35-9b-worker", "qwen36-chat"),
+    MODEL_ROUTE_PROFILE: ("qwen35-9b-worker", "qwen36-chat-deep", "qwen36-chat-default", "qwen36-chat"),
     MODEL_ROUTE_TITLE: ("qwen35-2b-worker", "ministral-3b-worker"),
-    MODEL_ROUTE_AUDIT: ("qwen35-9b-worker", "qwen36-chat"),
+    MODEL_ROUTE_AUDIT: ("qwen35-9b-worker", "qwen36-chat-quality", "qwen36-chat-default", "qwen36-chat"),
 }
+
+CHAT_ROUTE_PROFILES = {"default", "quality", "deep", "max"}
 
 
 def configured_identity_realm() -> str:
@@ -167,6 +178,33 @@ def route_string_value(raw: dict, *keys: str) -> str:
     return ""
 
 
+def route_profile_value(raw: dict) -> str:
+    value = route_string_value(raw, "route_profile", "routeProfile", "profile")
+    value = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    return value if value in CHAT_ROUTE_PROFILES else ""
+
+
+def route_selection(raw: dict) -> dict:
+    value = raw.get("selection")
+    return {str(key): item for key, item in value.items()} if isinstance(value, dict) else {}
+
+
+def route_selection_default(raw: dict) -> bool:
+    return route_selection(raw).get("default") is True
+
+
+def route_selection_priority(raw: dict) -> int:
+    try:
+        return int(route_selection(raw).get("priority") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def route_kv_cache_policy(raw: dict) -> dict:
+    value = raw.get("kv_cache") or raw.get("kvCache")
+    return {str(key): item for key, item in value.items()} if isinstance(value, dict) else {}
+
+
 def route_model_name(raw: dict, catalog: dict | None = None) -> str:
     catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
     model_ref = raw.get("model_id") or raw.get("modelId") or raw.get("model") or raw.get("model_name")
@@ -220,6 +258,12 @@ def local_model_route_summary(route_id: str, raw: dict, catalog: dict | None = N
         "endpoint_paths": endpoint_paths,
         "request_path": endpoint_paths[0] if endpoint_paths else "",
         "tasks": sorted(task_set),
+        "route_profile": route_profile_value(raw),
+        "role": route_string_value(raw, "role"),
+        "context_tokens": route_int_value(raw, "context_tokens", "contextTokens"),
+        "kv_offload": raw.get("kv_offload") if isinstance(raw.get("kv_offload"), bool) else raw.get("kvOffload"),
+        "kv_cache": route_kv_cache_policy(raw),
+        "selection": route_selection(raw),
         "max_parallel": raw.get("maxParallel") or raw.get("max_parallel") or 1,
         "embedding_dimensions": dimensions,
         "manager_kind": str(manager.get("kind") or ""),
@@ -289,6 +333,17 @@ def local_model_route_entry_for_task(route: str, routes: dict) -> tuple[str, dic
             candidates.append((route_id, raw))
     if not candidates:
         return None
+    if route == MODEL_ROUTE_CHAT:
+        candidates.sort(
+            key=lambda item: (
+                0 if route_selection_default(item[1]) else 1,
+                0 if route_profile_value(item[1]) == "default" else 1,
+                -route_selection_priority(item[1]),
+                str(item[0]),
+            )
+        )
+        if route_selection_default(candidates[0][1]):
+            return candidates[0]
     preferences = LOCAL_MODEL_ROUTE_PREFERENCES.get(route, ())
     for preferred in preferences:
         for route_id, raw in candidates:

@@ -63,9 +63,14 @@ not the easiest place to review what changed after a long work session.
   artifact lifecycle decisions, and content-free observability now have
   dedicated stdlib modules while the root `motoko` executable remains the
   compatibility facade.
-- Added a chat context governor that estimates prompt size, keeps normal chat on
-  the Qwen3.6 Q5 route, and switches to an approved max-context Q4 route only
-  for very large chat prompts or explicit context-mode overrides.
+- Added a chat context governor that estimates prompt size, uses the
+  NixOS-declared default Qwen3.6 route for normal chat, and switches to
+  approved quality/deep/max profiles only for explicit mode requests or prompts
+  that need longer context.
+- Updated chat route selection for explicit NixOS route profiles, so Motoko now
+  honors `selection.default`, `selection.priority`, `route_profile`,
+  `context_tokens`, `kv_offload`, and `kv_cache.location` instead of treating
+  `qwen36-chat` or Q4 naming as canonical.
 - Added content-free model-call telemetry plus `/last-call`,
   `motoko last-call`, and `motoko context-bench` so route choice, context
   pressure, timing, and estimated token rates can be inspected without storing
