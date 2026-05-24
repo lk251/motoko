@@ -197,6 +197,15 @@ from motoko_core.profile import (  # noqa: E402
     format_profile_dossier,
     render_profile_with_sources_core,
 )
+from motoko_core.skills import (  # noqa: E402
+    delete_skill as core_delete_skill,
+    format_skill as core_format_skill,
+    format_skills_list,
+    list_skills as core_list_skills,
+    load_skill as core_load_skill,
+    render_skills_with_sources as core_render_skills_with_sources,
+    save_skill as core_save_skill,
+)
 from motoko_core.retrieval import (  # noqa: E402
     add_hybrid_candidate,
     base_evidence_spans,
@@ -387,6 +396,7 @@ from motoko_core.state import (  # noqa: E402
     retrieval_eval_path,
     retrieval_evals_dir,
     safe_load_json,
+    skills_dir,
     state_root,
     study_jobs_path,
     study_state_path,
@@ -764,6 +774,10 @@ SLASH_COMMANDS = [
     ("/memory pin ID", "always include a memory when possible"),
     ("/memory unpin ID", "remove memory pin"),
     ("/forget ID", "delete a memory"),
+    ("/skills", "list learned procedural skills"),
+    ("/skill show NAME", "show a learned procedural skill"),
+    ("/skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+    ("/skill delete NAME", "delete a learned procedural skill"),
     ("/memorize", "ask Motoko to propose memories from this chat"),
 ]
 
@@ -795,6 +809,8 @@ SHELL_COMMANDS = [
     "dossiers",
     "dossier-show",
     "study",
+    "skills",
+    "skill",
     "memories",
     "memory",
     "tasks",
@@ -868,6 +884,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/profile",
     "/profile-refresh",
     "/memories",
+    "/skills",
     "/indexes",
     "/corpus-profile",
     "/index-quality",
@@ -4078,6 +4095,105 @@ def format_personality() -> str:
     text, path, exists = load_personality()
     status = "custom" if exists else "default"
     return "\n".join([f"path: {path}", f"status: {status}", "", text])
+
+
+def list_skills() -> list[dict]:
+    return core_list_skills(skills_dir())
+
+
+def format_skills() -> str:
+    return format_skills_list(list_skills())
+
+
+def format_skill(name: str) -> str:
+    return core_format_skill(core_load_skill(skills_dir(), name))
+
+
+def learn_skill(
+    name: str,
+    *,
+    description: str,
+    body: str,
+    source: str = "manual",
+    replace: bool = False,
+) -> dict:
+    return core_save_skill(
+        skills_dir(),
+        name=name,
+        description=description,
+        body=body,
+        source=source,
+        replace=replace,
+        writer=atomic_write,
+    )
+
+
+def learn_skill_text(
+    name: str,
+    *,
+    description: str,
+    body: str,
+    replace: bool = False,
+) -> str:
+    row = learn_skill(name, description=description, body=body, source="manual", replace=replace)
+    action = "updated" if replace else "saved"
+    return f"skill {action}: {row.get('slug', '')}\npath: {row.get('path', '')}"
+
+
+def delete_skill_text(name: str) -> str:
+    row = core_delete_skill(skills_dir(), name)
+    return f"skill deleted: {row.get('slug', '')}"
+
+
+def render_skills_with_sources(query: str) -> tuple[str, list[dict]]:
+    return core_render_skills_with_sources(skills_dir(), query)
+
+
+def parse_skill_learn_args(raw: str) -> dict:
+    usage = "usage: /skill learn NAME --description DESC --body TEXT [--replace]"
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{usage}\nerror: {exc}") from exc
+    if not tokens:
+        raise SystemExit(usage)
+    name = tokens[0]
+    description = ""
+    body = ""
+    replace = False
+    idx = 1
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in {"--replace", "-r"}:
+            replace = True
+            idx += 1
+            continue
+        if token in {"--description", "-d"}:
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            description = tokens[idx + 1]
+            idx += 2
+            continue
+        if token in {"--body", "-b"}:
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            body = tokens[idx + 1]
+            idx += 2
+            continue
+        raise SystemExit(f"{usage}\nunknown argument: {token}")
+    if not description or not body:
+        raise SystemExit(usage)
+    return {"name": name, "description": description, "body": body, "replace": replace}
+
+
+def learn_skill_from_command(raw: str) -> str:
+    args = parse_skill_learn_args(raw)
+    return learn_skill_text(
+        args["name"],
+        description=args["description"],
+        body=args["body"],
+        replace=args["replace"],
+    )
 
 
 def load_profile_dossier() -> dict | None:
@@ -11474,6 +11590,7 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
     profile_text, profile_sources = render_profile_with_sources()
+    skill_text, skill_sources = render_skills_with_sources(query)
     retrieval_query = context_query_text(conv, query)
     context_text, context_sources = render_context_with_sources(conv.get("context_items", []), retrieval_query)
     catalog = read_context_catalog() or build_context_catalog()
@@ -11497,6 +11614,7 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     )
     sources.extend(profile_sources)
     sources.extend(memory_sources)
+    sources.extend(skill_sources)
     sources.extend(recent_sources)
     if conv.get("summary", "").strip():
         sources.append({"kind": "conversation-summary", "conversation_id": conv.get("id", "")})
@@ -11527,6 +11645,12 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
                 "chars": len(memory_text),
                 "sources": len(memory_sources),
                 "purpose": "ranked personal facts and preferences",
+            },
+            {
+                "lane": "procedural skills",
+                "chars": len(skill_text),
+                "sources": len(skill_sources),
+                "purpose": "relevant learned procedures and debugging lessons",
             },
             {
                 "lane": "recent conversations",
@@ -11575,8 +11699,10 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         instructions.
 
         Use the profile dossier, selected saved memories, recent saved
-        conversations, compacted conversation summary, attached memory
+        conversations, relevant procedural skills, compacted conversation summary, attached memory
         dossiers, and explicitly attached documents as context.
+        Treat procedural skills as workflow guidance, not factual evidence
+        about source documents.
         Do not claim access to files or directories unless their contents are
         included in this prompt. If a memory seems stale, say so and ask before
         relying on it heavily.
@@ -11593,6 +11719,9 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
 
         Selected saved memories:
         {memory_text}
+
+        Relevant procedural skills:
+        {skill_text}
 
         Recent saved conversations:
         {recent_text}
@@ -12074,6 +12203,10 @@ HELP_SECTIONS = [
             ("/memory pin ID", "always include a memory when possible"),
             ("/memory unpin ID", "remove a memory pin"),
             ("/forget ID", "delete a memory"),
+            ("/skills", "list learned procedural skills"),
+            ("/skill show NAME", "show a learned procedural skill"),
+            ("/skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+            ("/skill delete NAME", "delete a learned procedural skill"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -12128,6 +12261,10 @@ HELP_SECTIONS = [
             ("motoko repo review [PATH]", "show repo review summary; runs review gate if present"),
             ("motoko profile refresh", "rebuild the profile dossier"),
             ("motoko memory review", "list memories with provenance"),
+            ("motoko skill list", "list learned procedural skills"),
+            ("motoko skill show NAME", "show a learned procedural skill"),
+            ("motoko skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+            ("motoko skill delete NAME --yes", "delete a learned procedural skill"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -12309,6 +12446,7 @@ def print_sources(conv: dict) -> None:
 def format_status(conv: dict | None = None) -> str:
     memories = load_memories(limit=500)
     pinned = sum(1 for row in memories if row.get("pinned"))
+    skills = list_skills()
     indexes = list_indexes()
     current_indexes = latest_indexes_by_family(indexes)
     index_files = sum(len(index.get("files", [])) for index in indexes)
@@ -12380,6 +12518,7 @@ def format_status(conv: dict | None = None) -> str:
         ),
         f"conversations: {len(conversations)}",
         f"memories: {len(memories)} total, {pinned} pinned",
+        f"skills: {len(skills)}",
         f"profile dossier: {'yes, updated ' + relative_time(profile.get('updated', '')) if profile else 'no'}",
         f"maintenance: {maintenance.get('phase', maintenance.get('status', 'unknown')) if maintenance else 'idle'}",
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
@@ -12610,6 +12749,8 @@ def memory_profile_report_command_request(text: str):
     body = command_body(text)
     if primary == "/memories" and not body:
         return "/memories", lambda: format_memories()
+    if primary == "/skills" and not body:
+        return "/skills", format_skills
     if primary == "/memory":
         parts = body.split(maxsplit=1)
         subcommand = parts[0] if parts else ""
@@ -12618,6 +12759,14 @@ def memory_profile_report_command_request(text: str):
             return "/memory review", lambda: format_memories(verbose=True)
         if subcommand == "search":
             return "/memory search", lambda: format_memory_search(subbody)
+    if primary == "/skill":
+        parts = body.split(maxsplit=1)
+        subcommand = parts[0] if parts else ""
+        subbody = parts[1].strip() if len(parts) > 1 else ""
+        if subcommand == "list" and not subbody:
+            return "/skill list", format_skills
+        if subcommand in {"show", "view"} and subbody:
+            return "/skill show", lambda: format_skill(subbody)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -12657,6 +12806,26 @@ def memory_mutation_command_request(text: str, conv: dict):
         if len(parts) != 2:
             return "/memory unpin", lambda: "usage: /memory unpin ID"
         return "/memory unpin", lambda: set_memory_pinned_text(parts[1], False)
+    return None
+
+
+def skill_mutation_command_request(text: str, conv: dict):
+    text = text.strip()
+    primary = command_primary(text)
+    body = command_body(text)
+    if primary != "/skill":
+        return None
+    parts = body.split(maxsplit=1)
+    subcommand = parts[0] if parts else ""
+    subbody = parts[1].strip() if len(parts) > 1 else ""
+    if subcommand == "learn":
+        if not subbody:
+            return "/skill learn", lambda: "usage: /skill learn NAME --description DESC --body TEXT [--replace]"
+        return "/skill learn", lambda: learn_skill_from_command(subbody)
+    if subcommand == "delete":
+        if not subbody:
+            return "/skill delete", lambda: "usage: /skill delete NAME"
+        return "/skill delete", lambda: delete_skill_text(subbody)
     return None
 
 
@@ -12839,6 +13008,7 @@ def shared_command_request(text: str, conv: dict):
         (lambda: topic_dossier_report_command_request(text), COMMAND_KIND_REPORT, False),
         (lambda: memory_profile_report_command_request(text), COMMAND_KIND_REPORT, False),
         (lambda: memory_mutation_command_request(text, conv), COMMAND_KIND_MUTATION, True),
+        (lambda: skill_mutation_command_request(text, conv), COMMAND_KIND_MUTATION, True),
         (lambda: context_attachment_command_request(text, conv), COMMAND_KIND_MUTATION, True),
         (lambda: repo_command_request(text, conv), COMMAND_KIND_MUTATION, True),
         (lambda: conversation_mutation_command_request(text, conv), COMMAND_KIND_MUTATION, True),
@@ -13137,6 +13307,8 @@ def completion_ids(kind: str) -> list[str]:
         return [row.get("id", "") for row in list_topics()]
     if kind == "dossier":
         return [row.get("id", "") for row in list_dossiers()]
+    if kind == "skill":
+        return [row.get("slug", "") for row in list_skills()]
     if kind == "model-route":
         routes = []
         for row in model_service_routes():
@@ -13168,6 +13340,15 @@ def setup_readline_completion() -> None:
                     if command.startswith("/memory ")
                 ]
                 matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
+            elif parts and parts[0] == "/skill" and (len(parts) < 2 or (len(parts) == 2 and not stripped.endswith(" "))):
+                subcommands = [
+                    slash_command_value(command).split(maxsplit=1)[1]
+                    for command, _description in SLASH_COMMANDS
+                    if command.startswith("/skill ")
+                ]
+                matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
+            elif parts and parts[0] == "/skill" and len(parts) <= 3 and parts[1] in {"show", "delete"}:
+                matches = [item for item in completion_ids("skill") if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-index", "/topic", "/deepen", "/corpus-profile", "/index-quality", "/index-repair"}:
@@ -14349,6 +14530,27 @@ class MotokoTui:
                 if not current or suffix.startswith(current) or value.startswith(stripped):
                     options.append({"kind": "command", "value": value, "label": command, "description": description})
             return options
+        if first == "/skill" and (len(words) < 2 or (len(words) == 2 and not stripped.endswith(" "))):
+            options = []
+            for command, description in SLASH_COMMANDS:
+                if not command.startswith("/skill "):
+                    continue
+                value = slash_command_value(command)
+                suffix = value.split(maxsplit=1)[1] if " " in value else value
+                if not current or suffix.startswith(current) or value.startswith(stripped):
+                    options.append({"kind": "command", "value": value, "label": command, "description": description})
+            return options
+        if first == "/skill" and len(words) <= 3 and len(words) >= 2 and words[1] in {"show", "delete"}:
+            return [
+                {
+                    "kind": "skill",
+                    "value": row.get("slug", ""),
+                    "label": row.get("slug", ""),
+                    "description": row.get("description", ""),
+                }
+                for row in list_skills()
+                if not current or item_matches_selector(row, current)
+            ][:20]
         if first in {"/index-resume", "/resume-work"} and len(words) <= 2:
             return [
                 {
@@ -14457,6 +14659,18 @@ class MotokoTui:
             self.submit_text(self.input_buffer)
             self.input_buffer = ""
             self.cursor = 0
+        if kind == "skill":
+            parts = self.input_buffer.lstrip().split()
+            subcommand = parts[1] if len(parts) > 1 else "show"
+            self.input_buffer = f"/skill {subcommand} {value}"
+            self.cursor = len(self.input_buffer)
+            if subcommand == "show":
+                self.submit_text(self.input_buffer)
+                self.input_buffer = ""
+                self.cursor = 0
+            else:
+                self.dropdown_index = 0
+                self.dirty = True
         if kind == "model-route":
             self.input_buffer = f"{first} {value}"
             self.cursor = len(self.input_buffer)
@@ -15605,6 +15819,34 @@ def command_memory(args) -> None:
         raise SystemExit("unknown memory command")
 
 
+def command_skill(args) -> None:
+    if args.skill_command == "list":
+        print_report(format_skills())
+    elif args.skill_command in {"show", "view"}:
+        print_report(format_skill(args.name))
+    elif args.skill_command == "learn":
+        if args.body and args.file:
+            raise SystemExit("use either --body or --file, not both")
+        if args.file:
+            body = pathlib.Path(args.file).read_text(encoding="utf-8")
+        else:
+            body = args.body or ""
+        print(
+            learn_skill_text(
+                args.name,
+                description=args.description,
+                body=body,
+                replace=args.replace,
+            )
+        )
+    elif args.skill_command == "delete":
+        if not args.yes:
+            raise SystemExit("refusing to delete skill without --yes")
+        print(delete_skill_text(args.name))
+    else:
+        raise SystemExit("unknown skill command")
+
+
 def command_personality(args) -> None:
     if args.personality_command in (None, "show"):
         print_personality()
@@ -16097,6 +16339,29 @@ def main(argv: list[str]) -> int:
 
     memories = sub.add_parser("memories", help="list memories")
     memories.set_defaults(func=lambda _args: print_memories())
+
+    skills = sub.add_parser("skills", help="list learned procedural skills")
+    skills.set_defaults(func=lambda _args: print_report(format_skills()))
+
+    skill = sub.add_parser("skill", help="list, show, learn, or delete procedural skills")
+    skill_sub = skill.add_subparsers(dest="skill_command", required=True)
+    skill_list = skill_sub.add_parser("list", help="list learned procedural skills")
+    skill_list.set_defaults(func=command_skill)
+    skill_show = skill_sub.add_parser("show", help="show a learned procedural skill")
+    skill_show.add_argument("name")
+    skill_show.set_defaults(func=command_skill)
+    skill_learn = skill_sub.add_parser("learn", help="save a learned procedural skill")
+    skill_learn.add_argument("name")
+    skill_learn.add_argument("--description", "-d", required=True)
+    skill_body = skill_learn.add_mutually_exclusive_group(required=True)
+    skill_body.add_argument("--body", "-b")
+    skill_body.add_argument("--file", "-f", help="read skill body from a UTF-8 text file")
+    skill_learn.add_argument("--replace", "-r", action="store_true")
+    skill_learn.set_defaults(func=command_skill)
+    skill_delete = skill_sub.add_parser("delete", help="delete a learned procedural skill")
+    skill_delete.add_argument("name")
+    skill_delete.add_argument("--yes", action="store_true", help="confirm deletion")
+    skill_delete.set_defaults(func=command_skill)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

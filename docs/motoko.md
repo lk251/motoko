@@ -492,6 +492,24 @@ motoko memory unpin MEM_ID
 motoko forget MEM_ID
 ```
 
+Manage procedural skills:
+
+```bash
+motoko skills
+motoko skill show NAME
+motoko skill learn NAME --description "short description" --body "procedure to follow"
+motoko skill learn NAME --description "short description" --file SKILL.md --replace
+motoko skill delete NAME --yes
+```
+
+Skills are realm-local procedural memories stored under Motoko state as
+`SKILL.md` files. They are for repeatable "how to approach this kind of task"
+guidance, not for executable tools or secrets. Motoko ranks skills against the
+current prompt, includes only relevant ones in chat context, and lists selected
+skills in `/sources`. This borrows the useful progressive-disclosure idea from
+Hermes Agent without importing a tool runtime, script execution, YAML
+dependency, or cross-realm skill store.
+
 Useful in-chat commands:
 
 ```text
@@ -560,6 +578,10 @@ Useful in-chat commands:
 /memory importance ID 1-5
 /memory pin ID
 /memory unpin ID
+/skills
+/skill show NAME
+/skill learn NAME --description DESC --body TEXT
+/skill delete NAME
 /forget ID
 /memorize
 /memories

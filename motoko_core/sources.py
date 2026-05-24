@@ -49,6 +49,15 @@ def format_sources(sources: list[dict]) -> str:
             )
             lines.append(f"{idx:3d}  memory {source.get('id', '')}  {detail}")
             lines.append(f"     why: {', '.join(reasons)}")
+        elif kind == "skill":
+            matched = ", ".join(source.get("matched_terms", [])[:8]) or "-"
+            lines.append(
+                f"{idx:3d}  skill  {source.get('name', '')}  "
+                f"score {source.get('score', 0)}  {source.get('description', '')}"
+            )
+            lines.append(f"     why: relevant learned procedure; matched {matched}")
+            if source.get("path"):
+                lines.append(f"     path: {source.get('path', '')}")
         elif kind == "personality":
             lines.append(
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "

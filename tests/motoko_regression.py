@@ -5864,6 +5864,74 @@ def test_live_command_request_metadata(m):
         assert blocking.blocks
 
 
+def test_procedural_skills_are_realm_local_and_retrievable(m):
+    with isolated_state():
+        text = m.learn_skill_text(
+            "org-temporal-retrieval",
+            description="Named Org temporal retrieval",
+            body=(
+                "When a query names logbook.org and asks for the latest days "
+                "present in that file, scope retrieval to the named source and "
+                "select the newest distinct dated Org sections present there."
+            ),
+        )
+        assert "org-temporal-retrieval" in text
+        assert "org-temporal-retrieval" in m.format_skills()
+        assert "newest distinct dated Org sections" in m.format_skill("org-temporal-retrieval")
+
+        rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
+        assert "Skill: org-temporal-retrieval" in rendered
+        assert sources and sources[0]["kind"] == "skill"
+        assert sources[0]["name"] == "org-temporal-retrieval"
+
+
+def test_procedural_skills_are_included_in_prompt_and_sources(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "org-temporal-retrieval",
+            description="Named Org temporal retrieval",
+            body="For logbook.org latest days questions, scope retrieval to the named Org file before choosing dated sections.",
+        )
+        conv = m.new_conversation("Skill prompt")
+        conv["id"] = "skill-prompt"
+        prompt, sources = m.build_system_prompt_and_sources(conv, "latest days in logbook.org")
+        assert "Relevant procedural skills:" in prompt
+        assert "For logbook.org latest days questions" in prompt
+        assert any(source.get("kind") == "skill" for source in sources)
+
+
+def test_procedural_skill_commands(m):
+    with isolated_state():
+        conv = m.new_conversation("Skill commands")
+        conv["id"] = "skill-commands"
+        mutation = m.shared_command_request(
+            '/skill learn org-temporal --description "Named Org temporal retrieval" --body "Scope to the named file."',
+            conv,
+        )
+        assert mutation is not None
+        assert mutation.kind == m.COMMAND_KIND_MUTATION
+        assert mutation.mutates_state
+        _label, run = mutation
+        assert "skill saved" in run()
+
+        report = m.shared_command_request("/skills", conv)
+        assert report is not None
+        assert report.kind == m.COMMAND_KIND_REPORT
+        _label, run = report
+        assert "org-temporal" in run()
+
+        shown = m.shared_command_request("/skill show org-temporal", conv)
+        assert shown is not None
+        _label, run = shown
+        assert "Scope to the named file." in run()
+
+        deleted = m.shared_command_request("/skill delete org-temporal", conv)
+        assert deleted is not None
+        _label, run = deleted
+        assert "skill deleted" in run()
+        assert "No Motoko skills yet." in m.format_skills()
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -5971,6 +6039,9 @@ def main() -> int:
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,
         test_live_command_request_metadata,
+        test_procedural_skills_are_realm_local_and_retrievable,
+        test_procedural_skills_are_included_in_prompt_and_sources,
+        test_procedural_skill_commands,
     ]
     for test in tests:
         test(m)

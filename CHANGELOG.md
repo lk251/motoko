@@ -5,6 +5,13 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added realm-local procedural skills: `motoko skill learn/show/delete`,
+  `/skills`, and `/skill show/learn/delete`. Skills are selected into chat
+  context only when relevant and appear in `/sources`; they are non-executable
+  `SKILL.md` guidance under the current user's Motoko state.
+- Documented the source-scoped temporal retrieval failure and its deterministic
+  solution as a future Hermes-style skill/tool candidate, while keeping Motoko's
+  current adaptation dependency-free and non-agentic.
 - Clarified deterministic temporal retrieval context: when Motoko selects the
   latest dated Org sections present in a source file, the prompt context and
   `/sources` now state those selected dates explicitly so the chat model does

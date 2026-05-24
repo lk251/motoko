@@ -70,7 +70,7 @@ def slash_command_value(command: str) -> str:
     parts = command.split()
     if not parts:
         return command
-    if parts[0] == "/memory" and len(parts) > 1:
+    if parts[0] in {"/memory", "/skill"} and len(parts) > 1:
         return " ".join(parts[:2])
     return parts[0]
 

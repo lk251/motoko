@@ -139,6 +139,35 @@ The next high-value direction is a persistent hierarchical evidence store:
 This should improve Motoko's effective intelligence more than adding another
 model immediately, because it gives the existing models better evidence.
 
+## Procedural Skill Candidate: Source-Scoped Temporal Retrieval
+
+A useful recent failure pattern was the query "summarize the last N days
+present in logbook.org". The retrieval layer could find `logbook.org`, but the
+answer sometimes inferred missing adjacent calendar days or allowed dated
+sections from other Org files to satisfy the request. The user intent was not
+"today and yesterday"; it was "the newest distinct dated sections that actually
+exist in this named source file".
+
+The general solution is not a permanent note about one query. It is a
+deterministic retrieval procedure:
+
+- detect temporal wording such as "last/latest N days present";
+- detect an explicit source path or filename when the query names one;
+- scope candidate generation to that source before considering other files;
+- parse dated Org headings and choose the newest distinct dates present in the
+  scoped source;
+- include one bounded, source-linked excerpt per selected date;
+- state the selected dates in prompt context and `/sources`, so the chat model
+  does not assume missing intervening calendar days have entries.
+
+This is a good future skills/tools candidate when Motoko studies Hermes Agent
+or similar systems. As a **skill**, it captures the repeatable debugging lesson
+and the checklist an assistant should follow. As a **tool**, it is the
+deterministic source-scoped date selector that enforces the rule. The tool
+should own source selection and date extraction; the skill should only describe
+when and why to use that procedure. That split keeps Motoko source-grounded and
+prevents prompt-only advice from becoming hidden retrieval policy.
+
 ## Evaluation Requirements
 
 Future retrieval work should be gated by inspectable evals that measure:

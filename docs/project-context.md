@@ -1168,6 +1168,18 @@ dependency, security, privacy, and maintenance tradeoffs are reviewed and the
 result still fits Motoko's account boundaries, stdlib-first bias, provenance
 requirements, and NixOS-owned service boundary.
 
+Initial Hermes Agent study on 2026-05-24 reviewed
+`github.com/NousResearch/hermes-agent` at commit `421ab81`. The main idea worth
+adapting now is not Hermes' full tool runtime. It is the narrower procedural
+skill pattern: user- or agent-authored instructions stored as durable files,
+listed by metadata, loaded by progressive disclosure, and selected only when
+relevant. Motoko's version should remain realm-local, dependency-free, and
+non-executable: no YAML dependency, no script execution, no arbitrary tool
+registry, no autonomous curator until the safety and evaluation design is
+reviewed. Skills may describe when to use an existing deterministic Motoko
+procedure, but they should not replace source-grounded retrieval, explicit
+allowlists, provenance, or evals.
+
 ## NixOS-Facing Model Boundary
 
 Motoko has repo-local support for named model routes, deterministic
