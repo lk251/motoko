@@ -596,7 +596,8 @@ Implementation recipe:
 
 ## Implementation Work Plan
 
-Status: active.
+Status: implementation complete to the accepted boundary; future gates remain
+active.
 
 This plan implements the accepted design without widening authority beyond the
 reviewed boundary:
@@ -672,22 +673,70 @@ Tool machinery checkpoint, 2026-05-24:
   fingerprint approvals, realm-local ledgers, and NixOS-owned stronger
   containment if a future tool truly needs it.
 
-Approval gates still required:
+Gated capabilities not completed by design:
 
-- `write_allowed_project`: not enabled for script tools yet. To enable it,
-  require explicit user approval of the effect tier, per-run preview, session
-  repeat only for the exact same scope, `.motokoignore` and allowlist checks,
-  interruption/rollback semantics where possible, and stronger tests.
+- Script-assisted project mutation: script tools still cannot directly write
+  project files. This is intentional. The current safe path is code-owned
+  `project_file_write`, and the likely next step is to let approved scripts
+  emit structured patch/write proposals that Motoko validates and applies
+  through the same allowlist, `.motokoignore`, hash, confirmation, atomic-write,
+  ledger, pause, and checkpoint machinery. Raw script filesystem write
+  authority should remain a later, separately reviewed option if it is ever
+  needed.
 - `network`: not enabled. To enable it, require a NixOS-reviewed wrapper or
   policy, explicit destination/purpose metadata, no ambient secrets, and
   content-safe telemetry.
-- Autonomous goal loops: not enabled. The only enabled loop runner is the
-  explicit-action form documented below. To enable model-planned loops, require
-  an approved loop record with objective, scope, allowed skills/tools, budgets,
-  stop conditions, checkpoints, pause/resume, cancellation, and final audit.
+- Autonomous model-planned goal loops: not enabled. The only enabled loop
+  runner is the explicit-action form documented below. To enable model-planned
+  loops, require an approved loop record with objective, scope, allowed
+  skills/tools, budgets, stop conditions, checkpoints, pause/resume,
+  cancellation, final audit, and a read-only soak phase before mutation.
+- Broader terminal-like tools and arbitrary executable control: not enabled.
+  Shell commands, arbitrary executables, service control, and privileged
+  actions remain outside Motoko's authority.
 - Stronger containment: not required for the current low-risk runner, but
-  needed before broad terminal-like tools, network tools, or project mutation.
-  This should be NixOS-owned, not a hidden Python-side privilege expansion.
+  needed before broad terminal-like tools, network tools, or direct project
+  mutation. This should be NixOS-owned, not a hidden Python-side privilege
+  expansion.
+
+Priority assessment for future intelligence and competence:
+
+1. Script-assisted project mutation is the highest-value next gate. It lets
+   Motoko turn understanding into useful local changes in the active project
+   while preserving the code-owned write boundary. This is more immediately
+   useful than giving scripts raw write access.
+2. Autonomous model-planned loops are potentially very valuable, but only after
+   read-only planning/retrieval/audit loops work well. The first production
+   form should plan, retrieve, inspect, and propose actions; mutation should
+   remain user-confirmed until evals prove reliability.
+3. Hermes-style skill improvement should continue incrementally: prompted
+   self-review, loaded-skill patching, support files, and tool contracts are
+   useful; broad terminal/code-execution toolsets should not be copied.
+4. Network tools are useful for research and external data, but less central to
+   Motoko's local intelligence than project mutation, retrieval quality,
+   memory, and durable skills.
+5. Stronger containment is enabling infrastructure, not intelligence by
+   itself. Add it when a concrete high-value tool needs it.
+
+Recommended next implementation sequence:
+
+1. Script-assisted project mutation via structured proposals. Let approved
+   tools generate `project_file_write` or patch-style action records, then have
+   Motoko validate and apply them through the existing code-owned writer. Do
+   not grant raw script write authority in this step.
+2. Read-only autonomous model-planned loops. Let the model plan, retrieve,
+   inspect, audit, and propose typed actions inside an approved budget. The
+   loop stops before mutation and produces an inspectable checkpoint and final
+   audit.
+3. User-confirmed mutating loops. After the first two steps are stable and
+   eval-covered, allow loops to apply validated actions with explicit
+   confirmation, durable checkpoints, pause/resume, cancellation, and final
+   audit.
+4. Hermes-style skill improvement as an ongoing parallel track. Keep improving
+   prompted self-review, loaded-skill patching, support-file use, and
+   feedback-derived eval fixtures so Motoko's procedural memory becomes more
+   useful through real use. Preserve Motoko's typed-action and approval
+   boundary instead of importing a broad terminal/tool runtime.
 
 Goal-loop preview checkpoint, 2026-05-24:
 

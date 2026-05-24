@@ -1360,6 +1360,66 @@ resumable, visible in job status, and conservative by default: read-only loops
 first, then user-confirmed local mutations, and only later any broader
 automation after separate review.
 
+Agentic roadmap gates not completed by design:
+
+- Script-assisted project mutation: Motoko can already apply code-owned
+  `project_file_write` actions, but script tools cannot directly write project
+  files. The attractive next step is not raw write authority; it is letting
+  approved scripts produce structured patch/write proposals that Motoko applies
+  through the existing allowlist, `.motokoignore`, expected-hash, confirmation,
+  atomic-write, ledger, pause, and checkpoint path. This is likely the
+  highest-value next agentic gate because it turns Motoko's understanding into
+  useful local project changes while keeping authority inspectable.
+- Autonomous model-planned loops: only explicit action-list loops are enabled.
+  A future loop may let the model plan, retrieve, act through approved
+  handlers/tools, observe, audit, checkpoint, and continue within a budget, but
+  the first safe production form should be read-only planning/retrieval/audit
+  plus user-confirmed actions.
+- Network tools: not enabled. They require a NixOS-reviewed wrapper or policy,
+  explicit destination/purpose metadata, no ambient secrets, and content-free
+  telemetry.
+- Broad terminal-like tools, arbitrary executables, service control, and
+  privileged actions: not enabled. These are lower priority and require a
+  separate design review.
+- Stronger containment: not required for the current low-risk stdlib Python
+  runner, but it becomes necessary before broad terminal-like tools, network
+  tools, or direct project mutation. This should be NixOS-owned.
+
+Relative priority for increasing Motoko's intelligence and competence:
+
+1. Improve retrieval/memory/skills and script-assisted project mutation first:
+   these directly affect whether Motoko understands the local corpus, remembers
+   useful procedure, and can safely turn good analysis into useful changes.
+2. Add read-only autonomous goal loops next: planning, retrieval, audit, and
+   proposal loops can make Motoko more persistent and competent without
+   granting new mutation authority.
+3. Add user-confirmed mutating goal loops only after read-only loops and
+   script-assisted project mutation have strong evals and checkpoint behavior.
+4. Consider Hermes-style background skill improvement continuously, but keep
+   Motoko's stricter typed-action and approval boundary instead of importing a
+   broad terminal/tool runtime.
+5. Treat network tools and stronger sandboxing as enabling infrastructure for
+   specific future tools, not as primary intelligence work by themselves.
+
+Immediate next agentic implementation sequence, when development resumes:
+
+1. Build script-assisted project mutation as structured proposal generation.
+   Approved scripts may prepare `project_file_write` or patch-style action
+   records, but Motoko's code-owned validator remains the only component that
+   writes files. This should include previews, exact scope checks, no raw
+   script writes, pause/checkpoint behavior, and action-eval coverage.
+2. Build read-only autonomous goal loops. The first model-planned loop should
+   plan, retrieve, inspect, audit, and propose typed actions inside a budget,
+   then stop for user review. It should not mutate project files.
+3. Only after the first two are stable, build user-confirmed mutating goal
+   loops that can apply already validated actions with explicit confirmation,
+   durable checkpoints, visible progress, cancellation, and final audit.
+4. Keep Hermes-style skill improvement running as a parallel craft track:
+   prompted self-review, loaded-skill patching, support-file use, and
+   feedback-derived evals should steadily improve Motoko's procedural memory.
+   This should keep Motoko's typed-action and approval boundary, not import a
+   broad terminal/tool runtime.
+
 ## NixOS-Facing Model Boundary
 
 Motoko has repo-local support for named model routes, deterministic
