@@ -3333,6 +3333,64 @@ def test_feedback_eval_exports_private_retrieval_fixtures(m):
         assert path.exists()
 
 
+def test_retrieval_eval_replays_private_feedback_fixtures(m):
+    with isolated_state() as tmp:
+        docs = tmp / "orgfiles"
+        docs.mkdir()
+        path = docs / "logbook.org"
+        content = "* [2026-05-23 Sat 00:36]\n** log\nFeedback replay source.\n"
+        path.write_text(content, encoding="utf-8")
+        index = {
+            "id": "feedback-retrieval-index",
+            "name": "orgfiles",
+            "root": str(docs),
+            "created": "2026-05-24T00:00:00+00:00",
+            "files": [
+                {
+                    "path": str(path),
+                    "source_fingerprint": m.source_fingerprint(path),
+                    "summary": "Daily logbook entries.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Feedback replay notes.",
+                            "content": content,
+                            "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            "content_bytes": len(content.encode("utf-8")),
+                        }
+                    ],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        conv = m.new_conversation("Feedback replay")
+        conv["id"] = "feedback-replay-conv"
+        conv["messages"] = [
+            {"role": "user", "content": "summarize logbook.org feedback replay"},
+            {"role": "assistant", "content": "It mentions feedback replay."},
+        ]
+        conv["last_sources"] = [
+            {
+                "kind": "chunk",
+                "index": index["id"],
+                "path": str(path),
+                "chunk": 1,
+                "retrieval": "hybrid",
+                "retrieval_methods": ["temporal"],
+            }
+        ]
+        m.record_response_feedback(conv, "down", "check retrieval replay")
+
+        report = m.run_retrieval_eval()
+        assert report["feedback_fixture_count"] == 1
+        row = report["feedback_fixtures"][0]
+        assert row["replay_status"] == "matched_previous_sources"
+        assert row["hinted_paths"] == [str(path)]
+        text = m.format_retrieval_eval_report(report)
+        assert "feedback fixtures: 1" in text
+        assert "matched_previous_sources" in text
+
+
 def test_retrieval_preview_shows_context_without_model_call(m):
     with isolated_state():
         conv = m.new_conversation("Preview")
@@ -5548,6 +5606,7 @@ def main() -> int:
         test_tui_prompt_is_saved_before_context_preparation,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
         test_feedback_eval_exports_private_retrieval_fixtures,
+        test_retrieval_eval_replays_private_feedback_fixtures,
         test_retrieval_preview_shows_context_without_model_call,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,

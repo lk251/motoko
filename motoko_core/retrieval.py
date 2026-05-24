@@ -415,6 +415,25 @@ def format_retrieval_eval_report_core(report: dict) -> str:
             details.append("missing terms " + ", ".join(row.get("missing_terms", [])[:6]))
         if details:
             lines.append("  " + "; ".join(details))
+    if report.get("feedback_fixture_count"):
+        counts = report.get("feedback_replay_counts") or {}
+        lines.append(
+            "feedback fixtures: "
+            + str(report.get("feedback_fixture_count", 0))
+            + "  "
+            + (", ".join(f"{key}={value}" for key, value in sorted(counts.items())) or "-")
+        )
+        for row in report.get("feedback_fixtures", [])[:8]:
+            lines.append(
+                f"- feedback {row.get('rating', '')} {row.get('replay_status', '')}: "
+                f"{compact_text(row.get('query', ''), 120)}"
+            )
+            if row.get("hinted_paths"):
+                lines.append("  hinted: " + ", ".join(row.get("hinted_paths", [])[:4]))
+            if row.get("selected_paths"):
+                lines.append("  selected: " + ", ".join(row.get("selected_paths", [])[:4]))
+            if row.get("missing_hinted_paths"):
+                lines.append("  missing hinted: " + ", ".join(row.get("missing_hinted_paths", [])[:4]))
     return "\n".join(lines)
 
 

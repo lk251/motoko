@@ -3018,6 +3018,66 @@ def retrieval_eval_path_matches(selected_paths: list[str], expected: str) -> boo
     return any(path.lower().endswith(expected) or expected in pathlib.PurePosixPath(path.lower()).name for path in selected_paths)
 
 
+def feedback_retrieval_eval_rows(*, limit: int | None = None) -> list[dict]:
+    rows = []
+    for row in read_response_feedback_rows(limit=limit):
+        fixture = feedback_eval_fixture(row)
+        query = str(fixture.get("query", "")).strip()
+        source_hints = fixture.get("source_hints", []) if isinstance(fixture.get("source_hints"), list) else []
+        hinted_paths = sorted({str(hint.get("path", "")) for hint in source_hints if hint.get("path")})
+        hinted_indexes = []
+        for hint in source_hints:
+            index_id = str(hint.get("index", "")).strip()
+            if index_id and index_id not in hinted_indexes:
+                hinted_indexes.append(index_id)
+        item = {
+            "id": fixture.get("id", ""),
+            "rating": fixture.get("rating", ""),
+            "quality_status": fixture.get("quality_status", ""),
+            "focus": fixture.get("focus", []),
+            "query": query,
+            "hinted_paths": hinted_paths,
+            "hinted_indexes": hinted_indexes,
+            "selected_paths": [],
+            "missing_hinted_paths": [],
+            "replay_status": "not-run",
+        }
+        if not query:
+            item["replay_status"] = "skip: empty query"
+            rows.append(item)
+            continue
+        if not hinted_indexes:
+            item["replay_status"] = "skip: no index source hints"
+            rows.append(item)
+            continue
+        selected_paths = set()
+        errors = []
+        for index_id in hinted_indexes[:3]:
+            try:
+                index = load_index_exact(index_id)
+                _text, sources = retrieve_from_index(index, query)
+            except SystemExit as exc:
+                errors.append(f"{index_id}: {str(exc).splitlines()[0][:180]}")
+                continue
+            selected_paths.update(str(source.get("path", "")) for source in sources if source.get("path"))
+        item["selected_paths"] = sorted(selected_paths)
+        item["missing_hinted_paths"] = [
+            path
+            for path in hinted_paths
+            if not retrieval_eval_path_matches(item["selected_paths"], path)
+        ]
+        if errors:
+            item["errors"] = errors[:3]
+        if item["missing_hinted_paths"]:
+            item["replay_status"] = "different_sources"
+        elif selected_paths:
+            item["replay_status"] = "matched_previous_sources"
+        else:
+            item["replay_status"] = "no_sources"
+        rows.append(item)
+    return rows
+
+
 def run_retrieval_eval() -> dict:
     report = {
         "schema": RETRIEVAL_EVAL_SCHEMA_VERSION,
@@ -3073,6 +3133,11 @@ def run_retrieval_eval() -> dict:
             os.environ.pop("MOTOKO_VECTOR_RERANK", None)
         else:
             os.environ["MOTOKO_VECTOR_RERANK"] = old_rerank
+    feedback_limit = env_int("MOTOKO_RETRIEVAL_EVAL_FEEDBACK_LIMIT", 20, minimum=0)
+    feedback_rows = feedback_retrieval_eval_rows(limit=feedback_limit) if feedback_limit else []
+    report["feedback_fixtures"] = feedback_rows
+    report["feedback_fixture_count"] = len(feedback_rows)
+    report["feedback_replay_counts"] = dict(collections.Counter(row.get("replay_status", "unknown") for row in feedback_rows))
     total = len(report["fixtures"])
     passed = sum(1 for row in report["fixtures"] if row.get("status") == "pass")
     report["status"] = "pass" if passed == total else "fail"
