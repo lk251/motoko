@@ -12,6 +12,8 @@ not the easiest place to review what changed after a long work session.
 - Documented the remaining retrieval/lifecycle refactor follow-ups and added
   an explicit design gate for future skill-script execution, tool running, and
   user-approved goal loops.
+- Added `docs/agentic-capability-design.md` to track the tool/script authority
+  model, review checklist, and goal-loop design path.
 - Added an internal, review-first `skill_manage` action layer for skill
   suggestions. Motoko can now propose creating a skill, patching an existing
   `SKILL.md`, or writing/removing confined support files under `references/`,

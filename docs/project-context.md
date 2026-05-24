@@ -1271,6 +1271,8 @@ quote.
 
 ## Agentic Capability Design Gate
 
+Detailed design review lives in `docs/agentic-capability-design.md`.
+
 Motoko should eventually support tightly scoped tool and skill-script
 execution, but this is a reviewed architecture change, not a background
 refactor. The goal is to gain the useful parts of agent harnesses such as

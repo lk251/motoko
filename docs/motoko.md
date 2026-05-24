@@ -557,7 +557,8 @@ why and when that handler should run.
 
 Motoko does not execute arbitrary skill scripts. A future reviewed script runner
 would need to stay constrained, stdlib-first, realm-local, timeout-bounded, and
-visible in `/sources`.
+visible in `/sources`. The current design review for that future runner lives
+in `docs/agentic-capability-design.md`.
 
 Skill schema changes include a deterministic upgrade path. Run
 `motoko skill upgrade` to rewrite learned `SKILL.md` files to the current
