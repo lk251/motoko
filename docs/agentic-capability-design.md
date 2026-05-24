@@ -23,7 +23,7 @@ points:
 - Authority model: accepted. Defines which effects exist, which are prompt-only, which are
   built-in handlers, which are script-backed, and which require explicit user
   confirmation every time.
-- Skill package format: proposed. Script assets under `scripts/` need metadata declaring
+- Skill package format: accepted. Script assets under `scripts/` need metadata declaring
   interpreter, allowed arguments, allowed effects, input/output schemas, source
   fingerprint, provenance, and whether the script is executable or inert text.
 - Planner boundary: the model may propose or select actions, but execution must
@@ -176,7 +176,7 @@ Implementation recipe:
 
 ## Skill Package Format
 
-Status: proposed, pending final acceptance.
+Decision: accepted on 2026-05-24.
 
 Hermes Agent reference:
 
@@ -221,7 +221,7 @@ Sources reviewed on 2026-05-24:
 - https://raw.githubusercontent.com/NousResearch/hermes-agent/main/tools/skill_manager_tool.py
 - https://raw.githubusercontent.com/NousResearch/hermes-agent/main/tools/skills_guard.py
 
-Proposed Motoko decision:
+Accepted Motoko decision:
 
 - Keep `SKILL.md` as the human-readable skill package manifest and procedural
   guide. It remains the primary progressive-disclosure file that Motoko can
@@ -240,7 +240,7 @@ Proposed Motoko decision:
   authority comes from the adjacent tool JSON plus the approval record, not
   from prose alone.
 
-Proposed `SKILL.md` additions:
+Accepted `SKILL.md` additions:
 
 ```yaml
 ---
@@ -258,7 +258,7 @@ tools:
 ---
 ```
 
-Proposed `scripts/*.tool.json` shape:
+Accepted `scripts/*.tool.json` shape:
 
 ```json
 {
