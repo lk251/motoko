@@ -1170,18 +1170,45 @@ requirements, and NixOS-owned service boundary.
 
 Initial Hermes Agent study on 2026-05-24 reviewed
 `github.com/NousResearch/hermes-agent` at commit `421ab81`. The main idea worth
-adapting now is not Hermes' full tool runtime. It is the narrower procedural
-skill pattern: user- or agent-authored instructions stored as durable files,
-listed by metadata, loaded by progressive disclosure, and selected only when
-relevant. Motoko's version should remain realm-local, dependency-free, and
-non-executable: no YAML dependency, no script execution, no arbitrary tool
-registry, no autonomous curator until the safety and evaluation design is
-reviewed. Skills may describe when to use an existing deterministic Motoko
-procedure, but they should not replace source-grounded retrieval, explicit
-allowlists, provenance, or evals. The initial built-in skill is
-`org-temporal-retrieval`, which documents the source-scoped latest-dated-Org
-procedure while leaving the actual date/source selection in deterministic
-retrieval code.
+adapting now is a smaller, stricter procedural skill spine: user- or
+agent-authored instructions stored as durable files, listed by metadata, loaded
+by progressive disclosure, and selected only when relevant. Motoko's version
+must stay realm-local, dependency-free, and inspectable. It should not import a
+broad tool runtime, YAML dependency, cross-realm skill store, or autonomous
+curator until the safety and evaluation design is reviewed.
+
+Motoko skills should crystallize actionable knowledge into explicit effects:
+
+- `Skill`: durable procedural package with triggers, kind, handler,
+  allowed effects, provenance, and optional support files in later versions;
+- `Planner`: deterministic or bounded model-assisted decision about whether a
+  skill applies before the relevant subsystem runs;
+- `Handler`: built-in Motoko code first, and only later tightly constrained
+  scripts when the security boundary is clear;
+- `LLM`: ambiguous judgment and final synthesis, not hidden ownership of
+  source selection or filesystem authority.
+
+The first shipped instance is `org-temporal-retrieval`. It now declares a
+retrieval handler and participates in a pre-retrieval `retrieval_plan_v1`, so
+queries such as "last three days present in logbook.org" activate a skill plan
+before context packing. The deterministic handler still owns source scoping,
+Org date parsing, and evidence extraction. This is the intended pattern for
+future Motoko skills: skills preserve procedure and trigger metadata; handlers
+perform bounded, inspectable effects; `/sources` and diagnostics show what was
+activated.
+
+Motoko should also learn when a conversation contains skill-worthy procedural
+knowledge. Adapt Hermes' review signals in a Motoko-shaped way: user
+corrections, workflow changes, non-trivial debugging paths, repeatable
+techniques, and stale or incomplete loaded skills are signals for a possible
+skill update. The first implementation should be suggestion-only: background
+maintenance may propose a class-level skill candidate and store it as pending
+realm-local state, but Motoko must not silently create, patch, or execute skills
+without explicit user confirmation. The user can review pending suggestions and
+accept them into `SKILL.md` files when they want that procedure crystallized.
+The core review question is: "Did this task reveal a reusable procedure that
+would save tokens, reduce errors, improve reliability, or encode
+project-specific craft?"
 
 ## NixOS-Facing Model Boundary
 

@@ -198,6 +198,9 @@ from motoko_core.profile import (  # noqa: E402
     render_profile_with_sources_core,
 )
 from motoko_core.skills import (  # noqa: E402
+    DEFAULT_SKILL_EFFECTS,
+    DEFAULT_SKILL_HANDLER,
+    DEFAULT_SKILL_KIND,
     delete_skill as core_delete_skill,
     format_skill as core_format_skill,
     format_skills_list,
@@ -205,6 +208,7 @@ from motoko_core.skills import (  # noqa: E402
     load_skill as core_load_skill,
     render_skills_with_sources as core_render_skills_with_sources,
     save_skill as core_save_skill,
+    skill_slug,
 )
 from motoko_core.retrieval import (  # noqa: E402
     add_hybrid_candidate,
@@ -396,6 +400,7 @@ from motoko_core.state import (  # noqa: E402
     retrieval_eval_path,
     retrieval_evals_dir,
     safe_load_json,
+    skill_suggestions_path,
     skills_dir,
     state_root,
     study_jobs_path,
@@ -453,6 +458,7 @@ MEMORY_DOSSIER_SCHEMA_VERSION = "memory-dossier-v1"
 PROFILE_DOSSIER_SCHEMA_VERSION = "profile-dossier-v1"
 CONVERSATION_SUMMARY_SCHEMA_VERSION = "conversation-summary-v1"
 MEMORY_PROPOSAL_SCHEMA_VERSION = "memory-proposal-v1"
+SKILL_SUGGESTION_SCHEMA_VERSION = "skill-suggestion-v1"
 TITLE_SCHEMA_VERSION = "title-v1"
 MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
 MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
@@ -566,6 +572,10 @@ CORPUS_PROFILE_SCHEMA_VERSION = "corpus-profile-v1"
 BACKGROUND_INDEX_UPGRADE_LIMIT = 1
 BACKGROUND_INDEX_REPAIR_LIMIT = 2
 BACKGROUND_INDEX_CLEANUP_LIMIT = 1
+AUTO_SKILL_MIN_MESSAGES = 6
+AUTO_SKILL_INTERVAL_MESSAGES = 6
+AUTO_SKILL_MAX_PROPOSALS = 2
+SKILL_SUGGESTION_BODY_CHARS = 3000
 ORG_TODO_KEYWORDS = {
     "TODO",
     "NEXT",
@@ -779,6 +789,9 @@ SLASH_COMMANDS = [
     ("/skills", "list learned procedural skills"),
     ("/skill show NAME", "show a learned procedural skill"),
     ("/skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+    ("/skill suggestions", "show pending skill suggestions"),
+    ("/skill accept ID", "accept a pending skill suggestion"),
+    ("/skill reject ID", "reject a pending skill suggestion"),
     ("/skill delete NAME", "delete a learned procedural skill"),
     ("/memorize", "ask Motoko to propose memories from this chat"),
 ]
@@ -4134,6 +4147,12 @@ def learn_skill(
     *,
     description: str,
     body: str,
+    kind: str = DEFAULT_SKILL_KIND,
+    handler: str = DEFAULT_SKILL_HANDLER,
+    allowed_effects: list[str] | None = None,
+    triggers: list[str] | None = None,
+    support_files: list[str] | None = None,
+    security: str = "prompt-only learned skill; no script execution",
     source: str = "manual",
     replace: bool = False,
 ) -> dict:
@@ -4142,6 +4161,12 @@ def learn_skill(
         name=name,
         description=description,
         body=body,
+        kind=kind,
+        handler=handler,
+        allowed_effects=allowed_effects,
+        triggers=triggers,
+        support_files=support_files,
+        security=security,
         source=source,
         replace=replace,
         writer=atomic_write,
@@ -4163,6 +4188,180 @@ def learn_skill_text(
 def delete_skill_text(name: str) -> str:
     row = core_delete_skill(skills_dir(), name)
     return f"skill deleted: {row.get('slug', '')}"
+
+
+def read_skill_suggestion_state() -> dict:
+    data = safe_load_json(skill_suggestions_path())
+    if not isinstance(data, dict):
+        return {"schema": SKILL_SUGGESTION_SCHEMA_VERSION, "suggestions": []}
+    rows = data.get("suggestions")
+    if not isinstance(rows, list):
+        data["suggestions"] = []
+    data.setdefault("schema", SKILL_SUGGESTION_SCHEMA_VERSION)
+    return data
+
+
+def write_skill_suggestion_state(state: dict) -> None:
+    state = dict(state or {})
+    state.setdefault("schema", SKILL_SUGGESTION_SCHEMA_VERSION)
+    rows = state.get("suggestions")
+    state["suggestions"] = rows if isinstance(rows, list) else []
+    atomic_write(skill_suggestions_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+
+
+def skill_suggestion_id() -> str:
+    return "skill-" + uuid.uuid4().hex[:10]
+
+
+def normalize_skill_suggestion(row: dict) -> dict:
+    row = dict(row or {})
+    row.setdefault("schema", SKILL_SUGGESTION_SCHEMA_VERSION)
+    row.setdefault("id", skill_suggestion_id())
+    row.setdefault("status", "pending")
+    row.setdefault("created_at", now())
+    row.setdefault("updated_at", row.get("created_at", now()))
+    row["name"] = compact_text(str(row.get("name", "")).strip(), 64)
+    row["slug"] = skill_slug(row.get("name", ""))
+    row["description"] = compact_text(str(row.get("description", "")).strip(), 400)
+    row["kind"] = str(row.get("kind") or DEFAULT_SKILL_KIND).strip() or DEFAULT_SKILL_KIND
+    row["handler"] = str(row.get("handler") or DEFAULT_SKILL_HANDLER).strip() or DEFAULT_SKILL_HANDLER
+    effects = row.get("allowed_effects")
+    if isinstance(effects, str):
+        effects = [item.strip() for item in effects.split(",") if item.strip()]
+    row["allowed_effects"] = (effects if isinstance(effects, list) else list(DEFAULT_SKILL_EFFECTS))[:8]
+    triggers = row.get("triggers")
+    if isinstance(triggers, str):
+        triggers = [item.strip() for item in triggers.split(",") if item.strip()]
+    row["triggers"] = (triggers if isinstance(triggers, list) else [])[:8]
+    signals = row.get("signals")
+    if isinstance(signals, str):
+        signals = [item.strip() for item in signals.split(",") if item.strip()]
+    row["signals"] = (signals if isinstance(signals, list) else [])[:8]
+    row["reason"] = compact_text(str(row.get("reason", "")).strip(), 1000)
+    row["body"] = str(row.get("body", "")).strip()[:SKILL_SUGGESTION_BODY_CHARS]
+    row["security"] = str(row.get("security") or "prompt-only suggested skill; no script execution").strip()
+    return row
+
+
+def list_skill_suggestions(*, status: str | None = None) -> list[dict]:
+    rows = [normalize_skill_suggestion(row) for row in read_skill_suggestion_state().get("suggestions", [])]
+    if status:
+        rows = [row for row in rows if row.get("status") == status]
+    rows.sort(key=lambda row: row.get("created_at", ""), reverse=True)
+    return rows
+
+
+def write_skill_suggestions(rows: list[dict]) -> None:
+    write_skill_suggestion_state({"schema": SKILL_SUGGESTION_SCHEMA_VERSION, "suggestions": rows})
+
+
+def resolve_skill_suggestion(selector: str, *, pending_only: bool = False) -> tuple[int, dict, list[dict]]:
+    rows = [normalize_skill_suggestion(row) for row in read_skill_suggestion_state().get("suggestions", [])]
+    matches = []
+    for idx, row in enumerate(rows):
+        if pending_only and row.get("status") != "pending":
+            continue
+        if (
+            row.get("id") == selector
+            or row.get("id", "").startswith(selector)
+            or row.get("slug") == selector
+            or row.get("slug", "").startswith(selector)
+        ):
+            matches.append((idx, row))
+    if len(matches) != 1:
+        raise SystemExit(f"skill suggestion selector must match exactly one suggestion; matched {len(matches)}")
+    idx, row = matches[0]
+    return idx, row, rows
+
+
+def format_skill_suggestions(*, status: str | None = None) -> str:
+    rows = list_skill_suggestions(status=status)
+    if not rows:
+        return "No pending skill suggestions." if status == "pending" else "No skill suggestions."
+    lines = [f"Skill suggestions: {len(rows)}"]
+    for row in rows:
+        lines.append(
+            f"- {row.get('id', '')}  {row.get('status', '')}  "
+            f"{row.get('slug', '')}: {row.get('description', '')}"
+        )
+        if row.get("reason"):
+            lines.append(f"  reason: {row.get('reason', '')}")
+        if row.get("signals"):
+            lines.append("  signals: " + ", ".join(row.get("signals", [])[:6]))
+        lines.append(f"  accept: motoko skill accept {row.get('id', '')}")
+    return "\n".join(lines)
+
+
+def skill_suggestion_duplicate(candidate: dict, rows: list[dict]) -> bool:
+    slug = candidate.get("slug", "")
+    if not slug:
+        return True
+    for row in rows:
+        normalized = normalize_skill_suggestion(row)
+        if normalized.get("status") == "pending" and normalized.get("slug") == slug:
+            return True
+    for row in list_skills():
+        if row.get("slug") == slug:
+            return True
+    return False
+
+
+def add_skill_suggestions(candidates: list[dict], *, conversation_id: str) -> list[dict]:
+    if not candidates:
+        return []
+    state = read_skill_suggestion_state()
+    rows = [normalize_skill_suggestion(row) for row in state.get("suggestions", [])]
+    added = []
+    for candidate in candidates[:AUTO_SKILL_MAX_PROPOSALS]:
+        row = normalize_skill_suggestion(candidate)
+        if not row.get("slug") or not row.get("description") or not row.get("body"):
+            continue
+        if skill_suggestion_duplicate(row, rows):
+            continue
+        row["id"] = skill_suggestion_id()
+        row["status"] = "pending"
+        row["created_at"] = now()
+        row["updated_at"] = row["created_at"]
+        row["conversation_id"] = conversation_id
+        row["source"] = "auto-skill-review"
+        rows.append(row)
+        added.append(row)
+    if added:
+        write_skill_suggestions(rows)
+    return added
+
+
+def accept_skill_suggestion_text(selector: str) -> str:
+    idx, row, rows = resolve_skill_suggestion(selector, pending_only=True)
+    skill = learn_skill(
+        row.get("name") or row.get("slug", ""),
+        description=row.get("description", ""),
+        body=row.get("body", ""),
+        kind=row.get("kind", DEFAULT_SKILL_KIND),
+        handler=row.get("handler", DEFAULT_SKILL_HANDLER),
+        allowed_effects=row.get("allowed_effects", list(DEFAULT_SKILL_EFFECTS)),
+        triggers=row.get("triggers", []),
+        security=row.get("security", "prompt-only suggested skill; no script execution"),
+        source="skill-suggestion",
+        replace=False,
+    )
+    row["status"] = "accepted"
+    row["accepted_at"] = now()
+    row["updated_at"] = row["accepted_at"]
+    row["accepted_skill"] = skill.get("slug", "")
+    rows[idx] = row
+    write_skill_suggestions(rows)
+    return f"skill accepted: {skill.get('slug', '')}\npath: {skill.get('path', '')}"
+
+
+def reject_skill_suggestion_text(selector: str) -> str:
+    idx, row, rows = resolve_skill_suggestion(selector, pending_only=True)
+    row["status"] = "rejected"
+    row["rejected_at"] = now()
+    row["updated_at"] = row["rejected_at"]
+    rows[idx] = row
+    write_skill_suggestions(rows)
+    return f"skill suggestion rejected: {row.get('id', '')}"
 
 
 def render_skills_with_sources(query: str) -> tuple[str, list[dict]]:
@@ -12602,6 +12801,8 @@ def report_command_request(text: str, conv: dict):
         return "/model-routes", lambda: format_model_routes(include_defaults=True)
     if primary in {"/models", "/model-status"}:
         return primary, lambda: format_model_services(body or None)
+    if primary == "/skill" and body in {"suggestions", "suggestions pending"}:
+        return "/skill suggestions", lambda: format_skill_suggestions(status="pending")
     if primary == "/retrieval-eval" and not body:
         return "/retrieval-eval", lambda: format_retrieval_eval_report(run_retrieval_eval())
     if primary == "/feedback-eval" and not body:
@@ -12846,6 +13047,14 @@ def skill_mutation_command_request(text: str, conv: dict):
         if not subbody:
             return "/skill delete", lambda: "usage: /skill delete NAME"
         return "/skill delete", lambda: delete_skill_text(subbody)
+    if subcommand == "accept":
+        if not subbody:
+            return "/skill accept", lambda: "usage: /skill accept SUGGESTION_ID"
+        return "/skill accept", lambda: accept_skill_suggestion_text(subbody)
+    if subcommand == "reject":
+        if not subbody:
+            return "/skill reject", lambda: "usage: /skill reject SUGGESTION_ID"
+        return "/skill reject", lambda: reject_skill_suggestion_text(subbody)
     return None
 
 
@@ -15162,6 +15371,125 @@ def propose_memories(
     return memories
 
 
+def _coerce_skill_suggestion_items(data) -> list[dict]:
+    if isinstance(data, dict):
+        if isinstance(data.get("suggestions"), list):
+            return [item for item in data.get("suggestions", []) if isinstance(item, dict)]
+        return [data]
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    return []
+
+
+def parse_skill_suggestion_output(text: str) -> list[dict]:
+    value = str(text or "").strip()
+    if not value or value.upper() == "NO_SKILL":
+        return []
+    json_text = value
+    if "```" in json_text:
+        blocks = re.findall(r"```(?:json)?\s*(.*?)```", json_text, flags=re.IGNORECASE | re.DOTALL)
+        if blocks:
+            json_text = blocks[0].strip()
+    else:
+        start = json_text.find("{")
+        end = json_text.rfind("}")
+        if start >= 0 and end > start:
+            json_text = json_text[start : end + 1]
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        data = None
+    items = _coerce_skill_suggestion_items(data)
+    suggestions = []
+    for item in items:
+        name = item.get("name") or item.get("slug") or item.get("title") or ""
+        body = item.get("body") or item.get("procedure") or item.get("skill_body") or ""
+        description = item.get("description") or item.get("summary") or ""
+        if not name or not description or not body:
+            continue
+        suggestions.append(
+            normalize_skill_suggestion(
+                {
+                    "name": name,
+                    "description": description,
+                    "body": body,
+                    "kind": item.get("kind") or DEFAULT_SKILL_KIND,
+                    "handler": item.get("handler") or DEFAULT_SKILL_HANDLER,
+                    "allowed_effects": item.get("allowed_effects") or list(DEFAULT_SKILL_EFFECTS),
+                    "triggers": item.get("triggers") or [],
+                    "signals": item.get("signals") or [],
+                    "reason": item.get("reason") or "",
+                    "security": item.get("security") or "prompt-only suggested skill; no script execution",
+                }
+            )
+        )
+        if len(suggestions) >= AUTO_SKILL_MAX_PROPOSALS:
+            break
+    return suggestions
+
+
+def propose_skill_suggestions(
+    conv: dict,
+    *,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+) -> list[dict]:
+    if not conv.get("messages"):
+        return []
+    prompt = textwrap.dedent(
+        """
+        Review the conversation and decide whether it revealed a reusable
+        procedure that should become a Motoko skill.
+
+        Decision question:
+        Did this task reveal a reusable procedure that would save tokens,
+        reduce errors, improve reliability, or encode project-specific craft?
+
+        Skill-worthy signals:
+        - the user corrected workflow, sequence, style, or approach;
+        - a non-trivial debugging path, workaround, tool-use pattern, or
+          repeatable technique emerged;
+        - a loaded/consulted skill was wrong, incomplete, or stale;
+        - the learning is class-level and likely useful again.
+
+        Do not propose a skill for one-off task progress, transient environment
+        failures, missing packages, fresh install quirks, commit ids, exact
+        dates that will soon be stale, or anything that only makes sense for
+        today's single task.
+
+        Return exactly NO_SKILL if no suggestion is warranted.
+        Otherwise return compact JSON:
+        {
+          "suggestions": [
+            {
+              "name": "class-level-skill-name",
+              "description": "one short sentence",
+              "kind": "workflow",
+              "handler": "prompt_only",
+              "allowed_effects": ["prompt_context"],
+              "triggers": ["when to use it"],
+              "signals": ["why it was suggested"],
+              "reason": "why this will save tokens, reduce errors, improve reliability, or encode craft",
+              "body": "durable procedure for future Motoko sessions"
+            }
+          ]
+        }
+        """
+    ).strip()
+    transcript = conversation_transcript_for_model(conv, limit=MAX_RECENT_MESSAGES, max_chars=16000)
+    reply = call_model(
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Conversation transcript:\n{transcript}"},
+        ],
+        temperature=0.1,
+        stream=False,
+        echo=False,
+        timeout=timeout,
+        route=MODEL_ROUTE_MEMORY,
+    ).strip()
+    return parse_skill_suggestion_output(reply)
+
+
 def title_candidate_messages(conv: dict) -> list[dict]:
     return [
         msg
@@ -15338,6 +15666,31 @@ def auto_maintain_conversation(
         conv["last_auto_memory_message_count"] = message_count
         if saved:
             notes.append(f"saved {saved} durable memor{'y' if saved == 1 else 'ies'}")
+
+    last_skill = int(conv.get("last_auto_skill_message_count", 0) or 0)
+    if (
+        message_count >= AUTO_SKILL_MIN_MESSAGES
+        and message_count - last_skill >= AUTO_SKILL_INTERVAL_MESSAGES
+    ):
+        set_phase("skills: reviewing")
+        suggestions = []
+        try:
+            suggestions = run_with_wall_timeout(
+                "skill suggestion",
+                MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+                propose_skill_suggestions,
+                conv,
+                timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+            )
+        except (Exception, SystemExit):
+            suggestions = []
+        if suggestions:
+            set_phase("skills: suggesting")
+            added = add_skill_suggestions(suggestions, conversation_id=conv.get("id", ""))
+            if added:
+                label = ", ".join(row.get("slug", "") for row in added[:AUTO_SKILL_MAX_PROPOSALS])
+                notes.append(f"skill suggestion pending: {label}")
+        conv["last_auto_skill_message_count"] = message_count
 
     last_compact = int(conv.get("last_auto_compact_message_count", 0) or 0)
     if (
@@ -15896,6 +16249,12 @@ def command_skill(args) -> None:
         if not args.yes:
             raise SystemExit("refusing to delete skill without --yes")
         print(delete_skill_text(args.name))
+    elif args.skill_command == "suggestions":
+        print_report(format_skill_suggestions(status="pending" if args.pending else None))
+    elif args.skill_command == "accept":
+        print(accept_skill_suggestion_text(args.id))
+    elif args.skill_command == "reject":
+        print(reject_skill_suggestion_text(args.id))
     else:
         raise SystemExit("unknown skill command")
 
@@ -16396,7 +16755,7 @@ def main(argv: list[str]) -> int:
     skills = sub.add_parser("skills", help="list learned procedural skills")
     skills.set_defaults(func=lambda _args: print_report(format_skills()))
 
-    skill = sub.add_parser("skill", help="list, show, learn, or delete procedural skills")
+    skill = sub.add_parser("skill", help="list, show, learn, suggest, or delete procedural skills")
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)
     skill_list = skill_sub.add_parser("list", help="list learned procedural skills")
     skill_list.set_defaults(func=command_skill)
@@ -16415,6 +16774,15 @@ def main(argv: list[str]) -> int:
     skill_delete.add_argument("name")
     skill_delete.add_argument("--yes", action="store_true", help="confirm deletion")
     skill_delete.set_defaults(func=command_skill)
+    skill_suggestions = skill_sub.add_parser("suggestions", help="show pending skill suggestions")
+    skill_suggestions.add_argument("--all", dest="pending", action="store_false", help="show accepted/rejected too")
+    skill_suggestions.set_defaults(func=command_skill, pending=True)
+    skill_accept = skill_sub.add_parser("accept", help="accept a pending skill suggestion")
+    skill_accept.add_argument("id")
+    skill_accept.set_defaults(func=command_skill)
+    skill_reject = skill_sub.add_parser("reject", help="reject a pending skill suggestion")
+    skill_reject.add_argument("id")
+    skill_reject.set_defaults(func=command_skill)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

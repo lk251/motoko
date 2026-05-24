@@ -56,8 +56,33 @@ def format_sources(sources: list[dict]) -> str:
                 f"score {source.get('score', 0)}  {source.get('description', '')}"
             )
             lines.append(f"     why: relevant learned procedure; matched {matched}")
+            if source.get("handler"):
+                effects = ", ".join(source.get("allowed_effects", [])[:6]) or "-"
+                lines.append(
+                    f"     handler: {source.get('handler', '')}  "
+                    f"kind: {source.get('skill_kind', '')}  effects: {effects}"
+                )
             if source.get("path"):
                 lines.append(f"     path: {source.get('path', '')}")
+        elif kind == "retrieval-plan":
+            lines.append(
+                f"{idx:3d}  retrieval plan  {source.get('schema', '')}  "
+                f"{source.get('status', 'unknown')}"
+            )
+            lines.append("     why: pre-retrieval skill/handler planning")
+            if source.get("activated_skills"):
+                lines.append("     skills: " + ", ".join(source.get("activated_skills", [])[:8]))
+            if source.get("handlers"):
+                lines.append("     handlers: " + ", ".join(source.get("handlers", [])[:8]))
+            temporal = source.get("temporal") or {}
+            if temporal:
+                mentions = ", ".join(temporal.get("path_mentions", [])[:4]) or "-"
+                lines.append(
+                    f"     temporal: {temporal.get('mode', '')} "
+                    f"count={temporal.get('requested_count', 0)} source={mentions}"
+                )
+            for warning in source.get("warnings", [])[:3]:
+                lines.append(f"     warning: {warning}")
         elif kind == "personality":
             lines.append(
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "
@@ -149,6 +174,8 @@ def format_sources(sources: list[dict]) -> str:
                 )
             if source.get("temporal_selected_dates"):
                 lines.append("     temporal: selected newest dates present in source: " + ", ".join(source.get("temporal_selected_dates", [])[:8]))
+            if source.get("activated_skills"):
+                lines.append("     activated skills: " + ", ".join(source.get("activated_skills", [])[:8]))
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
         elif kind == "topic":

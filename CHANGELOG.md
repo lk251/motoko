@@ -5,6 +5,16 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
+  boundary so built-in skills can activate deterministic handlers before
+  context packing instead of living only as final-prompt guidance.
+- Added the roadmap and CLI surface for review-first skill suggestions, so
+  Motoko can notice skill-worthy procedural knowledge during maintenance and
+  ask for confirmation instead of silently writing skills.
+- Converted the built-in `org-temporal-retrieval` skill into a real retrieval
+  skill that declares `builtin:org_temporal_latest_entries`; `/sources` now
+  shows the activated skill plan and handler when source-scoped temporal
+  retrieval runs.
 - Added realm-local procedural skills: `motoko skill learn/show/delete`,
   `/skills`, and `/skill show/learn/delete`. Skills are selected into chat
   context only when relevant and appear in `/sources`; they are non-executable
@@ -13,8 +23,8 @@ not the easiest place to review what changed after a long work session.
   latest-dated-Org handling while keeping date/source selection deterministic in
   the retrieval layer.
 - Documented the source-scoped temporal retrieval failure and its deterministic
-  solution as a future Hermes-style skill/tool candidate, while keeping Motoko's
-  current adaptation dependency-free and non-agentic.
+  solution as Motoko's first Hermes-inspired skill/planner/handler pattern
+  while keeping the adaptation dependency-free and bounded.
 - Clarified deterministic temporal retrieval context: when Motoko selects the
   latest dated Org sections present in a source file, the prompt context and
   `/sources` now state those selected dates explicitly so the chat model does

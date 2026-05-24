@@ -9,19 +9,36 @@ import re
 from motoko_core.text import compact_text
 
 
-SKILL_SCHEMA = "motoko-skill-v1"
+SKILL_SCHEMA = "motoko-skill-v2"
+LEGACY_SKILL_SCHEMA = "motoko-skill-v1"
 MAX_SKILL_NAME = 64
 MAX_SKILL_DESCRIPTION = 400
 MAX_SKILL_BODY = 12000
 DEFAULT_SKILL_CONTEXT_LIMIT = 2
 DEFAULT_SKILL_CONTEXT_CHARS = 5000
+DEFAULT_SKILL_KIND = "workflow"
+DEFAULT_SKILL_HANDLER = "prompt_only"
+DEFAULT_SKILL_EFFECTS = ["prompt_context"]
+ORG_TEMPORAL_SKILL = "org-temporal-retrieval"
+ORG_TEMPORAL_HANDLER = "builtin:org_temporal_latest_entries"
 
 BUILTIN_SKILLS = [
     {
         "schema": SKILL_SCHEMA,
-        "name": "org-temporal-retrieval",
-        "slug": "org-temporal-retrieval",
+        "name": ORG_TEMPORAL_SKILL,
+        "slug": ORG_TEMPORAL_SKILL,
         "description": "Source-scoped retrieval for latest dated Org entries",
+        "version": "2",
+        "kind": "retrieval",
+        "triggers": [
+            "last/latest/recent N dated entries",
+            "explicit named Org source such as logbook.org",
+        ],
+        "handler": ORG_TEMPORAL_HANDLER,
+        "allowed_effects": ["retrieval_plan", "source_scoped_evidence"],
+        "support_files": [],
+        "security": "builtin deterministic handler; no script execution",
+        "source_schema": SKILL_SCHEMA,
         "created_at": "2026-05-24T00:00:00+00:00",
         "updated_at": "2026-05-24T00:00:00+00:00",
         "source": "builtin",
@@ -39,7 +56,7 @@ BUILTIN_SKILLS = [
                 "- Include bounded source excerpts for each selected date and preserve source provenance.",
                 "- In the final answer, state which dates were selected and avoid implying that absent dates were retrieved.",
                 "",
-                "This skill describes the workflow. The deterministic retrieval layer still owns source selection, date parsing, and evidence extraction.",
+                "This skill activates the built-in deterministic retrieval handler for source selection, date parsing, and evidence extraction.",
             ]
         ),
     }
@@ -89,11 +106,38 @@ def parse_skill_markdown(text: str, *, path: pathlib.Path | None = None) -> dict
             if stripped and not stripped.startswith("#"):
                 description = stripped
                 break
+    source_schema = frontmatter.get("schema") or LEGACY_SKILL_SCHEMA
+    kind = frontmatter.get("kind") or DEFAULT_SKILL_KIND
+    handler = frontmatter.get("handler") or DEFAULT_SKILL_HANDLER
+    allowed_effects = [
+        item.strip()
+        for item in (frontmatter.get("allowed_effects") or ",".join(DEFAULT_SKILL_EFFECTS)).split(",")
+        if item.strip()
+    ]
+    triggers = [
+        item.strip()
+        for item in (frontmatter.get("triggers") or "").split(",")
+        if item.strip()
+    ]
+    support_files = [
+        item.strip()
+        for item in (frontmatter.get("support_files") or "").split(",")
+        if item.strip()
+    ]
     return {
-        "schema": frontmatter.get("schema") or SKILL_SCHEMA,
+        "schema": SKILL_SCHEMA,
+        "source_schema": source_schema,
         "name": name,
         "slug": skill_slug(name),
         "description": compact_text(description, MAX_SKILL_DESCRIPTION) if description else "",
+        "version": frontmatter.get("version") or ("1" if source_schema == LEGACY_SKILL_SCHEMA else "2"),
+        "kind": kind,
+        "triggers": triggers,
+        "handler": handler,
+        "allowed_effects": allowed_effects or list(DEFAULT_SKILL_EFFECTS),
+        "support_files": support_files,
+        "security": frontmatter.get("security") or "prompt-only learned skill; no script execution",
+        "can_upgrade_deterministically": source_schema != SKILL_SCHEMA,
         "created_at": frontmatter.get("created_at", ""),
         "updated_at": frontmatter.get("updated_at", ""),
         "source": frontmatter.get("source", ""),
@@ -107,6 +151,12 @@ def format_skill_markdown(
     name: str,
     description: str,
     body: str,
+    kind: str = DEFAULT_SKILL_KIND,
+    handler: str = DEFAULT_SKILL_HANDLER,
+    allowed_effects: list[str] | None = None,
+    triggers: list[str] | None = None,
+    support_files: list[str] | None = None,
+    security: str = "prompt-only learned skill; no script execution",
     source: str = "manual",
     created_at: str = "",
     updated_at: str = "",
@@ -125,12 +175,22 @@ def format_skill_markdown(
     stamp = _now()
     created_at = created_at or stamp
     updated_at = updated_at or stamp
+    allowed_effects = allowed_effects or list(DEFAULT_SKILL_EFFECTS)
+    triggers = triggers or []
+    support_files = support_files or []
     return "\n".join(
         [
             "---",
             f"schema: {SKILL_SCHEMA}",
+            "version: 2",
             f"name: {name}",
             f"description: {description}",
+            f"kind: {kind or DEFAULT_SKILL_KIND}",
+            f"handler: {handler or DEFAULT_SKILL_HANDLER}",
+            f"allowed_effects: {', '.join(allowed_effects)}",
+            f"triggers: {', '.join(triggers)}",
+            f"support_files: {', '.join(support_files)}",
+            f"security: {security}",
             f"created_at: {created_at}",
             f"updated_at: {updated_at}",
             f"source: {source or 'manual'}",
@@ -210,6 +270,12 @@ def save_skill(
     name: str,
     description: str,
     body: str,
+    kind: str = DEFAULT_SKILL_KIND,
+    handler: str = DEFAULT_SKILL_HANDLER,
+    allowed_effects: list[str] | None = None,
+    triggers: list[str] | None = None,
+    support_files: list[str] | None = None,
+    security: str = "prompt-only learned skill; no script execution",
     source: str = "manual",
     replace: bool = False,
     writer,
@@ -231,6 +297,12 @@ def save_skill(
         name=name,
         description=description,
         body=body,
+        kind=kind,
+        handler=handler,
+        allowed_effects=allowed_effects,
+        triggers=triggers,
+        support_files=support_files,
+        security=security,
         source=source,
         created_at=created_at,
     )
@@ -307,6 +379,9 @@ def render_skills_with_sources(
                 "kind": "skill",
                 "name": row.get("name", ""),
                 "description": row.get("description", ""),
+                "skill_kind": row.get("kind", DEFAULT_SKILL_KIND),
+                "handler": row.get("handler", DEFAULT_SKILL_HANDLER),
+                "allowed_effects": row.get("allowed_effects", [])[:8],
                 "path": row.get("path", ""),
                 "score": row.get("score", 0),
                 "matched_terms": row.get("matched_terms", [])[:12],
@@ -323,6 +398,7 @@ def format_skills_list(rows: list[dict]) -> str:
     for row in rows:
         lines.append(
             f"- {row.get('slug', '')}: {row.get('description', '')}"
+            f" [{row.get('kind', DEFAULT_SKILL_KIND)} -> {row.get('handler', DEFAULT_SKILL_HANDLER)}]"
             + (f" ({row.get('path', '')})" if row.get("path") else "")
         )
     return "\n".join(lines)
@@ -334,6 +410,14 @@ def format_skill(row: dict) -> str:
             f"skill: {row.get('name', '')}",
             f"slug: {row.get('slug', '')}",
             f"description: {row.get('description', '')}",
+            f"schema: {row.get('schema', '')}",
+            f"source schema: {row.get('source_schema', '')}",
+            f"kind: {row.get('kind', DEFAULT_SKILL_KIND)}",
+            f"handler: {row.get('handler', DEFAULT_SKILL_HANDLER)}",
+            "allowed effects: " + ", ".join(row.get("allowed_effects", []) or []),
+            "triggers: " + ", ".join(row.get("triggers", []) or []),
+            "support files: " + ", ".join(row.get("support_files", []) or []),
+            f"security: {row.get('security', '')}",
             f"source: {row.get('source', '')}",
             f"created: {row.get('created_at', '')}",
             f"updated: {row.get('updated_at', '')}",

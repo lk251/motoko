@@ -166,6 +166,11 @@ def skills_dir() -> pathlib.Path:
     return ensure_private_dir(root / "skills")
 
 
+def skill_suggestions_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "skill-suggestions.json"
+
+
 def feedback_eval_path(eval_id: str) -> pathlib.Path:
     return feedback_evals_dir() / f"{_safe_component(eval_id, 'feedback-eval')}.json"
 

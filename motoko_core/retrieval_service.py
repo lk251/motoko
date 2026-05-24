@@ -23,6 +23,12 @@ from motoko_core.retrieval import (
     token_counts,
     unavailable_context_source,
 )
+from motoko_core.retrieval_planner import (
+    build_retrieval_plan,
+    plan_has_handler,
+    retrieval_plan_source,
+)
+from motoko_core.skills import ORG_TEMPORAL_HANDLER
 
 
 RETRIEVAL_SERVICE_SCHEMA = "retrieval-service-v1"
@@ -125,9 +131,16 @@ def _chunk_lookup(index: dict) -> dict[tuple[str, str], tuple[dict, dict]]:
     return lookup
 
 
-def _temporal_evidence_rows(index: dict, query: str, env: HybridRetrievalEnvironment) -> list[dict]:
+def _temporal_evidence_rows(
+    index: dict,
+    query: str,
+    env: HybridRetrievalEnvironment,
+    *,
+    retrieval_plan: dict | None = None,
+) -> list[dict]:
     exact_dates = set(query_date_mentions(query))
     recent_count = query_requested_recent_section_count(query)
+    source_scoped_latest = plan_has_handler(retrieval_plan or {}, ORG_TEMPORAL_HANDLER)
     if not exact_dates and not recent_count:
         return []
     rows = []
@@ -137,6 +150,8 @@ def _temporal_evidence_rows(index: dict, query: str, env: HybridRetrievalEnviron
         path = file_item.get("path", "")
         path_boost = query_path_match_boost(query, path)
         if path_mentions and path_boost <= 0:
+            continue
+        if source_scoped_latest and path_mentions and path_boost <= 0:
             continue
         file_match = path_boost > 0 or score_text(query_counts, "\n".join([path, file_item.get("summary", "")])) > 0
         if not file_match and not exact_dates:
@@ -224,6 +239,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     top_files, top_chunks, max_retrieval_chars = env.retrieval_limits(query)
     index_status, index_warnings = env.index_staleness(index)
     profile_text = env.corpus_profile_text(index)
+    retrieval_plan = build_retrieval_plan(query)
     file_rows = []
     chunk_rows = []
     for file_item in index.get("files", []):
@@ -261,7 +277,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
     env.add_structured_task_candidates(index, query, candidates)
     lookup = _chunk_lookup(index)
-    temporal_rows = _temporal_evidence_rows(index, query, env)
+    temporal_rows = _temporal_evidence_rows(index, query, env, retrieval_plan=retrieval_plan)
     temporal_dates = sorted({str(row.get("date", "")) for row in temporal_rows if row.get("date")}, reverse=True)
     for row in temporal_rows:
         found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
@@ -366,6 +382,18 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     if index_warnings:
         parts.append("Freshness warnings:\n" + "\n".join(f"- {warning}" for warning in index_warnings[:8]))
     if temporal_dates:
+        activated = ", ".join(
+            row.get("slug") or row.get("name", "")
+            for row in retrieval_plan.get("activated_skills", [])
+            if row.get("slug") or row.get("name")
+        )
+        if activated:
+            parts.append(
+                "Retrieval plan:\n"
+                f"Activated skill(s): {activated}. "
+                "Motoko applied the plan before context packing so source evidence, "
+                "not only final-prompt guidance, controls the answer."
+            )
         parts.append(
             "Temporal selection:\n"
             "The query asked for recent dated Org sections from this source. "
@@ -383,7 +411,15 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         "retrieval": "deep" if env.wants_deep_context(query) else "normal",
         "corpus_profile_schema": index.get("corpus_profile_schema", ""),
         "retrieval_service_schema": RETRIEVAL_SERVICE_SCHEMA,
+        "retrieval_plan_schema": retrieval_plan.get("schema", ""),
     }
+    if retrieval_plan.get("activated_skills"):
+        index_source["activated_skills"] = [
+            row.get("slug") or row.get("name", "")
+            for row in retrieval_plan.get("activated_skills", [])
+            if row.get("slug") or row.get("name")
+        ]
+        index_source["retrieval_plan_status"] = retrieval_plan.get("status", "")
     if temporal_dates:
         index_source["temporal_selected_dates"] = temporal_dates
     if hybrid_report:
@@ -431,6 +467,9 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             f"rows {len(evidence_report.get('rows', [])) if evidence_report else 0}"
         )
     sources = [index_source]
+    plan_source = retrieval_plan_source(retrieval_plan)
+    if plan_source:
+        sources.append(plan_source)
     if selected_files:
         parts.append("Relevant file summaries:")
         for file_item in selected_files:
@@ -528,6 +567,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         "evidence_rows": len(evidence_report.get("rows", [])) if evidence_report else 0,
         "vector_rows": len(vector_report.get("rows", [])) if vector_report else 0,
         "index_status": index_status,
+        "retrieval_plan": retrieval_plan,
     }
     return RetrievalServiceResult(
         text="\n\n".join(part for part in parts if part),

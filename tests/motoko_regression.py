@@ -153,6 +153,78 @@ def test_memory_proposal_sends_transcript_not_assistant_prefill(m):
         assert kwargs["route"] == m.MODEL_ROUTE_MEMORY
 
 
+def test_skill_suggestion_parser_uses_hermes_style_signal(m):
+    with isolated_state():
+        text = json.dumps(
+            {
+                "suggestions": [
+                    {
+                        "name": "motoko-retrieval-debugging",
+                        "description": "Debug Motoko retrieval failures with source-visible checks.",
+                        "kind": "workflow",
+                        "handler": "prompt_only",
+                        "allowed_effects": ["prompt_context"],
+                        "triggers": ["retrieval result is wrong or incomplete"],
+                        "signals": ["would reduce errors", "encodes project-specific craft"],
+                        "reason": "This would save tokens and improve reliability.",
+                        "body": "Check recall, ranking, staleness, chunking, summaries, and prompt use before changing retrieval.",
+                    }
+                ]
+            }
+        )
+        rows = m.parse_skill_suggestion_output(text)
+        assert len(rows) == 1
+        assert rows[0]["slug"] == "motoko-retrieval-debugging"
+        assert rows[0]["handler"] == "prompt_only"
+        assert "would reduce errors" in rows[0]["signals"]
+
+
+def test_auto_maintenance_suggests_skill_without_saving_it(m):
+    with isolated_state():
+        conv = m.new_conversation("Skill suggestion")
+        conv["id"] = "skill-suggestion"
+        conv["title_kind"] = "manual"
+        conv["title_generated"] = m.now()
+        conv["messages"] = [
+            {"role": "user", "content": "When retrieval fails, inspect sources first."},
+            {"role": "assistant", "content": "I will check sources."},
+            {"role": "user", "content": "Then check recall, ranking, stale data, chunking, summaries, and prompt use."},
+            {"role": "assistant", "content": "Understood."},
+            {"role": "user", "content": "This should become a reusable workflow."},
+            {"role": "assistant", "content": "I can suggest a skill."},
+        ]
+        conv["last_auto_memory_message_count"] = len(conv["messages"])
+        conv["last_auto_compact_message_count"] = len(conv["messages"])
+
+        old_propose = m.propose_skill_suggestions
+        try:
+            def fake_propose(_conv, **_kwargs):
+                return [
+                    {
+                        "name": "retrieval-failure-diagnosis",
+                        "description": "Diagnose retrieval failures before changing ranking.",
+                        "body": "Check recall, ranking, stale data, chunking, summaries, and prompt use.",
+                        "reason": "Saves tokens and reduces errors on repeated retrieval debugging.",
+                        "signals": ["user corrected workflow"],
+                    }
+                ]
+
+            m.propose_skill_suggestions = fake_propose
+            notes = m.auto_maintain_conversation(conv)
+        finally:
+            m.propose_skill_suggestions = old_propose
+
+        assert any("skill suggestion pending: retrieval-failure-diagnosis" in note for note in notes)
+        assert "retrieval-failure-diagnosis" not in m.format_skills()
+        suggestions = m.list_skill_suggestions(status="pending")
+        assert len(suggestions) == 1
+        assert suggestions[0]["slug"] == "retrieval-failure-diagnosis"
+
+        accepted = m.accept_skill_suggestion_text(suggestions[0]["id"])
+        assert "skill accepted: retrieval-failure-diagnosis" in accepted
+        assert "retrieval-failure-diagnosis" in m.format_skills()
+
+
 def test_interrupted_maintenance_resume(m):
     with isolated_state():
         conv = m.new_conversation("Resume")
@@ -1860,10 +1932,17 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert "newest dates present in the matching file(s): 2026-05-19, 2026-05-18" in text
         index_source = next(source for source in sources if source.get("kind") == "index")
         assert index_source["temporal_selected_dates"] == ["2026-05-19", "2026-05-18"]
+        assert index_source["activated_skills"] == ["org-temporal-retrieval"]
+        plan_source = next(source for source in sources if source.get("kind") == "retrieval-plan")
+        assert plan_source["activated_skills"] == ["org-temporal-retrieval"]
+        assert plan_source["handlers"] == ["builtin:org_temporal_latest_entries"]
+        assert plan_source["temporal"]["requested_count"] == 2
         chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
         assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
         assert chunk_sources[0]["temporal_selected_dates"] == ["2026-05-19", "2026-05-18"]
         assert "selected newest dates present in source: 2026-05-19, 2026-05-18" in m.format_sources(sources)
+        assert "retrieval plan" in m.format_sources(sources)
+        assert "builtin:org_temporal_latest_entries" in m.format_sources(sources)
 
 
 def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
@@ -1929,6 +2008,8 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
             assert "2026-05-22" not in text
             index_source = next(source for source in sources if source.get("kind") == "index")
             assert index_source["temporal_selected_dates"] == ["2026-05-23", "2026-05-19"]
+            plan_source = next(source for source in sources if source.get("kind") == "retrieval-plan")
+            assert plan_source["activated_skills"] == ["org-temporal-retrieval"]
             chunks = [source for source in sources if source.get("kind") == "chunk"]
             assert chunks
             assert chunks[0]["temporal_selected_dates"] == ["2026-05-23", "2026-05-19"]
@@ -5930,12 +6011,18 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         listed = m.format_skills()
         assert "org-temporal-retrieval" in listed
         assert "Source-scoped retrieval" in listed
+        assert "builtin:org_temporal_latest_entries" in listed
+        shown = m.format_skill("org-temporal-retrieval")
+        assert "schema: motoko-skill-v2" in shown
+        assert "kind: retrieval" in shown
+        assert "handler: builtin:org_temporal_latest_entries" in shown
 
         rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
         assert "Skill: org-temporal-retrieval" in rendered
         assert "newest distinct dates actually present" in rendered
         assert sources and sources[0]["kind"] == "skill"
         assert sources[0]["path"] == "builtin:org-temporal-retrieval"
+        assert sources[0]["handler"] == "builtin:org_temporal_latest_entries"
 
 
 def test_procedural_skills_are_included_in_prompt_and_sources(m):
@@ -5986,6 +6073,8 @@ def main() -> int:
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
         test_memory_proposal_sends_transcript_not_assistant_prefill,
+        test_skill_suggestion_parser_uses_hermes_style_signal,
+        test_auto_maintenance_suggests_skill_without_saving_it,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

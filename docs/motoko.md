@@ -502,20 +502,46 @@ motoko skill learn NAME --description "short description" --file SKILL.md --repl
 motoko skill delete NAME --yes
 ```
 
-Skills are procedural guidance for repeatable "how to approach this kind of
-task" situations, not executable tools or secrets. Repo-shipped built-in skills
-cover stable Motoko procedures, while learned user skills are stored under the
-current user's Motoko state as `SKILL.md` files. Motoko ranks skills against
-the current prompt, includes only relevant ones in chat context, and lists
-selected skills in `/sources`. This borrows the useful progressive-disclosure
-idea from Hermes Agent without importing a tool runtime, script execution, YAML
-dependency, or cross-realm skill store.
+Skills are durable procedural packages for repeatable "how to approach this
+kind of task" situations. Repo-shipped built-in skills cover stable Motoko
+procedures, while learned user skills are stored under the current user's
+Motoko state as `SKILL.md` files. Motoko ranks skills against the current
+prompt, includes only relevant ones in chat context, and lists selected skills
+in `/sources`.
 
-The built-in `org-temporal-retrieval` skill documents how to handle queries
-such as "last three days present in logbook.org". It does not replace
-deterministic retrieval. The retrieval layer still owns source scoping, Org date
-parsing, and evidence extraction; the skill tells the assistant how to
-interpret and explain that class of query.
+Current `motoko-skill-v2` skills can declare a kind, trigger hints, handler,
+and allowed effects. Prompt-only learned skills use `handler: prompt_only`.
+Built-in skills may declare deterministic handlers that Motoko's planner can
+activate before a subsystem runs. This borrows the useful progressive
+disclosure idea from Hermes Agent while keeping Motoko realm-local,
+dependency-light, and inspectable.
+
+The built-in `org-temporal-retrieval` skill handles queries such as "last three
+days present in logbook.org". It declares the
+`builtin:org_temporal_latest_entries` handler. For matching queries, Motoko
+builds a pre-retrieval `retrieval_plan_v1`, activates that skill, scopes
+retrieval to the named Org source, parses dated headings, and selects the
+newest dates actually present. The deterministic retrieval layer still owns
+source scoping, Org date parsing, and evidence extraction; the skill records
+why and when that handler should run.
+
+Motoko does not yet execute arbitrary skill scripts. Future support for
+`references/`, `templates/`, and `scripts/` should keep script execution
+constrained, stdlib-first, realm-local, timeout-bounded, and visible in
+`/sources`.
+
+After-answer maintenance may also suggest skill candidates when a conversation
+contains repeatable procedural knowledge: user corrections, workflow changes,
+non-trivial debugging paths, reusable techniques, or evidence that a loaded
+skill is stale. These suggestions are review-first. Motoko stores pending
+realm-local suggestions and prints a short note; she does not silently create,
+patch, or execute learned skills. Review them with:
+
+```bash
+motoko skill suggestions
+motoko skill accept SUGGESTION_ID
+motoko skill reject SUGGESTION_ID
+```
 
 Useful in-chat commands:
 

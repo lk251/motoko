@@ -169,10 +169,21 @@ when and why to use that procedure. That split keeps Motoko source-grounded and
 prevents prompt-only advice from becoming hidden retrieval policy.
 
 Motoko now ships this as the built-in `org-temporal-retrieval` procedural
-skill while keeping the deterministic source/date selector in the retrieval
-pipeline. That is the intended architecture for similar cases: skills preserve
-procedure and interpretation; parser/retrieval code enforces evidence
-selection.
+skill with `motoko-skill-v2` metadata. The skill declares the
+`builtin:org_temporal_latest_entries` handler, and a pre-retrieval
+`retrieval_plan_v1` activates that handler before context packing when the
+query asks for latest/recent dated entries in a named Org source. The
+deterministic source/date selector still enforces evidence selection; the skill
+supplies durable trigger metadata, procedure, and provenance. That is the
+intended architecture for similar cases: skills preserve procedural knowledge,
+planners decide whether the skill should affect a subsystem, and handlers
+perform bounded inspectable work.
+
+Future skill work should add support files and carefully constrained scripts
+only after the planner/handler boundary is stable. Scripts are useful when they
+turn repeatable procedures into deterministic probes or transforms, but they
+must not become broad shell execution, cross-realm access, or a way around
+document allowlists.
 
 ## Evaluation Requirements
 
