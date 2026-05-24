@@ -20,7 +20,7 @@ intent, but code-owned validators decide what can run.
 Before enabling script execution or a general tool runner, settle these design
 points:
 
-- Authority model: which effects exist, which are prompt-only, which are
+- Authority model: accepted. Defines which effects exist, which are prompt-only, which are
   built-in handlers, which are script-backed, and which require explicit user
   confirmation every time.
 - Skill package format: script assets under `scripts/` need metadata declaring
@@ -56,9 +56,19 @@ points:
   service control, model files, or network policy, NixOS declares that surface;
   Motoko consumes approved interfaces and does not call `sudo` or `systemctl`.
 
+Design review process:
+
+- Resolve one item at a time.
+- For each item, record the accepted decision and the implementation recipe in
+  this document.
+- Treat unresolved items as blockers for executable script-backed tools.
+- Once all items are resolved, use this document as the implementation plan.
+- If implementation reveals a conflict, update the relevant item here before
+  widening the runner's authority.
+
 ## Authority Model
 
-Initial recommendation:
+Decision: accepted on 2026-05-24.
 
 - Keep prompt-only skills as the default for new learned skills.
 - Keep built-in handlers as code-owned capabilities. A skill may request a
@@ -133,6 +143,32 @@ My bias is to make the first script runner read-only or Motoko-state-only.
 That gives Motoko useful deterministic tools without immediately granting
 project-file mutation. Project-file writes can follow after the runner has
 good previews, confirmations, evals, and interruption behavior.
+
+Implementation recipe:
+
+1. Add an effect registry with the effect tiers above. Unknown effects must
+   fail closed.
+2. Keep a hard-coded built-in handler registry. Skills may request handlers by
+   name, but Motoko only activates handlers present in code and allowed by the
+   handler's declared effects.
+3. Add a realm-local tool approval store under the current user's Motoko state.
+   Do not store approvals in the repository or in another account.
+4. For script-backed tools, compute script and metadata fingerprints before
+   every run. If either fingerprint differs from the approval record, block the
+   run and ask for review again.
+5. Validate every proposed run against the approval contract: realm, skill id,
+   tool path, script hash, metadata hash, wrapper/interpreter, argument schema,
+   allowed effects, network flag, and confirmation policy.
+6. Allow repeated automatic runs only for low-risk approved contracts such as
+   read-only or `write_motoko_state` tools. Keep project-file writes,
+   networking, and other higher-risk effects behind per-run confirmation until
+   the runner has strong previews, ledgers, evals, and interruption behavior.
+7. Record each run in a realm-local tool ledger with content-safe metadata,
+   provenance, status, timestamps, effect tier, approval id, and output hashes.
+   Tool inputs/outputs that may contain private content stay in user-owned
+   Motoko state, not in admin-visible logs.
+8. Keep `service_control` and `privileged` effects forbidden. Motoko must not
+   use sudo, setuid helpers, or direct systemd control.
 
 ## Goal Loops
 
