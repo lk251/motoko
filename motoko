@@ -123,6 +123,7 @@ from motoko_core.model_io import (  # noqa: E402
     model_request_timeout as model_io_request_timeout,
     open_model_response as open_model_response_core,
     parse_openai_stream_line,
+    parse_openai_stream_line_parts,
     raise_if_cancelled,
     read_json_response,
 )
@@ -457,6 +458,16 @@ CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
 CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
 CHAT_CONTEXT_MAX_SOFT_TOKENS = 262_144
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
+REASONING_MODE_ENV = "MOTOKO_REASONING"
+REASONING_FORMAT = "deepseek"
+REASONING_PRESETS = {
+    "off": (False, 0),
+    "low": (True, 1024),
+    "default": (True, 4096),
+    "high": (True, 16384),
+    "max": (True, -1),
+}
+REASONING_LIVE_MAX_CHARS = 1600
 KV_OFFLOAD_NOTICE_TEXT = "KV not in GPU"
 KV_OFFLOAD_NOTICE_SECONDS = 3.0
 CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
@@ -2049,6 +2060,42 @@ def route_kv_offload_disabled(route_info: dict) -> bool:
     return "--no-kv-offload" in args
 
 
+def reasoning_mode() -> str:
+    raw = os.environ.get(REASONING_MODE_ENV, "default").strip().lower()
+    return raw if raw in REASONING_PRESETS else "default"
+
+
+def route_uses_chat_reasoning(route_info: dict) -> bool:
+    return normalize_model_route(str(route_info.get("route") or MODEL_ROUTE_CHAT), strict=False) == MODEL_ROUTE_CHAT
+
+
+def chat_reasoning_request(route_info: dict) -> dict:
+    if not route_uses_chat_reasoning(route_info):
+        return {}
+    mode = reasoning_mode()
+    enabled, budget = REASONING_PRESETS[mode]
+    return {
+        "mode": mode,
+        "reasoning_format": REASONING_FORMAT,
+        "enable_thinking": enabled,
+        "thinking_budget_tokens": budget,
+    }
+
+
+def apply_chat_reasoning_payload(payload: dict, route_info: dict) -> dict:
+    request = chat_reasoning_request(route_info)
+    if not request:
+        return request
+    payload["reasoning_format"] = request["reasoning_format"]
+    kwargs = payload.get("chat_template_kwargs")
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+    kwargs["enable_thinking"] = bool(request["enable_thinking"])
+    payload["chat_template_kwargs"] = kwargs
+    payload["thinking_budget_tokens"] = int(request["thinking_budget_tokens"])
+    return request
+
+
 def endpoint() -> str:
     env_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     if env_endpoint:
@@ -2381,6 +2428,10 @@ def write_last_model_call(record: dict) -> None:
             "route_profile",
             "kv_offload",
             "kv_cache_location",
+            "reasoning_mode",
+            "reasoning_format",
+            "enable_thinking",
+            "thinking_budget_tokens",
             "tier",
             "mode",
             "model",
@@ -2462,6 +2513,11 @@ def format_last_model_call(record: dict | None = None) -> str:
         location = record.get("kv_cache_location") or "unknown"
         offload = record.get("kv_offload")
         lines.append(f"KV: {'GPU' if offload is True else location}")
+    if record.get("reasoning_mode"):
+        lines.append(
+            f"reasoning: {record.get('reasoning_mode')} "
+            f"budget={record.get('thinking_budget_tokens')}"
+        )
     lines.extend(
         [
             (
@@ -2486,6 +2542,15 @@ def format_last_model_call(record: dict | None = None) -> str:
     if record.get("error_type"):
         lines.append(f"error type: {record.get('error_type')}")
     return "\n".join(lines)
+
+
+def add_reasoning_to_model_call_record(record: dict, reasoning: dict) -> None:
+    if not reasoning:
+        return
+    record["reasoning_mode"] = reasoning.get("mode", "")
+    record["reasoning_format"] = reasoning.get("reasoning_format", "")
+    record["enable_thinking"] = reasoning.get("enable_thinking")
+    record["thinking_budget_tokens"] = reasoning.get("thinking_budget_tokens", 0)
 
 
 def synthetic_messages_for_token_estimate(target_tokens: int) -> list[dict]:
@@ -12410,6 +12475,7 @@ def call_model(
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
     payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=stream)
+    reasoning = apply_chat_reasoning_payload(payload, route_info)
     started = time.monotonic()
     record = model_call_started_record(
         route_info,
@@ -12418,6 +12484,7 @@ def call_model(
         stream=stream,
         temperature=temperature,
     )
+    add_reasoning_to_model_call_record(record, reasoning)
     write_last_model_call(record)
     spinner = ThinkingSpinner(enabled=echo)
     try:
@@ -12535,6 +12602,7 @@ def call_model_with_callback(
     messages: list[dict],
     *,
     on_token,
+    on_reasoning=None,
     temperature: float = 0.7,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
@@ -12545,6 +12613,7 @@ def call_model_with_callback(
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
     payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=True)
+    reasoning = apply_chat_reasoning_payload(payload, route_info)
     collected = []
     first_token_at = 0.0
     started = time.monotonic()
@@ -12555,6 +12624,7 @@ def call_model_with_callback(
         stream=True,
         temperature=temperature,
     )
+    add_reasoning_to_model_call_record(record, reasoning)
     write_last_model_call(record)
     try:
         raise_if_cancelled(cancel_event)
@@ -12568,9 +12638,12 @@ def call_model_with_callback(
         ) as resp:
             for raw in iter_cancelable_response_lines(resp, cancel_event):
                 raise_if_cancelled(cancel_event)
-                done, content = parse_openai_stream_line(raw)
+                done, content, reasoning_delta = parse_openai_stream_line_parts(raw)
                 if done:
                     break
+                if reasoning_delta:
+                    if on_reasoning is not None:
+                        on_reasoning(reasoning_delta)
                 if content:
                     if not first_token_at:
                         first_token_at = time.monotonic()
@@ -14049,6 +14122,7 @@ class MotokoTui:
         self.answer_entry: dict | None = None
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
+        self.answer_reasoning = ""
         self.kv_notice_started_monotonic = 0.0
         self.kv_notice_until_monotonic = 0.0
         self.active_model_lock = threading.Lock()
@@ -14777,6 +14851,7 @@ class MotokoTui:
         self.answer_started_monotonic = now
         self.answer_phase_started_monotonic = now
         self.answer_phase = "preparing"
+        self.answer_reasoning = ""
         chat_route = model_route(MODEL_ROUTE_CHAT)
         if endpoint_is_unix(chat_route.get("endpoint", "")):
             self.status = f"model queued/loading on {chat_route['route']} socket; you can type the next prompt below"
@@ -14819,10 +14894,15 @@ class MotokoTui:
                     raise_if_cancelled(cancel_event)
                     self.put_event(("token", token))
 
+                def on_reasoning(token: str) -> None:
+                    raise_if_cancelled(cancel_event)
+                    self.put_event(("reasoning", token))
+
                 reply = call_model_with_callback(
                     messages,
                     temperature=0.7,
                     on_token=on_token,
+                    on_reasoning=on_reasoning,
                     route=MODEL_ROUTE_CHAT,
                     cancel_event=cancel_event,
                     on_connection=self.set_active_model_connection,
@@ -14864,6 +14944,9 @@ class MotokoTui:
                 if self.answer_entry is not None:
                     self.answer_entry["content"] += event[1]
                     changed = True
+            elif kind == "reasoning":
+                self.answer_reasoning = (self.answer_reasoning + event[1])[-REASONING_LIVE_MAX_CHARS:]
+                changed = True
             elif kind == "answer_phase":
                 new_phase = event[1]
                 if new_phase != self.answer_phase:
@@ -14880,6 +14963,7 @@ class MotokoTui:
                 save_conversation(self.conv)
                 self.generating = False
                 self.answer_phase = ""
+                self.answer_reasoning = ""
                 self.answer_entry = None
                 self.status = "ready"
                 if self.answer_started_monotonic:
@@ -14907,6 +14991,7 @@ class MotokoTui:
                 save_conversation(self.conv)
                 self.generating = False
                 self.answer_phase = ""
+                self.answer_reasoning = ""
                 self.answer_entry = None
                 self.answer_started_monotonic = 0.0
                 self.answer_phase_started_monotonic = 0.0
@@ -14916,6 +15001,7 @@ class MotokoTui:
                 failed_answer = self.answer_entry
                 self.generating = False
                 self.answer_phase = ""
+                self.answer_reasoning = ""
                 self.answer_entry = None
                 self.answer_started_monotonic = 0.0
                 self.answer_phase_started_monotonic = 0.0
@@ -15421,6 +15507,7 @@ class MotokoTui:
             assistant_color=assistant_color(),
             answer_phase=getattr(self, "answer_phase", ""),
             answer_phase_elapsed=time.monotonic() - phase_started,
+            answer_reasoning=getattr(self, "answer_reasoning", ""),
         )
 
     def render_overlay_page(self, width: int, height: int) -> None:
@@ -15451,6 +15538,7 @@ class MotokoTui:
             active_answer=active_answer,
             answer_phase=getattr(self, "answer_phase", ""),
             answer_phase_elapsed=phase_elapsed,
+            answer_reasoning=getattr(self, "answer_reasoning", "") if active_answer else "",
         )
 
     def body_display(self, width: int) -> list[str]:

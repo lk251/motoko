@@ -362,12 +362,22 @@ def chat_phase_label(phase: str) -> str:
     }.get(phase, "Working")
 
 
-def working_text(phase: str, elapsed_seconds: float) -> str:
-    return chat_phase_label(phase) + " " + style(f"({human_duration_words(int(max(0, elapsed_seconds)))})", "dim")
+def compact_working_detail(text: str, *, max_chars: int = 96) -> str:
+    compact = " ".join(str(text or "").split())
+    if len(compact) <= max_chars:
+        return compact
+    return "... " + compact[-max(0, max_chars - 4) :]
+
+
+def working_text(phase: str, elapsed_seconds: float, detail: str = "") -> str:
+    text = chat_phase_label(phase) + " " + style(f"({human_duration_words(int(max(0, elapsed_seconds)))})", "dim")
+    detail = compact_working_detail(detail)
+    if detail:
+        text += " " + style(detail, "dim")
+    return text
 
 
 def worked_line(duration: str, width: int) -> str:
     label = f"Worked for {duration} "
     filler = "─" * max(0, width - display_width(label))
     return style(label, "dim") + style(filler, "dim")
-

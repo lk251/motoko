@@ -825,6 +825,31 @@ class FakeHandler(BaseHTTPRequestHandler):
         return
 
 
+class ReasoningHandler(BaseHTTPRequestHandler):
+    payloads = []
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            self.__class__.payloads.append(json.loads(body.decode("utf-8")))
+        except json.JSONDecodeError:
+            self.__class__.payloads.append({})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for event in (
+            {"choices": [{"delta": {"reasoning_content": "checking "}}]},
+            {"choices": [{"delta": {"reasoning_content": "sources"}}]},
+            {"choices": [{"delta": {"content": "OK"}}]},
+        ):
+            self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *_args):
+        return
+
+
 class LoadingThenOkHandler(BaseHTTPRequestHandler):
     calls = 0
 
@@ -1075,6 +1100,63 @@ def test_fake_openai_stream(m):
             os.environ.pop("MOTOKO_ENDPOINT", None)
         else:
             os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+
+
+def test_chat_reasoning_payload_and_stream(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_reasoning = os.environ.get(m.REASONING_MODE_ENV)
+    ReasoningHandler.payloads = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ReasoningHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with isolated_state():
+            os.environ["MOTOKO_ENDPOINT"] = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+            os.environ[m.REASONING_MODE_ENV] = "high"
+            tokens = []
+            reasoning = []
+            text = m.call_model_with_callback(
+                [{"role": "user", "content": "hello"}],
+                on_token=tokens.append,
+                on_reasoning=reasoning.append,
+                timeout=2,
+            )
+            assert text == "OK"
+            assert tokens == ["OK"]
+            assert reasoning == ["checking ", "sources"]
+            payload = ReasoningHandler.payloads[-1]
+            assert payload["reasoning_format"] == "deepseek"
+            assert payload["chat_template_kwargs"]["enable_thinking"] is True
+            assert payload["thinking_budget_tokens"] == 16384
+            record = m.read_last_model_call()
+            assert record["reasoning_mode"] == "high"
+            assert record["thinking_budget_tokens"] == 16384
+            assert "checking" not in json.dumps(record)
+            ReasoningHandler.payloads = []
+            worker_tokens = []
+            worker_text = m.call_model_with_callback(
+                [{"role": "user", "content": "hello"}],
+                on_token=worker_tokens.append,
+                route=m.MODEL_ROUTE_MEMORY,
+                timeout=2,
+            )
+            assert worker_text == "OK"
+            assert worker_tokens == ["OK"]
+            worker_payload = ReasoningHandler.payloads[-1]
+            assert "reasoning_format" not in worker_payload
+            assert "thinking_budget_tokens" not in worker_payload
+            assert "chat_template_kwargs" not in worker_payload
+    finally:
+        server.shutdown()
+        server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_reasoning is None:
+            os.environ.pop(m.REASONING_MODE_ENV, None)
+        else:
+            os.environ[m.REASONING_MODE_ENV] = old_reasoning
 
 
 def test_unix_socket_model_loading_retries(m):
@@ -3069,11 +3151,13 @@ def test_tui_role_markers_working_and_worked_line(m):
         ui.answer_started_monotonic = time.monotonic() - 173
         ui.answer_phase_started_monotonic = time.monotonic() - 32
         ui.answer_phase = "answering"
+        ui.answer_reasoning = "checking source excerpts"
 
         rows = [m.strip_ansi(row) for row in ui.body_display(60) if row.strip()]
         assert rows[0].startswith("› identity: Motoko")
         assert rows[1].startswith("› Done answer.")
         assert rows[2].startswith("● Answering (32s)")
+        assert "checking source excerpts" in rows[2]
         assert rows[3].startswith("Worked for 6m 32s ")
         assert "─" in rows[3]
 
@@ -6366,6 +6450,7 @@ def main() -> int:
         test_tui_about_opens_overlay,
         test_tui_overlay_highlights_report_labels,
         test_fake_openai_stream,
+        test_chat_reasoning_payload_and_stream,
         test_unix_socket_model_loading_retries,
         test_unix_socket_connection_reset_retries_while_activating,
         test_unix_socket_connection_reset_retries_while_active,

@@ -1249,12 +1249,23 @@ KV placement from route names; use catalog `kv_offload` and
 prompt-prefix/KV reuse belongs in the deployed local model service if
 measurement shows it is worthwhile.
 
+The main chat route may use llama.cpp per-request reasoning controls. Motoko
+sets `reasoning_format="deepseek"`,
+`chat_template_kwargs.enable_thinking`, and `thinking_budget_tokens` only for
+logical chat requests. The current presets are `MOTOKO_REASONING=off|low|default|high|max`;
+the default is enabled with a 4096-token thinking budget. Worker routes for
+indexing, titles, memory maintenance, profiles, and audits must not inherit
+chat thinking settings just because they share the transport helper. Streaming
+`reasoning_content` may be shown live in the TUI active-answer row, but it must
+not be stored in content-free telemetry, logs, shared state, or prompt history.
+
 Model-call telemetry must remain content-free. `last-model-call.json`,
 `/last-call`, and `motoko context-bench` may record route names, route profiles,
-model ids, configured context size, declared KV placement, estimated
-prompt/completion token counts, source counts, timing, and estimated token
-rates. They must not record prompt text, response text, filenames, excerpts,
-summaries, private memory text, or corpus-derived content.
+model ids, configured context size, declared KV placement, reasoning preset and
+budget, estimated prompt/completion token counts, source counts, timing, and
+estimated token rates. They must not record prompt text, response text,
+reasoning text, filenames, excerpts, summaries, private memory text, or
+corpus-derived content.
 
 When NixOS declares route cache fields such as `route.cache.prompt`,
 `reuseMinTokens`, `cacheRamMiB`, `slotPromptSimilarity`, `metrics`, and

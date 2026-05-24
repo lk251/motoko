@@ -190,13 +190,17 @@ def message_display_lines(
     active_answer: bool = False,
     answer_phase: str = "",
     answer_phase_elapsed: float = 0.0,
+    answer_reasoning: str = "",
 ) -> list[str]:
     lines = []
     code = False
     role = entry.get("role", "?")
     content = entry.get("content", "")
     if active_answer:
-        lines.append(tui_marker(assistant_color, active=True) + working_text(answer_phase, answer_phase_elapsed))
+        lines.append(
+            tui_marker(assistant_color, active=True)
+            + working_text(answer_phase, answer_phase_elapsed, answer_reasoning)
+        )
         lines.append("")
     if role == "worked":
         return [worked_line(str(content), width), ""]
@@ -244,6 +248,7 @@ def live_answer_display_lines(
     assistant_color: str,
     answer_phase: str,
     answer_phase_elapsed: float,
+    answer_reasoning: str = "",
 ) -> list[str]:
     if entry is None:
         return []
@@ -254,6 +259,7 @@ def live_answer_display_lines(
         active_answer=True,
         answer_phase=answer_phase,
         answer_phase_elapsed=answer_phase_elapsed,
+        answer_reasoning=answer_reasoning,
     )
 
 

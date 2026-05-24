@@ -5,6 +5,10 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added per-request llama.cpp thinking controls for the main chat route, with
+  `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
+  `reasoning_content` display in the active TUI answer row without storing
+  reasoning text in conversations or content-free telemetry.
 - Added an internal, review-first `skill_manage` action layer for skill
   suggestions. Motoko can now propose creating a skill, patching an existing
   `SKILL.md`, or writing/removing confined support files under `references/`,
