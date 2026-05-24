@@ -23,7 +23,7 @@ points:
 - Authority model: accepted. Defines which effects exist, which are prompt-only, which are
   built-in handlers, which are script-backed, and which require explicit user
   confirmation every time.
-- Skill package format: script assets under `scripts/` need metadata declaring
+- Skill package format: proposed. Script assets under `scripts/` need metadata declaring
   interpreter, allowed arguments, allowed effects, input/output schemas, source
   fingerprint, provenance, and whether the script is executable or inert text.
 - Planner boundary: the model may propose or select actions, but execution must
@@ -61,6 +61,10 @@ Design review process:
 - Resolve one item at a time.
 - For each item, record the accepted decision and the implementation recipe in
   this document.
+- While an item is still under review, record the current proposed solution in
+  the item's section so later discussion has a concrete target. When the user
+  accepts or revises it, update that same section rather than leaving the
+  decision in chat.
 - Treat unresolved items as blockers for executable script-backed tools.
 - Once all items are resolved, use this document as the implementation plan.
 - If implementation reveals a conflict, update the relevant item here before
@@ -169,6 +173,143 @@ Implementation recipe:
    Motoko state, not in admin-visible logs.
 8. Keep `service_control` and `privileged` effects forbidden. Motoko must not
    use sudo, setuid helpers, or direct systemd control.
+
+## Skill Package Format
+
+Status: proposed, pending final acceptance.
+
+Hermes Agent reference:
+
+- Hermes stores skills as directories with a required `SKILL.md` and optional
+  supporting directories such as `references/`, `templates/`, `scripts/`, and
+  `assets/`.
+- `SKILL.md` uses YAML frontmatter for metadata such as `name`,
+  `description`, `version`, `platforms`, `metadata.hermes.tags`,
+  `requires_toolsets`, `requires_tools`, non-secret config settings, and
+  required environment variables.
+- Hermes treats helper scripts as files in `scripts/` that the skill
+  instructions can ask the agent to run through existing tools such as terminal
+  or code execution. Skills are suitable when the capability can be expressed
+  as instructions plus shell commands or existing tools; Hermes recommends a
+  Tool when the capability needs custom Python integration, auth flows, binary
+  data, streaming, or precise custom processing.
+- Hermes exposes skill discovery through progressive disclosure:
+  a compact skill list first, full `SKILL.md` only when needed, and linked
+  reference files only on demand.
+- Hermes lets the agent maintain procedural memory through a `skill_manage`
+  tool that can create, patch, edit, delete, and add supporting files to skills
+  after useful workflows are discovered.
+- Hermes has Skills Hub trust levels and security scanning for hub-installed
+  skills, including checks for data exfiltration, prompt injection, destructive
+  commands, and shell injection. It can also declare required secrets and
+  config values in skill metadata.
+- Hermes can render template variables such as the skill directory into
+  `SKILL.md`, so the model can run a bundled helper script without path
+  arithmetic. Hermes also supports inline shell snippets in skills, but that
+  feature is disabled by default because it runs host commands when a skill is
+  loaded.
+- Hermes' public skill format does not appear to require a separate
+  per-script typed execution contract. For Motoko, that is the key place to be
+  stricter.
+
+Sources reviewed on 2026-05-24:
+
+- https://hermes-agent.nousresearch.com/docs/developer-guide/creating-skills
+- https://hermes-agent.nousresearch.com/docs/guides/work-with-skills/
+- https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md
+- https://raw.githubusercontent.com/NousResearch/hermes-agent/main/tools/skills_tool.py
+- https://raw.githubusercontent.com/NousResearch/hermes-agent/main/tools/skill_manager_tool.py
+- https://raw.githubusercontent.com/NousResearch/hermes-agent/main/tools/skills_guard.py
+
+Proposed Motoko decision:
+
+- Keep `SKILL.md` as the human-readable skill package manifest and procedural
+  guide. It remains the primary progressive-disclosure file that Motoko can
+  show to a model or user.
+- Continue supporting confined support directories:
+  `references/`, `templates/`, `scripts/`, and later `assets/` if needed.
+- Treat files under `scripts/` as inert text by default. A script becomes
+  executable only if it has an adjacent metadata file and a matching user
+  approval record.
+- Require adjacent JSON metadata for every executable script. JSON is preferred
+  over prose frontmatter for the execution contract because Motoko can validate
+  it with the Python standard library and fail closed on unknown fields.
+- Suggested naming: `scripts/name.py` has metadata in
+  `scripts/name.tool.json`. Other script types use the same pattern.
+- `SKILL.md` may declare high-level tools for readability, but executable
+  authority comes from the adjacent tool JSON plus the approval record, not
+  from prose alone.
+
+Proposed `SKILL.md` additions:
+
+```yaml
+---
+schema: motoko-skill-v3
+name: example-skill
+description: Short skill description.
+kind: workflow
+triggers:
+  - example trigger phrase
+handler: prompt_only
+allowed_effects:
+  - prompt_only
+tools:
+  - scripts/example.tool.json
+---
+```
+
+Proposed `scripts/*.tool.json` shape:
+
+```json
+{
+  "schema": "motoko-tool-v1",
+  "name": "example",
+  "description": "Short executable tool description.",
+  "script": "example.py",
+  "interpreter": "python3",
+  "wrapper": "motoko-tool-python-stdlib",
+  "allowed_effects": ["read_allowed_files", "write_motoko_state"],
+  "argument_schema": {
+    "type": "object",
+    "properties": {
+      "path": {"type": "string"}
+    },
+    "required": ["path"],
+    "additionalProperties": false
+  },
+  "input_schema": {"type": "object"},
+  "output_schema": {"type": "object"},
+  "timeout_seconds": 30,
+  "max_stdout_bytes": 65536,
+  "max_stderr_bytes": 16384,
+  "network": false,
+  "writes_project_files": false,
+  "requires_confirmation": false
+}
+```
+
+Implementation recipe:
+
+1. Extend skill schema to `motoko-skill-v3` while keeping deterministic
+   upgrades from older skill files.
+2. Add a stdlib JSON loader for `scripts/*.tool.json` with strict validation:
+   reject unknown schemas, unknown effects, paths outside the skill package,
+   absolute script paths, path traversal, unsupported interpreters, and
+   ambiguous argument schemas.
+3. Compute `script_sha256` and `metadata_sha256` from the executable script and
+   adjacent tool JSON. These hashes feed the approval record from the accepted
+   authority model.
+4. Keep `SKILL.md` tool declarations advisory for display and discovery; the
+   adjacent JSON metadata is the execution contract.
+5. Add `motoko skill tools NAME` and `/skill tools NAME` to inspect declared
+   tools, their status, hashes, effects, and whether approval is current.
+6. Add validation tests with synthetic skill packages: valid prompt-only skill,
+   valid inert script, valid executable script metadata, rejected path
+   traversal, rejected unknown effect, rejected unsupported interpreter,
+   rejected missing metadata, and approval invalidation after script or metadata
+   changes.
+7. Do not execute any scripts in this step. First implement discovery,
+   validation, display, fingerprinting, and approval-status reporting.
 
 ## Goal Loops
 
