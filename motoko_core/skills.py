@@ -6,6 +6,15 @@ import datetime as _dt
 import pathlib
 import re
 
+from motoko_core.skill_registry import (
+    ORG_TEMPORAL_HANDLER,
+    PROMPT_CONTEXT_EFFECT,
+    PROMPT_ONLY_HANDLER,
+    RETRIEVAL_PLAN_EFFECT,
+    SOURCE_SCOPED_EVIDENCE_EFFECT,
+    normalize_skill_effects,
+    normalize_skill_handler,
+)
 from motoko_core.text import compact_text
 
 
@@ -17,10 +26,9 @@ MAX_SKILL_BODY = 12000
 DEFAULT_SKILL_CONTEXT_LIMIT = 2
 DEFAULT_SKILL_CONTEXT_CHARS = 5000
 DEFAULT_SKILL_KIND = "workflow"
-DEFAULT_SKILL_HANDLER = "prompt_only"
-DEFAULT_SKILL_EFFECTS = ["prompt_context"]
+DEFAULT_SKILL_HANDLER = PROMPT_ONLY_HANDLER
+DEFAULT_SKILL_EFFECTS = [PROMPT_CONTEXT_EFFECT]
 ORG_TEMPORAL_SKILL = "org-temporal-retrieval"
-ORG_TEMPORAL_HANDLER = "builtin:org_temporal_latest_entries"
 
 BUILTIN_SKILLS = [
     {
@@ -35,7 +43,7 @@ BUILTIN_SKILLS = [
             "explicit named Org source such as logbook.org",
         ],
         "handler": ORG_TEMPORAL_HANDLER,
-        "allowed_effects": ["retrieval_plan", "source_scoped_evidence"],
+        "allowed_effects": [RETRIEVAL_PLAN_EFFECT, SOURCE_SCOPED_EVIDENCE_EFFECT],
         "support_files": [],
         "security": "builtin deterministic handler; no script execution",
         "source_schema": SKILL_SCHEMA,
@@ -108,12 +116,8 @@ def parse_skill_markdown(text: str, *, path: pathlib.Path | None = None) -> dict
                 break
     source_schema = frontmatter.get("schema") or LEGACY_SKILL_SCHEMA
     kind = frontmatter.get("kind") or DEFAULT_SKILL_KIND
-    handler = frontmatter.get("handler") or DEFAULT_SKILL_HANDLER
-    allowed_effects = [
-        item.strip()
-        for item in (frontmatter.get("allowed_effects") or ",".join(DEFAULT_SKILL_EFFECTS)).split(",")
-        if item.strip()
-    ]
+    handler = normalize_skill_handler(frontmatter.get("handler"))
+    allowed_effects = normalize_skill_effects(frontmatter.get("allowed_effects"), handler=handler)
     triggers = [
         item.strip()
         for item in (frontmatter.get("triggers") or "").split(",")
@@ -134,7 +138,7 @@ def parse_skill_markdown(text: str, *, path: pathlib.Path | None = None) -> dict
         "kind": kind,
         "triggers": triggers,
         "handler": handler,
-        "allowed_effects": allowed_effects or list(DEFAULT_SKILL_EFFECTS),
+        "allowed_effects": allowed_effects,
         "support_files": support_files,
         "security": frontmatter.get("security") or "prompt-only learned skill; no script execution",
         "can_upgrade_deterministically": source_schema != SKILL_SCHEMA,
@@ -175,7 +179,8 @@ def format_skill_markdown(
     stamp = _now()
     created_at = created_at or stamp
     updated_at = updated_at or stamp
-    allowed_effects = allowed_effects or list(DEFAULT_SKILL_EFFECTS)
+    handler = normalize_skill_handler(handler)
+    allowed_effects = normalize_skill_effects(allowed_effects, handler=handler)
     triggers = triggers or []
     support_files = support_files or []
     return "\n".join(

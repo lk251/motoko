@@ -206,6 +206,8 @@ from motoko_core.skills import (  # noqa: E402
     format_skills_list,
     list_skills as core_list_skills,
     load_skill as core_load_skill,
+    normalize_skill_effects,
+    normalize_skill_handler,
     render_skills_with_sources as core_render_skills_with_sources,
     save_skill as core_save_skill,
     skill_slug,
@@ -4224,11 +4226,8 @@ def normalize_skill_suggestion(row: dict) -> dict:
     row["slug"] = skill_slug(row.get("name", ""))
     row["description"] = compact_text(str(row.get("description", "")).strip(), 400)
     row["kind"] = str(row.get("kind") or DEFAULT_SKILL_KIND).strip() or DEFAULT_SKILL_KIND
-    row["handler"] = str(row.get("handler") or DEFAULT_SKILL_HANDLER).strip() or DEFAULT_SKILL_HANDLER
-    effects = row.get("allowed_effects")
-    if isinstance(effects, str):
-        effects = [item.strip() for item in effects.split(",") if item.strip()]
-    row["allowed_effects"] = (effects if isinstance(effects, list) else list(DEFAULT_SKILL_EFFECTS))[:8]
+    row["handler"] = normalize_skill_handler(row.get("handler"))
+    row["allowed_effects"] = normalize_skill_effects(row.get("allowed_effects"), handler=row["handler"])[:8]
     triggers = row.get("triggers")
     if isinstance(triggers, str):
         triggers = [item.strip() for item in triggers.split(",") if item.strip()]

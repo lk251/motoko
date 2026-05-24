@@ -521,6 +521,11 @@ activate before a subsystem runs. This borrows the useful progressive
 disclosure idea from Hermes Agent while keeping Motoko realm-local,
 dependency-light, and inspectable.
 
+Handlers and effects are allowlisted in Motoko's code. Unknown or model-suggested
+handler names degrade to `prompt_only`, and unsupported effects are discarded.
+That keeps skill suggestions safe to inspect and accept without creating a
+backdoor for broad shell execution.
+
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the
 `builtin:org_temporal_latest_entries` handler. For matching queries, Motoko

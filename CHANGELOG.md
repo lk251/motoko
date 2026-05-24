@@ -14,6 +14,9 @@ not the easiest place to review what changed after a long work session.
 - Added manual skill review and suggestion detail commands, so a user can ask
   Motoko to review a specific conversation for reusable procedures and inspect
   the proposed skill body before accepting or rejecting it.
+- Added a code-owned skill handler/effect registry. Unsupported suggested
+  handlers degrade to prompt-only skills, which preserves the planner boundary
+  before any future script or tool work.
 - Converted the built-in `org-temporal-retrieval` skill into a real retrieval
   skill that declares `builtin:org_temporal_latest_entries`; `/sources` now
   shows the activated skill plan and handler when source-scoped temporal

@@ -188,6 +188,9 @@ Current UI direction:
   reusable procedures, and `/skill review` or `motoko skill review [ID]` may
   run that review explicitly, but Motoko should not silently create, patch, or
   execute learned skills.
+- Skill handlers and effects must pass through a code-owned allowlist. Unknown
+  model-suggested handlers degrade to prompt-only guidance rather than gaining
+  retrieval, filesystem, shell, or other behavioral power.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.

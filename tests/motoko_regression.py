@@ -179,6 +179,34 @@ def test_skill_suggestion_parser_uses_hermes_style_signal(m):
         assert "would reduce errors" in rows[0]["signals"]
 
 
+def test_skill_registry_downgrades_unknown_handlers_and_effects(m):
+    with isolated_state():
+        rows = m.parse_skill_suggestion_output(
+            json.dumps(
+                {
+                    "name": "unsafe-skill",
+                    "description": "Attempt to declare an unsupported handler.",
+                    "handler": "shell:run",
+                    "allowed_effects": ["execute_shell", "prompt_context"],
+                    "body": "Do not execute this.",
+                }
+            )
+        )
+        assert len(rows) == 1
+        assert rows[0]["handler"] == "prompt_only"
+        assert rows[0]["allowed_effects"] == ["prompt_context"]
+
+        skill = m.learn_skill(
+            "unsafe-learned-skill",
+            description="Unsupported handler should be normalized.",
+            body="Do not execute this.",
+            handler="shell:run",
+            allowed_effects=["execute_shell", "prompt_context"],
+        )
+        assert skill["handler"] == "prompt_only"
+        assert skill["allowed_effects"] == ["prompt_context"]
+
+
 def test_auto_maintenance_suggests_skill_without_saving_it(m):
     with isolated_state():
         conv = m.new_conversation("Skill suggestion")
@@ -6125,6 +6153,7 @@ def main() -> int:
         test_maintenance_state_and_phases,
         test_memory_proposal_sends_transcript_not_assistant_prefill,
         test_skill_suggestion_parser_uses_hermes_style_signal,
+        test_skill_registry_downgrades_unknown_handlers_and_effects,
         test_auto_maintenance_suggests_skill_without_saving_it,
         test_manual_skill_review_and_suggestion_detail,
         test_interrupted_maintenance_resume,
