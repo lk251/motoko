@@ -830,10 +830,11 @@ thinking_budget_tokens = N
 
 Use `MOTOKO_REASONING=off|low|default|high|max` for one process. The default is
 `default`, which enables thinking with a 4096-token budget. `low` uses 1024,
-`high` uses 16384, and `max` is unrestricted. Streaming reasoning is shown
-live next to the active `Preparing`/`Answering` row in the TUI, dimmed and
-truncated for fit. It is not inserted into the conversation transcript, prompt
-history, `/last-call`, logs, or shared state.
+`high` uses 16384, and `max` is unrestricted. Streaming reasoning switches the
+active TUI answer row to `Thinking`, shows the latest reasoning text dimmed and
+truncated for fit, and returns to `Answering` when normal answer tokens stream.
+It is not inserted into the conversation transcript, prompt history,
+`/last-call`, logs, or shared state.
 
 All routes still fall back to the normal chat endpoint until config,
 environment variables, or the NixOS local-model catalog override them, so the

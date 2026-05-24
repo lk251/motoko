@@ -1256,8 +1256,9 @@ logical chat requests. The current presets are `MOTOKO_REASONING=off|low|default
 the default is enabled with a 4096-token thinking budget. Worker routes for
 indexing, titles, memory maintenance, profiles, and audits must not inherit
 chat thinking settings just because they share the transport helper. Streaming
-`reasoning_content` may be shown live in the TUI active-answer row, but it must
-not be stored in content-free telemetry, logs, shared state, or prompt history.
+`reasoning_content` may be shown live under a distinct `Thinking` phase in the
+TUI active-answer row, but it must not be stored in content-free telemetry,
+logs, shared state, or prompt history.
 
 Model-call telemetry must remain content-free. `last-model-call.json`,
 `/last-call`, and `motoko context-bench` may record route names, route profiles,

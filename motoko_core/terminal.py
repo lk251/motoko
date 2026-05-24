@@ -358,6 +358,7 @@ def chat_phase_label(phase: str) -> str:
         phase = phase.split(":", 1)[1].strip()
     return {
         "preparing": "Preparing",
+        "thinking": "Thinking",
         "answering": "Answering",
     }.get(phase, "Working")
 

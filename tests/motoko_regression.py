@@ -3150,16 +3150,25 @@ def test_tui_role_markers_working_and_worked_line(m):
         ui.generating = True
         ui.answer_started_monotonic = time.monotonic() - 173
         ui.answer_phase_started_monotonic = time.monotonic() - 32
-        ui.answer_phase = "answering"
+        ui.answer_phase = "thinking"
         ui.answer_reasoning = "checking source excerpts"
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.dirty = False
 
         rows = [m.strip_ansi(row) for row in ui.body_display(60) if row.strip()]
         assert rows[0].startswith("› identity: Motoko")
         assert rows[1].startswith("› Done answer.")
-        assert rows[2].startswith("● Answering (32s)")
+        assert rows[2].startswith("● Thinking (32s)")
         assert "checking source excerpts" in rows[2]
         assert rows[3].startswith("Worked for 6m 32s ")
         assert "─" in rows[3]
+        ui.events.append(("token", "A"))
+        ui.drain_events()
+        assert ui.answer_phase == "answering"
+        rows = [m.strip_ansi(row) for row in ui.body_display(60) if row.strip()]
+        assert rows[2].startswith("● Answering ")
+        assert "checking source excerpts" not in rows[2]
 
 
 def test_tui_alt_backspace_deletes_previous_word(m):

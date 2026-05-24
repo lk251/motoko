@@ -14942,9 +14942,15 @@ class MotokoTui:
             kind = event[0]
             if kind == "token":
                 if self.answer_entry is not None:
+                    if self.answer_phase == "thinking":
+                        self.answer_phase = "answering"
+                        self.answer_phase_started_monotonic = time.monotonic()
                     self.answer_entry["content"] += event[1]
                     changed = True
             elif kind == "reasoning":
+                if self.answer_phase != "thinking":
+                    self.answer_phase = "thinking"
+                    self.answer_phase_started_monotonic = time.monotonic()
                 self.answer_reasoning = (self.answer_reasoning + event[1])[-REASONING_LIVE_MAX_CHARS:]
                 changed = True
             elif kind == "answer_phase":
@@ -15421,6 +15427,11 @@ class MotokoTui:
             attention_notice=notice,
         )
 
+    def active_answer_reasoning(self) -> str:
+        if getattr(self, "answer_phase", "") != "thinking":
+            return ""
+        return getattr(self, "answer_reasoning", "")
+
     def bottom_clear_sequence(self) -> str:
         return render_bottom_clear_sequence(
             int(getattr(self, "bottom_rows_rendered", 0) or 0),
@@ -15507,7 +15518,7 @@ class MotokoTui:
             assistant_color=assistant_color(),
             answer_phase=getattr(self, "answer_phase", ""),
             answer_phase_elapsed=time.monotonic() - phase_started,
-            answer_reasoning=getattr(self, "answer_reasoning", ""),
+            answer_reasoning=self.active_answer_reasoning(),
         )
 
     def render_overlay_page(self, width: int, height: int) -> None:
@@ -15538,7 +15549,7 @@ class MotokoTui:
             active_answer=active_answer,
             answer_phase=getattr(self, "answer_phase", ""),
             answer_phase_elapsed=phase_elapsed,
-            answer_reasoning=getattr(self, "answer_reasoning", "") if active_answer else "",
+            answer_reasoning=self.active_answer_reasoning() if active_answer else "",
         )
 
     def body_display(self, width: int) -> list[str]:
