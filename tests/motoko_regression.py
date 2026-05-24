@@ -1849,6 +1849,43 @@ def test_live_index_retrieval_uses_service_boundary(m):
         assert "Retrieval boundary smoke test" in text
 
 
+def test_render_context_with_sources_uses_live_retrieval_service(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "orgfiles"
+            docs.mkdir()
+            (docs / "notes.org").write_text("* Alpha\nRetrieval service attached context.\n", encoding="utf-8")
+            m.add_allowed_dir(str(docs))
+
+            old_quiet_model = m.quiet_model
+            try:
+                m.quiet_model = lambda *args, **kwargs: "summary"
+                index = m.build_document_index(str(docs))
+                text, sources = m.render_context_with_sources(
+                    [{"kind": "index", "id": index["id"]}],
+                    "alpha attached context",
+                )
+            finally:
+                m.quiet_model = old_quiet_model
+
+            assert "Retrieval service attached context" in text
+            index_source = next(source for source in sources if source.get("kind") == "index")
+            assert index_source["retrieval_service_schema"] == "retrieval-service-v1"
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
     old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
     old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
@@ -5307,6 +5344,34 @@ def test_core_context_renderer_uses_injected_loaders(m):
     assert [source["kind"] for source in sources] == ["index", "repo", "file"]
 
 
+def test_retrieval_service_renders_attached_context_without_generic_callback(m):
+    service = m.RetrievalService(
+        load_index=lambda index_id: {"id": index_id},
+        retrieve_index_query=lambda index, query: (f"index {index['id']} query {query}", [{"kind": "index", "id": index["id"]}]),
+        render_index_overview=lambda index: ("overview", [{"kind": "index", "id": index["id"]}]),
+        load_topic=lambda topic_id: {"id": topic_id},
+        retrieve_topic=lambda topic, query: ("topic", [{"kind": "topic", "id": topic["id"]}]),
+        load_dossier=lambda dossier_id: {"id": dossier_id},
+        retrieve_dossier=lambda dossier, query: ("dossier", [{"kind": "dossier", "id": dossier["id"]}]),
+        render_context_items=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("generic renderer should not be used")),
+    )
+
+    result = service.render_attached_context(
+        [
+            {"kind": "index", "id": "idx"},
+            {"kind": "repo", "command": "status", "root": "/repo", "content": "clean", "bytes": 5},
+            {"kind": "file", "path": "/tmp/a.txt", "content": "alpha", "bytes": 5},
+        ],
+        "alpha",
+    )
+
+    assert "index idx query alpha" in result.text
+    assert "repo:status /repo" in result.text
+    assert "file:/tmp/a.txt" in result.text
+    assert [source["kind"] for source in result.sources] == ["index", "repo", "file"]
+    assert result.diagnostics["source_count"] == 3
+
+
 def test_core_recent_conversation_renderer_is_injectable(m):
     text, sources = m.render_recent_conversations_with_sources_core(
         [
@@ -5618,6 +5683,7 @@ def main() -> int:
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
         test_live_index_retrieval_uses_service_boundary,
+        test_render_context_with_sources_uses_live_retrieval_service,
         test_temporal_retrieval_finds_latest_org_dates_without_evidence_store,
         test_hierarchical_evidence_store_retrieves_org_day_and_terms,
         test_span_selection_uses_embedding_and_rerank_routes,
@@ -5674,6 +5740,7 @@ def main() -> int:
         test_background_study_repairs_quality_failure,
         test_index_signal_enrichment_skips_active_index,
         test_repo_context_item,
+        test_retrieval_service_renders_attached_context_without_generic_callback,
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,
         test_live_command_request_metadata,

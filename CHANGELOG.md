@@ -9,6 +9,10 @@ not the easiest place to review what changed after a long work session.
   including candidate fusion, injected vector/evidence/source callbacks, and
   hybrid rerank control, while keeping the root `motoko` executable as a
   compatibility facade.
+- Moved attached-context rendering for indexes into the retrieval service, so
+  chat context, retrieval previews, and source records use the same
+  service-owned index retrieval path instead of bouncing through a root facade
+  callback.
 - Added deterministic temporal retrieval for dated Org/logbook questions, so
   "last", "latest", "today", "yesterday", and similar queries prefer the
   newest matching source evidence before ordinary semantic ranking.

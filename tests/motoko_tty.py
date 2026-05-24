@@ -299,11 +299,14 @@ def main() -> int:
         retrieve_topic=lambda _topic, _query: ("topic", []),
         load_dossier=lambda _id: {},
         retrieve_dossier=lambda _dossier, _query: ("dossier", []),
-        render_context_items=lambda items, query, **_callbacks: (f"{len(items)}:{query}", [{"kind": "ctx"}]),
+        render_context_items=lambda items, query, **_callbacks: (_ for _ in ()).throw(
+            AssertionError("retrieval service should own attached context rendering")
+        ),
     )
     retrieval = service.render_attached_context([{"kind": "index", "id": "idx"}], "query")
-    assert retrieval.text == "1:query"
+    assert retrieval.text == "index text"
     assert retrieval.diagnostics["schema"] == "retrieval-service-v1"
+    assert retrieval.diagnostics["source_count"] == 1
     decision = superseded_index_cleanup_decision(
         index_id="old",
         latest_id="new",

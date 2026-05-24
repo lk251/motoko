@@ -11379,13 +11379,14 @@ def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
 def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
     service = RetrievalService(
         load_index=load_index,
-        retrieve_index_query=retrieve_from_index,
+        retrieve_index_query=lambda _index, _query: ("", []),
         render_index_overview=render_index_overview_context,
         load_topic=load_topic,
         retrieve_topic=retrieve_from_topic,
         load_dossier=load_dossier,
         retrieve_dossier=retrieve_from_dossier,
         render_context_items=core_render_context_items_with_sources,
+        hybrid_environment=hybrid_retrieval_environment(),
     )
     result = service.render_attached_context(items, query)
     return result.text, result.sources

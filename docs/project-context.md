@@ -1057,11 +1057,13 @@ Current progress on this stretch:
 - Complete: hybrid rerank control moved behind the retrieval service.
 - Complete: deterministic temporal Org/logbook selection for recent/latest
   dated questions.
+- Complete: attached index context now renders through the retrieval service
+  instead of a generic root-facade callback.
 - Complete: feedback rows can be replayed as private retrieval-eval fixtures.
 - Complete: index health reports source lifecycle decisions for changed,
   deleted, and ignored indexed files.
-- Remaining: context packing and `/sources` source-record construction still
-  need to converge on the retrieval service result.
+- Remaining: prompt-level context packing and some `/sources` source-record
+  construction still need to converge on the retrieval service result.
 - Remaining: retrieval report paths should be reduced to renderers over the
   same structured result.
 - Remaining: artifact lifecycle needs a higher-level service for vectors,

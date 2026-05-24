@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Callable
 
 from motoko_core.retrieval import (
     add_hybrid_candidate,
+    file_context_text_and_source,
     hybrid_candidate_base_score,
     hybrid_candidate_guard_bonus,
     org_dated_section_spans,
     query_date_mentions,
     query_path_match_boost,
     query_requested_recent_section_count,
+    repo_context_text_and_source,
     score_text,
     selected_evidence_excerpt,
     token_counts,
+    unavailable_context_source,
 )
 
 
@@ -510,17 +514,63 @@ class RetrievalService:
         )
 
     def render_attached_context(self, items: list[dict], query: str) -> RetrievalServiceResult:
-        text, sources = self.render_context_items(
-            items,
-            query,
-            load_index=self.load_index,
-            render_index_query=self.retrieve_index_query,
-            render_index_overview=self.render_index_overview,
-            load_topic=self.load_topic,
-            render_topic=self.retrieve_topic,
-            load_dossier=self.load_dossier,
-            render_dossier=self.retrieve_dossier,
-        )
+        if not items:
+            return RetrievalServiceResult(
+                text="No explicit documents are attached.",
+                sources=[],
+                diagnostics={
+                    "schema": RETRIEVAL_SERVICE_SCHEMA,
+                    "kind": "attached-context",
+                    "item_count": 0,
+                    "source_count": 0,
+                },
+            )
+        parts = []
+        sources = []
+        warning_exceptions = (KeyError, SystemExit, OSError, json.JSONDecodeError)
+        for item in items:
+            kind = item.get("kind")
+            if kind == "index":
+                try:
+                    index = self.load_index(item["id"])
+                except warning_exceptions as exc:
+                    sources.append(unavailable_context_source("index", item, exc))
+                    continue
+                if query:
+                    result = self.retrieve_index(index, query)
+                else:
+                    text, index_sources = self.render_index_overview(index)
+                    result = RetrievalServiceResult(text=text, sources=list(index_sources))
+                parts.append(result.text)
+                sources.extend(result.sources)
+                continue
+            if kind == "topic":
+                try:
+                    topic = self.load_topic(item["id"])
+                except warning_exceptions as exc:
+                    sources.append(unavailable_context_source("topic", item, exc))
+                    continue
+                text, topic_sources = self.retrieve_topic(topic, query)
+                parts.append(text)
+                sources.extend(topic_sources)
+                continue
+            if kind == "dossier":
+                try:
+                    dossier = self.load_dossier(item["id"])
+                except warning_exceptions as exc:
+                    sources.append(unavailable_context_source("dossier", item, exc))
+                    continue
+                text, dossier_sources = self.retrieve_dossier(dossier, query)
+                parts.append(text)
+                sources.extend(dossier_sources)
+                continue
+            if kind == "repo":
+                text, source = repo_context_text_and_source(item)
+            else:
+                text, source = file_context_text_and_source(item)
+            parts.append(text)
+            sources.append(source)
+        text = "\n\n".join(part for part in parts if part)
         return RetrievalServiceResult(
             text=text,
             sources=list(sources),
