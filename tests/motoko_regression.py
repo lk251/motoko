@@ -5123,6 +5123,50 @@ def test_embedding_parallelism_allows_32_cap(m):
             os.environ["MOTOKO_EMBEDDING_BATCHES_PER_WORKER"] = old_batches_per_worker
 
 
+def test_retrieval_vector_query_uses_short_worker_timeouts(m):
+    old_timeout = os.environ.get("MOTOKO_RETRIEVAL_MODEL_TIMEOUT")
+    old_socket_timeout = os.environ.get("MOTOKO_RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT")
+    old_embed = m.embed_texts
+    calls = []
+    try:
+        os.environ["MOTOKO_RETRIEVAL_MODEL_TIMEOUT"] = "7"
+        os.environ["MOTOKO_RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT"] = "8"
+
+        def fake_embed(texts, **kwargs):
+            calls.append(kwargs)
+            return [[1.0, 0.0] for _text in texts], {"catalog_route": "embed-test"}
+
+        m.embed_texts = fake_embed
+        store = {
+            "id": "short-timeout-store",
+            "method": m.EMBEDDING_VECTOR_METHOD,
+            "embedding_route": {"catalog_route": "embed-test"},
+            "rows": [
+                {
+                    "id": "row1",
+                    "path": "/tmp/logbook.org",
+                    "chunk": 1,
+                    "vector": [1.0, 0.0],
+                    "summary": "latest logbook day",
+                }
+            ],
+        }
+        report = m.query_vector_store_for_retrieval(store, "latest logbook", limit=1, rerank=False)
+        assert report["rows"]
+        assert calls[0]["timeout"] == 7
+        assert calls[0]["socket_activation_min_timeout"] == 8
+    finally:
+        m.embed_texts = old_embed
+        if old_timeout is None:
+            os.environ.pop("MOTOKO_RETRIEVAL_MODEL_TIMEOUT", None)
+        else:
+            os.environ["MOTOKO_RETRIEVAL_MODEL_TIMEOUT"] = old_timeout
+        if old_socket_timeout is None:
+            os.environ.pop("MOTOKO_RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT", None)
+        else:
+            os.environ["MOTOKO_RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT"] = old_socket_timeout
+
+
 def test_embedding_vector_store_stale_when_route_model_changes(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -7547,6 +7591,7 @@ def main() -> int:
         test_embedding_vector_store_splits_long_chunks_with_parent_mapping,
         test_embedding_vector_store_parallelizes_batches,
         test_embedding_parallelism_allows_32_cap,
+        test_retrieval_vector_query_uses_short_worker_timeouts,
         test_embedding_vector_store_stale_when_route_model_changes,
         test_embedding_vector_store_resumes_saved_progress,
         test_embedding_vector_store_falls_back_from_excess_parallelism,

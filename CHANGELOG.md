@@ -9,6 +9,10 @@ not the easiest place to review what changed after a long work session.
   completed same-family indexes before retrieval/debug context is built, so a
   live Motoko session can use a freshly rebuilt source index without requiring
   restart.
+- Interactive retrieval now uses a short, configurable timeout for optional
+  embedding/rerank worker calls (`MOTOKO_RETRIEVAL_MODEL_TIMEOUT` and
+  `MOTOKO_RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT`), so cold or VRAM-blocked
+  workers fall back instead of leaving chat stuck in `Preparing` for minutes.
 - Expanded the agentic capability design note with the accepted skill package
   format, including the Hermes Agent comparison and Motoko's stricter
   per-script metadata and approval-contract path.

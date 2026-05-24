@@ -738,6 +738,8 @@ AUTO_MEMORY_MAX_PROPOSALS = 5
 MODEL_TIMEOUT_SECONDS = 600
 INDEX_MODEL_TIMEOUT_SECONDS = 1800
 MAINTENANCE_MODEL_TIMEOUT_SECONDS = 90
+RETRIEVAL_MODEL_TIMEOUT_SECONDS = 20
+RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT_SECONDS = 20
 MAINTENANCE_MAX_RETRIES = 2
 MAX_CONVERSATION_SUMMARY_CHARS = 12000
 MAX_RECENT_MESSAGES = 24
@@ -3663,7 +3665,9 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
             max_subspans=SPAN_SELECTION_EMBED_SUBSPANS,
         )
         try:
-            vectors, route_info = embed_texts([model_query] + [str(row.get("model_text", "")) for row in embed_rows])
+            vectors, route_info = embed_texts_for_retrieval(
+                [model_query] + [str(row.get("model_text", "")) for row in embed_rows]
+            )
         except SystemExit as exc:
             warnings.append(f"span embedding skipped: {str(exc).splitlines()[0][:220]}")
         else:
@@ -3699,7 +3703,10 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
             max_subspans=SPAN_SELECTION_RERANK_SUBSPANS,
         )
         try:
-            scores, route_info = rerank_documents(model_query, [str(row.get("model_text", "")) for row in rerank_rows])
+            scores, route_info = rerank_documents_for_retrieval(
+                model_query,
+                [str(row.get("model_text", "")) for row in rerank_rows],
+            )
         except SystemExit as exc:
             warnings.append(f"span rerank skipped: {str(exc).splitlines()[0][:220]}")
         else:
@@ -4138,6 +4145,17 @@ def env_seconds(name: str, default: int) -> int:
         return max(1, int(float(raw)))
     except ValueError:
         return default
+
+
+def retrieval_model_timeout_seconds() -> int:
+    return env_seconds("MOTOKO_RETRIEVAL_MODEL_TIMEOUT", RETRIEVAL_MODEL_TIMEOUT_SECONDS)
+
+
+def retrieval_socket_activation_timeout_seconds() -> int:
+    return env_seconds(
+        "MOTOKO_RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT",
+        RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT_SECONDS,
+    )
 
 
 def env_int(name: str, default: int, *, minimum: int = 0) -> int:
@@ -10176,6 +10194,7 @@ def rerank_documents(
     *,
     route_id: str | None = None,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    socket_activation_min_timeout: float | None = None,
 ) -> tuple[list[float], dict]:
     if not documents:
         return [], reranker_route_info(route_id)
@@ -10187,7 +10206,12 @@ def rerank_documents(
         "top_n": len(documents),
     }
     try:
-        with open_model_response(route_info, payload, timeout=timeout) as resp:
+        with open_model_response(
+            route_info,
+            payload,
+            timeout=timeout,
+            socket_activation_min_timeout=socket_activation_min_timeout,
+        ) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         hint = local_model_verify_hint(route_info)
@@ -10199,7 +10223,13 @@ def rerank_documents(
     return scores, route_info
 
 
-def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float = MODEL_TIMEOUT_SECONDS) -> tuple[list[list[float]], dict]:
+def embed_texts(
+    texts: list[str],
+    *,
+    route_id: str | None = None,
+    timeout: float = MODEL_TIMEOUT_SECONDS,
+    socket_activation_min_timeout: float | None = None,
+) -> tuple[list[list[float]], dict]:
     if not texts:
         return [], embedding_route_info(route_id)
     route_info = embedding_route_info(route_id)
@@ -10209,7 +10239,12 @@ def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float
         "encoding_format": "float",
     }
     try:
-        with open_model_response(route_info, payload, timeout=timeout) as resp:
+        with open_model_response(
+            route_info,
+            payload,
+            timeout=timeout,
+            socket_activation_min_timeout=socket_activation_min_timeout,
+        ) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         hint = local_model_verify_hint(route_info)
@@ -10219,6 +10254,30 @@ def embed_texts(texts: list[str], *, route_id: str | None = None, timeout: float
     except RuntimeError as exc:
         raise SystemExit(f"embedding request failed: {exc}") from exc
     return embeddings, route_info
+
+
+def retrieval_model_socket_timeout() -> tuple[int, int]:
+    return retrieval_model_timeout_seconds(), retrieval_socket_activation_timeout_seconds()
+
+
+def rerank_documents_for_retrieval(query: str, documents: list[str]) -> tuple[list[float], dict]:
+    timeout, socket_timeout = retrieval_model_socket_timeout()
+    return rerank_documents(
+        query,
+        documents,
+        timeout=timeout,
+        socket_activation_min_timeout=socket_timeout,
+    )
+
+
+def embed_texts_for_retrieval(texts: list[str], *, route_id: str | None = None) -> tuple[list[list[float]], dict]:
+    timeout, socket_timeout = retrieval_model_socket_timeout()
+    return embed_texts(
+        texts,
+        route_id=route_id,
+        timeout=timeout,
+        socket_activation_min_timeout=socket_timeout,
+    )
 
 
 def route_max_parallel(route_info: dict, *, default: int = 1, maximum: int = 32) -> int:
@@ -11252,6 +11311,8 @@ def query_vector_store(
     limit: int = VECTOR_QUERY_LIMIT,
     check_freshness: bool = True,
     rerank: bool = False,
+    model_timeout: float = MODEL_TIMEOUT_SECONDS,
+    socket_activation_min_timeout: float | None = None,
 ) -> dict:
     query = query.strip()
     if not query:
@@ -11260,7 +11321,12 @@ def query_vector_store(
     method = str(store.get("method") or LEXICAL_VECTOR_METHOD)
     if method == EMBEDDING_VECTOR_METHOD:
         route = store.get("embedding_route") if isinstance(store.get("embedding_route"), dict) else {}
-        query_vectors, _route_info = embed_texts([query], route_id=route.get("catalog_route") or None)
+        query_vectors, _route_info = embed_texts(
+            [query],
+            route_id=route.get("catalog_route") or None,
+            timeout=model_timeout,
+            socket_activation_min_timeout=socket_activation_min_timeout,
+        )
         query_vector = query_vectors[0] if query_vectors else []
     else:
         dims = int(store.get("dims", DEFAULT_LEXICAL_VECTOR_DIMS) or DEFAULT_LEXICAL_VECTOR_DIMS)
@@ -11332,7 +11398,12 @@ def query_vector_store(
         candidates = rows[: min(len(rows), max(limit, RERANK_CANDIDATE_LIMIT))]
         source_index, lookup = vector_store_chunk_lookup(store)
         documents = [vector_query_document_text(source_index, lookup, row, query=query) for row in candidates]
-        rerank_scores, rerank_route = rerank_documents(query, documents)
+        rerank_scores, rerank_route = rerank_documents(
+            query,
+            documents,
+            timeout=model_timeout,
+            socket_activation_min_timeout=socket_activation_min_timeout,
+        )
         for row, rerank_score in zip(candidates, rerank_scores):
             row["rerank_score"] = round(rerank_score, 6)
             row["score"] = round((float(row.get("score", 0)) * 0.2) + (float(rerank_score) * 1000))
@@ -11370,6 +11441,7 @@ def query_vector_store_for_retrieval(
     rerank: bool | None = None,
 ) -> dict:
     rerank = env_flag("MOTOKO_VECTOR_RERANK", True) if rerank is None else bool(rerank)
+    model_timeout, socket_timeout = retrieval_model_socket_timeout()
     if rerank and not local_model_routes_for_capability(
         kind="reranker",
         tasks=RERANKER_TASKS,
@@ -11381,6 +11453,8 @@ def query_vector_store_for_retrieval(
             limit=limit,
             check_freshness=check_freshness,
             rerank=False,
+            model_timeout=model_timeout,
+            socket_activation_min_timeout=socket_timeout,
         )
         fallback["rerank_fallback"] = True
         fallback["warnings"] = ["rerank fallback: no configured /v1/rerank route"] + list(
@@ -11394,6 +11468,8 @@ def query_vector_store_for_retrieval(
             limit=limit,
             check_freshness=check_freshness,
             rerank=rerank,
+            model_timeout=model_timeout,
+            socket_activation_min_timeout=socket_timeout,
         )
     except SystemExit as exc:
         if not rerank:
@@ -11404,6 +11480,8 @@ def query_vector_store_for_retrieval(
             limit=limit,
             check_freshness=check_freshness,
             rerank=False,
+            model_timeout=model_timeout,
+            socket_activation_min_timeout=socket_timeout,
         )
         warning = f"rerank fallback: {str(exc).splitlines()[0][:220]}"
         fallback["rerank_fallback"] = True
@@ -13683,7 +13761,7 @@ def hybrid_retrieval_environment() -> HybridRetrievalEnvironment:
         hybrid_rerank_available=lambda: bool(
             local_model_routes_for_capability(kind="reranker", tasks=RERANKER_TASKS, endpoint_path="/v1/rerank")
         ),
-        rerank_documents=rerank_documents,
+        rerank_documents=rerank_documents_for_retrieval,
         hybrid_candidate_document=lambda index, candidate, query: hybrid_candidate_document(index, candidate, query=query),
         wants_deep_context=wants_deep_context,
         file_staleness=file_staleness,
@@ -14069,13 +14147,18 @@ def open_model_response(
     cancel_event=None,
     on_connection=None,
     on_response=None,
+    socket_activation_min_timeout: float | None = None,
 ):
     with open_model_response_core(
         route_info,
         payload,
         timeout=timeout,
         unix_request_path=LOCAL_MODEL_UNIX_REQUEST_PATH,
-        socket_activation_min_timeout=SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS,
+        socket_activation_min_timeout=(
+            SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS
+            if socket_activation_min_timeout is None
+            else socket_activation_min_timeout
+        ),
         model_loading_retry_seconds=MODEL_LOADING_RETRY_SECONDS,
         cancel_event=cancel_event,
         on_connection=on_connection,
