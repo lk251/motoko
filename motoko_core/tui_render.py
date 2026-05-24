@@ -51,6 +51,7 @@ def status_display_lines(
     study_status: str,
     study_status_label: str,
     study_last_note: str,
+    attention_notice: str = "",
 ) -> list[str]:
     text = f"{style(title, 'turquoise', 'bold')}  {style(model_badge, 'dim')}"
     status_parts = []
@@ -68,6 +69,8 @@ def status_display_lines(
         status_parts.append(style(f"{label} {human_duration(maintenance_elapsed)}".rstrip(), "turquoise"))
     if pending_count:
         status_parts.append(style(f"queued:{pending_count}", "yellow"))
+    if attention_notice:
+        status_parts.append(style(attention_notice, "yellow"))
     if study_running:
         status_parts.append(style(f"{study_status_label} {human_duration(study_elapsed)}".rstrip(), "turquoise"))
     elif study_status == "study: off":

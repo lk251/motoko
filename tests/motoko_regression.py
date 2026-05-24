@@ -1170,6 +1170,50 @@ def test_chat_context_governor_falls_back_without_q4(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_route_kv_offload_notice_detects_catalog_flag(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                        "tasks": ["chat", "deep_synthesis"],
+                        "args": ["--ctx-size", "262144", "--no-kv-offload"],
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            route, _governor = m.select_chat_route([{"role": "user", "content": "hello"}])
+            assert m.route_kv_offload_disabled(route)
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_tui_kv_notice_blinks_for_three_seconds(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.kv_notice_started_monotonic = 100.0
+    ui.kv_notice_until_monotonic = 103.0
+    assert ui.kv_notice_visible(100.1)
+    assert not ui.kv_notice_visible(100.6)
+    assert ui.kv_notice_visible(101.1)
+    assert not ui.kv_notice_active(103.1)
+
+
 def test_last_call_telemetry_is_content_free(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     FakeHandler.payloads = []
@@ -5964,6 +6008,8 @@ def main() -> int:
         test_local_model_catalog_task_routes,
         test_chat_context_governor_selects_q4_for_max_context,
         test_chat_context_governor_falls_back_without_q4,
+        test_route_kv_offload_notice_detects_catalog_flag,
+        test_tui_kv_notice_blinks_for_three_seconds,
         test_last_call_telemetry_is_content_free,
         test_context_bench_dry_run_uses_governor_without_model_call,
         test_embedding_route_fails_fast_when_model_file_missing,

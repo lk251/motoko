@@ -235,10 +235,12 @@ def main() -> int:
             study_status="study: idle",
             study_status_label="bg: idle",
             study_last_note="catalog fresh",
+            attention_notice="KV not in GPU",
         )
     )
     assert "Chat" in status
     assert "queued:2" in status
+    assert "KV not in GPU" in status
     assert "bg: idle (catalog fresh)" in status
     assert study_status_label_core("study: indexing", None, progress_formatter=lambda _row: "unused") == "bg-heavy: indexing(model)"
     frame_lines, frame_cursor_row, frame_cursor_col = bottom_area_frame(

@@ -443,6 +443,8 @@ CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
 CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
 CHAT_CONTEXT_MAX_SOFT_TOKENS = 262_144
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
+KV_OFFLOAD_NOTICE_TEXT = "KV not in GPU"
+KV_OFFLOAD_NOTICE_SECONDS = 3.0
 CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
 FILE_SUMMARY_SCHEMA_VERSION = "file-summary-v1"
 CORPUS_SUMMARY_SCHEMA_VERSION = "corpus-summary-v1"
@@ -1990,6 +1992,24 @@ def catalog_route_info(route_id: str, *, logical_route: str = MODEL_ROUTE_CHAT) 
         "quant": route_quant_label(raw),
     }
     return info if info["endpoint"] and info["model"] else None
+
+
+def route_catalog_args(route_info: dict) -> list[str]:
+    catalog_route = str(route_info.get("catalog_route") or "").strip()
+    if not catalog_route:
+        return []
+    raw = local_model_catalog_routes().get(catalog_route)
+    if not isinstance(raw, dict):
+        return []
+    args = raw.get("args")
+    return [str(item) for item in args] if isinstance(args, list) else []
+
+
+def route_kv_offload_disabled(route_info: dict) -> bool:
+    if route_info.get("kv_offload") is False:
+        return True
+    args = route_catalog_args(route_info)
+    return "--no-kv-offload" in args
 
 
 def endpoint() -> str:
@@ -13460,6 +13480,8 @@ class MotokoTui:
         self.answer_entry: dict | None = None
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
+        self.kv_notice_started_monotonic = 0.0
+        self.kv_notice_until_monotonic = 0.0
         self.active_model_lock = threading.Lock()
         self.active_model_connection = None
         self.active_model_response = None
@@ -13537,6 +13559,23 @@ class MotokoTui:
                 with contextlib.suppress(Exception):
                     item.close()
 
+    def show_kv_notice(self) -> None:
+        now_value = time.monotonic()
+        self.kv_notice_started_monotonic = now_value
+        self.kv_notice_until_monotonic = now_value + KV_OFFLOAD_NOTICE_SECONDS
+        self.dirty = True
+
+    def kv_notice_active(self, now_value: float | None = None) -> bool:
+        now_value = time.monotonic() if now_value is None else now_value
+        return now_value < float(getattr(self, "kv_notice_until_monotonic", 0.0) or 0.0)
+
+    def kv_notice_visible(self, now_value: float | None = None) -> bool:
+        now_value = time.monotonic() if now_value is None else now_value
+        if not self.kv_notice_active(now_value):
+            return False
+        started = float(getattr(self, "kv_notice_started_monotonic", 0.0) or now_value)
+        return int((now_value - started) / 0.5) % 2 == 0
+
     def stop_active_answer(self) -> bool:
         discarded = self.clear_queued_prompts()
         if self.generating:
@@ -13584,13 +13623,19 @@ class MotokoTui:
                 self.start_maintenance(resumed=True)
             while self.running:
                 self.drain_events()
-                active_work = self.generating or self.maintaining or self.study_running or self.report_running
+                now_ts = time.monotonic()
+                active_work = (
+                    self.generating
+                    or self.maintaining
+                    or self.study_running
+                    or self.report_running
+                    or self.kv_notice_active(now_ts)
+                )
                 timeout = 0.04 if active_work else 0.12
                 readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
                 if readable:
                     self.last_input_at = time.monotonic()
                     self.handle_key(self.read_key())
-                now_ts = time.monotonic()
                 if self.dirty or (active_work and now_ts - self.last_render > 0.08):
                     self.render()
         finally:
@@ -14195,6 +14240,9 @@ class MotokoTui:
                     )
                 messages, sources = build_messages(self.conv, user_text)
                 raise_if_cancelled(cancel_event)
+                selected_route, _governor = model_route_for_request(MODEL_ROUTE_CHAT, messages)
+                if route_kv_offload_disabled(selected_route):
+                    self.put_event(("kv_notice",))
                 self.put_event(("answer_phase", "answering"))
                 raise_if_cancelled(cancel_event)
 
@@ -14252,6 +14300,9 @@ class MotokoTui:
                 if new_phase != self.answer_phase:
                     self.answer_phase_started_monotonic = time.monotonic()
                 self.answer_phase = new_phase
+                changed = True
+            elif kind == "kv_notice":
+                self.show_kv_notice()
                 changed = True
             elif kind == "done":
                 reply, sources = event[1], event[2]
@@ -14694,6 +14745,7 @@ class MotokoTui:
 
     def status_display(self, width: int) -> list[str]:
         now_value = time.monotonic()
+        notice = KV_OFFLOAD_NOTICE_TEXT if self.kv_notice_visible(now_value) else ""
         return render_status_display_lines(
             title=str(self.conv.get("title", "Untitled")),
             model_badge=model_badge(),
@@ -14711,6 +14763,7 @@ class MotokoTui:
             study_status=str(getattr(self, "study_status", "study: idle")),
             study_status_label=self.study_status_label(),
             study_last_note=str(getattr(self, "study_last_note", "") or ""),
+            attention_notice=notice,
         )
 
     def bottom_clear_sequence(self) -> str:

@@ -57,6 +57,8 @@ not the easiest place to review what changed after a long work session.
   `motoko last-call`, and `motoko context-bench` so route choice, context
   pressure, timing, and estimated token rates can be inspected without storing
   prompt or response text.
+- Added a short blinking `KV not in GPU` TUI status warning when the selected
+  chat route declares RAM-backed KV with `--no-kv-offload`.
 - Added `/rename` and guarded `/delete` for conversations. Conversation delete
   removes the chat plus Motoko-owned derived artifacts that explicitly reference
   that conversation, and new topic/memory dossiers record their owner
