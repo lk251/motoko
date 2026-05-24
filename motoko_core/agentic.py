@@ -1,8 +1,8 @@
 """Agentic action and skill-tool validation for Motoko.
 
-This module deliberately does not execute scripts. It validates declarations,
-approval state, and typed action records so the runner boundary can stay
-inspectable before any future execution path is enabled.
+This module owns the strict boundary between model/planner output and local
+effects. It validates declarations, approval state, typed action records, and
+the first narrow script runner for approved stdlib Python skill tools.
 """
 
 from __future__ import annotations
@@ -13,15 +13,22 @@ import json
 import os
 import pathlib
 import re
+import subprocess
+import sys
+import tempfile
+import time
 import uuid
 
-from motoko_core.state import append_jsonl, atomic_write, safe_load_json
+from motoko_core.state import append_jsonl, atomic_write, ensure_private_dir, safe_load_json
 
 
 TOOL_SCHEMA = "motoko-tool-v1"
 APPROVAL_SCHEMA = "motoko-tool-approval-v1"
 ACTION_SCHEMA = "motoko-action-v1"
 ACTION_LEDGER_SCHEMA = "motoko-action-ledger-v1"
+ACTION_RESULT_SCHEMA = "motoko-action-result-v1"
+TOOL_INPUT_SCHEMA = "motoko-tool-input-v1"
+TOOL_PRIVATE_RESULT_SCHEMA = "motoko-tool-private-result-v1"
 
 EFFECT_PROMPT_ONLY = "prompt_only"
 EFFECT_READ_CONTEXT = "read_context"
@@ -68,6 +75,7 @@ MAX_DESCRIPTION = 600
 MAX_TIMEOUT_SECONDS = 3600
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
+MAX_RESULT_PREVIEW_CHARS = 1200
 
 
 class AgenticValidationError(ValueError):
@@ -224,6 +232,13 @@ def validate_arguments(arguments, schema: dict) -> None:
             raise AgenticValidationError(f"argument {key} must be {expected}")
 
 
+def validate_json_value(value, schema: dict, *, label: str = "value") -> None:
+    """Validate the small JSON-schema subset Motoko accepts for tool I/O."""
+    schema = validate_schema_subset(schema, label=label)
+    if schema.get("type") == "object":
+        validate_arguments(value, schema)
+
+
 def validate_path_argument_boundaries(arguments: dict, tool: dict, *, realm: str, path_checker=None) -> None:
     if not isinstance(arguments, dict):
         return
@@ -302,6 +317,10 @@ def validate_tool_metadata(skill: dict, metadata_path: pathlib.Path) -> dict:
     effects = normalize_effects(raw.get("allowed_effects"))
     if not effects:
         raise AgenticValidationError("allowed_effects must not be empty")
+    if EFFECT_PROMPT_ONLY in effects:
+        raise AgenticValidationError("script tools cannot declare prompt_only")
+    if EFFECT_EXTERNAL_PROCESS not in effects:
+        effects.append(EFFECT_EXTERNAL_PROCESS)
     network = bool(raw.get("network", False))
     if network and EFFECT_NETWORK not in effects:
         raise AgenticValidationError("network=true requires the network effect")
@@ -625,6 +644,17 @@ def ledger_record(validation: dict, *, status: str | None = None) -> dict:
         "session_repeat_eligible",
         "argument_hash",
         "action_hash",
+        "result_schema",
+        "tool_run_id",
+        "private_result_path",
+        "exit_code",
+        "duration_ms",
+        "stdout_bytes",
+        "stderr_bytes",
+        "stdout_sha256",
+        "stderr_sha256",
+        "output_json_valid",
+        "error",
     }
     row = {key: validation.get(key) for key in allowed if key in validation}
     row["schema"] = ACTION_LEDGER_SCHEMA
@@ -637,6 +667,190 @@ def write_action_ledger(path: pathlib.Path, validation: dict, *, status: str | N
     row = ledger_record(validation, status=status)
     append_jsonl(path, row)
     return row
+
+
+def tool_runs_dir(state_root: pathlib.Path) -> pathlib.Path:
+    return ensure_private_dir(state_root / "tool-runs")
+
+
+def tool_run_dir(state_root: pathlib.Path, run_id: str) -> pathlib.Path:
+    return ensure_private_dir(tool_runs_dir(state_root) / safe_slug(run_id, limit=120))
+
+
+def safe_tool_environment(*, realm: str, state_root: pathlib.Path, run_dir: pathlib.Path) -> dict[str, str]:
+    return {
+        "HOME": str(run_dir),
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONNOUSERSITE": "1",
+        "MOTOKO_REALM": realm,
+        "MOTOKO_STATE_HOME": str(state_root),
+        "MOTOKO_TOOL_RUN_DIR": str(run_dir),
+        "MOTOKO_TOOL_MODE": "1",
+    }
+
+
+def _read_limited_binary(handle, limit: int) -> tuple[bytes, bool]:
+    handle.seek(0)
+    if limit <= 0:
+        data = handle.read(1)
+        return b"", bool(data)
+    data = handle.read(limit + 1)
+    if len(data) > limit:
+        return data[:limit], True
+    return data, False
+
+
+def _decode_tool_bytes(data: bytes) -> str:
+    return data.decode("utf-8", errors="replace")
+
+
+def execute_skill_tool_action(
+    action: dict,
+    validation: dict,
+    *,
+    skill_resolver,
+    approval_path: pathlib.Path,
+    state_root: pathlib.Path,
+    realm: str | None = None,
+    session_approvals: set[str] | None = None,
+    path_checker=None,
+) -> dict:
+    """Run one already approved skill tool action through the narrow runner."""
+    if validation.get("status") != "valid":
+        raise AgenticValidationError(f"cannot execute invalid action: {validation.get('status', '')}")
+    if validation.get("kind") != "skill_tool_run":
+        raise AgenticValidationError(f"unsupported executable action kind: {validation.get('kind', '')}")
+    realm = realm or current_realm()
+    skill = skill_resolver(str(action.get("skill") or ""))
+    tool = resolve_skill_tool(skill, str(action.get("tool") or ""))
+    effects = set(tool.get("allowed_effects", []))
+    if EFFECT_NETWORK in effects or tool.get("network"):
+        raise AgenticValidationError("network skill tools are not enabled")
+    if EFFECT_WRITE_ALLOWED_PROJECT in effects or tool.get("writes_project_files"):
+        raise AgenticValidationError("project-writing skill tools are not enabled in the first runner")
+    if tool.get("interpreter") != "python3" or tool.get("wrapper") != "motoko-tool-python-stdlib":
+        raise AgenticValidationError("only motoko-tool-python-stdlib python3 tools are enabled")
+
+    arguments = action.get("arguments") or {}
+    validate_arguments(arguments, tool.get("argument_schema") or {"type": "object"})
+    validate_path_argument_boundaries(arguments, tool, realm=realm, path_checker=path_checker)
+    approval = matching_approval(approval_path, tool, realm=realm)
+    if approval is None:
+        raise AgenticValidationError("tool approval is missing")
+    if tool.get("requires_confirmation") and session_approval_key(action, tool) not in (session_approvals or set()):
+        raise AgenticValidationError("session confirmation is required")
+
+    action_run_id = validation.get("id") or action_id(action)
+    run_id = "run-" + uuid.uuid4().hex[:16]
+    run_dir = tool_run_dir(state_root, run_id)
+    input_record = {
+        "schema": TOOL_INPUT_SCHEMA,
+        "action_id": action_run_id,
+        "tool_run_id": run_id,
+        "created_at": utc_now(),
+        "realm": realm,
+        "skill": tool.get("skill", ""),
+        "tool": tool.get("name", ""),
+        "arguments": arguments,
+    }
+    input_path = run_dir / "input.json"
+    atomic_write(input_path, json.dumps(input_record, ensure_ascii=False, indent=2) + "\n")
+    stdin = json.dumps(input_record, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+    start = time.monotonic()
+    proc = None
+    timed_out = False
+    with tempfile.TemporaryFile() as stdout_fh, tempfile.TemporaryFile() as stderr_fh:
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(tool.get("script_path", ""))],
+                cwd=str(skill_package_dir(skill)),
+                env=safe_tool_environment(realm=realm, state_root=state_root, run_dir=run_dir),
+                stdin=subprocess.PIPE,
+                stdout=stdout_fh,
+                stderr=stderr_fh,
+                close_fds=True,
+            )
+            assert proc.stdin is not None
+            proc.communicate(input=stdin, timeout=float(tool.get("timeout_seconds") or 30))
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if proc is not None:
+                proc.kill()
+                proc.communicate(timeout=5)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        stdout_data, stdout_truncated = _read_limited_binary(stdout_fh, int(tool.get("max_stdout_bytes") or 0))
+        stderr_data, stderr_truncated = _read_limited_binary(stderr_fh, int(tool.get("max_stderr_bytes") or 0))
+
+    stdout_text = _decode_tool_bytes(stdout_data)
+    stderr_text = _decode_tool_bytes(stderr_data)
+    stdout_hash = sha256_bytes(stdout_data)
+    stderr_hash = sha256_bytes(stderr_data)
+    exit_code = proc.returncode if proc is not None and proc.returncode is not None else -1
+    output_json = None
+    output_json_valid = False
+    error = ""
+    status = "completed"
+    if timed_out:
+        status = "timeout"
+        error = f"tool exceeded timeout of {tool.get('timeout_seconds')}s"
+    elif stdout_truncated or stderr_truncated:
+        status = "failed"
+        error = "tool output exceeded declared byte limit"
+    elif exit_code != 0:
+        status = "failed"
+        error = f"tool exited with code {exit_code}"
+    else:
+        stripped = stdout_text.strip()
+        if stripped:
+            try:
+                output_json = json.loads(stripped)
+                validate_json_value(output_json, tool.get("output_schema") or {"type": "object"}, label="output_schema")
+                output_json_valid = True
+            except (json.JSONDecodeError, AgenticValidationError) as exc:
+                status = "failed"
+                error = f"tool stdout did not match output_schema: {exc}"
+        else:
+            output_json = {}
+            output_json_valid = True
+    private_result = {
+        "schema": TOOL_PRIVATE_RESULT_SCHEMA,
+        "action_id": action_run_id,
+        "tool_run_id": run_id,
+        "created_at": utc_now(),
+        "realm": realm,
+        "skill": tool.get("skill", ""),
+        "tool": tool.get("name", ""),
+        "status": status,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "stdout": stdout_text,
+        "stderr": stderr_text,
+        "stdout_truncated": stdout_truncated,
+        "stderr_truncated": stderr_truncated,
+        "output_json": output_json,
+        "output_json_valid": output_json_valid,
+        "error": error,
+    }
+    private_result_path = run_dir / "result.json"
+    atomic_write(private_result_path, json.dumps(private_result, ensure_ascii=False, indent=2) + "\n")
+    return {
+        "result_schema": ACTION_RESULT_SCHEMA,
+        "action_id": action_run_id,
+        "tool_run_id": run_id,
+        "status": status,
+        "exit_code": exit_code,
+        "duration_ms": duration_ms,
+        "stdout_bytes": len(stdout_data),
+        "stderr_bytes": len(stderr_data),
+        "stdout_sha256": stdout_hash,
+        "stderr_sha256": stderr_hash,
+        "output_json_valid": output_json_valid,
+        "private_result_path": str(private_result_path),
+        "error": error,
+    }
 
 
 def format_tool_rows(rows: list[dict], *, approval_path: pathlib.Path, realm: str | None = None) -> str:
@@ -680,4 +894,35 @@ def format_action_validation(validation: dict) -> str:
         lines.append(f"session repeat key: {validation.get('session_repeat_key', '')}")
     if validation.get("reason"):
         lines.append(f"reason: {validation.get('reason', '')}")
+    return "\n".join(lines)
+
+
+def format_action_result(validation: dict, result: dict | None = None) -> str:
+    if not result:
+        return format_action_validation(validation)
+    lines = [
+        "action run:",
+        f"id: {validation.get('id', '')}",
+        f"status: {result.get('status', '')}",
+        f"kind: {validation.get('kind', '')}",
+        f"realm: {validation.get('realm', '')}",
+    ]
+    for key in ("skill", "tool", "tool_metadata"):
+        if validation.get(key):
+            lines.append(f"{key.replace('_', ' ')}: {validation.get(key)}")
+    if validation.get("allowed_effects"):
+        lines.append("effects: " + ", ".join(validation.get("allowed_effects", [])))
+    lines.extend(
+        [
+            f"tool run: {result.get('tool_run_id', '')}",
+            f"duration: {result.get('duration_ms', 0)} ms",
+            f"exit code: {result.get('exit_code', '')}",
+            f"stdout: {result.get('stdout_bytes', 0)} B sha256={result.get('stdout_sha256', '')}",
+            f"stderr: {result.get('stderr_bytes', 0)} B sha256={result.get('stderr_sha256', '')}",
+            f"output json valid: {'yes' if result.get('output_json_valid') else 'no'}",
+            f"private result: {result.get('private_result_path', '')}",
+        ]
+    )
+    if result.get("error"):
+        lines.append(f"error: {result.get('error', '')}")
     return "\n".join(lines)

@@ -601,6 +601,31 @@ Implementation checkpoint, 2026-05-24:
   lets Motoko inspect, approve, and preview tool contracts before any future
   runner executes them.
 
+Runner checkpoint, 2026-05-24:
+
+- Added the first executable runner for `skill_tool_run` actions. It runs only
+  approved `python3` tools using the declared `motoko-tool-python-stdlib`
+  wrapper, sends structured JSON on stdin, uses a scrubbed environment, sets a
+  fixed skill-package working directory, enforces per-tool timeout and
+  stdout/stderr byte limits, validates JSON object output, and writes private
+  inputs/results under the current user's Motoko state.
+- Executable script tools are treated as having the `external_process` effect
+  even when older metadata omits it, so the approval contract records the real
+  authority being granted. Script tools cannot declare `prompt_only`; that
+  effect remains reserved for non-executable procedural guidance.
+- Added `motoko action run FILE [--yes]` and `/action run FILE [--yes]`.
+  `--yes` grants only one session-style confirmation for that invocation when
+  the action already has a persistent fingerprint approval but still requires
+  run confirmation.
+- Shell commands, arbitrary executables, network tools, service control,
+  privileged actions, and project-file-writing tools remain blocked. The
+  runner currently enables low-risk read/Motoko-state tools first; broader
+  mutation still needs a later review step with previews, cancellation, and
+  stronger sandboxing if needed.
+- Action ledgers remain content-safe. Private stdin/stdout/stderr and parsed
+  result JSON stay in realm-local `tool-runs/` records owned by the current
+  user.
+
 ## Goal Loops
 
 Goal loops should come after the planner/handler/tool boundary is solid. The

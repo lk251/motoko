@@ -203,8 +203,11 @@ Current UI direction:
   flow through code-owned validators. Support files are confined to
   `references/`, `templates/`, and `scripts/`. Scripts are inert until they
   have adjacent `*.tool.json` metadata, current fingerprint approval, and a
-  typed action record accepted by Motoko validators; the current substrate
-  validates and previews that boundary but does not execute arbitrary scripts.
+  typed action record accepted by Motoko validators. The first runner can
+  execute only approved stdlib Python skill tools with low-risk effects,
+  bounded time/output, scrubbed environment, and private realm-local results;
+  arbitrary scripts, shell, network, service control, privileged actions, and
+  project-file writes remain blocked.
   Support files should be inspectable with explicit commands and loaded into
   chat only by bounded progressive disclosure when they match the current
   prompt.
@@ -1263,8 +1266,9 @@ Support files may live under `references/`, `templates/`, or `scripts/`, but
 scripts require adjacent `*.tool.json` metadata and a fingerprinted approval
 before they can even be considered for execution. Motoko should expose support
 files and tool metadata through explicit listing/view commands, validate typed
-action records before execution, and include bounded matching support-file
-excerpts as `skill-support` sources when a selected skill needs them. The
+action records before execution, run only approved low-risk stdlib Python tools
+through the narrow runner, and include bounded matching support-file excerpts
+as `skill-support` sources when a selected skill needs them. The
 background reviewer should not rely only on a fixed message interval: explicit
 recent phrases such as "reusable procedure" or "make this a skill" can trigger
 an early review, and recently loaded skills should be passed into the review
@@ -1277,13 +1281,13 @@ that sentence as an upstream Hermes quote.
 
 Detailed design review lives in `docs/agentic-capability-design.md`.
 
-Motoko should eventually support tightly scoped tool and skill-script
-execution, but this is a reviewed architecture change, not a background
+Motoko now has the first tightly scoped tool and skill-script execution path,
+but broader execution remains a reviewed architecture change, not a background
 refactor. The goal is to gain the useful parts of agent harnesses such as
 Hermes Agent and modern Codex-style goal loops while keeping Motoko smaller,
 stricter, realm-local, dependency-light, and inspectable.
 
-Before enabling script execution or a general tool runner, review and document:
+The accepted review checklist for script execution and a general tool runner:
 
 - Authority model: which effects exist, which are prompt-only, which are
   built-in handlers, which are script-backed, and which require explicit user

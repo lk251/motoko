@@ -510,6 +510,7 @@ motoko skill approve-tool NAME TOOL --yes
 motoko skill delete NAME --yes
 motoko skill plan "query"
 motoko action preview ACTION.json
+motoko action run ACTION.json [--yes]
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -555,7 +556,16 @@ NAME` validates and displays those declarations, fingerprints, effects, and
 approval status. `motoko skill approve-tool NAME TOOL --yes` approves only the
 current script and metadata fingerprints. `motoko action preview ACTION.json`
 validates a typed `motoko-action-v1` record and writes a private user-state
-ledger row; it does not execute scripts.
+ledger row without execution. `motoko action run ACTION.json [--yes]` runs only
+approved `skill_tool_run` records through the narrow stdlib Python runner:
+structured JSON on stdin, scrubbed environment, fixed skill-package working
+directory, timeout and output byte limits, JSON object output validation, and
+private inputs/results stored under the current user's Motoko state. `--yes`
+grants only one run-local confirmation when the already approved tool contract
+requires confirmation. Executable script tools are treated as having the
+`external_process` effect even when old metadata omits it, so approvals show
+the actual authority being granted; script tools cannot declare
+`prompt_only`.
 
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the
@@ -566,11 +576,12 @@ newest dates actually present. The deterministic retrieval layer still owns
 source scoping, Org date parsing, and evidence extraction; the skill records
 why and when that handler should run.
 
-Motoko does not execute arbitrary skill scripts. The runner substrate validates
-metadata, approvals, typed action records, and ledgers first. Future execution
-must stay constrained, stdlib-first, realm-local, timeout-bounded, and visible
-in `/sources`. The accepted design for that runner lives in
-`docs/agentic-capability-design.md`.
+Motoko does not execute arbitrary skill scripts, shell snippets, network tools,
+service-control actions, privileged actions, or project-file-writing tools.
+The first runner is deliberately limited to approved stdlib Python tools with
+low-risk effects such as allowlisted reads and Motoko-state writes. Broader
+mutation requires a later reviewed design step. The accepted design for that
+runner lives in `docs/agentic-capability-design.md`.
 
 Skill schema changes include a deterministic upgrade path. Run
 `motoko skill upgrade` to rewrite learned `SKILL.md` files to the current

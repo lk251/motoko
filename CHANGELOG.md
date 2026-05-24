@@ -18,6 +18,13 @@ not the easiest place to review what changed after a long work session.
   validated `*.tool.json` skill metadata, fingerprinted tool approvals, typed
   action previews, private action ledgers, and `/skill tools` /
   `motoko action preview` inspection commands.
+- Added the first narrow skill-tool runner: `motoko action run FILE [--yes]`
+  and `/action run FILE [--yes]` can execute approved `python3`
+  `motoko-tool-python-stdlib` tools with structured JSON input, scrubbed
+  environment, bounded timeout/output, JSON output validation, content-safe
+  ledgers, and private realm-local tool-run results. Shell, network, service
+  control, privileged actions, arbitrary executables, and project-file writes
+  remain blocked.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

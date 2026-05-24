@@ -6632,7 +6632,8 @@ def write_demo_tool(m, skill_name="tool-backed-skill"):
     (scripts / "demo.py").write_text(
         "import json, sys\n"
         "data = json.loads(sys.stdin.read() or '{}')\n"
-        "print(json.dumps({'ok': True, 'path': data.get('path', '')}))\n",
+        "args = data.get('arguments') or {}\n"
+        "print(json.dumps({'ok': True, 'path': args.get('path', ''), 'realm': data.get('realm', '')}))\n",
         encoding="utf-8",
     )
     (scripts / "demo.tool.json").write_text(
@@ -6764,6 +6765,110 @@ def test_action_preview_rejects_shell_and_bad_tool_metadata(m):
         assert "traversal" in tools
 
 
+def test_action_run_executes_approved_tool_and_records_private_result(m):
+    with isolated_state() as tmp:
+        write_demo_tool(m)
+        action_path = tmp / "run-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "tool-backed-skill",
+                    "tool": "demo",
+                    "arguments": {"path": "notes.org"},
+                    "reason": "Need a bounded deterministic helper.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        blocked = m.run_action_text(str(action_path))
+        assert "status: blocked" in blocked
+        assert "approval: missing" in blocked
+        assert "not run" in blocked
+
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        output = m.run_action_text(str(action_path))
+        assert "action run:" in output
+        assert "status: completed" in output
+        assert "output json valid: yes" in output
+        assert "private result:" in output
+
+        result_files = list((m.state_root() / "tool-runs").glob("*/result.json"))
+        assert len(result_files) == 1
+        result = json.loads(result_files[0].read_text(encoding="utf-8"))
+        assert result["status"] == "completed"
+        assert result["output_json"]["path"] == "notes.org"
+        rows = m.read_jsonl(m.action_ledger_path())
+        assert any(row.get("status") == "running" for row in rows)
+        assert any(row.get("status") == "completed" and row.get("tool_run_id") for row in rows)
+
+
+def test_action_run_keeps_project_write_tools_disabled(m):
+    with isolated_state() as tmp:
+        m.learn_skill_text(
+            "project-writer",
+            description="Project write tool",
+            body="This tool declares project writes and should not run yet.",
+        )
+        scripts = m.skills_dir() / "project-writer" / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / "writer.py").write_text("print('{}')\n", encoding="utf-8")
+        (scripts / "writer.tool.json").write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-tool-v1",
+                    "name": "writer",
+                    "description": "Writes a project file.",
+                    "script": "writer.py",
+                    "interpreter": "python3",
+                    "wrapper": "motoko-tool-python-stdlib",
+                    "allowed_effects": ["write_allowed_project", "external_process"],
+                    "argument_schema": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                        "additionalProperties": False,
+                    },
+                    "input_schema": {"type": "object"},
+                    "output_schema": {"type": "object"},
+                    "timeout_seconds": 30,
+                    "max_stdout_bytes": 65536,
+                    "max_stderr_bytes": 16384,
+                    "network": False,
+                    "writes_project_files": True,
+                    "requires_confirmation": True,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        m.approve_skill_tool_text("project-writer", "writer", yes=True)
+        action_path = tmp / "write-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "project-writer",
+                    "tool": "writer",
+                    "arguments": {"path": "notes.org"},
+                    "reason": "Attempt a project mutation.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        output = m.run_action_text(str(action_path), yes=True)
+        assert "status: failed" in output
+        assert "project-writing skill tools are not enabled" in output
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -6784,6 +6889,8 @@ def main() -> int:
         test_skill_tool_metadata_validation_and_approval,
         test_action_preview_requires_approval_then_validates,
         test_action_preview_rejects_shell_and_bad_tool_metadata,
+        test_action_run_executes_approved_tool_and_records_private_result,
+        test_action_run_keeps_project_write_tools_disabled,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

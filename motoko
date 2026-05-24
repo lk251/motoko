@@ -224,9 +224,12 @@ from motoko_core.skills import (  # noqa: E402
 from motoko_core.agentic import (  # noqa: E402
     AgenticValidationError,
     approve_tool as core_approve_tool,
+    execute_skill_tool_action as core_execute_skill_tool_action,
+    format_action_result as core_format_action_result,
     format_action_validation as core_format_action_validation,
     format_tool_rows as core_format_tool_rows,
     list_skill_tools as core_list_skill_tools,
+    session_approval_key as core_session_approval_key,
     validate_action_record as core_validate_action_record,
     write_action_ledger as core_write_action_ledger,
 )
@@ -831,6 +834,7 @@ SLASH_COMMANDS = [
     ("/skill tools NAME", "list validated script tool metadata for a skill"),
     ("/skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
     ("/action preview FILE", "validate a typed action JSON file without execution"),
+    ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -4450,6 +4454,78 @@ def validate_action_text(path_text: str, *, preview: bool = True) -> str:
         }
     core_write_action_ledger(action_ledger_path(), validation, status=validation.get("status", "unknown"))
     return core_format_action_validation(validation)
+
+
+def run_action_text(path_text: str, *, yes: bool = False) -> str:
+    action = read_action_file(path_text)
+    session_approvals: set[str] = set()
+    try:
+        preview_validation = core_validate_action_record(
+            action,
+            skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+            approval_path=tool_approvals_path(),
+            realm=identity_realm(),
+            path_checker=action_path_checker,
+            preview=True,
+        )
+        if preview_validation.get("status") == "needs_confirmation" and yes:
+            session_approvals.add(str(preview_validation.get("session_repeat_key") or core_session_approval_key(action)))
+        validation = core_validate_action_record(
+            action,
+            skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+            approval_path=tool_approvals_path(),
+            realm=identity_realm(),
+            session_approvals=session_approvals,
+            path_checker=action_path_checker,
+            preview=False,
+        )
+    except AgenticValidationError as exc:
+        validation = {
+            "schema": "motoko-action-validation-v1",
+            "id": "",
+            "created_at": now(),
+            "realm": identity_realm(),
+            "kind": str(action.get("kind", "")) if isinstance(action, dict) else "",
+            "status": "rejected",
+            "approval": "not-applicable",
+            "reason": str(exc),
+            "action_hash": "",
+        }
+        core_write_action_ledger(action_ledger_path(), validation, status="rejected")
+        return core_format_action_validation(validation) + "\nnot run"
+    if validation.get("status") != "valid":
+        core_write_action_ledger(action_ledger_path(), validation, status="blocked")
+        return core_format_action_validation(validation) + "\nnot run"
+    core_write_action_ledger(action_ledger_path(), validation, status="running")
+    try:
+        result = core_execute_skill_tool_action(
+            action,
+            validation,
+            skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+            approval_path=tool_approvals_path(),
+            state_root=state_root(),
+            realm=identity_realm(),
+            session_approvals=session_approvals,
+            path_checker=action_path_checker,
+        )
+    except AgenticValidationError as exc:
+        result = {
+            "result_schema": "motoko-action-result-v1",
+            "action_id": validation.get("id", ""),
+            "tool_run_id": "",
+            "status": "failed",
+            "exit_code": "",
+            "duration_ms": 0,
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "stdout_sha256": "",
+            "stderr_sha256": "",
+            "output_json_valid": False,
+            "private_result_path": "",
+            "error": str(exc),
+        }
+    core_write_action_ledger(action_ledger_path(), {**validation, **result}, status=result.get("status", "unknown"))
+    return core_format_action_result(validation, result)
 
 
 def learn_skill(
@@ -13162,6 +13238,7 @@ HELP_SECTIONS = [
             ("/skill accept ID", "accept a pending skill suggestion"),
             ("/skill reject ID", "reject a pending skill suggestion"),
             ("/action preview FILE", "validate a typed action JSON file without execution"),
+            ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -13234,6 +13311,7 @@ HELP_SECTIONS = [
             ("motoko skill accept ID", "accept a pending skill suggestion"),
             ("motoko skill reject ID", "reject a pending skill suggestion"),
             ("motoko action preview FILE", "validate a typed action JSON file without execution"),
+            ("motoko action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -13759,6 +13837,12 @@ def memory_profile_report_command_request(text: str):
         subbody = parts[1].strip() if len(parts) > 1 else ""
         if subcommand in {"preview", "validate"} and subbody:
             return "/action preview", lambda: validate_action_text(subbody, preview=True)
+        if subcommand == "run" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            file_args = [arg for arg in args if arg != "--yes"]
+            if file_args:
+                return "/action run", lambda: run_action_text(file_args[0], yes=yes)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -17219,6 +17303,8 @@ def command_skill(args) -> None:
 def command_action(args) -> None:
     if args.action_command in {"preview", "validate"}:
         print_report(validate_action_text(args.file, preview=True))
+    elif args.action_command == "run":
+        print_report(run_action_text(args.file, yes=args.yes))
     else:
         raise SystemExit("unknown action command")
 
@@ -17798,6 +17884,10 @@ def main(argv: list[str]) -> int:
     action_validate = action_sub.add_parser("validate", help="alias for preview; no execution is performed")
     action_validate.add_argument("file")
     action_validate.set_defaults(func=command_action)
+    action_run = action_sub.add_parser("run", help="run an approved typed action through the narrow tool runner")
+    action_run.add_argument("file")
+    action_run.add_argument("--yes", action="store_true", help="grant one-session confirmation for this run")
+    action_run.set_defaults(func=command_action)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)
