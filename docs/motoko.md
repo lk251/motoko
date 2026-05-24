@@ -113,7 +113,7 @@ and includes it in the system prompt and `/sources` provenance for each answer.
 `motoko about` is the compact introduction screen: Motoko's name, version,
 brief purpose and development values, the Mares ASCII logo in the assistant
 color, identity/realm, active chat model and endpoint, background lanes, state
-paths, and permissions. The logo is rendered first and right-justified, with
+paths, and permissions. The logo is rendered first and left-justified, with
 the Motoko/version/values text below it so narrow terminals do not interleave
 the text with the ASCII art. In the TUI, `/about` and other report-style commands
 open a temporary page instead of adding report text to the chat view; close the
@@ -376,9 +376,9 @@ TTY, Sway, Foot, or tmux shows chat history instead of old full-screen redraw
 frames. The composer and status area redraw at the bottom, `/` opens command
 suggestions, arrow keys move through suggestions, Enter accepts a selection,
 and typed text remains available while Motoko streams an answer. There is no
-fixed separator between the chat body and the composer. The TUI does not print
-routine startup tips into the conversation body; `/help`, `/status`, and
-`/sources` are the inspectable places for that state.
+fixed separator between the chat body and the composer. The TUI prints a short,
+non-persistent startup tip block; `/tips`, `/help`, `/status`, and `/sources`
+are the inspectable places for details.
 Use `/stop` to stop the current answer and discard any prompts queued behind
 it. Use `/clear-queue` to discard queued prompts without stopping the active
 answer.
@@ -410,6 +410,46 @@ assistant name. It includes the model badge, for example
 such as
 `mem: proposing(model)`, `bg-light: catalog(cpu)`, or
 `bg-heavy: summarizing chunk file 6/54 chunk 10/100 9% eta 3h12m`.
+
+## Daily Usage Tips
+
+The normal daily loop is:
+
+1. Start Motoko from the directory whose corpus matters, such as
+   `/home/mares/repos/orgfiles`.
+2. Ask questions naturally. If an index exists for the current directory,
+   Motoko auto-attaches the best current-directory index; if she offers to learn
+   the directory tree, answer `yes` only when that corpus should become part of
+   her local derived knowledge.
+3. After important answers, run `/sources` to inspect the files, spans, and
+   context-selection reasons used for the answer.
+4. When an answer seems wrong, run `/retrieval-debug QUERY` to decide whether
+   the failure is recall/indexing, ranking, stale data, chunking, summaries,
+   prompt use, or final synthesis. Use `/retrieval-preview QUERY` when you want
+   to see the packed context without calling a model.
+5. Use `/study QUERY` for deliberate deeper analysis and `/tasks QUERY` for
+   Org task planning.
+6. Record concise feedback with `/feedback up|down|ok NOTE`, or the shorthand
+   `/up NOTE` and `/down NOTE`. Good notes name the missing file, date,
+   project, stale artifact, wrong assumption, or behavior that worked.
+
+Feedback stays in the current user's Motoko state, not in the conversation
+transcript. It becomes useful evaluation material through `/feedback-eval` or
+`motoko feedback-eval`; it does not silently retune retrieval or prompts.
+
+Evals are health checks, not daily chat chores. Run `motoko retrieval-eval`,
+`motoko vector-eval`, `motoko feedback-eval`, `motoko action-eval`, or
+`motoko model-eval` after Motoko updates, model-route changes, suspicious
+failures, or before trusting a new retrieval/action path. For routine use,
+`/sources`, specific feedback, and targeted `/retrieval-debug` runs are usually
+the higher-signal habit.
+
+Motoko's self-improvement path is review-first: private feedback rows,
+inspectable eval fixtures, skill suggestions, and approved changes. The
+Hermes-style direction is to let Motoko crystallize repeated procedures into
+durable skills and later tightly constrained support files/tools, while
+preserving Motoko's realm-local, dependency-light, approval-first security
+shape.
 
 Emacs-style editing keys in the TUI:
 
@@ -712,6 +752,7 @@ Useful in-chat commands:
 ```text
 /help
 /
+/tips
 /stop
 /clear-queue
 /pause

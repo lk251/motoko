@@ -785,6 +785,7 @@ PERMISSION_MODE_CAPABILITIES = {
 SLASH_COMMANDS = [
     ("/help", "show full help"),
     ("/", "show compact command menu"),
+    ("/tips", "show daily usage and feedback tips"),
     ("/about", "show Motoko version and runtime details"),
     ("/exit", "save and exit"),
     ("/stop", "stop the current streamed answer and discard queued prompts"),
@@ -892,6 +893,7 @@ SLASH_COMMANDS = [
 
 SHELL_COMMANDS = [
     "help",
+    "tips",
     "about",
     "chat",
     "pause",
@@ -961,6 +963,7 @@ SHELL_COMMANDS = [
 SIMPLE_SLASH_COMMANDS = {
     "/help",
     "/",
+    "/tips",
     "/about",
     "/exit",
     "/stop",
@@ -14868,6 +14871,7 @@ HELP_SECTIONS = [
         "Session",
         [
             ("/help", "open this help; in the TUI press Enter or Esc to return"),
+            ("/tips", "show the daily usage and feedback loop"),
             ("/about", "show version, model, endpoint, and state paths"),
             ("/", "show a compact command menu"),
             ("/exit", "save and exit"),
@@ -15020,6 +15024,7 @@ HELP_SECTIONS = [
         "Shell",
         [
             ("motoko help", "show this command reference"),
+            ("motoko tips", "show daily usage and feedback tips"),
             ("motoko about", "show version and runtime details"),
             ("motoko", "start a new chat"),
             ("motoko new", "start a new chat"),
@@ -15105,6 +15110,45 @@ HELP_SECTIONS = [
 ]
 
 
+STARTUP_TIPS_LINES = [
+    "Tips: ask normally from the relevant directory; /sources checks grounding.",
+    "Use /feedback up|down|ok NOTE after important answers; /retrieval-debug QUERY diagnoses failures.",
+    "Evals are health checks after updates or suspicious answers, not daily chores. /tips opens the guide.",
+]
+
+
+def startup_tips_text() -> str:
+    return "\n".join(STARTUP_TIPS_LINES)
+
+
+def format_tips() -> str:
+    lines = [
+        "Motoko tips",
+        "",
+        "Daily use:",
+        "  Start Motoko in the directory whose corpus matters.",
+        "  Ask normally; Motoko auto-attaches the best current-directory index when available.",
+        "  Run /sources after important answers to inspect files, spans, and why context was selected.",
+        "  Use /retrieval-debug QUERY when an answer seems wrong: missing source means recall/indexing, wrong top source means ranking, stale warnings mean refresh/rebuild, and right source with a bad answer means prompt or final synthesis.",
+        "  Use /study QUERY for deliberate deeper analysis, and /tasks QUERY for Org task planning.",
+        "",
+        "Feedback:",
+        "  Use /feedback up|down|ok NOTE, or /up NOTE and /down NOTE, after answers that matter.",
+        "  Good notes name the missing file/date/project, stale artifact, wrong assumption, or behavior that worked.",
+        "  Feedback stays in this user's Motoko state and does not become chat transcript text.",
+        "",
+        "Evals:",
+        "  Evals are specialized health checks, not daily conversation steps.",
+        "  Run retrieval-eval, vector-eval, feedback-eval, action-eval, or model-eval after updates, route changes, suspicious failures, or before trusting new machinery.",
+        "  feedback-eval turns your private feedback rows into inspectable fixtures; it does not silently retune Motoko.",
+        "",
+        "Self-improvement:",
+        "  Motoko should improve through inspectable feedback, eval gates, skill suggestions, and approved changes.",
+        "  Hermes-style skill learning remains the direction, but with Motoko's stricter realm-local, approval-first, dependency-light boundaries.",
+    ]
+    return "\n".join(lines)
+
+
 def format_help() -> str:
     lines = ["Motoko help", "TUI: press q or Esc to close help and return to the conversation.", ""]
     for section, rows in HELP_SECTIONS:
@@ -15150,14 +15194,11 @@ def format_about() -> str:
 
 
 def format_about_header(width: int | None = None) -> list[str]:
-    width = width or shutil.get_terminal_size((100, 24)).columns
+    _ = width
     logo = MARES_LOGO_ASCII.splitlines()
-    logo_width = max((display_width(line) for line in logo), default=0)
-    left_pad = " " * max(0, width - logo_width)
     rows = []
     for line in logo:
-        row_pad = " " * max(0, logo_width - display_width(line))
-        rows.append(left_pad + style(line + row_pad, assistant_color(), "bold"))
+        rows.append(style(line, assistant_color(), "bold"))
     rows.append("")
     rows.extend(
         [
@@ -15407,6 +15448,8 @@ def report_command_request(text: str, conv: dict):
     body = command_body(text)
     if primary == "/help" and not body:
         return "/help", format_help
+    if primary == "/tips" and not body:
+        return "/tips", format_tips
     if primary == "/about" and not body:
         return "/about", format_about
     if primary == "/sources" and not body:
@@ -16444,6 +16487,7 @@ class MotokoTui:
         self.cwd_indexing = False
         self.index_progress: dict | None = None
         self.messages = self.seed_messages(conv)
+        self.append("system", startup_tips_text())
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
             self.append("system", resume_note)
@@ -17919,7 +17963,7 @@ def chat_loop(conv: dict) -> None:
             print(f"Motoko TUI failed; falling back to line mode: {exc}", file=sys.stderr)
     setup_readline_completion()
     print(format_conversation_banner(conv))
-    print("Type /help for commands, /exit to save and leave.")
+    print("sys " + startup_tips_text().replace("\n", "\nsys "))
     resume_maintenance, resume_note = resume_interrupted_maintenance(conv)
     if resume_note:
         print(f"sys {resume_note}")
@@ -19258,6 +19302,10 @@ def command_about(_args) -> None:
     print_report(format_about())
 
 
+def command_tips(_args) -> None:
+    print_report(format_tips())
+
+
 def command_status(_args) -> None:
     print_status()
 
@@ -19403,6 +19451,9 @@ def main(argv: list[str]) -> int:
 
     help_cmd = sub.add_parser("help", help="show the full Motoko command reference")
     help_cmd.set_defaults(func=lambda _args: print(format_help()))
+
+    tips_cmd = sub.add_parser("tips", help="show daily usage and feedback tips")
+    tips_cmd.set_defaults(func=command_tips)
 
     about_cmd = sub.add_parser("about", help="show Motoko version and runtime details")
     about_cmd.set_defaults(func=command_about)

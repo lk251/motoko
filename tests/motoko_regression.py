@@ -837,7 +837,12 @@ def test_help_about_and_explicit_memory(m):
         help_text = m.format_help()
         assert "Session:" in help_text
         assert "Memory:" in help_text
+        assert "/tips" in help_text
         assert "Enter or Esc" in help_text
+        tips = m.format_tips()
+        assert "Daily use:" in tips
+        assert "/sources" in tips
+        assert "Evals are specialized health checks" in tips
         about = m.format_about()
         assert "Motoko" in about
         assert "model badge:" in about
@@ -847,6 +852,7 @@ def test_help_about_and_explicit_memory(m):
         logo_rows = [m.strip_ansi(row) for row in m.format_about_header(width=90)[:6]]
         logo_left_pads = [len(row) - len(row.lstrip(" ")) for row in logo_rows]
         assert len(set(logo_left_pads)) == 1
+        assert logo_left_pads == [0] * len(logo_left_pads)
         assert "Model routes:" not in about
         assert "assistant color:" not in about
         assert "spinner:" not in about
@@ -6685,6 +6691,11 @@ def test_help_uses_shared_report_command_request(m):
         label, run = request
         assert label == "/help"
         assert "/status" in run()
+        tips_request = m.shared_command_request("/tips", conv)
+        assert tips_request is not None
+        tips_label, tips_run = tips_request
+        assert tips_label == "/tips"
+        assert "/feedback up|down|ok" in tips_run()
 
 
 def test_blocking_command_request_attaches_index(m):

@@ -160,6 +160,11 @@ Current UI direction:
 - User input prompt should be just `>`, not `You>`.
 - Titles, command text, and supporting UI can be turquoise.
 - Raw TTY usability matters as much as graphical terminals.
+- `/about` should render the Mares ASCII logo left-justified, with the Motoko
+  version/realm/values text below the logo rather than interleaved beside it.
+- Startup should show a brief non-persistent `/tips` pointer block for now:
+  `/sources` for grounding, `/feedback` for private eval signal,
+  `/retrieval-debug` for failures, and evals as health checks after changes.
 - Slash-command suggestions should visibly scroll as the selection moves.
 - Emacs-style editing keys should work in the TUI:
   - `Ctrl+A` beginning of line;
@@ -1447,6 +1452,12 @@ Immediate next agentic implementation sequence, when development resumes:
    reports, loaded-skill patch preference, umbrella-skill consolidation, and
    support-file organization. This is the next craftsmanship pass for keeping
    skills useful as Motoko learns from real use.
+6. Continue toward Hermes-style agent-harness capability without losing
+   Motoko's constraints: durable skills, support files, approved scripts,
+   explicit goal loops, feedback-derived evals, and review-first self-improving
+   procedure. This belongs farther down the roadmap than today's stabilization
+   pass, and must preserve realm-local state, typed effects, approval gates,
+   ledgers, and stdlib-first implementation.
 
 ## NixOS-Facing Model Boundary
 
