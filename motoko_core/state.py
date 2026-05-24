@@ -181,6 +181,15 @@ def action_ledger_path() -> pathlib.Path:
     return root / "action-ledger.jsonl"
 
 
+def action_evals_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "action-evals")
+
+
+def action_eval_path(eval_id: str) -> pathlib.Path:
+    return action_evals_dir() / f"{_safe_component(eval_id, 'action-eval')}.json"
+
+
 def goal_loops_dir() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return ensure_private_dir(root / "goal-loops")

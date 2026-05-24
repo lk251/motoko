@@ -202,6 +202,11 @@ Current UI direction:
 - Tool planning should be inspectable without model calls. `/tools` should list
   the current skill-tool catalog, and `/action plan QUERY` should propose typed
   action records from known tools without running anything.
+- Agentic action safety should be eval-gated. `/action-eval` and
+  `motoko action-eval` run deterministic no-model fixtures for project-write
+  confirmation, `.motokoignore` denial, blocked script-owned writes, explicit
+  goal runs, and budget refusal; `--write` saves the report under the current
+  user's Motoko state.
 - Goal-loop planning and execution should stay explicit and inspectable.
   `/goal plan OBJECTIVE`, `/goal list`, and `/goal preview FILE` may create or
   show `motoko-goal-loop-v1` records. `/goal run FILE --yes` may run only an
@@ -1337,6 +1342,8 @@ The accepted review checklist for script execution and a general tool runner:
   before a runner affects production behavior. Evals should cover refusal of
   unsafe actions, argument validation, output parsing, interruption, stale
   artifact handling, and source-grounding quality.
+  `motoko action-eval` is the first deterministic command surface for these
+  safety fixtures.
 - NixOS boundary: if a tool requires system packages, sandboxes, helper users,
   service control, model files, or network policy, NixOS declares that surface;
   Motoko consumes approved interfaces and does not call `sudo` or `systemctl`.

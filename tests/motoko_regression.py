@@ -7105,6 +7105,24 @@ def test_goal_loop_runs_explicit_confirmed_action_list(m):
         assert target.read_text(encoding="utf-8") == "* Goal output\n"
 
 
+def test_action_eval_report_covers_agentic_safety_fixtures(m):
+    with isolated_state():
+        report = m.run_action_eval()
+        assert report["schema"] == "action-eval-v1"
+        assert report["summary"]["status"] == "pass"
+        fixture_ids = {row["id"] for row in report["fixtures"]}
+        assert {
+            "project_file_write_confirmed",
+            "motokoignore_project_write_denied",
+            "script_project_write_blocked",
+            "explicit_goal_run_confirmed",
+            "goal_budget_refuses_extra_actions",
+        } <= fixture_ids
+        text = m.format_action_eval_report(report)
+        assert "action eval:" in text
+        assert "fixtures: 5/5 passed" in text
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -7132,6 +7150,7 @@ def main() -> int:
         test_project_file_write_overwrite_requires_expected_hash,
         test_goal_loop_preview_save_and_list_without_execution,
         test_goal_loop_runs_explicit_confirmed_action_list,
+        test_action_eval_report_covers_agentic_safety_fixtures,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

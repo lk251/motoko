@@ -722,6 +722,19 @@ Project-write and goal-run checkpoint, 2026-05-24:
 - Goal loops are now executable only in this narrow explicit-action form.
   Autonomous plan/retrieve/act/observe loops remain a later reviewed step.
 
+Action-eval checkpoint, 2026-05-24:
+
+- Added `motoko action-eval` and `/action-eval` as the first command/report
+  surface for agentic safety fixtures. The eval runs in a temporary Motoko
+  state/config root, calls no model, and uses no real user corpus content.
+- Current fixtures cover confirmed code-owned project writes, unconfirmed write
+  blocking, `.motokoignore` denial, script-owned project-write blocking,
+  explicit goal action-list confirmation, and goal budget refusal.
+- `--write` stores the JSON report under the current user's Motoko state in
+  `action-evals/`. These evals are deterministic safety checks; private
+  feedback-derived agentic eval rows can come later after real usage reveals
+  useful cases.
+
 ## Goal Loops
 
 Goal loops should remain staged. The current enabled form is an explicit

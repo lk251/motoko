@@ -516,6 +516,7 @@ motoko action run ACTION.json [--yes]
 motoko action apply ACTION.json --yes
 motoko action ledger [--limit N]
 motoko action result RUN_ID [--private]
+motoko action-eval [--write] [--json]
 motoko goal plan "objective" [--save]
 motoko goal list
 motoko goal preview GOAL.json
@@ -596,6 +597,14 @@ typed action JSON candidates without running anything or calling a model.
 result RUN_ID` shows metadata for a private tool run result; add `--private`
 only in the owning Unix account when you intentionally want stdout/stderr and
 parsed JSON output printed.
+
+`motoko action-eval` runs deterministic safety fixtures for the agentic action
+surface without calling a model and without using real user corpora. It checks
+that confirmed code-owned project writes work, unconfirmed writes block,
+`.motokoignore` denials hold, script-owned project writes remain blocked,
+explicit goal action lists run only with confirmation, and goal budgets stop
+over-broad action lists. Add `--write` to save the JSON report under the
+current user's Motoko state.
 
 Goal loops are still deliberately narrow. `motoko goal plan "objective"` builds
 a `motoko-goal-loop-v1` record with objective, scope, allowed tools/effects,
