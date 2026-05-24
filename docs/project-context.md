@@ -1063,13 +1063,17 @@ Current progress on this stretch:
   dated questions.
 - Complete: attached index context now renders through the retrieval service
   instead of a generic root-facade callback.
+- Complete: `retrieval-debug` now includes production selected-source summaries
+  from the retrieval-service result, tying diagnostics to the context chat
+  would actually receive.
 - Complete: feedback rows can be replayed as private retrieval-eval fixtures.
 - Complete: index health reports source lifecycle decisions for changed,
   deleted, and ignored indexed files.
 - Complete: source lifecycle plans count dependent derived artifacts and
   surface rebuild-first work in `index-storage`.
 - Remaining: prompt-level context packing and some `/sources` source-record
-  construction still need to converge on the retrieval service result.
+  construction still need to become service-returned structured records rather
+  than root-facade assembly.
 - Remaining: retrieval report paths should be reduced to renderers over the
   same structured result.
 - Remaining: artifact lifecycle needs an apply path for vectors, evidence

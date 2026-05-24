@@ -465,6 +465,21 @@ def format_retrieval_debug_report_core(report: dict) -> str:
             lines.append(f"  warning: {warning}")
         for note in index.get("diagnosis", []):
             lines.append(f"  diagnosis: {note}")
+        if index.get("production_retrieval_error"):
+            lines.append(f"  production retrieval error: {index.get('production_retrieval_error')}")
+        if index.get("production_sources"):
+            lines.append("  production selected sources:")
+            for idx, row in enumerate(index.get("production_sources", [])[:8], 1):
+                label = row.get("path", "") or row.get("index", "")
+                chunk = f" chunk {row.get('chunk')}" if row.get("chunk") not in ("", None) else ""
+                lines.append(
+                    f"    {idx}. {row.get('kind', '')}  {label}{chunk}  "
+                    f"{row.get('retrieval', row.get('status', ''))}"
+                )
+                if row.get("retrieval_methods"):
+                    lines.append("       methods: " + ", ".join(row.get("retrieval_methods", [])[:8]))
+                if row.get("excerpt_selection"):
+                    lines.append(f"       excerpt: {row.get('excerpt_selection')}")
         lines.append("  top files:")
         for idx, row in enumerate(index.get("files", [])[:5], 1):
             lines.append(

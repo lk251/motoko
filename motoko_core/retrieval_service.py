@@ -581,3 +581,41 @@ class RetrievalService:
                 "source_count": len(sources),
             },
         )
+
+
+def summarize_retrieval_sources(sources: list[dict], *, limit: int = 8) -> list[dict]:
+    rows = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        kind = str(source.get("kind", ""))
+        if kind not in {"index", "file-summary", "chunk", "context-warning"}:
+            continue
+        row = {
+            "kind": kind,
+            "index": source.get("index") or source.get("id", ""),
+            "path": source.get("path", ""),
+            "chunk": source.get("chunk", ""),
+            "status": source.get("status", ""),
+        }
+        for key in (
+            "retrieval",
+            "retrieval_methods",
+            "hybrid_score",
+            "lexical_score",
+            "structured_score",
+            "evidence_score",
+            "vector_score",
+            "rerank_score",
+            "excerpt_selection",
+            "evidence_id",
+            "evidence_kind",
+            "evidence_date",
+            "warning",
+        ):
+            if source.get(key) not in (None, "", []):
+                row[key] = source.get(key)
+        rows.append(row)
+        if len(rows) >= limit:
+            break
+    return rows

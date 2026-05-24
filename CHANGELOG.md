@@ -28,6 +28,9 @@ not the easiest place to review what changed after a long work session.
 - Made `Ctrl+C` in the TUI stop an active answer and clear queued prompts,
   matching `/stop`, instead of exiting while an answer worker may still be
   running. Idle `Ctrl+C` still exits.
+- Added production selected-source summaries to `retrieval-debug`, so its
+  lexical/evidence/vector diagnostics can be compared against the actual
+  retrieval-service result that chat context would use.
 - Added a live-subsystem refactor boundary: runtime context, typed command
   requests, job supervision, model-route readiness, retrieval-service wrapping,
   artifact lifecycle decisions, and content-free observability now have

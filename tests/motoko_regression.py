@@ -1745,8 +1745,11 @@ def test_retrieval_debug_explains_scores(m):
         rows = report["indexes"][0]["chunks"]
         assert rows[0]["path"].endswith("/logbook.org")
         assert rows[0]["path_boost"] >= 2000
+        production_sources = report["indexes"][0]["production_sources"]
+        assert any(row["kind"] == "chunk" and row["path"].endswith("/logbook.org") for row in production_sources)
         text = m.format_retrieval_debug_report(report)
         assert "retrieval debug:" in text
+        assert "production selected sources:" in text
         assert "path=2500" in text
         assert "diagnosis:" in text
         assert "prompt-use check" in text

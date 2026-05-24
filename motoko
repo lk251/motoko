@@ -331,6 +331,7 @@ from motoko_core.retrieval_service import (  # noqa: E402
     HybridRetrievalEnvironment,
     RetrievalService,
     rerank_hybrid_candidates_with_environment,
+    summarize_retrieval_sources,
 )
 from motoko_core.runtime import (  # noqa: E402
     RuntimePaths,
@@ -3463,6 +3464,12 @@ def run_retrieval_debug(
             "files": file_rows[:limit],
             "chunks": chunk_rows[:limit],
         }
+        try:
+            _retrieved_text, retrieval_sources = retrieve_from_index(index, query)
+        except SystemExit as exc:
+            index_report["production_retrieval_error"] = str(exc).splitlines()[0][:240]
+        else:
+            index_report["production_sources"] = summarize_retrieval_sources(retrieval_sources, limit=limit)
         if env_flag("MOTOKO_EVIDENCE_RETRIEVAL", True):
             try:
                 evidence_store = evidence_store_for_retrieval(index)
