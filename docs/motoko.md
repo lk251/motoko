@@ -550,6 +550,8 @@ motoko goal plan "objective" [--save]
 motoko goal list
 motoko goal preview GOAL.json
 motoko goal run GOAL.json --yes
+motoko goal runs
+motoko goal resume RUN_ID --yes
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -643,6 +645,13 @@ GOAL.json` inspect saved or external loop records. `motoko goal run GOAL.json
 --yes` only runs an explicit action list already present in the loop record,
 and each action still passes through the same action validator, effect checks,
 budgets, confirmations, and ledger path. There is no autonomous model loop yet.
+Confirmed runs create `goal-run-v1` checkpoints under the current user's Motoko
+state. `motoko goal runs` lists those checkpoints, and `motoko goal resume
+RUN_ID --yes` resumes from the next incomplete action or reports an already
+completed run. Checkpoints contain content needed to validate and replay the
+typed actions, but not model-planned hidden state. `motoko pause` and `/pause`
+are honored between actions, so a paused goal run keeps completed action
+results and resumes at the next pending action.
 `network` loops require future approval; `service_control` and `privileged`
 are rejected.
 

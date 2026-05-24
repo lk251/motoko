@@ -212,7 +212,9 @@ Current UI direction:
   show `motoko-goal-loop-v1` records. `/goal run FILE --yes` may run only an
   explicit action list already present in the record, within declared budgets,
   and each action still passes through the same validator, confirmation, and
-  ledger path. This is not an autonomous model-planning loop yet.
+  ledger path. Confirmed runs are checkpointed as `goal-run-v1` records and
+  can be listed or resumed with `/goal runs` and `/goal resume RUN_ID --yes`.
+  This is not an autonomous model-planning loop yet.
 - Skill-management actions should stay review-first and allowlisted. Motoko may
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to

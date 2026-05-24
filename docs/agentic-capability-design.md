@@ -735,13 +735,35 @@ Action-eval checkpoint, 2026-05-24:
   feedback-derived agentic eval rows can come later after real usage reveals
   useful cases.
 
+Durable goal-run checkpoint, 2026-05-24:
+
+- Confirmed `motoko goal run FILE --yes` and `/goal run FILE --yes` now create
+  `goal-run-v1` records under the current user's Motoko state before execution
+  begins. The record stores the source loop id/path, objective, allowed
+  effects/tools, budgets, explicit typed actions, cursor, status, and
+  per-action result metadata.
+- The runner updates the record after every action. Interruptions, refusals,
+  and validation failures therefore leave an inspectable checkpoint rather than
+  relying on terminal scrollback.
+- `motoko pause` and `/pause` are checked at action boundaries. A pause request
+  marks the run `paused`, preserves completed action results, clears the pause
+  request, and leaves resume to continue at the next pending action.
+- Added `motoko goal runs` / `/goal runs` and `motoko goal resume RUN_ID --yes`
+  / `/goal resume RUN_ID --yes`. Resume starts at the first incomplete action;
+  completed runs are reported without re-executing actions.
+- This is still not an autonomous model-planned loop. It is the durable
+  execution substrate for explicit action-list loops, preserving the reviewed
+  validator, effect, budget, confirmation, and ledger boundaries.
+
 ## Goal Loops
 
 Goal loops should remain staged. The current enabled form is an explicit
 action-list runner: the loop record contains concrete typed actions and Motoko
 runs them through the normal validator, confirmation, budget, and ledger path.
-The later autonomous form should come after this explicit runner stays stable.
-The intended durable record contains:
+Each confirmed run has a `goal-run-v1` checkpoint with a cursor and per-action
+results so completed work is not lost across interruption. The later
+autonomous form should come after this explicit runner stays stable. The
+intended autonomous durable record contains:
 
 - objective;
 - scope;

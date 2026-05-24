@@ -7230,12 +7230,105 @@ def test_goal_loop_runs_explicit_confirmed_action_list(m):
         refused = m.run_goal_text(str(goal_path), yes=False)
         assert "status: refused" in refused
         assert not target.exists()
+        assert not list(m.goal_runs_dir().glob("*.json"))
 
         output = m.run_goal_text(str(goal_path), yes=True)
         assert "goal run:" in output
         assert "completed: 1/1" in output
         assert "status: completed" in output
         assert target.read_text(encoding="utf-8") == "* Goal output\n"
+        run_paths = list(m.goal_runs_dir().glob("*.json"))
+        assert len(run_paths) == 1
+        run_record = m.safe_load_json(run_paths[0])
+        assert run_record["schema"] == "goal-run-v1"
+        assert run_record["status"] == "completed"
+        assert run_record["cursor"] == 1
+        assert run_record["source_path"] == str(goal_path)
+        assert run_record["action_results"][0]["status"] == "completed"
+        assert run_record["action_results"][0]["validation_id"]
+        listing = m.format_goal_runs()
+        assert run_record["id"] in listing
+        assert "Create one bounded file" in listing
+        resumed = m.resume_goal_run_text(run_record["id"], yes=True)
+        assert "status: completed" in resumed
+        assert "cursor: 1/1" in resumed
+
+
+def test_goal_run_pause_resume_preserves_completed_actions(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        first = docs / "first.org"
+        second = docs / "second.org"
+        actions = [
+            {
+                "schema": "motoko-action-v1",
+                "kind": "project_file_write",
+                "path": str(first),
+                "mode": "create",
+                "content": "* First\n",
+                "reason": "First durable action.",
+            },
+            {
+                "schema": "motoko-action-v1",
+                "kind": "project_file_write",
+                "path": str(second),
+                "mode": "create",
+                "content": "* Second\n",
+                "reason": "Second durable action.",
+            },
+        ]
+        goal_path = tmp / "goal-pause.json"
+        goal_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-goal-loop-v1",
+                    "objective": "Create two bounded files",
+                    "allowed_effects": ["write_allowed_project"],
+                    "budgets": {"max_steps": 2, "max_tool_calls": 2, "max_model_calls": 1, "max_minutes": 5},
+                    "actions": actions,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_execute = m.execute_action_record
+        calls = {"count": 0}
+
+        def pause_after_first(action, *, yes):
+            validation, result = original_execute(action, yes=yes)
+            calls["count"] += 1
+            if calls["count"] == 1:
+                m.request_work_pause("test goal pause")
+            return validation, result
+
+        try:
+            m.execute_action_record = pause_after_first
+            paused = m.run_goal_text(str(goal_path), yes=True)
+        finally:
+            m.execute_action_record = original_execute
+
+        assert "status: paused" in paused
+        assert first.read_text(encoding="utf-8") == "* First\n"
+        assert not second.exists()
+        run_record = m.safe_load_json(next(m.goal_runs_dir().glob("*.json")))
+        assert run_record["status"] == "paused"
+        assert run_record["cursor"] == 1
+        assert run_record["action_results"][0]["status"] == "completed"
+        assert run_record["action_results"][1]["status"] == "pending"
+
+        resumed = m.resume_goal_run_text(run_record["id"], yes=True)
+        assert "status: completed" in resumed
+        assert "completed: 2/2" in resumed
+        assert first.read_text(encoding="utf-8") == "* First\n"
+        assert second.read_text(encoding="utf-8") == "* Second\n"
+        final = m.find_goal_run_record(run_record["id"])
+        assert final["status"] == "completed"
+        assert final["cursor"] == 2
+        assert final["action_results"][0]["status"] == "completed"
+        assert final["action_results"][1]["status"] == "completed"
 
 
 def test_action_eval_report_covers_agentic_safety_fixtures(m):
@@ -7283,6 +7376,7 @@ def main() -> int:
         test_project_file_write_overwrite_requires_expected_hash,
         test_goal_loop_preview_save_and_list_without_execution,
         test_goal_loop_runs_explicit_confirmed_action_list,
+        test_goal_run_pause_resume_preserves_completed_actions,
         test_action_eval_report_covers_agentic_safety_fixtures,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,

@@ -43,10 +43,19 @@ not the easiest place to review what changed after a long work session.
   `/goal run FILE --yes` execute only explicit action lists already present in
   `motoko-goal-loop-v1` records, within budgets and allowed effects/tools.
   Autonomous model-planned loops remain disabled.
+- Added durable `goal-run-v1` checkpoints for confirmed goal runs, plus
+  `motoko goal runs` / `/goal runs` and `motoko goal resume RUN_ID --yes` /
+  `/goal resume RUN_ID --yes`, so explicit action-list loops can resume from
+  the next incomplete action instead of depending on scrollback. Goal runs now
+  honor `motoko pause` and `/pause` between actions.
 - Added `motoko action-eval` and `/action-eval`, a no-model deterministic
   safety gate for the agentic action surface covering confirmed project writes,
   unconfirmed write blocking, `.motokoignore` denial, blocked script-owned
   project writes, explicit goal runs, and goal budget refusal.
+- Integrated NixOS-declared route request policies for local model services.
+  Motoko now consumes declared sampling presets, structured-output fields,
+  reasoning/thinking presets, scheduling, idle, safety, and cache-measurement
+  metadata while keeping `/last-call` telemetry content-free.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

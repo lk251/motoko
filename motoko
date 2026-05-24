@@ -432,6 +432,8 @@ from motoko_core.state import (  # noqa: E402
     feedback_evals_dir,
     goal_loop_path,
     goal_loops_dir,
+    goal_run_path,
+    goal_runs_dir,
     heavy_study_path,
     index_data_dir,
     index_partial_path,
@@ -544,6 +546,7 @@ EVIDENCE_QUERY_SCHEMA_VERSION = "evidence-query-v1"
 FEEDBACK_EVAL_SCHEMA_VERSION = "feedback-eval-v1"
 RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 ACTION_EVAL_SCHEMA_VERSION = "action-eval-v1"
+GOAL_RUN_SCHEMA_VERSION = "goal-run-v1"
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
@@ -873,6 +876,8 @@ SLASH_COMMANDS = [
     ("/goal list", "list saved goal-loop drafts"),
     ("/goal preview FILE", "validate a goal-loop JSON file"),
     ("/goal run FILE --yes", "run an explicit approved goal action list"),
+    ("/goal runs", "list durable goal-run checkpoints"),
+    ("/goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -4870,54 +4875,208 @@ def preview_action_record(action: dict) -> dict:
     )
 
 
-def run_goal_text(path_text: str, *, yes: bool = False) -> str:
+def make_goal_run_record(goal: dict, *, source_path: pathlib.Path | None = None) -> dict:
+    actions = goal.get("actions") if isinstance(goal.get("actions"), list) else []
+    stamp = now()
+    run_id = "goal-run-" + uuid.uuid4().hex[:16]
+    return {
+        "schema": GOAL_RUN_SCHEMA_VERSION,
+        "id": run_id,
+        "goal_id": goal.get("id", ""),
+        "created": stamp,
+        "updated": stamp,
+        "status": "queued",
+        "cursor": 0,
+        "source_path": str(source_path or ""),
+        "objective": goal.get("objective", ""),
+        "allowed_effects": goal.get("allowed_effects", []),
+        "allowed_tools": goal.get("allowed_tools", []),
+        "budgets": goal.get("budgets", {}),
+        "actions": actions,
+        "action_results": [
+            {"index": idx + 1, "status": "pending", "kind": str(action.get("kind", ""))}
+            for idx, action in enumerate(actions)
+        ],
+    }
+
+
+def write_goal_run_record(record: dict) -> None:
+    record = dict(record)
+    record["updated"] = now()
+    atomic_write(
+        goal_run_path(str(record.get("id", "goal-run"))),
+        json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def find_goal_run_record(selector: str) -> dict:
+    selector = str(selector or "").strip()
+    if not selector:
+        raise GoalLoopValidationError("goal run selector is empty")
+    candidates = []
+    direct = pathlib.Path(selector).expanduser()
+    if direct.exists():
+        candidates.append(direct)
+    exact = goal_run_path(selector)
+    if exact.exists():
+        candidates.append(exact)
+    for path in goal_runs_dir().glob("*.json"):
+        stem = path.stem
+        if stem == selector or stem.startswith(selector):
+            candidates.append(path)
+    unique = []
+    seen = set()
+    for path in candidates:
+        key = str(path.resolve(strict=False))
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    if not unique:
+        raise GoalLoopValidationError(f"goal run not found: {selector}")
+    if len(unique) > 1:
+        raise GoalLoopValidationError(f"ambiguous goal run selector: {selector}")
+    data = safe_load_json(unique[0])
+    if not isinstance(data, dict) or data.get("schema") != GOAL_RUN_SCHEMA_VERSION:
+        raise GoalLoopValidationError(f"not a goal run record: {unique[0]}")
+    return data
+
+
+def list_goal_run_records(limit: int = 20) -> list[dict]:
+    rows = []
+    for path in sorted(goal_runs_dir().glob("*.json")):
+        data = safe_load_json(path)
+        if isinstance(data, dict) and data.get("schema") == GOAL_RUN_SCHEMA_VERSION:
+            row = dict(data)
+            row["path"] = str(path)
+            rows.append(row)
+    rows.sort(key=lambda row: (row.get("updated", ""), row.get("id", "")), reverse=True)
+    return rows[: max(1, min(200, int(limit or 20)))]
+
+
+def format_goal_runs(limit: int = 20) -> str:
+    rows = list_goal_run_records(limit=limit)
+    if not rows:
+        return "goal runs: none"
+    lines = [f"goal runs: {len(rows)} shown"]
+    for row in rows:
+        lines.append(
+            f"- {row.get('id', '')}  {row.get('status', '')}  "
+            f"cursor={row.get('cursor', 0)}/{len(row.get('actions', []) or [])}  "
+            f"{row.get('objective', '')[:120]}"
+        )
+    return "\n".join(lines)
+
+
+def execute_goal_run_record(run: dict, *, yes: bool) -> str:
     if not yes:
         return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
-    if not path_text:
-        return "usage: motoko goal run FILE --yes"
-    try:
-        record = core_read_goal_loop(pathlib.Path(path_text).expanduser(), path_checker=goal_loop_path_checker)
-    except (OSError, GoalLoopValidationError) as exc:
-        return f"goal run:\nstatus: rejected\nerror: {exc}"
-    actions = record.get("actions") if isinstance(record.get("actions"), list) else []
+    actions = run.get("actions") if isinstance(run.get("actions"), list) else []
     if not actions:
         return "goal run:\nstatus: refused\nerror: goal loop has no explicit actions"
-    budgets = record.get("budgets") if isinstance(record.get("budgets"), dict) else {}
+    if run.get("status") == "completed":
+        return format_goal_run_result(run)
+    budgets = run.get("budgets") if isinstance(run.get("budgets"), dict) else {}
     max_steps = int(budgets.get("max_steps") or 1)
     max_tool_calls = int(budgets.get("max_tool_calls") or 1)
     if len(actions) > min(max_steps, max_tool_calls):
+        run["status"] = "refused"
+        run["error"] = (
+            f"{len(actions)} action(s) exceed step/tool budget "
+            f"({max_steps} steps, {max_tool_calls} tool calls)"
+        )
+        write_goal_run_record(run)
         return (
             "goal run:\n"
             "status: refused\n"
-            f"error: {len(actions)} action(s) exceed step/tool budget "
-            f"({max_steps} steps, {max_tool_calls} tool calls)"
+            f"error: {run['error']}"
         )
-    allowed_effects = set(record.get("allowed_effects", []))
-    allowed_tools = set(record.get("allowed_tools", []))
+    allowed_effects = set(run.get("allowed_effects", []))
+    allowed_tools = set(run.get("allowed_tools", []))
+    if not isinstance(run.get("action_results"), list) or len(run.get("action_results", [])) != len(actions):
+        run["action_results"] = [
+            {"index": idx + 1, "status": "pending", "kind": str(action.get("kind", ""))}
+            for idx, action in enumerate(actions)
+        ]
+    cursor = max(0, min(len(actions), int(run.get("cursor", 0) or 0)))
     lines = [
         "goal run:",
-        f"id: {record.get('id', '')}",
-        f"objective: {record.get('objective', '')}",
+        f"id: {run.get('id', '')}",
+        f"objective: {run.get('objective', '')}",
         f"actions: {len(actions)}",
+        f"cursor: {cursor}",
     ]
-    completed = 0
-    for idx, action in enumerate(actions, 1):
+    completed = sum(1 for row in run.get("action_results", []) if row.get("status") == "completed")
+    if work_pause_requested():
+        run["status"] = "paused"
+        run["cursor"] = cursor
+        run["note"] = "paused before next action"
+        write_goal_run_record(run)
+        clear_work_pause_request()
+        lines.append("paused: before next action")
+        lines.append(f"completed: {completed}/{len(actions)}")
+        lines.append("status: paused")
+        lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+        return "\n".join(lines)
+    run["status"] = "running"
+    write_goal_run_record(run)
+    for idx0 in range(cursor, len(actions)):
+        idx = idx0 + 1
+        action = actions[idx0]
+        if work_pause_requested():
+            run["status"] = "paused"
+            run["cursor"] = idx0
+            run["note"] = "paused before next action"
+            write_goal_run_record(run)
+            clear_work_pause_request()
+            lines.append(f"paused: before action {idx}")
+            break
         try:
             preview = preview_action_record(action)
         except AgenticValidationError as exc:
             lines.append(f"- action {idx}: rejected before run: {exc}")
+            run["status"] = "stopped"
+            run["error"] = str(exc)
+            run["action_results"][idx0] = {
+                "index": idx,
+                "kind": str(action.get("kind", "")),
+                "status": "rejected",
+                "error": str(exc),
+            }
+            write_goal_run_record(run)
             break
         effects = set(preview.get("allowed_effects", []))
         if not effects <= allowed_effects:
-            lines.append(
-                f"- action {idx}: refused; effects {','.join(sorted(effects)) or 'none'} "
-                f"exceed goal allowed effects {','.join(sorted(allowed_effects)) or 'none'}"
+            error = (
+                f"effects {','.join(sorted(effects)) or 'none'} exceed goal allowed effects "
+                f"{','.join(sorted(allowed_effects)) or 'none'}"
             )
+            lines.append(
+                f"- action {idx}: refused; {error}"
+            )
+            run["status"] = "stopped"
+            run["error"] = error
+            run["action_results"][idx0] = {
+                "index": idx,
+                "kind": preview.get("kind", ""),
+                "status": "refused",
+                "error": error,
+            }
+            write_goal_run_record(run)
             break
         if allowed_tools and preview.get("kind") == "skill_tool_run":
             selector = f"{preview.get('skill', '')}/{preview.get('tool', '')}"
             if selector not in allowed_tools and preview.get("tool", "") not in allowed_tools:
-                lines.append(f"- action {idx}: refused; tool {selector} is not in goal allowed_tools")
+                error = f"tool {selector} is not in goal allowed_tools"
+                lines.append(f"- action {idx}: refused; {error}")
+                run["status"] = "stopped"
+                run["error"] = error
+                run["action_results"][idx0] = {
+                    "index": idx,
+                    "kind": preview.get("kind", ""),
+                    "status": "refused",
+                    "error": error,
+                }
+                write_goal_run_record(run)
                 break
         validation, result = execute_action_record(action, yes=yes)
         status = result.get("status") if result else validation.get("status")
@@ -4926,12 +5085,78 @@ def run_goal_text(path_text: str, *, yes: bool = False) -> str:
             lines.append(f"  run: {result.get('tool_run_id')}")
         if result and result.get("error"):
             lines.append(f"  error: {result.get('error')}")
+        run["action_results"][idx0] = {
+            "index": idx,
+            "kind": validation.get("kind", ""),
+            "status": status,
+            "validation_id": validation.get("id", ""),
+            "tool_run_id": result.get("tool_run_id", "") if result else "",
+            "error": result.get("error", "") if result else validation.get("reason", ""),
+        }
         if status != "completed":
+            run["status"] = "stopped"
+            run["cursor"] = idx0
+            write_goal_run_record(run)
             break
         completed += 1
+        run["cursor"] = idx
+        write_goal_run_record(run)
+    if completed == len(actions):
+        run["status"] = "completed"
+        run["cursor"] = len(actions)
+        run.pop("error", None)
+        run.pop("note", None)
+        write_goal_run_record(run)
     lines.append(f"completed: {completed}/{len(actions)}")
-    lines.append("status: completed" if completed == len(actions) else "status: stopped")
+    lines.append(f"status: {run.get('status', 'stopped')}")
+    lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
     return "\n".join(lines)
+
+
+def format_goal_run_result(run: dict) -> str:
+    actions = run.get("actions") if isinstance(run.get("actions"), list) else []
+    completed = sum(1 for row in run.get("action_results", []) if row.get("status") == "completed")
+    lines = [
+        "goal run:",
+        f"id: {run.get('id', '')}",
+        f"status: {run.get('status', '')}",
+        f"objective: {run.get('objective', '')}",
+        f"cursor: {run.get('cursor', 0)}/{len(actions)}",
+        f"completed: {completed}/{len(actions)}",
+    ]
+    if run.get("error"):
+        lines.append(f"error: {run.get('error')}")
+    for row in run.get("action_results", []):
+        lines.append(f"- action {row.get('index')}: {row.get('kind', '')} {row.get('status', '')}")
+        if row.get("tool_run_id"):
+            lines.append(f"  run: {row.get('tool_run_id')}")
+        if row.get("error"):
+            lines.append(f"  error: {row.get('error')}")
+    lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+    return "\n".join(lines)
+
+
+def run_goal_text(path_text: str, *, yes: bool = False) -> str:
+    if not yes:
+        return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
+    if not path_text:
+        return "usage: motoko goal run FILE --yes"
+    source_path = pathlib.Path(path_text).expanduser()
+    try:
+        record = core_read_goal_loop(source_path, path_checker=goal_loop_path_checker)
+    except (OSError, GoalLoopValidationError) as exc:
+        return f"goal run:\nstatus: rejected\nerror: {exc}"
+    run = make_goal_run_record(record, source_path=source_path)
+    write_goal_run_record(run)
+    return execute_goal_run_record(run, yes=yes)
+
+
+def resume_goal_run_text(selector: str, *, yes: bool = False) -> str:
+    try:
+        run = find_goal_run_record(selector)
+    except GoalLoopValidationError as exc:
+        return f"goal run:\nstatus: rejected\nerror: {exc}"
+    return execute_goal_run_record(run, yes=yes)
 
 
 @contextlib.contextmanager
@@ -14302,6 +14527,8 @@ HELP_SECTIONS = [
             ("/goal list", "list saved goal-loop drafts"),
             ("/goal preview FILE", "validate a goal-loop JSON file"),
             ("/goal run FILE --yes", "run an explicit approved goal action list"),
+            ("/goal runs", "list durable goal-run checkpoints"),
+            ("/goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -14386,6 +14613,8 @@ HELP_SECTIONS = [
             ("motoko goal list", "list saved goal-loop drafts"),
             ("motoko goal preview FILE", "validate a goal-loop JSON file"),
             ("motoko goal run FILE --yes", "run an explicit approved goal action list"),
+            ("motoko goal runs", "list durable goal-run checkpoints"),
+            ("motoko goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -14964,6 +15193,20 @@ def memory_profile_report_command_request(text: str):
             file_args = [arg for arg in args if arg != "--yes"]
             if file_args:
                 return "/goal run", lambda: run_goal_text(file_args[0], yes=yes)
+        if subcommand in {"runs", "run-list"}:
+            limit = 20
+            if subbody:
+                try:
+                    limit = int(subbody)
+                except ValueError:
+                    limit = 20
+            return "/goal runs", lambda: format_goal_runs(limit=limit)
+        if subcommand == "resume" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            selectors = [arg for arg in args if arg != "--yes"]
+            if selectors:
+                return "/goal resume", lambda: resume_goal_run_text(selectors[0], yes=yes)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -18493,6 +18736,10 @@ def command_goal(args) -> None:
         print_report(format_goal_preview(args.file))
     elif args.goal_command == "run":
         print_report(run_goal_text(args.file, yes=args.yes))
+    elif args.goal_command in {"runs", "run-list"}:
+        print_report(format_goal_runs(limit=args.limit))
+    elif args.goal_command == "resume":
+        print_report(resume_goal_run_text(args.run_id, yes=args.yes))
     else:
         raise SystemExit("unknown goal command")
 
@@ -19131,6 +19378,13 @@ def main(argv: list[str]) -> int:
     goal_run.add_argument("file")
     goal_run.add_argument("--yes", action="store_true", help="confirm this goal run")
     goal_run.set_defaults(func=command_goal)
+    goal_runs = goal_sub.add_parser("runs", aliases=["run-list"], help="list durable goal-run checkpoints")
+    goal_runs.add_argument("--limit", type=int, default=20)
+    goal_runs.set_defaults(func=command_goal)
+    goal_resume = goal_sub.add_parser("resume", help="resume a durable goal-run checkpoint")
+    goal_resume.add_argument("run_id")
+    goal_resume.add_argument("--yes", action="store_true", help="confirm this goal resume")
+    goal_resume.set_defaults(func=command_goal)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

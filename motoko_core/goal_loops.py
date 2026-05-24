@@ -1,8 +1,9 @@
-"""Preview-only goal-loop records for Motoko.
+"""Goal-loop record validation and formatting for Motoko.
 
-Goal loops are deliberately not executable here. This module validates and
-formats durable loop plans so broader agentic behavior can be reviewed before a
-runner exists.
+This module validates and formats durable loop plans. Execution stays outside
+this module and remains deliberately narrow: only explicit action lists are
+run, and the root facade sends each action through the normal action validator,
+confirmation, budget, checkpoint, and ledger path.
 """
 
 from __future__ import annotations

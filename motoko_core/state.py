@@ -199,6 +199,15 @@ def goal_loop_path(loop_id: str) -> pathlib.Path:
     return goal_loops_dir() / f"{_safe_component(loop_id, 'goal-loop')}.json"
 
 
+def goal_runs_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "goal-runs")
+
+
+def goal_run_path(run_id: str) -> pathlib.Path:
+    return goal_runs_dir() / f"{_safe_component(run_id, 'goal-run')}.json"
+
+
 def feedback_eval_path(eval_id: str) -> pathlib.Path:
     return feedback_evals_dir() / f"{_safe_component(eval_id, 'feedback-eval')}.json"
 
