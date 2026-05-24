@@ -21,6 +21,9 @@ not the easiest place to review what changed after a long work session.
 - Moved top-level prompt context lane packing into the retrieval-service
   boundary. Chat, `/sources`, and retrieval preview now share a structured
   `context-package-v1` plan for lane source accounting.
+- Added a shared retrieval-service result source summary so `retrieval-debug`
+  reports production selected sources from the same result object used for chat
+  context.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

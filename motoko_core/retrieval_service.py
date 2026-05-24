@@ -42,6 +42,9 @@ class RetrievalServiceResult:
     sources: list[dict] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
 
+    def source_summary(self, *, limit: int = 8) -> list[dict]:
+        return summarize_retrieval_sources(self.sources, limit=limit)
+
 
 @dataclass(frozen=True)
 class ContextLane:

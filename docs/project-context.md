@@ -1097,8 +1097,10 @@ Current progress on this stretch:
   narrower: final prompt wording, excerpt/snippet choice across non-index
   lanes, and some `/sources` source-record construction still live in the root
   facade.
-- Remaining: retrieval report paths should be reduced to renderers over the
-  same structured result.
+- Progress: `retrieval-debug` now reads its production selected-source summary
+  and content-free diagnostics from the same retrieval-service result object
+  used for chat context. Remaining report work is to turn preview/debug/vector
+  displays into thin renderers over one richer result shape.
 - Remaining: artifact lifecycle needs an apply path for vectors, evidence
   stores, dossiers, memories, feedback fixtures, profiles, and
   conversation-derived artifacts after rebuilds materialize replacement state.

@@ -3613,11 +3613,19 @@ def run_retrieval_debug(
             "chunks": chunk_rows[:limit],
         }
         try:
-            _retrieved_text, retrieval_sources = retrieve_from_index(index, query)
+            retrieval_result = retrieve_index_result(index, query)
         except SystemExit as exc:
             index_report["production_retrieval_error"] = str(exc).splitlines()[0][:240]
         else:
-            index_report["production_sources"] = summarize_retrieval_sources(retrieval_sources, limit=limit)
+            index_report["production_sources"] = retrieval_result.source_summary(limit=limit)
+            index_report["production_diagnostics"] = {
+                "schema": retrieval_result.diagnostics.get("schema", ""),
+                "source_count": retrieval_result.diagnostics.get("source_count", 0),
+                "hybrid_candidates": retrieval_result.diagnostics.get("hybrid_candidates", 0),
+                "evidence_rows": retrieval_result.diagnostics.get("evidence_rows", 0),
+                "vector_rows": retrieval_result.diagnostics.get("vector_rows", 0),
+                "index_status": retrieval_result.diagnostics.get("index_status", ""),
+            }
         if env_flag("MOTOKO_EVIDENCE_RETRIEVAL", True):
             try:
                 evidence_store = evidence_store_for_retrieval(index)
@@ -12277,8 +12285,8 @@ def hybrid_retrieval_environment() -> HybridRetrievalEnvironment:
     )
 
 
-def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
-    service = RetrievalService(
+def make_retrieval_service() -> RetrievalService:
+    return RetrievalService(
         load_index=load_index,
         retrieve_index_query=lambda _index, _query: ("", []),
         render_index_overview=render_index_overview_context,
@@ -12289,7 +12297,14 @@ def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
         render_context_items=core_render_context_items_with_sources,
         hybrid_environment=hybrid_retrieval_environment(),
     )
-    result = service.retrieve_index(index, query)
+
+
+def retrieve_index_result(index: dict, query: str):
+    return make_retrieval_service().retrieve_index(index, query)
+
+
+def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
+    result = retrieve_index_result(index, query)
     return result.text, result.sources
 
 
@@ -12392,18 +12407,7 @@ def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
 
 
 def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
-    service = RetrievalService(
-        load_index=load_index,
-        retrieve_index_query=lambda _index, _query: ("", []),
-        render_index_overview=render_index_overview_context,
-        load_topic=load_topic,
-        retrieve_topic=retrieve_from_topic,
-        load_dossier=load_dossier,
-        retrieve_dossier=retrieve_from_dossier,
-        render_context_items=core_render_context_items_with_sources,
-        hybrid_environment=hybrid_retrieval_environment(),
-    )
-    result = service.render_attached_context(items, query)
+    result = make_retrieval_service().render_attached_context(items, query)
     return result.text, result.sources
 
 

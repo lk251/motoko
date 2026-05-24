@@ -2266,6 +2266,8 @@ def test_retrieval_debug_explains_scores(m):
         assert rows[0]["path_boost"] >= 2000
         production_sources = report["indexes"][0]["production_sources"]
         assert any(row["kind"] == "chunk" and row["path"].endswith("/logbook.org") for row in production_sources)
+        assert report["indexes"][0]["production_diagnostics"]["schema"] == "retrieval-service-v1"
+        assert report["indexes"][0]["production_diagnostics"]["source_count"] >= len(production_sources)
         text = m.format_retrieval_debug_report(report)
         assert "retrieval debug:" in text
         assert "production selected sources:" in text
