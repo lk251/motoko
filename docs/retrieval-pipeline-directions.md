@@ -179,9 +179,11 @@ intended architecture for similar cases: skills preserve procedural knowledge,
 planners decide whether the skill should affect a subsystem, and handlers
 perform bounded inspectable work.
 
-Future skill work should add support files and carefully constrained scripts
-only after the planner/handler boundary is stable. Scripts are useful when they
-turn repeatable procedures into deterministic probes or transforms, but they
+Motoko now has an internal review-first `skill_manage` action layer for
+`create`, `patch`, `write_file`, and `remove_file` suggestions. Support files
+are useful for preserving references, templates, and script-like deterministic
+procedures under an existing skill package, but they remain stored text assets
+unless a later reviewed runner gives them bounded execution authority. Scripts
 must not become broad shell execution, cross-realm access, or a way around
 document allowlists.
 

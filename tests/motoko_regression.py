@@ -153,7 +153,7 @@ def test_memory_proposal_sends_transcript_not_assistant_prefill(m):
         assert kwargs["route"] == m.MODEL_ROUTE_MEMORY
 
 
-def test_skill_suggestion_parser_uses_hermes_style_signal(m):
+def test_skill_suggestion_parser_uses_local_review_signal(m):
     with isolated_state():
         text = json.dumps(
             {
@@ -302,6 +302,84 @@ def test_manual_skill_review_and_suggestion_detail(m):
         assert "Proposed skill body:" in detail
         assert "Inspect sources" in detail
         assert "motoko skill accept" in detail
+
+
+def test_skill_suggestion_accepts_patch_action(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "source-first-answer-diagnosis",
+            description="Diagnose weak answers from sources.",
+            body="Inspect sources first.",
+        )
+        added = m.add_skill_suggestions(
+            [
+                {
+                    "action": "patch",
+                    "name": "source-first-answer-diagnosis",
+                    "target_skill": "source-first-answer-diagnosis",
+                    "description": "Extend the source-first diagnosis procedure.",
+                    "old_string": "Inspect sources first.",
+                    "new_string": "Inspect sources first, then run retrieval-debug to separate recall, ranking, stale data, chunking, summary, and final prompt issues.",
+                    "reason": "This updates an existing umbrella skill instead of creating a duplicate.",
+                    "signals": ["existing skill was incomplete"],
+                }
+            ],
+            conversation_id="patch-skill",
+        )
+        assert len(added) == 1
+        detail = m.format_skill_suggestion(added[0]["id"])
+        assert "action: patch" in detail
+        assert "Proposed patch:" in detail
+
+        accepted = m.accept_skill_suggestion_text(added[0]["id"])
+        assert "skill accepted: source-first-answer-diagnosis" in accepted
+        assert "action: patch" in accepted
+        shown = m.format_skill("source-first-answer-diagnosis")
+        assert "retrieval-debug" in shown
+
+
+def test_skill_manage_support_file_is_confined(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "retrieval-debugging",
+            description="Debug retrieval failures.",
+            body="Prefer source-visible diagnostics before prompt changes.",
+        )
+        added = m.add_skill_suggestions(
+            [
+                {
+                    "action": "write_file",
+                    "name": "retrieval-debugging-reference",
+                    "target_skill": "retrieval-debugging",
+                    "description": "Add a compact retrieval debugging reference.",
+                    "file_path": "references/checklist.md",
+                    "file_content": "Check recall, ranking, staleness, chunking, summaries, and prompt use.",
+                    "reason": "Support files preserve detail without bloating SKILL.md.",
+                    "signals": ["support file is better than a new skill"],
+                }
+            ],
+            conversation_id="support-file",
+        )
+        assert len(added) == 1
+        accepted = m.accept_skill_suggestion_text(added[0]["id"])
+        assert "support file written: references/checklist.md" in accepted
+        support_path = m.skills_dir() / "retrieval-debugging" / "references" / "checklist.md"
+        assert support_path.read_text(encoding="utf-8").startswith("Check recall")
+        assert "support files: references/checklist.md" in m.format_skill("retrieval-debugging")
+
+        try:
+            m.core_manage_skill(
+                m.skills_dir(),
+                action="write_file",
+                target_skill="retrieval-debugging",
+                file_path="../escape.md",
+                file_content="bad",
+                writer=m.atomic_write,
+            )
+        except SystemExit as exc:
+            assert "support file path" in str(exc)
+        else:
+            raise AssertionError("path traversal support file was accepted")
 
 
 def test_skill_upgrade_rewrites_legacy_skill_files(m):
@@ -6266,10 +6344,12 @@ def main() -> int:
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
         test_memory_proposal_sends_transcript_not_assistant_prefill,
-        test_skill_suggestion_parser_uses_hermes_style_signal,
+        test_skill_suggestion_parser_uses_local_review_signal,
         test_skill_registry_downgrades_unknown_handlers_and_effects,
         test_auto_maintenance_suggests_skill_without_saving_it,
         test_manual_skill_review_and_suggestion_detail,
+        test_skill_suggestion_accepts_patch_action,
+        test_skill_manage_support_file_is_confined,
         test_skill_upgrade_rewrites_legacy_skill_files,
         test_skill_plan_shows_prompt_and_retrieval_selection,
         test_interrupted_maintenance_resume,

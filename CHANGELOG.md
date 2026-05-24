@@ -5,6 +5,11 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added an internal, review-first `skill_manage` action layer for skill
+  suggestions. Motoko can now propose creating a skill, patching an existing
+  `SKILL.md`, or writing/removing confined support files under `references/`,
+  `templates/`, or `scripts/`, while still requiring explicit acceptance and
+  avoiding arbitrary script execution.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

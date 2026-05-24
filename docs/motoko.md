@@ -529,6 +529,14 @@ handler names degrade to `prompt_only`, and unsupported effects are discarded.
 That keeps skill suggestions safe to inspect and accept without creating a
 backdoor for broad shell execution.
 
+Motoko also borrows Hermes Agent's useful `skill_manage` shape, but narrows it
+to a review-first internal action model. Pending suggestions may propose
+`create`, `patch`, `write_file`, or `remove_file` actions. Accepting a
+suggestion applies the action through Motoko's own validators, not through a
+general tool loop. Support files are confined to `references/`, `templates/`,
+and `scripts/` under the selected skill package; today scripts are inert text
+assets, not executable authority.
+
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the
 `builtin:org_temporal_latest_entries` handler. For matching queries, Motoko
@@ -538,10 +546,9 @@ newest dates actually present. The deterministic retrieval layer still owns
 source scoping, Org date parsing, and evidence extraction; the skill records
 why and when that handler should run.
 
-Motoko does not yet execute arbitrary skill scripts. Future support for
-`references/`, `templates/`, and `scripts/` should keep script execution
-constrained, stdlib-first, realm-local, timeout-bounded, and visible in
-`/sources`.
+Motoko does not execute arbitrary skill scripts. A future reviewed script runner
+would need to stay constrained, stdlib-first, realm-local, timeout-bounded, and
+visible in `/sources`.
 
 Skill schema changes include a deterministic upgrade path. Run
 `motoko skill upgrade` to rewrite learned `SKILL.md` files to the current
@@ -553,14 +560,17 @@ prompt skills and pre-retrieval handlers would be selected for a query without
 calling a model. This is the main debugging surface for the planner/handler
 boundary.
 
-After-answer maintenance may also suggest skill candidates when a conversation
+After-answer maintenance may also suggest skill actions when a conversation
 contains repeatable procedural knowledge: user corrections, workflow changes,
 non-trivial debugging paths, reusable techniques, or evidence that a loaded
 skill is stale. These suggestions are review-first. Motoko stores pending
 realm-local suggestions and prints a short note; she does not silently create,
-patch, or execute learned skills. You can also run a manual review on the
-current or selected conversation when you believe a reusable procedure just
-emerged. Review suggestions with:
+patch, or execute learned skills. The local review heuristic is whether a
+proposed action would save tokens, reduce errors, improve reliability, or
+encode project-specific craft; that wording is Motoko policy, not a claimed
+Hermes Agent quotation. You can also run a manual review on the current or
+selected conversation when you believe a reusable procedure just emerged.
+Review suggestions with:
 
 ```bash
 motoko skill review [CONVERSATION_ID]

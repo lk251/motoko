@@ -198,6 +198,11 @@ Current UI direction:
 - Skill planning should be inspectable without model calls. `/skill plan QUERY`
   should show prompt skill selection and deterministic handler activation
   before any future scripts or tools can affect behavior.
+- Skill-management actions should stay review-first and allowlisted. Motoko may
+  propose `create`, `patch`, and support-file updates, but accepting them must
+  flow through code-owned validators. Support files are confined to
+  `references/`, `templates/`, and `scripts/`; scripts are inert text until a
+  separate reviewed runner exists.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.
@@ -1183,8 +1188,8 @@ result still fits Motoko's account boundaries, stdlib-first bias, provenance
 requirements, and NixOS-owned service boundary.
 
 Initial Hermes Agent study on 2026-05-24 reviewed
-`github.com/NousResearch/hermes-agent` at commit `421ab81`. The main idea worth
-adapting now is a smaller, stricter procedural skill spine: user- or
+`github.com/NousResearch/hermes-agent` through commit `bc3f1f4`. The main idea
+worth adapting now is a smaller, stricter procedural skill spine: user- or
 agent-authored instructions stored as durable files, listed by metadata, loaded
 by progressive disclosure, and selected only when relevant. Motoko's version
 must stay realm-local, dependency-free, and inspectable. It should not import a
@@ -1212,17 +1217,19 @@ perform bounded, inspectable effects; `/sources` and diagnostics show what was
 activated.
 
 Motoko should also learn when a conversation contains skill-worthy procedural
-knowledge. Adapt Hermes' review signals in a Motoko-shaped way: user
-corrections, workflow changes, non-trivial debugging paths, repeatable
+knowledge. Adapt Hermes' prompt-driven review pattern in a Motoko-shaped way:
+user corrections, workflow changes, non-trivial debugging paths, repeatable
 techniques, and stale or incomplete loaded skills are signals for a possible
-skill update. The first implementation should be suggestion-only: background
-maintenance may propose a class-level skill candidate and store it as pending
-realm-local state, but Motoko must not silently create, patch, or execute skills
-without explicit user confirmation. The user can review pending suggestions and
-accept them into `SKILL.md` files when they want that procedure crystallized.
-The core review question is: "Did this task reveal a reusable procedure that
-would save tokens, reduce errors, improve reliability, or encode
-project-specific craft?"
+skill update. Hermes prefers updating loaded or umbrella skills before creating
+new ones, and can add support files via `skill_manage`. Motoko should follow
+that shape through a narrower internal action model: `create`, `patch`,
+`write_file`, and `remove_file` suggestions are pending realm-local proposals,
+not direct writes. Accepting a suggestion applies it through Motoko validators.
+Support files may live under `references/`, `templates/`, or `scripts/`, but
+scripts are stored text only until a separate reviewed runner exists. The local
+Motoko review heuristic is whether the action would save tokens, reduce errors,
+improve reliability, or encode project-specific craft; do not present that
+sentence as an upstream Hermes quote.
 
 ## NixOS-Facing Model Boundary
 

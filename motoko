@@ -209,10 +209,12 @@ from motoko_core.skills import (  # noqa: E402
     format_skills_list,
     list_skills as core_list_skills,
     load_skill as core_load_skill,
+    manage_skill as core_manage_skill,
     normalize_skill_effects,
     normalize_skill_handler,
     render_skills_with_sources as core_render_skills_with_sources,
     save_skill as core_save_skill,
+    normalize_skill_manage_action,
     skill_slug,
     upgrade_skill_files as core_upgrade_skill_files,
 )
@@ -465,7 +467,7 @@ MEMORY_DOSSIER_SCHEMA_VERSION = "memory-dossier-v1"
 PROFILE_DOSSIER_SCHEMA_VERSION = "profile-dossier-v1"
 CONVERSATION_SUMMARY_SCHEMA_VERSION = "conversation-summary-v1"
 MEMORY_PROPOSAL_SCHEMA_VERSION = "memory-proposal-v1"
-SKILL_SUGGESTION_SCHEMA_VERSION = "skill-suggestion-v1"
+SKILL_SUGGESTION_SCHEMA_VERSION = "skill-suggestion-v2"
 TITLE_SCHEMA_VERSION = "title-v1"
 MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
 MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
@@ -4329,6 +4331,10 @@ def skill_suggestion_id() -> str:
     return "skill-" + uuid.uuid4().hex[:10]
 
 
+def _skill_suggestion_text_field(row: dict, key: str, limit: int) -> str:
+    return str(row.get(key) or "").strip()[:limit]
+
+
 def normalize_skill_suggestion(row: dict) -> dict:
     row = dict(row or {})
     row.setdefault("schema", SKILL_SUGGESTION_SCHEMA_VERSION)
@@ -4336,9 +4342,20 @@ def normalize_skill_suggestion(row: dict) -> dict:
     row.setdefault("status", "pending")
     row.setdefault("created_at", now())
     row.setdefault("updated_at", row.get("created_at", now()))
+    try:
+        row["action"] = normalize_skill_manage_action(row.get("action") or row.get("skill_action") or "create")
+    except SystemExit:
+        row["action"] = "create"
+    if row.get("target") and not row.get("target_skill"):
+        row["target_skill"] = row.get("target")
+    if row.get("skill") and not row.get("target_skill"):
+        row["target_skill"] = row.get("skill")
     row["name"] = compact_text(str(row.get("name", "")).strip(), 64)
     row["slug"] = skill_slug(row.get("name", ""))
     row["description"] = compact_text(str(row.get("description", "")).strip(), 400)
+    row["target_skill"] = skill_slug(row.get("target_skill", "")) or (
+        row["slug"] if row["action"] != "create" else ""
+    )
     row["kind"] = str(row.get("kind") or DEFAULT_SKILL_KIND).strip() or DEFAULT_SKILL_KIND
     row["handler"] = normalize_skill_handler(row.get("handler"))
     row["allowed_effects"] = normalize_skill_effects(row.get("allowed_effects"), handler=row["handler"])[:8]
@@ -4352,6 +4369,11 @@ def normalize_skill_suggestion(row: dict) -> dict:
     row["signals"] = (signals if isinstance(signals, list) else [])[:8]
     row["reason"] = compact_text(str(row.get("reason", "")).strip(), 1000)
     row["body"] = str(row.get("body", "")).strip()[:SKILL_SUGGESTION_BODY_CHARS]
+    row["file_path"] = _skill_suggestion_text_field(row, "file_path", 240)
+    row["file_content"] = _skill_suggestion_text_field(row, "file_content", SKILL_SUGGESTION_BODY_CHARS)
+    row["old_string"] = _skill_suggestion_text_field(row, "old_string", SKILL_SUGGESTION_BODY_CHARS)
+    row["new_string"] = _skill_suggestion_text_field(row, "new_string", SKILL_SUGGESTION_BODY_CHARS)
+    row["replace_all"] = bool(row.get("replace_all"))
     row["security"] = str(row.get("security") or "prompt-only suggested skill; no script execution").strip()
     return row
 
@@ -4362,6 +4384,22 @@ def list_skill_suggestions(*, status: str | None = None) -> list[dict]:
         rows = [row for row in rows if row.get("status") == status]
     rows.sort(key=lambda row: row.get("created_at", ""), reverse=True)
     return rows
+
+
+def skill_suggestion_payload_ok(row: dict) -> bool:
+    row = normalize_skill_suggestion(row)
+    action = row.get("action", "create")
+    if not row.get("description"):
+        return False
+    if action == "create":
+        return bool(row.get("slug") and row.get("body"))
+    if action == "patch":
+        return bool(row.get("target_skill") and row.get("old_string") and row.get("new_string"))
+    if action == "write_file":
+        return bool(row.get("target_skill") and row.get("file_path") and row.get("file_content"))
+    if action == "remove_file":
+        return bool(row.get("target_skill") and row.get("file_path"))
+    return False
 
 
 def write_skill_suggestions(rows: list[dict]) -> None:
@@ -4392,9 +4430,12 @@ def format_skill_suggestion(selector: str) -> str:
     lines = [
         f"skill suggestion: {row.get('id', '')}",
         f"status: {row.get('status', '')}",
+        f"action: {row.get('action', '')}",
         f"name: {row.get('name', '')}",
         f"slug: {row.get('slug', '')}",
         f"description: {row.get('description', '')}",
+        f"target skill: {row.get('target_skill', '')}",
+        f"file path: {row.get('file_path', '')}",
         f"kind: {row.get('kind', '')}",
         f"handler: {row.get('handler', '')}",
         "allowed effects: " + ", ".join(row.get("allowed_effects", [])),
@@ -4422,6 +4463,21 @@ def format_skill_suggestion(selector: str) -> str:
         lines.append("")
         lines.append("Proposed skill body:")
         lines.append(row.get("body", ""))
+    if row.get("old_string") or row.get("new_string"):
+        lines.append("")
+        lines.append("Proposed patch:")
+        if row.get("file_path"):
+            lines.append(f"file: {row.get('file_path', '')}")
+        lines.append("old_string:")
+        lines.append(row.get("old_string", ""))
+        lines.append("new_string:")
+        lines.append(row.get("new_string", ""))
+        if row.get("replace_all"):
+            lines.append("replace_all: true")
+    if row.get("file_content"):
+        lines.append("")
+        lines.append("Proposed support file content:")
+        lines.append(row.get("file_content", ""))
     if row.get("status") == "pending":
         lines.append("")
         lines.append(f"accept: motoko skill accept {row.get('id', '')}")
@@ -4436,9 +4492,13 @@ def format_skill_suggestions(*, status: str | None = None) -> str:
     lines = [f"Skill suggestions: {len(rows)}"]
     for row in rows:
         lines.append(
-            f"- {row.get('id', '')}  {row.get('status', '')}  "
+            f"- {row.get('id', '')}  {row.get('status', '')}  {row.get('action', '')}  "
             f"{row.get('slug', '')}: {row.get('description', '')}"
         )
+        if row.get("target_skill"):
+            target = row.get("target_skill", "")
+            suffix = f" ({row.get('file_path', '')})" if row.get("file_path") else ""
+            lines.append(f"  target: {target}{suffix}")
         if row.get("reason"):
             lines.append(f"  reason: {row.get('reason', '')}")
         if row.get("signals"):
@@ -4451,16 +4511,43 @@ def format_skill_suggestions(*, status: str | None = None) -> str:
 
 
 def skill_suggestion_duplicate(candidate: dict, rows: list[dict]) -> bool:
+    candidate = normalize_skill_suggestion(candidate)
+    action = candidate.get("action", "create")
     slug = candidate.get("slug", "")
-    if not slug:
+    target = candidate.get("target_skill", "")
+    if action == "create" and not slug:
         return True
+    if action != "create" and not target:
+        return True
+    fingerprint_parts = [
+        action,
+        slug,
+        target,
+        candidate.get("file_path", ""),
+        hashlib.sha256(candidate.get("old_string", "").encode("utf-8")).hexdigest()[:12],
+        hashlib.sha256(candidate.get("new_string", "").encode("utf-8")).hexdigest()[:12],
+        hashlib.sha256(candidate.get("file_content", "").encode("utf-8")).hexdigest()[:12],
+    ]
+    fingerprint = "\0".join(fingerprint_parts)
     for row in rows:
         normalized = normalize_skill_suggestion(row)
-        if normalized.get("status") == "pending" and normalized.get("slug") == slug:
+        other = "\0".join(
+            [
+                normalized.get("action", "create"),
+                normalized.get("slug", ""),
+                normalized.get("target_skill", ""),
+                normalized.get("file_path", ""),
+                hashlib.sha256(normalized.get("old_string", "").encode("utf-8")).hexdigest()[:12],
+                hashlib.sha256(normalized.get("new_string", "").encode("utf-8")).hexdigest()[:12],
+                hashlib.sha256(normalized.get("file_content", "").encode("utf-8")).hexdigest()[:12],
+            ]
+        )
+        if normalized.get("status") == "pending" and other == fingerprint:
             return True
-    for row in list_skills():
-        if row.get("slug") == slug:
-            return True
+    if action == "create":
+        for row in list_skills():
+            if row.get("slug") == slug:
+                return True
     return False
 
 
@@ -4477,7 +4564,7 @@ def add_skill_suggestions(
     added = []
     for candidate in candidates[:AUTO_SKILL_MAX_PROPOSALS]:
         row = normalize_skill_suggestion(candidate)
-        if not row.get("slug") or not row.get("description") or not row.get("body"):
+        if not skill_suggestion_payload_ok(row):
             continue
         if skill_suggestion_duplicate(row, rows):
             continue
@@ -4496,8 +4583,11 @@ def add_skill_suggestions(
 
 def accept_skill_suggestion_text(selector: str) -> str:
     idx, row, rows = resolve_skill_suggestion(selector, pending_only=True)
-    skill = learn_skill(
-        row.get("name") or row.get("slug", ""),
+    result = core_manage_skill(
+        skills_dir(),
+        action=row.get("action", "create"),
+        name=row.get("name") or row.get("slug", ""),
+        target_skill=row.get("target_skill", ""),
         description=row.get("description", ""),
         body=row.get("body", ""),
         kind=row.get("kind", DEFAULT_SKILL_KIND),
@@ -4507,14 +4597,31 @@ def accept_skill_suggestion_text(selector: str) -> str:
         security=row.get("security", "prompt-only suggested skill; no script execution"),
         source="skill-suggestion",
         replace=False,
+        file_path=row.get("file_path", ""),
+        file_content=row.get("file_content", ""),
+        old_string=row.get("old_string", ""),
+        new_string=row.get("new_string", ""),
+        replace_all=row.get("replace_all", False),
+        writer=atomic_write,
     )
+    skill = result.get("skill", {})
     row["status"] = "accepted"
     row["accepted_at"] = now()
     row["updated_at"] = row["accepted_at"]
     row["accepted_skill"] = skill.get("slug", "")
+    row["accepted_action"] = result.get("action", row.get("action", ""))
+    row["accepted_path"] = result.get("path", "")
     rows[idx] = row
     write_skill_suggestions(rows)
-    return f"skill accepted: {skill.get('slug', '')}\npath: {skill.get('path', '')}"
+    lines = [
+        f"skill accepted: {skill.get('slug', '')}",
+        f"action: {result.get('action', row.get('action', ''))}",
+    ]
+    if result.get("path"):
+        lines.append(f"path: {result.get('path', '')}")
+    if result.get("message"):
+        lines.append(result.get("message", ""))
+    return "\n".join(lines)
 
 
 def reject_skill_suggestion_text(selector: str) -> str:
@@ -15655,15 +15762,27 @@ def parse_skill_suggestion_output(text: str) -> list[dict]:
     items = _coerce_skill_suggestion_items(data)
     suggestions = []
     for item in items:
+        action = item.get("action") or item.get("skill_action") or "create"
         name = item.get("name") or item.get("slug") or item.get("title") or ""
         body = item.get("body") or item.get("procedure") or item.get("skill_body") or ""
         description = item.get("description") or item.get("summary") or ""
-        if not name or not description or not body:
+        target_skill = item.get("target_skill") or item.get("target") or item.get("skill") or ""
+        if action != "create" and not name:
+            name = target_skill
+        if not description:
+            description = f"{action} skill proposal for {target_skill or name}".strip()
+        if action == "create" and (not name or not description or not body):
+            continue
+        if action == "patch" and not (target_skill or name):
+            continue
+        if action == "write_file" and not (target_skill or name):
             continue
         suggestions.append(
             normalize_skill_suggestion(
                 {
+                    "action": action,
                     "name": name,
+                    "target_skill": target_skill,
                     "description": description,
                     "body": body,
                     "kind": item.get("kind") or DEFAULT_SKILL_KIND,
@@ -15672,6 +15791,11 @@ def parse_skill_suggestion_output(text: str) -> list[dict]:
                     "triggers": item.get("triggers") or [],
                     "signals": item.get("signals") or [],
                     "reason": item.get("reason") or "",
+                    "file_path": item.get("file_path") or "",
+                    "file_content": item.get("file_content") or "",
+                    "old_string": item.get("old_string") or "",
+                    "new_string": item.get("new_string") or "",
+                    "replace_all": item.get("replace_all") or False,
                     "security": item.get("security") or "prompt-only suggested skill; no script execution",
                 }
             )
@@ -15688,14 +15812,25 @@ def propose_skill_suggestions(
 ) -> list[dict]:
     if not conv.get("messages"):
         return []
+    catalog_lines = []
+    for row in list_skills()[:40]:
+        triggers = ", ".join(row.get("triggers", [])[:4])
+        catalog_lines.append(
+            f"- {row.get('slug', '')}: {row.get('description', '')} "
+            f"[{row.get('kind', DEFAULT_SKILL_KIND)}; {row.get('handler', DEFAULT_SKILL_HANDLER)}]"
+            + (f" triggers={triggers}" if triggers else "")
+        )
+    catalog = "\n".join(catalog_lines) if catalog_lines else "(no learned skills yet)"
     prompt = textwrap.dedent(
         """
-        Review the conversation and decide whether it revealed a reusable
-        procedure that should become a Motoko skill.
+        Review the conversation and decide whether it revealed reusable
+        procedural knowledge that should become a Motoko skill_manage proposal.
+        You cannot mutate files directly. You may only propose review-first
+        skill_manage actions that a user may later accept.
 
-        Decision question:
-        Did this task reveal a reusable procedure that would save tokens,
-        reduce errors, improve reliability, or encode project-specific craft?
+        Motoko's local decision heuristic:
+        Would this skill action save tokens, reduce errors, improve
+        reliability, or encode project-specific craft for future sessions?
 
         Skill-worthy signals:
         - the user corrected workflow, sequence, style, or approach;
@@ -15703,6 +15838,17 @@ def propose_skill_suggestions(
           repeatable technique emerged;
         - a loaded/consulted skill was wrong, incomplete, or stale;
         - the learning is class-level and likely useful again.
+
+        Preference order:
+        1. Prefer action="patch" when an existing skill covers the class of
+           work. Patch SKILL.md with a small exact old_string/new_string.
+        2. Prefer action="write_file" under an existing umbrella when the
+           learning is useful as supporting material. file_path must start with
+           references/, templates/, or scripts/. Scripts are stored text only;
+           Motoko does not execute arbitrary skill scripts.
+        3. Use action="create" only when no existing skill fits. The skill name
+           must be class-level, not today's incident, commit id, branch name,
+           exact error string, or one-off project milestone.
 
         Do not propose a skill for one-off task progress, transient environment
         failures, missing packages, fresh install quirks, commit ids, exact
@@ -15715,6 +15861,8 @@ def propose_skill_suggestions(
           "suggestions": [
             {
               "name": "class-level-skill-name",
+              "target_skill": "existing-skill-name-for-patch-or-write-file",
+              "action": "create|patch|write_file",
               "description": "one short sentence",
               "kind": "workflow",
               "handler": "prompt_only",
@@ -15722,7 +15870,12 @@ def propose_skill_suggestions(
               "triggers": ["when to use it"],
               "signals": ["why it was suggested"],
               "reason": "why this will save tokens, reduce errors, improve reliability, or encode craft",
-              "body": "durable procedure for future Motoko sessions"
+              "body": "durable procedure for create actions",
+              "file_path": "references/example.md for write_file actions",
+              "file_content": "support file text for write_file actions",
+              "old_string": "exact text to replace for patch actions",
+              "new_string": "replacement text for patch actions",
+              "replace_all": false
             }
           ]
         }
@@ -15732,7 +15885,10 @@ def propose_skill_suggestions(
     reply = call_model(
         [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Conversation transcript:\n{transcript}"},
+            {
+                "role": "user",
+                "content": f"Existing skill catalog:\n{catalog}\n\nConversation transcript:\n{transcript}",
+            },
         ],
         temperature=0.1,
         stream=False,

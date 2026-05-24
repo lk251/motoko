@@ -20,15 +20,19 @@ from motoko_core.text import compact_text
 
 SKILL_SCHEMA = "motoko-skill-v2"
 LEGACY_SKILL_SCHEMA = "motoko-skill-v1"
+SKILL_MANAGE_SCHEMA = "motoko-skill-manage-v1"
+SKILL_MANAGE_ACTIONS = {"create", "patch", "write_file", "remove_file"}
 MAX_SKILL_NAME = 64
 MAX_SKILL_DESCRIPTION = 400
 MAX_SKILL_BODY = 12000
+MAX_SKILL_SUPPORT_FILE = 100000
 DEFAULT_SKILL_CONTEXT_LIMIT = 2
 DEFAULT_SKILL_CONTEXT_CHARS = 5000
 DEFAULT_SKILL_KIND = "workflow"
 DEFAULT_SKILL_HANDLER = PROMPT_ONLY_HANDLER
 DEFAULT_SKILL_EFFECTS = [PROMPT_CONTEXT_EFFECT]
 ORG_TEMPORAL_SKILL = "org-temporal-retrieval"
+ALLOWED_SKILL_SUPPORT_DIRS = {"references", "templates", "scripts"}
 
 BUILTIN_SKILLS = [
     {
@@ -313,6 +317,256 @@ def save_skill(
     )
     writer(path, text)
     return load_skill(root, name)
+
+
+def normalize_skill_manage_action(value: str | None) -> str:
+    action = str(value or "create").strip().lower().replace("-", "_")
+    if action not in SKILL_MANAGE_ACTIONS:
+        raise SystemExit(f"unsupported skill_manage action: {action or value}")
+    return action
+
+
+def _support_file_relpath(file_path: str) -> pathlib.PurePosixPath:
+    raw = str(file_path or "").strip().replace("\\", "/")
+    if not raw:
+        raise SystemExit("support file path is empty")
+    path = pathlib.PurePosixPath(raw)
+    parts = path.parts
+    if path.is_absolute() or not parts:
+        raise SystemExit("support file path must be relative")
+    if len(parts) < 2 or parts[0] not in ALLOWED_SKILL_SUPPORT_DIRS:
+        allowed = ", ".join(sorted(ALLOWED_SKILL_SUPPORT_DIRS))
+        raise SystemExit(f"support file path must start with one of: {allowed}")
+    if any(part in {"", ".", ".."} or part.startswith(".") for part in parts):
+        raise SystemExit("support file path must not contain traversal or hidden path components")
+    return path
+
+
+def _load_user_skill_for_manage(root: pathlib.Path, name: str) -> tuple[dict, pathlib.Path, pathlib.Path]:
+    row = load_skill(root, name)
+    if row.get("builtin"):
+        raise SystemExit(f"cannot modify built-in skill: {row.get('slug', name)}")
+    path_text = row.get("path", "")
+    if not path_text:
+        raise SystemExit(f"skill has no writable path: {name}")
+    path = pathlib.Path(path_text)
+    if path.name != "SKILL.md":
+        raise SystemExit(f"skill path is not a SKILL.md file: {path}")
+    skill_dir = path.parent.resolve(strict=False)
+    root_resolved = root.resolve(strict=False)
+    try:
+        skill_dir.relative_to(root_resolved)
+    except ValueError as exc:
+        raise SystemExit(f"skill path is outside the skill root: {path}") from exc
+    return row, path, skill_dir
+
+
+def _resolve_support_file(root: pathlib.Path, name: str, file_path: str) -> tuple[dict, pathlib.Path, str]:
+    row, _skill_path, skill_dir = _load_user_skill_for_manage(root, name)
+    rel = _support_file_relpath(file_path)
+    target = (skill_dir / pathlib.Path(*rel.parts)).resolve(strict=False)
+    try:
+        target.relative_to(skill_dir)
+    except ValueError as exc:
+        raise SystemExit("support file path escapes the skill directory") from exc
+    if target.exists() and target.is_symlink():
+        raise SystemExit("refusing to modify symlinked support file")
+    return row, target, rel.as_posix()
+
+
+def _update_skill_support_files(
+    root: pathlib.Path,
+    name: str,
+    *,
+    add: str | None = None,
+    remove: str | None = None,
+    writer,
+) -> dict:
+    row, path, _skill_dir = _load_user_skill_for_manage(root, name)
+    support_files = [item for item in row.get("support_files", []) if item]
+    if add and add not in support_files:
+        support_files.append(add)
+    if remove:
+        support_files = [item for item in support_files if item != remove]
+    text = format_skill_markdown(
+        name=row.get("name", ""),
+        description=row.get("description", ""),
+        body=row.get("body", ""),
+        kind=row.get("kind", DEFAULT_SKILL_KIND),
+        handler=row.get("handler", DEFAULT_SKILL_HANDLER),
+        allowed_effects=row.get("allowed_effects", list(DEFAULT_SKILL_EFFECTS)),
+        triggers=row.get("triggers", []),
+        support_files=support_files,
+        security=row.get("security", "prompt-only learned skill; no script execution"),
+        source=row.get("source", "manual"),
+        created_at=row.get("created_at", ""),
+        updated_at=_now(),
+    )
+    writer(path, text)
+    return load_skill(root, name)
+
+
+def write_skill_support_file(
+    root: pathlib.Path,
+    name: str,
+    *,
+    file_path: str,
+    file_content: str,
+    writer,
+) -> dict:
+    if "\x00" in str(file_content):
+        raise SystemExit("support file content must be text, not NUL-delimited data")
+    encoded_size = len(str(file_content).encode("utf-8"))
+    if encoded_size > MAX_SKILL_SUPPORT_FILE:
+        raise SystemExit(
+            f"support file is too large ({encoded_size} bytes, max {MAX_SKILL_SUPPORT_FILE})"
+        )
+    row, target, rel = _resolve_support_file(root, name, file_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.parent.chmod(0o700)
+    writer(target, str(file_content))
+    updated = _update_skill_support_files(root, row.get("name", name), add=rel, writer=writer)
+    return {
+        "schema": SKILL_MANAGE_SCHEMA,
+        "action": "write_file",
+        "skill": updated,
+        "path": str(target),
+        "support_file": rel,
+        "message": f"support file written: {rel}",
+    }
+
+
+def remove_skill_support_file(root: pathlib.Path, name: str, *, file_path: str, writer) -> dict:
+    row, target, rel = _resolve_support_file(root, name, file_path)
+    if not target.exists():
+        raise SystemExit(f"support file not found: {rel}")
+    if target.is_dir():
+        raise SystemExit(f"support file path is a directory: {rel}")
+    target.unlink()
+    updated = _update_skill_support_files(root, row.get("name", name), remove=rel, writer=writer)
+    return {
+        "schema": SKILL_MANAGE_SCHEMA,
+        "action": "remove_file",
+        "skill": updated,
+        "path": str(target),
+        "support_file": rel,
+        "message": f"support file removed: {rel}",
+    }
+
+
+def patch_skill_file(
+    root: pathlib.Path,
+    name: str,
+    *,
+    old_string: str,
+    new_string: str,
+    file_path: str = "SKILL.md",
+    replace_all: bool = False,
+    writer,
+) -> dict:
+    if not old_string:
+        raise SystemExit("patch old_string is empty")
+    if new_string is None:
+        raise SystemExit("patch new_string is required")
+    row, skill_path, _skill_dir = _load_user_skill_for_manage(root, name)
+    if not file_path or file_path == "SKILL.md":
+        target = skill_path
+        rel = "SKILL.md"
+    else:
+        _row, target, rel = _resolve_support_file(root, name, file_path)
+        if not target.exists():
+            raise SystemExit(f"support file not found: {rel}")
+    original = target.read_text(encoding="utf-8")
+    count = original.count(old_string)
+    if count == 0:
+        raise SystemExit("patch old_string was not found")
+    if count > 1 and not replace_all:
+        raise SystemExit("patch old_string matched more than once; set replace_all for intentional bulk replacement")
+    updated_text = original.replace(old_string, str(new_string), -1 if replace_all else 1)
+    if target == skill_path:
+        parsed = parse_skill_markdown(updated_text, path=skill_path)
+        if parsed.get("slug") != row.get("slug"):
+            raise SystemExit("patch cannot rename or retarget a skill")
+        if len(parsed.get("body", "")) > MAX_SKILL_BODY:
+            raise SystemExit(f"skill body is too large ({len(parsed.get('body', ''))} chars, max {MAX_SKILL_BODY})")
+    elif len(updated_text.encode("utf-8")) > MAX_SKILL_SUPPORT_FILE:
+        raise SystemExit(f"support file is too large after patch (max {MAX_SKILL_SUPPORT_FILE} bytes)")
+    writer(target, updated_text)
+    return {
+        "schema": SKILL_MANAGE_SCHEMA,
+        "action": "patch",
+        "skill": load_skill(root, name),
+        "path": str(target),
+        "support_file": rel,
+        "message": f"skill file patched: {rel}",
+    }
+
+
+def manage_skill(
+    root: pathlib.Path,
+    *,
+    action: str,
+    name: str = "",
+    target_skill: str = "",
+    description: str = "",
+    body: str = "",
+    kind: str = DEFAULT_SKILL_KIND,
+    handler: str = DEFAULT_SKILL_HANDLER,
+    allowed_effects: list[str] | None = None,
+    triggers: list[str] | None = None,
+    support_files: list[str] | None = None,
+    security: str = "prompt-only learned skill; no script execution",
+    source: str = "skill-manage",
+    replace: bool = False,
+    file_path: str = "",
+    file_content: str = "",
+    old_string: str = "",
+    new_string: str = "",
+    replace_all: bool = False,
+    writer,
+) -> dict:
+    action = normalize_skill_manage_action(action)
+    if action == "create":
+        skill = save_skill(
+            root,
+            name=name,
+            description=description,
+            body=body,
+            kind=kind,
+            handler=handler,
+            allowed_effects=allowed_effects,
+            triggers=triggers,
+            support_files=support_files,
+            security=security,
+            source=source,
+            replace=replace,
+            writer=writer,
+        )
+        return {
+            "schema": SKILL_MANAGE_SCHEMA,
+            "action": action,
+            "skill": skill,
+            "path": skill.get("path", ""),
+            "message": f"skill created: {skill.get('slug', '')}",
+        }
+    skill_name = target_skill or name
+    if not skill_name:
+        raise SystemExit(f"{action} requires target_skill")
+    if action == "write_file":
+        return write_skill_support_file(root, skill_name, file_path=file_path, file_content=file_content, writer=writer)
+    if action == "remove_file":
+        return remove_skill_support_file(root, skill_name, file_path=file_path, writer=writer)
+    if action == "patch":
+        return patch_skill_file(
+            root,
+            skill_name,
+            old_string=old_string,
+            new_string=new_string,
+            file_path=file_path or "SKILL.md",
+            replace_all=replace_all,
+            writer=writer,
+        )
+    raise SystemExit(f"unsupported skill_manage action: {action}")
 
 
 def upgrade_skill_files(root: pathlib.Path, *, writer) -> dict:
