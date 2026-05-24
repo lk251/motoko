@@ -578,6 +578,11 @@ proposed action would save tokens, reduce errors, improve reliability, or
 encode project-specific craft; that wording is Motoko policy, not a claimed
 Hermes Agent quotation. You can also run a manual review on the current or
 selected conversation when you believe a reusable procedure just emerged.
+The background reviewer normally runs on a bounded interval, but it can run
+earlier when recent turns explicitly mention reusable procedures or when the
+last answer used a skill that may need to be patched. In those cases the
+review prompt receives the recently loaded skill list and prefers patching that
+skill before creating a new one.
 Review suggestions with:
 
 ```bash

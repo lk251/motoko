@@ -14,6 +14,10 @@ not the easiest place to review what changed after a long work session.
   `motoko skill support NAME [FILE]` and `/skill support NAME [FILE]` list or
   show confined support files, and relevant support-file excerpts can now enter
   chat context as visible `skill-support` sources.
+- Made background skill review more Hermes-shaped without adding autonomous
+  tools: explicit reusable-procedure phrases can trigger early review, and
+  recently loaded skills are passed into the review prompt so suggestions
+  prefer patching the skill that was actually in use.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

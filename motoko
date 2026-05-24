@@ -585,6 +585,7 @@ BACKGROUND_INDEX_REPAIR_LIMIT = 2
 BACKGROUND_INDEX_CLEANUP_LIMIT = 1
 AUTO_SKILL_MIN_MESSAGES = 6
 AUTO_SKILL_INTERVAL_MESSAGES = 6
+AUTO_SKILL_LOADED_INTERVAL_MESSAGES = 4
 AUTO_SKILL_MAX_PROPOSALS = 2
 SKILL_SUGGESTION_BODY_CHARS = 3000
 ORG_TODO_KEYWORDS = {
@@ -4733,6 +4734,97 @@ def review_skill_suggestions_text(conv: dict, *, source: str = "manual-skill-rev
             lines.append(f"  reason: {row.get('reason', '')}")
         lines.append(f"  show: motoko skill suggestion {row.get('id', '')}")
     return "\n".join(lines)
+
+
+SKILL_REVIEW_SIGNAL_PATTERNS = [
+    "reusable procedure",
+    "reusable workflow",
+    "repeatable procedure",
+    "repeatable workflow",
+    "should become a skill",
+    "make this a skill",
+    "learn a skill",
+    "skill-worthy",
+    "next time",
+    "in future",
+    "from now on",
+    "always do",
+    "don't forget",
+    "do not forget",
+    "remember this procedure",
+    "encode this",
+    "crystallize",
+]
+
+
+def recent_skill_review_signal(conv: dict, *, max_messages: int = 8) -> str:
+    texts = []
+    for msg in conv.get("messages", [])[-max_messages:]:
+        if msg.get("role") not in {"user", "assistant"}:
+            continue
+        texts.append(str(msg.get("content", "")))
+    haystack = "\n".join(texts).lower()
+    for pattern in SKILL_REVIEW_SIGNAL_PATTERNS:
+        if pattern in haystack:
+            return pattern
+    return ""
+
+
+def last_loaded_skill_sources(conv: dict) -> list[dict]:
+    rows = []
+    seen = set()
+    for source in conv.get("last_sources", []) or []:
+        if source.get("kind") not in {"skill", "skill-support"}:
+            continue
+        name = source.get("name", "")
+        key = (source.get("kind", ""), name, source.get("support_file", ""))
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "kind": source.get("kind", ""),
+                "name": name,
+                "description": source.get("description", ""),
+                "handler": source.get("handler", ""),
+                "support_file": source.get("support_file", ""),
+                "matched_terms": source.get("matched_terms", [])[:8],
+                "score": source.get("score", 0),
+            }
+        )
+    return rows
+
+
+def format_loaded_skill_review_context(conv: dict) -> str:
+    rows = last_loaded_skill_sources(conv)
+    if not rows:
+        return "(none)"
+    lines = []
+    for row in rows[:8]:
+        support = f" support={row.get('support_file', '')}" if row.get("support_file") else ""
+        matched = ", ".join(row.get("matched_terms", [])[:6])
+        lines.append(
+            f"- {row.get('kind', '')}:{row.get('name', '')}{support} "
+            f"handler={row.get('handler', '')} score={row.get('score', 0)} "
+            f"matched={matched or '-'} description={row.get('description', '')}"
+        )
+    return "\n".join(lines)
+
+
+def skill_review_triggers(conv: dict, *, message_count: int | None = None, last_skill: int | None = None) -> list[str]:
+    message_count = len(conv.get("messages", [])) if message_count is None else int(message_count or 0)
+    last_skill = int(conv.get("last_auto_skill_message_count", 0) or 0) if last_skill is None else int(last_skill or 0)
+    if message_count <= last_skill:
+        return []
+    reasons = []
+    if message_count >= AUTO_SKILL_MIN_MESSAGES and message_count - last_skill >= AUTO_SKILL_INTERVAL_MESSAGES:
+        reasons.append("interval")
+    signal = recent_skill_review_signal(conv)
+    if signal and message_count >= 2:
+        reasons.append(f"explicit-signal:{signal}")
+    if last_loaded_skill_sources(conv) and message_count - last_skill >= AUTO_SKILL_LOADED_INTERVAL_MESSAGES:
+        reasons.append("loaded-skill")
+    return reasons
 
 
 def render_skills_with_sources(query: str) -> tuple[str, list[dict]]:
@@ -16038,6 +16130,7 @@ def propose_skill_suggestions(
     conv: dict,
     *,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    review_reasons: list[str] | None = None,
 ) -> list[dict]:
     if not conv.get("messages"):
         return []
@@ -16050,6 +16143,9 @@ def propose_skill_suggestions(
             + (f" triggers={triggers}" if triggers else "")
         )
     catalog = "\n".join(catalog_lines) if catalog_lines else "(no learned skills yet)"
+    loaded_skill_context = format_loaded_skill_review_context(conv)
+    review_reasons = review_reasons if review_reasons is not None else skill_review_triggers(conv)
+    review_reason_text = ", ".join(review_reasons) if review_reasons else "manual review"
     prompt = textwrap.dedent(
         """
         Review the conversation and decide whether it revealed reusable
@@ -16071,6 +16167,8 @@ def propose_skill_suggestions(
         Preference order:
         1. Prefer action="patch" when an existing skill covers the class of
            work. Patch SKILL.md with a small exact old_string/new_string.
+           If a recently loaded skill appears below and covers the learning,
+           patch that loaded skill first.
         2. Prefer action="write_file" under an existing umbrella when the
            learning is useful as supporting material. file_path must start with
            references/, templates/, or scripts/. Scripts are stored text only;
@@ -16116,7 +16214,12 @@ def propose_skill_suggestions(
             {"role": "system", "content": prompt},
             {
                 "role": "user",
-                "content": f"Existing skill catalog:\n{catalog}\n\nConversation transcript:\n{transcript}",
+                "content": (
+                    f"Review trigger(s): {review_reason_text}\n\n"
+                    f"Recently loaded/consulted skills:\n{loaded_skill_context}\n\n"
+                    f"Existing skill catalog:\n{catalog}\n\n"
+                    f"Conversation transcript:\n{transcript}"
+                ),
             },
         ],
         temperature=0.1,
@@ -16312,10 +16415,8 @@ def auto_maintain_conversation(
             notes.append(f"saved {saved} durable memor{'y' if saved == 1 else 'ies'}")
 
     last_skill = int(conv.get("last_auto_skill_message_count", 0) or 0)
-    if (
-        message_count >= AUTO_SKILL_MIN_MESSAGES
-        and message_count - last_skill >= AUTO_SKILL_INTERVAL_MESSAGES
-    ):
+    skill_reasons = skill_review_triggers(conv, message_count=message_count, last_skill=last_skill)
+    if skill_reasons:
         set_phase("skills: reviewing")
         suggestions = []
         try:
@@ -16325,6 +16426,7 @@ def auto_maintain_conversation(
                 propose_skill_suggestions,
                 conv,
                 timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+                review_reasons=skill_reasons,
             )
         except (Exception, SystemExit):
             suggestions = []

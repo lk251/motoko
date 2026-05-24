@@ -1231,7 +1231,11 @@ Support files may live under `references/`, `templates/`, or `scripts/`, but
 scripts are stored text only until a separate reviewed runner exists. Motoko
 should expose support files through explicit listing/view commands and include
 bounded matching support-file excerpts as `skill-support` sources when a
-selected skill needs them. The local Motoko review heuristic is whether the
+selected skill needs them. The background reviewer should not rely only on a
+fixed message interval: explicit recent phrases such as "reusable procedure" or
+"make this a skill" can trigger an early review, and recently loaded skills
+should be passed into the review prompt so Motoko prefers patching the skill
+that was actually in play. The local Motoko review heuristic is whether the
 action would save tokens, reduce errors, improve reliability, or encode
 project-specific craft; do not present that sentence as an upstream Hermes
 quote.

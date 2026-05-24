@@ -253,6 +253,84 @@ def test_auto_maintenance_suggests_skill_without_saving_it(m):
         assert "retrieval-failure-diagnosis" in m.format_skills()
 
 
+def test_auto_skill_review_runs_on_explicit_signal_before_interval(m):
+    with isolated_state():
+        conv = m.new_conversation("Early skill suggestion")
+        conv["id"] = "early-skill-suggestion"
+        conv["title_kind"] = "manual"
+        conv["title_generated"] = m.now()
+        conv["messages"] = [
+            {"role": "user", "content": "When retrieval fails, inspect sources first."},
+            {"role": "assistant", "content": "I will check sources first."},
+            {"role": "user", "content": "This should become a reusable procedure for Motoko."},
+            {"role": "assistant", "content": "I can review it as a skill suggestion."},
+        ]
+        conv["last_auto_memory_message_count"] = len(conv["messages"])
+        conv["last_auto_compact_message_count"] = len(conv["messages"])
+
+        calls = []
+        old_propose = m.propose_skill_suggestions
+        try:
+            def fake_propose(_conv, **kwargs):
+                calls.append(kwargs.get("review_reasons", []))
+                return [
+                    {
+                        "name": "source-first-retrieval-diagnosis",
+                        "description": "Diagnose retrieval failures by inspecting sources first.",
+                        "body": "Inspect sources before changing prompts or ranking.",
+                        "reason": "The user explicitly marked this as reusable.",
+                        "signals": ["explicit reusable procedure signal"],
+                    }
+                ]
+
+            m.propose_skill_suggestions = fake_propose
+            notes = m.auto_maintain_conversation(conv)
+        finally:
+            m.propose_skill_suggestions = old_propose
+
+        assert calls
+        assert any(str(reason).startswith("explicit-signal:") for reason in calls[0])
+        assert any("skill suggestion pending: source-first-retrieval-diagnosis" in note for note in notes)
+
+
+def test_skill_review_prompt_prioritizes_loaded_skill_context(m):
+    with isolated_state():
+        conv = m.new_conversation("Loaded skill review")
+        conv["id"] = "loaded-skill-review"
+        conv["messages"] = [
+            {"role": "user", "content": "Use the retrieval debugging workflow."},
+            {"role": "assistant", "content": "I used the existing workflow, but it needs a source audit step."},
+        ]
+        conv["last_sources"] = [
+            {
+                "kind": "skill",
+                "name": "retrieval-debugging",
+                "description": "Debug retrieval failures.",
+                "handler": "prompt_only",
+                "matched_terms": ["retrieval", "debugging"],
+                "score": 42,
+            }
+        ]
+        calls = []
+        old_call_model = m.call_model
+        try:
+            def fake_call_model(messages, **kwargs):
+                calls.append((messages, kwargs))
+                return "NO_SKILL"
+
+            m.call_model = fake_call_model
+            assert m.propose_skill_suggestions(conv, review_reasons=["loaded-skill"]) == []
+        finally:
+            m.call_model = old_call_model
+
+        assert calls
+        user_prompt = calls[0][0][-1]["content"]
+        assert "Review trigger(s): loaded-skill" in user_prompt
+        assert "Recently loaded/consulted skills:" in user_prompt
+        assert "skill:retrieval-debugging" in user_prompt
+        assert "patch that loaded skill first" in calls[0][0][0]["content"]
+
+
 def test_manual_skill_review_and_suggestion_detail(m):
     with isolated_state():
         conv = m.new_conversation("Manual skill review")
@@ -6401,6 +6479,8 @@ def main() -> int:
         test_skill_suggestion_parser_uses_local_review_signal,
         test_skill_registry_downgrades_unknown_handlers_and_effects,
         test_auto_maintenance_suggests_skill_without_saving_it,
+        test_auto_skill_review_runs_on_explicit_signal_before_interval,
+        test_skill_review_prompt_prioritizes_loaded_skill_context,
         test_manual_skill_review_and_suggestion_detail,
         test_skill_suggestion_accepts_patch_action,
         test_skill_manage_support_file_is_confined,
