@@ -204,8 +204,6 @@ from motoko_core.retrieval import (  # noqa: E402
     effective_evidence_span,
     fit_evidence_spans_to_budget,
     heading_section_spans,
-    hybrid_candidate_base_score,
-    hybrid_candidate_guard_bonus,
     make_evidence_span,
     mandatory_date_evidence_spans,
     model_span_rows_for_candidates as core_model_span_rows_for_candidates,
@@ -332,6 +330,7 @@ from motoko_core.model_manager import (  # noqa: E402
 from motoko_core.retrieval_service import (  # noqa: E402
     HybridRetrievalEnvironment,
     RetrievalService,
+    rerank_hybrid_candidates_with_environment,
 )
 from motoko_core.runtime import (  # noqa: E402
     RuntimePaths,
@@ -11119,47 +11118,7 @@ def add_structured_task_candidates(index: dict, query: str, candidates: dict[tup
 
 
 def rerank_hybrid_candidates(index: dict, query: str, candidates: dict[tuple[str, str], dict]) -> tuple[list[dict], dict]:
-    rows = list(candidates.values())
-    for row in rows:
-        row["hybrid_score"] = round(hybrid_candidate_base_score(row), 6)
-    rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_guard_bonus(row)), reverse=True)
-    report = {
-        "mode": "hybrid",
-        "candidate_count": len(rows),
-        "rerank": False,
-        "rerank_fallback": False,
-        "warnings": [],
-    }
-    if not rows or not env_flag("MOTOKO_VECTOR_RERANK", True):
-        return rows, report
-    if not local_model_routes_for_capability(kind="reranker", tasks=RERANKER_TASKS, endpoint_path="/v1/rerank"):
-        report["rerank_fallback"] = True
-        report["warnings"].append("hybrid rerank fallback: no configured /v1/rerank route")
-        return rows, report
-    rerank_rows = rows[: min(len(rows), RERANK_CANDIDATE_LIMIT)]
-    documents = [hybrid_candidate_document(index, row, query=query) for row in rerank_rows]
-    try:
-        scores, route_info = rerank_documents(query, documents)
-    except SystemExit as exc:
-        report["rerank_fallback"] = True
-        report["warnings"].append(f"hybrid rerank fallback: {str(exc).splitlines()[0][:220]}")
-        return rows, report
-    report["rerank"] = True
-    report["rerank_route"] = {
-        "catalog_route": route_info.get("catalog_route") or route_info.get("route", ""),
-        "model": route_info.get("model", ""),
-    }
-    for row, score in zip(rerank_rows, scores):
-        row["rerank_score"] = round(float(score), 6)
-        row["hybrid_score"] = round(
-            (hybrid_candidate_base_score(row) * 0.2)
-            + (float(score) * 1000)
-            + hybrid_candidate_guard_bonus(row),
-            6,
-        )
-    rerank_rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_base_score(row)), reverse=True)
-    rows = rerank_rows + rows[len(rerank_rows) :]
-    return rows, report
+    return rerank_hybrid_candidates_with_environment(index, query, candidates, hybrid_retrieval_environment())
 
 
 def hybrid_retrieval_environment() -> HybridRetrievalEnvironment:
@@ -11181,7 +11140,12 @@ def hybrid_retrieval_environment() -> HybridRetrievalEnvironment:
         vector_enabled=lambda: env_flag("MOTOKO_VECTOR_RETRIEVAL", True),
         latest_vector_store_for_index=latest_vector_store_for_index,
         query_vector_store_for_retrieval=query_vector_store_for_retrieval,
-        rerank_hybrid_candidates=rerank_hybrid_candidates,
+        hybrid_rerank_enabled=lambda: env_flag("MOTOKO_VECTOR_RERANK", True),
+        hybrid_rerank_available=lambda: bool(
+            local_model_routes_for_capability(kind="reranker", tasks=RERANKER_TASKS, endpoint_path="/v1/rerank")
+        ),
+        rerank_documents=rerank_documents,
+        hybrid_candidate_document=lambda index, candidate, query: hybrid_candidate_document(index, candidate, query=query),
         wants_deep_context=wants_deep_context,
         file_staleness=file_staleness,
         span_model_chunk_limit=span_model_chunk_limit,

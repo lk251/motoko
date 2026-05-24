@@ -7,6 +7,8 @@ from typing import Callable
 
 from motoko_core.retrieval import (
     add_hybrid_candidate,
+    hybrid_candidate_base_score,
+    hybrid_candidate_guard_bonus,
     org_dated_section_spans,
     query_date_mentions,
     query_path_match_boost,
@@ -46,7 +48,10 @@ class HybridRetrievalEnvironment:
     vector_enabled: Callable[[], bool]
     latest_vector_store_for_index: Callable[..., dict | None]
     query_vector_store_for_retrieval: Callable[..., dict]
-    rerank_hybrid_candidates: Callable[[dict, str, dict], tuple[list[dict], dict]]
+    hybrid_rerank_enabled: Callable[[], bool]
+    hybrid_rerank_available: Callable[[], bool]
+    rerank_documents: Callable[[str, list[str]], tuple[list[float], dict]]
+    hybrid_candidate_document: Callable[[dict, dict, str], str]
     wants_deep_context: Callable[[str], bool]
     file_staleness: Callable[[dict], tuple[str, list[str]]]
     span_model_chunk_limit: Callable[[], int]
@@ -56,6 +61,54 @@ class HybridRetrievalEnvironment:
     evidence_context_limit: int
     vector_query_limit: int
     embedding_vector_method: str
+
+
+def rerank_hybrid_candidates_with_environment(
+    index: dict,
+    query: str,
+    candidates: dict[tuple[str, str], dict],
+    env: HybridRetrievalEnvironment,
+) -> tuple[list[dict], dict]:
+    rows = list(candidates.values())
+    for row in rows:
+        row["hybrid_score"] = round(hybrid_candidate_base_score(row), 6)
+    rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_guard_bonus(row)), reverse=True)
+    report = {
+        "mode": "hybrid",
+        "candidate_count": len(rows),
+        "rerank": False,
+        "rerank_fallback": False,
+        "warnings": [],
+    }
+    if not rows or not env.hybrid_rerank_enabled():
+        return rows, report
+    if not env.hybrid_rerank_available():
+        report["rerank_fallback"] = True
+        report["warnings"].append("hybrid rerank fallback: no configured /v1/rerank route")
+        return rows, report
+    rerank_rows = rows[: min(len(rows), env.max_rerank_candidates)]
+    documents = [env.hybrid_candidate_document(index, row, query) for row in rerank_rows]
+    try:
+        scores, route_info = env.rerank_documents(query, documents)
+    except SystemExit as exc:
+        report["rerank_fallback"] = True
+        report["warnings"].append(f"hybrid rerank fallback: {str(exc).splitlines()[0][:220]}")
+        return rows, report
+    report["rerank"] = True
+    report["rerank_route"] = {
+        "catalog_route": route_info.get("catalog_route") or route_info.get("route", ""),
+        "model": route_info.get("model", ""),
+    }
+    for row, score in zip(rerank_rows, scores):
+        row["rerank_score"] = round(float(score), 6)
+        row["hybrid_score"] = round(
+            (hybrid_candidate_base_score(row) * 0.2)
+            + (float(score) * 1000)
+            + hybrid_candidate_guard_bonus(row),
+            6,
+        )
+    rerank_rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_base_score(row)), reverse=True)
+    return rerank_rows + rows[len(rerank_rows) :], report
 
 
 def _chunk_lookup(index: dict) -> dict[tuple[str, str], tuple[dict, dict]]:
@@ -222,7 +275,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             for key, value in candidates.items()
             if key in temporal_candidate_keys
         }
-    selected_candidates, hybrid_report = env.rerank_hybrid_candidates(index, query, rerank_candidates)
+    selected_candidates, hybrid_report = rerank_hybrid_candidates_with_environment(index, query, rerank_candidates, env)
     selected_chunks = [
         (
             candidate.get("hybrid_score", candidate.get("score", 0)),
