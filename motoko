@@ -14648,10 +14648,20 @@ def motoko_program_path() -> str:
     return sys.argv[0]
 
 
+def memory_proposal_helper_timeout(timeout: float) -> float:
+    try:
+        route_info = model_route(MODEL_ROUTE_MEMORY)
+        effective = model_request_timeout(route_info, timeout)
+    except Exception:
+        effective = timeout
+    return max(float(timeout) + 5, float(effective) + 15)
+
+
 def propose_memories_subprocess(conv: dict, *, timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS) -> list[str]:
     payload = json.dumps({"conversation": conv, "timeout": timeout}, ensure_ascii=False)
     env = dict(os.environ)
     env["MOTOKO_INTERNAL"] = "1"
+    wall_timeout = memory_proposal_helper_timeout(timeout)
     try:
         result = subprocess.run(
             [sys.executable, motoko_program_path(), "__internal-propose-memories"],
@@ -14660,12 +14670,12 @@ def propose_memories_subprocess(conv: dict, *, timeout: float = MAINTENANCE_MODE
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            timeout=timeout + 5,
+            timeout=wall_timeout,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError(
-            f"memory proposal timed out after {int(timeout)}s; helper process was terminated"
+            f"memory proposal helper timed out after {int(wall_timeout)}s; helper process was terminated"
         ) from exc
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
@@ -15202,7 +15212,8 @@ def format_about_header(width: int | None = None) -> list[str]:
     rows.append("")
     rows.extend(
         [
-            assistant_label("Motoko") + " - realm-local terminal assistant for local corpora, memory, and repo review.",
+            assistant_label("Motoko")
+            + " - privacy- and security-conscious terminal assistant for local corpora, memory, and repo review.",
             "values: intelligence, competence, craft",
             f"version: {APP_VERSION}",
         ]

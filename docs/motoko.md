@@ -111,8 +111,9 @@ motoko status
 
 and includes it in the system prompt and `/sources` provenance for each answer.
 `motoko about` is the compact introduction screen: Motoko's name, brief
-description, development values, version, the Mares ASCII logo in the assistant
-color, identity/realm, active chat model and endpoint, background lanes, state
+privacy/security-conscious description, development values, version, the Mares
+ASCII logo in the assistant color, identity/realm, active chat model and
+endpoint, background lanes, state
 paths, and permissions. The logo is rendered first and left-justified, with
 the Motoko/version/values text below it so narrow terminals do not interleave
 the text with the ASCII art. In the TUI, `/about` and other report-style commands
@@ -912,7 +913,9 @@ when the same conversation is opened again. The TUI also shows how long the
 current maintenance phase has been active. Automatic memory proposal work runs
 in a bounded helper process so a stuck local model request is terminated and
 reported as a maintenance failure instead of leaving `memory: proposing`
-visible forever.
+visible forever. For per-realm Unix-socket model routes, the helper wall
+timeout is aligned with socket-activation timeouts so model loading is not
+mistaken for a failed memory proposal.
 When Javier explicitly asks Motoko to remember something with natural wording
 such as `remember that ...`, Motoko saves that memory deterministically before
 answering instead of waiting for the model proposal pass.

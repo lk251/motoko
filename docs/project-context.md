@@ -160,8 +160,9 @@ Current UI direction:
 - User input prompt should be just `>`, not `You>`.
 - Titles, command text, and supporting UI can be turquoise.
 - Raw TTY usability matters as much as graphical terminals.
-- `/about` should render the Mares ASCII logo left-justified, with the Motoko
-  version/realm/values text below the logo rather than interleaved beside it.
+- `/about` should render the Mares ASCII logo left-justified, with a concise
+  privacy/security-conscious Motoko description, values, version, and runtime
+  details below the logo rather than interleaved beside it.
 - Startup should show a brief non-persistent `/tips` pointer block for now:
   `/sources` for grounding, `/feedback` for private eval signal,
   `/retrieval-debug` for failures, and evals as health checks after changes.

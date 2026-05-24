@@ -154,6 +154,18 @@ def test_memory_proposal_sends_transcript_not_assistant_prefill(m):
         assert kwargs["route"] == m.MODEL_ROUTE_MEMORY
 
 
+def test_memory_proposal_helper_timeout_respects_socket_activation(m):
+    with isolated_state():
+        old_model_route = m.model_route
+        try:
+            m.model_route = lambda _route: {"endpoint": "unix:///run/motoko-llm/personal/qwen35-2b-worker.sock"}
+            assert m.memory_proposal_helper_timeout(90) == m.SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS + 15
+            m.model_route = lambda _route: {"endpoint": "http://127.0.0.1:8083/v1/chat/completions"}
+            assert m.memory_proposal_helper_timeout(90) == 105
+        finally:
+            m.model_route = old_model_route
+
+
 def test_skill_suggestion_parser_uses_local_review_signal(m):
     with isolated_state():
         text = json.dumps(
@@ -845,6 +857,7 @@ def test_help_about_and_explicit_memory(m):
         assert "Evals are specialized health checks" in tips
         about = m.format_about()
         assert "Motoko" in about
+        assert "privacy- and security-conscious" in about
         assert "local corpora, memory, and repo review" in about
         assert "model badge:" in about
         assert "values: intelligence, competence, craft" in about
