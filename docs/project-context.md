@@ -373,6 +373,15 @@ Current sequencing notes:
   from `~/.config/motoko/local-models.json`, reports it in `/model-routes`,
   exposes content-free worker state through `/models`, and keeps prompts
   stable, explicit, and easy to cache.
+- Persistent slot/KV cache files are an attractive but deferred optimization,
+  not a correctness requirement. Before enabling them, write a reviewed design
+  that treats the cache as prompt-derived private state: realm-local paths
+  under the user's Motoko state or another reviewed user-private directory,
+  strict permissions, model/tokenizer/prompt-template/route/context-size
+  fingerprints, invalidation on model or prompt/schema changes, bounded garbage
+  collection, no cross-realm reuse, no admin-owned content logs, and tests that
+  stale or wrong-route caches cannot be reused. Motoko must continue to
+  reconstruct correct prompts from durable state when no KV cache is available.
 - Embedding and reranker routes are now expected to be discovered from
   NixOS-owned `~/.config/motoko/local-models.json` by `kind`, `tasks`,
   `endpoint_paths`, dimensions, and advertised parallelism. Motoko stores
@@ -1574,6 +1583,15 @@ maintenance, titles, skill review, profile/dossier work, indexing, embeddings,
 rerank work, and future worker lanes. Status may mention route names and unit
 state, but must not log prompts, responses, retrieved context, filenames,
 memories, summaries, corpora, or conversation text.
+
+The recent-chat grace window is a protection window for foreground chat, not an
+eviction timer. Motoko must not proactively stop a large chat route merely
+because grace expired. A large chat route should be released only when a
+competing same-realm route is about to start and needs the residency headroom,
+when a different selected chat profile needs to replace stale residency, or
+when the user explicitly requests model stop. Any independent idle-unload timer
+belongs to the NixOS service policy and should be tuned separately from
+Motoko's worker-deferral grace.
 
 If NixOS declares a non-chat route with an explicit `scheduling.exclusiveLane`
 or `selection.exclusiveLane`, Motoko should treat that as a real residency

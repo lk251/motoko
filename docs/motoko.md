@@ -554,6 +554,11 @@ window, while workers defer when a large chat route reports active requests or
 was just used. Before large foreground chat starts, Motoko also releases idle
 worker routes and idle peer chat profiles so stale residency does not block the
 selected chat model.
+The grace window is not an eviction timer. Motoko does not proactively stop a
+large chat route just because the grace window expired; it releases a route only
+while preparing another conflicting model route, or when the user explicitly
+requests a model stop. NixOS may still enforce its own service idle-unload
+policy independently.
 Deferred durable jobs are left retryable: memory proposals remain queued,
 partial indexes remain resumable, and vector refreshes keep progress for a
 later pass.
@@ -1133,6 +1138,10 @@ availability, and metrics endpoint. Motoko reads those fields as service-owned
 capabilities. She keeps prompts stable and explicit, but does not call `/slots`,
 does not persist KV cache files, and does not fake prompt/KV caching in user
 state.
+Persistent slot/KV cache files are deferred until a separate design review
+covers privacy, realm-local storage, permissions, route/model/prompt-template
+fingerprints, invalidation, garbage collection, and stale-cache tests. Motoko
+must remain correct when no server-side KV cache survives.
 
 When the NixOS catalog is keyed by worker service name instead of Motoko route
 name, Motoko resolves routes through each catalog entry's `tasks` list. For
