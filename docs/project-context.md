@@ -1178,7 +1178,10 @@ non-executable: no YAML dependency, no script execution, no arbitrary tool
 registry, no autonomous curator until the safety and evaluation design is
 reviewed. Skills may describe when to use an existing deterministic Motoko
 procedure, but they should not replace source-grounded retrieval, explicit
-allowlists, provenance, or evals.
+allowlists, provenance, or evals. The initial built-in skill is
+`org-temporal-retrieval`, which documents the source-scoped latest-dated-Org
+procedure while leaving the actual date/source selection in deterministic
+retrieval code.
 
 ## NixOS-Facing Model Boundary
 

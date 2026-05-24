@@ -502,13 +502,20 @@ motoko skill learn NAME --description "short description" --file SKILL.md --repl
 motoko skill delete NAME --yes
 ```
 
-Skills are realm-local procedural memories stored under Motoko state as
-`SKILL.md` files. They are for repeatable "how to approach this kind of task"
-guidance, not for executable tools or secrets. Motoko ranks skills against the
-current prompt, includes only relevant ones in chat context, and lists selected
-skills in `/sources`. This borrows the useful progressive-disclosure idea from
-Hermes Agent without importing a tool runtime, script execution, YAML
+Skills are procedural guidance for repeatable "how to approach this kind of
+task" situations, not executable tools or secrets. Repo-shipped built-in skills
+cover stable Motoko procedures, while learned user skills are stored under the
+current user's Motoko state as `SKILL.md` files. Motoko ranks skills against
+the current prompt, includes only relevant ones in chat context, and lists
+selected skills in `/sources`. This borrows the useful progressive-disclosure
+idea from Hermes Agent without importing a tool runtime, script execution, YAML
 dependency, or cross-realm skill store.
+
+The built-in `org-temporal-retrieval` skill documents how to handle queries
+such as "last three days present in logbook.org". It does not replace
+deterministic retrieval. The retrieval layer still owns source scoping, Org date
+parsing, and evidence extraction; the skill tells the assistant how to
+interpret and explain that class of query.
 
 Useful in-chat commands:
 

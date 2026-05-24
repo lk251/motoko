@@ -16,6 +16,35 @@ MAX_SKILL_BODY = 12000
 DEFAULT_SKILL_CONTEXT_LIMIT = 2
 DEFAULT_SKILL_CONTEXT_CHARS = 5000
 
+BUILTIN_SKILLS = [
+    {
+        "schema": SKILL_SCHEMA,
+        "name": "org-temporal-retrieval",
+        "slug": "org-temporal-retrieval",
+        "description": "Source-scoped retrieval for latest dated Org entries",
+        "created_at": "2026-05-24T00:00:00+00:00",
+        "updated_at": "2026-05-24T00:00:00+00:00",
+        "source": "builtin",
+        "builtin": True,
+        "path": "builtin:org-temporal-retrieval",
+        "body": "\n".join(
+            [
+                "When a query asks for the last/latest/recent N dated entries present in a named Org source,",
+                "treat that as a source-scoped temporal retrieval task.",
+                "",
+                "Procedure:",
+                "- Prefer the explicitly named file or path before broad corpus candidates.",
+                "- Parse dated Org headings from that source and choose the newest distinct dates actually present.",
+                "- Do not infer missing intervening calendar days; if May 23 and May 19 are the newest entries, those are the last two days present.",
+                "- Include bounded source excerpts for each selected date and preserve source provenance.",
+                "- In the final answer, state which dates were selected and avoid implying that absent dates were retrieved.",
+                "",
+                "This skill describes the workflow. The deterministic retrieval layer still owns source selection, date parsing, and evidence extraction.",
+            ]
+        ),
+    }
+]
+
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -126,14 +155,20 @@ def iter_skill_files(root: pathlib.Path) -> list[pathlib.Path]:
 
 
 def list_skills(root: pathlib.Path) -> list[dict]:
-    rows = []
+    rows = [dict(row) for row in BUILTIN_SKILLS]
+    by_slug = {row.get("slug", ""): idx for idx, row in enumerate(rows)}
     for path in iter_skill_files(root):
         try:
             row = parse_skill_markdown(path.read_text(encoding="utf-8"), path=path)
         except OSError:
             continue
         if row.get("name"):
-            rows.append(row)
+            slug = row.get("slug", "")
+            if slug in by_slug:
+                rows[by_slug[slug]] = row
+            else:
+                by_slug[slug] = len(rows)
+                rows.append(row)
     rows.sort(key=lambda row: row.get("slug", ""))
     return rows
 
@@ -159,6 +194,9 @@ def load_skill(root: pathlib.Path, name: str) -> dict:
             seen.add(resolved)
             unique.append(path)
     if not unique:
+        for row in BUILTIN_SKILLS:
+            if row.get("slug") == slug or str(row.get("name", "")).lower() == str(name).lower():
+                return dict(row)
         raise SystemExit(f"skill not found: {name}")
     if len(unique) > 1:
         raise SystemExit(f"ambiguous skill name: {name}")
@@ -177,7 +215,8 @@ def save_skill(
     writer,
 ) -> dict:
     path = skill_markdown_path(root, name)
-    if path.exists() and not replace:
+    builtin_conflict = any(row.get("slug") == skill_slug(name) for row in BUILTIN_SKILLS)
+    if (path.exists() or builtin_conflict) and not replace:
         raise SystemExit(f"skill already exists: {skill_slug(name)} (use --replace)")
     created_at = ""
     if path.exists():
@@ -201,6 +240,8 @@ def save_skill(
 
 def delete_skill(root: pathlib.Path, name: str) -> dict:
     row = load_skill(root, name)
+    if row.get("builtin"):
+        raise SystemExit(f"cannot delete built-in skill: {row.get('slug', name)}")
     path = pathlib.Path(row.get("path", ""))
     try:
         path.unlink()

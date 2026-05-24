@@ -5867,36 +5867,40 @@ def test_live_command_request_metadata(m):
 def test_procedural_skills_are_realm_local_and_retrievable(m):
     with isolated_state():
         text = m.learn_skill_text(
-            "org-temporal-retrieval",
-            description="Named Org temporal retrieval",
-            body=(
-                "When a query names logbook.org and asks for the latest days "
-                "present in that file, scope retrieval to the named source and "
-                "select the newest distinct dated Org sections present there."
-            ),
+            "racefocus-response-style",
+            description="RaceFocus planning responses",
+            body="When discussing RaceFocus, preserve the distinction between VR, 2D HUD, and OBS renderer contexts.",
         )
-        assert "org-temporal-retrieval" in text
-        assert "org-temporal-retrieval" in m.format_skills()
-        assert "newest distinct dated Org sections" in m.format_skill("org-temporal-retrieval")
+        assert "racefocus-response-style" in text
+        assert "racefocus-response-style" in m.format_skills()
+        assert "VR, 2D HUD, and OBS" in m.format_skill("racefocus-response-style")
+
+        rendered, sources = m.render_skills_with_sources("RaceFocus OBS renderer plan")
+        assert "Skill: racefocus-response-style" in rendered
+        assert sources and sources[0]["kind"] == "skill"
+        assert sources[0]["name"] == "racefocus-response-style"
+
+
+def test_builtin_source_scoped_temporal_skill_is_available(m):
+    with isolated_state():
+        listed = m.format_skills()
+        assert "org-temporal-retrieval" in listed
+        assert "Source-scoped retrieval" in listed
 
         rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
         assert "Skill: org-temporal-retrieval" in rendered
+        assert "newest distinct dates actually present" in rendered
         assert sources and sources[0]["kind"] == "skill"
-        assert sources[0]["name"] == "org-temporal-retrieval"
+        assert sources[0]["path"] == "builtin:org-temporal-retrieval"
 
 
 def test_procedural_skills_are_included_in_prompt_and_sources(m):
     with isolated_state():
-        m.learn_skill_text(
-            "org-temporal-retrieval",
-            description="Named Org temporal retrieval",
-            body="For logbook.org latest days questions, scope retrieval to the named Org file before choosing dated sections.",
-        )
         conv = m.new_conversation("Skill prompt")
         conv["id"] = "skill-prompt"
         prompt, sources = m.build_system_prompt_and_sources(conv, "latest days in logbook.org")
         assert "Relevant procedural skills:" in prompt
-        assert "For logbook.org latest days questions" in prompt
+        assert "source-scoped temporal retrieval task" in prompt
         assert any(source.get("kind") == "skill" for source in sources)
 
 
@@ -5929,7 +5933,7 @@ def test_procedural_skill_commands(m):
         assert deleted is not None
         _label, run = deleted
         assert "skill deleted" in run()
-        assert "No Motoko skills yet." in m.format_skills()
+        assert "org-temporal-retrieval" in m.format_skills()
 
 
 def main() -> int:
@@ -6040,6 +6044,7 @@ def main() -> int:
         test_color_survives_quiet_index_redirect,
         test_live_command_request_metadata,
         test_procedural_skills_are_realm_local_and_retrievable,
+        test_builtin_source_scoped_temporal_skill_is_available,
         test_procedural_skills_are_included_in_prompt_and_sources,
         test_procedural_skill_commands,
     ]

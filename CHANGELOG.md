@@ -9,6 +9,9 @@ not the easiest place to review what changed after a long work session.
   `/skills`, and `/skill show/learn/delete`. Skills are selected into chat
   context only when relevant and appear in `/sources`; they are non-executable
   `SKILL.md` guidance under the current user's Motoko state.
+- Added a built-in `org-temporal-retrieval` skill that describes source-scoped
+  latest-dated-Org handling while keeping date/source selection deterministic in
+  the retrieval layer.
 - Documented the source-scoped temporal retrieval failure and its deterministic
   solution as a future Hermes-style skill/tool candidate, while keeping Motoko's
   current adaptation dependency-free and non-agentic.

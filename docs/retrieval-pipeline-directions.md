@@ -168,6 +168,12 @@ should own source selection and date extraction; the skill should only describe
 when and why to use that procedure. That split keeps Motoko source-grounded and
 prevents prompt-only advice from becoming hidden retrieval policy.
 
+Motoko now ships this as the built-in `org-temporal-retrieval` procedural
+skill while keeping the deterministic source/date selector in the retrieval
+pipeline. That is the intended architecture for similar cases: skills preserve
+procedure and interpretation; parser/retrieval code enforces evidence
+selection.
+
 ## Evaluation Requirements
 
 Future retrieval work should be gated by inspectable evals that measure:
