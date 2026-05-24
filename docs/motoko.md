@@ -500,6 +500,11 @@ motoko skill show NAME
 motoko skill learn NAME --description "short description" --body "procedure to follow"
 motoko skill learn NAME --description "short description" --file SKILL.md --replace
 motoko skill delete NAME --yes
+motoko skill review [CONVERSATION_ID]
+motoko skill suggestions
+motoko skill suggestion SUGGESTION_ID
+motoko skill accept SUGGESTION_ID
+motoko skill reject SUGGESTION_ID
 ```
 
 Skills are durable procedural packages for repeatable "how to approach this
@@ -535,10 +540,14 @@ contains repeatable procedural knowledge: user corrections, workflow changes,
 non-trivial debugging paths, reusable techniques, or evidence that a loaded
 skill is stale. These suggestions are review-first. Motoko stores pending
 realm-local suggestions and prints a short note; she does not silently create,
-patch, or execute learned skills. Review them with:
+patch, or execute learned skills. You can also run a manual review on the
+current or selected conversation when you believe a reusable procedure just
+emerged. Review suggestions with:
 
 ```bash
+motoko skill review [CONVERSATION_ID]
 motoko skill suggestions
+motoko skill suggestion SUGGESTION_ID
 motoko skill accept SUGGESTION_ID
 motoko skill reject SUGGESTION_ID
 ```

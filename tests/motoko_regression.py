@@ -225,6 +225,57 @@ def test_auto_maintenance_suggests_skill_without_saving_it(m):
         assert "retrieval-failure-diagnosis" in m.format_skills()
 
 
+def test_manual_skill_review_and_suggestion_detail(m):
+    with isolated_state():
+        conv = m.new_conversation("Manual skill review")
+        conv["id"] = "manual-skill-review"
+        conv["messages"] = [
+            {"role": "user", "content": "When Motoko gives a weak answer, inspect /sources first."},
+            {"role": "assistant", "content": "I will inspect sources before changing prompts."},
+            {"role": "user", "content": "Then check recall, ranking, staleness, chunking, summaries, and prompt use."},
+            {"role": "assistant", "content": "That is a reusable diagnostic workflow."},
+        ]
+
+        old_propose = m.propose_skill_suggestions
+        try:
+            def fake_propose(_conv, **_kwargs):
+                return [
+                    {
+                        "name": "source-first-answer-diagnosis",
+                        "description": "Diagnose weak answers from sources before changing prompts.",
+                        "body": "Inspect sources, then check recall, ranking, stale data, chunking, summaries, and prompt use.",
+                        "reason": "This reduces errors and encodes project-specific craft.",
+                        "signals": ["user corrected workflow"],
+                        "triggers": ["answer is weak or unsupported"],
+                    }
+                ]
+
+            m.propose_skill_suggestions = fake_propose
+            request = m.shared_command_request("/skill review", conv)
+            assert request is not None
+            assert request.kind == m.COMMAND_KIND_MUTATION
+            assert request.mutates_state
+            _label, run = request
+            report = run()
+        finally:
+            m.propose_skill_suggestions = old_propose
+
+        assert "skill review: 1 pending suggestion" in report
+        suggestions = m.list_skill_suggestions(status="pending")
+        assert len(suggestions) == 1
+        suggestion_id = suggestions[0]["id"]
+
+        shown = m.shared_command_request(f"/skill suggestion {suggestion_id}", conv)
+        assert shown is not None
+        assert shown.kind == m.COMMAND_KIND_REPORT
+        _label, run = shown
+        detail = run()
+        assert "source-first-answer-diagnosis" in detail
+        assert "Proposed skill body:" in detail
+        assert "Inspect sources" in detail
+        assert "motoko skill accept" in detail
+
+
 def test_interrupted_maintenance_resume(m):
     with isolated_state():
         conv = m.new_conversation("Resume")
@@ -6075,6 +6126,7 @@ def main() -> int:
         test_memory_proposal_sends_transcript_not_assistant_prefill,
         test_skill_suggestion_parser_uses_hermes_style_signal,
         test_auto_maintenance_suggests_skill_without_saving_it,
+        test_manual_skill_review_and_suggestion_detail,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

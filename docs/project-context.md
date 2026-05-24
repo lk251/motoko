@@ -184,6 +184,10 @@ Current UI direction:
 - Query-focused memory dossiers should be available when Javier wants Motoko to
   study a subject across saved memories and prior conversations before
   continuing the chat.
+- Skill learning should stay review-first: after-answer maintenance may suggest
+  reusable procedures, and `/skill review` or `motoko skill review [ID]` may
+  run that review explicitly, but Motoko should not silently create, patch, or
+  execute learned skills.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.

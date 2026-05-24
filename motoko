@@ -4274,6 +4274,48 @@ def resolve_skill_suggestion(selector: str, *, pending_only: bool = False) -> tu
     return idx, row, rows
 
 
+def format_skill_suggestion(selector: str) -> str:
+    _idx, row, _rows = resolve_skill_suggestion(selector, pending_only=False)
+    lines = [
+        f"skill suggestion: {row.get('id', '')}",
+        f"status: {row.get('status', '')}",
+        f"name: {row.get('name', '')}",
+        f"slug: {row.get('slug', '')}",
+        f"description: {row.get('description', '')}",
+        f"kind: {row.get('kind', '')}",
+        f"handler: {row.get('handler', '')}",
+        "allowed effects: " + ", ".join(row.get("allowed_effects", [])),
+        f"security: {row.get('security', '')}",
+        f"source: {row.get('source', '')}",
+        f"conversation: {row.get('conversation_id', '')}",
+        f"created: {row.get('created_at', '')}",
+        f"updated: {row.get('updated_at', '')}",
+    ]
+    if row.get("accepted_skill"):
+        lines.append(f"accepted skill: {row.get('accepted_skill', '')}")
+    if row.get("triggers"):
+        lines.append("")
+        lines.append("Triggers:")
+        lines.extend(f"- {item}" for item in row.get("triggers", []))
+    if row.get("signals"):
+        lines.append("")
+        lines.append("Signals:")
+        lines.extend(f"- {item}" for item in row.get("signals", []))
+    if row.get("reason"):
+        lines.append("")
+        lines.append("Reason:")
+        lines.append(row.get("reason", ""))
+    if row.get("body"):
+        lines.append("")
+        lines.append("Proposed skill body:")
+        lines.append(row.get("body", ""))
+    if row.get("status") == "pending":
+        lines.append("")
+        lines.append(f"accept: motoko skill accept {row.get('id', '')}")
+        lines.append(f"reject: motoko skill reject {row.get('id', '')}")
+    return "\n".join(lines)
+
+
 def format_skill_suggestions(*, status: str | None = None) -> str:
     rows = list_skill_suggestions(status=status)
     if not rows:
@@ -4288,7 +4330,10 @@ def format_skill_suggestions(*, status: str | None = None) -> str:
             lines.append(f"  reason: {row.get('reason', '')}")
         if row.get("signals"):
             lines.append("  signals: " + ", ".join(row.get("signals", [])[:6]))
-        lines.append(f"  accept: motoko skill accept {row.get('id', '')}")
+        lines.append(f"  show: motoko skill suggestion {row.get('id', '')}")
+        if row.get("status") == "pending":
+            lines.append(f"  accept: motoko skill accept {row.get('id', '')}")
+            lines.append(f"  reject: motoko skill reject {row.get('id', '')}")
     return "\n".join(lines)
 
 
@@ -4306,7 +4351,12 @@ def skill_suggestion_duplicate(candidate: dict, rows: list[dict]) -> bool:
     return False
 
 
-def add_skill_suggestions(candidates: list[dict], *, conversation_id: str) -> list[dict]:
+def add_skill_suggestions(
+    candidates: list[dict],
+    *,
+    conversation_id: str,
+    source: str = "auto-skill-review",
+) -> list[dict]:
     if not candidates:
         return []
     state = read_skill_suggestion_state()
@@ -4323,7 +4373,7 @@ def add_skill_suggestions(candidates: list[dict], *, conversation_id: str) -> li
         row["created_at"] = now()
         row["updated_at"] = row["created_at"]
         row["conversation_id"] = conversation_id
-        row["source"] = "auto-skill-review"
+        row["source"] = source
         rows.append(row)
         added.append(row)
     if added:
@@ -4362,6 +4412,24 @@ def reject_skill_suggestion_text(selector: str) -> str:
     rows[idx] = row
     write_skill_suggestions(rows)
     return f"skill suggestion rejected: {row.get('id', '')}"
+
+
+def review_skill_suggestions_text(conv: dict, *, source: str = "manual-skill-review") -> str:
+    if not conv.get("messages"):
+        return "skill review: no conversation messages to review"
+    suggestions = propose_skill_suggestions(conv, timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS)
+    if not suggestions:
+        return "skill review: no reusable procedure found"
+    added = add_skill_suggestions(suggestions, conversation_id=conv.get("id", ""), source=source)
+    if not added:
+        return "skill review: no new suggestions; proposed skills were duplicates or already learned"
+    lines = [f"skill review: {len(added)} pending suggestion(s)"]
+    for row in added:
+        lines.append(f"- {row.get('id', '')}  {row.get('slug', '')}: {row.get('description', '')}")
+        if row.get("reason"):
+            lines.append(f"  reason: {row.get('reason', '')}")
+        lines.append(f"  show: motoko skill suggestion {row.get('id', '')}")
+    return "\n".join(lines)
 
 
 def render_skills_with_sources(query: str) -> tuple[str, list[dict]]:
@@ -12426,6 +12494,11 @@ HELP_SECTIONS = [
             ("/skill show NAME", "show a learned procedural skill"),
             ("/skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
             ("/skill delete NAME", "delete a learned procedural skill"),
+            ("/skill suggestions", "list pending skill suggestions"),
+            ("/skill suggestion ID", "show a pending skill suggestion"),
+            ("/skill review", "review this chat for reusable skill suggestions"),
+            ("/skill accept ID", "accept a pending skill suggestion"),
+            ("/skill reject ID", "reject a pending skill suggestion"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -12484,6 +12557,11 @@ HELP_SECTIONS = [
             ("motoko skill show NAME", "show a learned procedural skill"),
             ("motoko skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
             ("motoko skill delete NAME --yes", "delete a learned procedural skill"),
+            ("motoko skill suggestions", "show pending skill suggestions"),
+            ("motoko skill suggestion ID", "show a skill suggestion"),
+            ("motoko skill review [ID]", "review a conversation for reusable skill suggestions"),
+            ("motoko skill accept ID", "accept a pending skill suggestion"),
+            ("motoko skill reject ID", "reject a pending skill suggestion"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -12803,6 +12881,8 @@ def report_command_request(text: str, conv: dict):
         return primary, lambda: format_model_services(body or None)
     if primary == "/skill" and body in {"suggestions", "suggestions pending"}:
         return "/skill suggestions", lambda: format_skill_suggestions(status="pending")
+    if primary == "/skill" and body == "suggestions all":
+        return "/skill suggestions", lambda: format_skill_suggestions(status=None)
     if primary == "/retrieval-eval" and not body:
         return "/retrieval-eval", lambda: format_retrieval_eval_report(run_retrieval_eval())
     if primary == "/feedback-eval" and not body:
@@ -12988,6 +13068,8 @@ def memory_profile_report_command_request(text: str):
             return "/skill list", format_skills
         if subcommand in {"show", "view"} and subbody:
             return "/skill show", lambda: format_skill(subbody)
+        if subcommand in {"suggestion", "suggestion-show"} and subbody:
+            return "/skill suggestion", lambda: format_skill_suggestion(subbody)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -13055,6 +13137,8 @@ def skill_mutation_command_request(text: str, conv: dict):
         if not subbody:
             return "/skill reject", lambda: "usage: /skill reject SUGGESTION_ID"
         return "/skill reject", lambda: reject_skill_suggestion_text(subbody)
+    if subcommand == "review":
+        return "/skill review", lambda: review_skill_suggestions_text(conv)
     return None
 
 
@@ -16251,6 +16335,11 @@ def command_skill(args) -> None:
         print(delete_skill_text(args.name))
     elif args.skill_command == "suggestions":
         print_report(format_skill_suggestions(status="pending" if args.pending else None))
+    elif args.skill_command in {"suggestion", "suggestion-show"}:
+        print_report(format_skill_suggestion(args.id))
+    elif args.skill_command == "review":
+        conv = load_conversation(args.conversation)
+        print_report(review_skill_suggestions_text(conv))
     elif args.skill_command == "accept":
         print(accept_skill_suggestion_text(args.id))
     elif args.skill_command == "reject":
@@ -16777,6 +16866,12 @@ def main(argv: list[str]) -> int:
     skill_suggestions = skill_sub.add_parser("suggestions", help="show pending skill suggestions")
     skill_suggestions.add_argument("--all", dest="pending", action="store_false", help="show accepted/rejected too")
     skill_suggestions.set_defaults(func=command_skill, pending=True)
+    skill_suggestion = skill_sub.add_parser("suggestion", aliases=["suggestion-show"], help="show a skill suggestion")
+    skill_suggestion.add_argument("id")
+    skill_suggestion.set_defaults(func=command_skill)
+    skill_review = skill_sub.add_parser("review", help="review a conversation for reusable skill suggestions")
+    skill_review.add_argument("conversation", nargs="?", help="conversation selector; prompts if omitted in a TTY")
+    skill_review.set_defaults(func=command_skill)
     skill_accept = skill_sub.add_parser("accept", help="accept a pending skill suggestion")
     skill_accept.add_argument("id")
     skill_accept.set_defaults(func=command_skill)
