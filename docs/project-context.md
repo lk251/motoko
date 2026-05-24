@@ -146,6 +146,12 @@ Current UI direction:
   labels; the active answer status row uses `● Preparing (...)` or
   `● Answering (...)`, and completed answers leave a dim `Worked for ...`
   separator across the chat width.
+- Live reasoning/thinking text may be shown in the active answer row, but
+  readability controls should stay performance-first: no extra summarizer or
+  model pass, no stored chain-of-thought, and no throttling that slows the
+  socket read or model throughput. If slower or fuller display is added later,
+  make it a render-only, configurable TUI behavior with the default optimized
+  for latency.
 - The bottom status line should not duplicate chat activity from the in-chat
   active answer row. It should keep the conversation title, model identity, and
   background/maintenance status such as `bg: idle`, `bg-light`, or `bg-heavy`.
@@ -1166,6 +1172,12 @@ Completion criteria for this next stretch:
 
 Remaining follow-up items from this stretch:
 
+- Immediate implementation target: foreground action/tool interruption. `/stop`
+  and `Ctrl+C` should interrupt active script-tool, project-write, and
+  goal-run foreground work where possible, mark the action or goal ledger
+  `interrupted`, preserve completed checkpoints/results, and discard queued
+  prompts without corrupting derived artifacts. This should reuse the existing
+  content-free job supervisor rather than adding a second cancellation path.
 - Finish moving context/source construction out of the root facade where it
   still owns final prompt wording, non-index lane excerpt choices, and some
   `/sources` source-record assembly.
@@ -1181,6 +1193,12 @@ Remaining follow-up items from this stretch:
   vector, and dossier work. Foreground work is now tracked by the job
   supervisor, but long-running functions still need narrower pause/stop
   boundaries before cancellation can feel as responsive as chat answering.
+- Next stretch after the interruption target: build the Motoko-shaped skill
+  lifecycle layer. Track skill/tool usage counts and last-used timestamps, add
+  pin/archive/restore commands, keep curator suggestions report-first rather
+  than auto-applying changes, prefer patching loaded or umbrella skills before
+  creating new skills, and improve support-file consolidation without granting
+  broader execution authority.
 
 ## Roadmap Candidates
 
@@ -1407,22 +1425,31 @@ Relative priority for increasing Motoko's intelligence and competence:
 
 Immediate next agentic implementation sequence, when development resumes:
 
-1. Build script-assisted project mutation as structured proposal generation.
+1. Add foreground action/tool interruption. The first target is an interruptible
+   action runner for script tools, project-file writes, and explicit goal runs:
+   cooperative cancellation checks, durable `interrupted` ledger states, no
+   duplicated cancellation machinery, and action-eval coverage.
+2. Build script-assisted project mutation as structured proposal generation.
    Approved scripts may prepare `project_file_write` or patch-style action
    records, but Motoko's code-owned validator remains the only component that
    writes files. This should include previews, exact scope checks, no raw
    script writes, pause/checkpoint behavior, and action-eval coverage.
-2. Build read-only autonomous goal loops. The first model-planned loop should
+3. Build read-only autonomous goal loops. The first model-planned loop should
    plan, retrieve, inspect, audit, and propose typed actions inside a budget,
    then stop for user review. It should not mutate project files.
-3. Only after the first two are stable, build user-confirmed mutating goal
+4. Only after the first two are stable, build user-confirmed mutating goal
    loops that can apply already validated actions with explicit confirmation,
    durable checkpoints, visible progress, cancellation, and final audit.
-4. Keep Hermes-style skill improvement running as a parallel craft track:
+5. Keep Hermes-style skill improvement running as a parallel craft track:
    prompted self-review, loaded-skill patching, support-file use, and
    feedback-derived evals should steadily improve Motoko's procedural memory.
    This should keep Motoko's typed-action and approval boundary, not import a
    broad terminal/tool runtime.
+6. After the interruption target, make the next long stretch the skill
+   lifecycle layer: usage metadata, pin/archive/restore, review-first curator
+   reports, loaded-skill patch preference, umbrella-skill consolidation, and
+   support-file organization. This is the next craftsmanship pass for keeping
+   skills useful as Motoko learns from real use.
 
 ## NixOS-Facing Model Boundary
 

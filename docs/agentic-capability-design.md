@@ -825,6 +825,26 @@ Durable goal-run checkpoint, 2026-05-24:
   execution substrate for explicit action-list loops, preserving the reviewed
   validator, effect, budget, confirmation, and ledger boundaries.
 
+Next implementation target:
+
+- Foreground action/tool interruption. `/stop` and `Ctrl+C` should interrupt
+  active script-tool runs, project-file writes, and explicit goal runs where
+  possible, mark the action or goal ledger `interrupted`, preserve completed
+  checkpoints/results, and discard queued prompts without corrupting Motoko
+  state or derived artifacts. Use the content-free job supervisor and existing
+  action/goal ledgers; do not add a second cancellation framework.
+- Add action-eval coverage for interruption: running-to-interrupted state,
+  completed work not replayed on resume, queued prompt discard, and refusal to
+  mark a failed validation as interrupted.
+
+Next long stretch after interruption:
+
+- Build the Motoko-shaped skill lifecycle layer. Track usage counts,
+  last-used timestamps, pinned/archived/restored state, and curator suggestions
+  as report-first records. Prefer patching loaded or umbrella skills before
+  creating new skills, keep support-file consolidation inspectable, and avoid
+  widening script/tool authority while improving procedural memory quality.
+
 ## Goal Loops
 
 Goal loops should remain staged. The current enabled form is an explicit

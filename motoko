@@ -14917,9 +14917,12 @@ def format_about() -> str:
 def format_about_header(width: int | None = None) -> list[str]:
     width = width or shutil.get_terminal_size((100, 24)).columns
     logo = MARES_LOGO_ASCII.splitlines()
+    logo_width = max((display_width(line) for line in logo), default=0)
+    left_pad = " " * max(0, width - logo_width)
     rows = []
     for line in logo:
-        rows.append(" " * max(0, width - display_width(line)) + style(line, assistant_color(), "bold"))
+        row_pad = " " * max(0, logo_width - display_width(line))
+        rows.append(left_pad + style(line + row_pad, assistant_color(), "bold"))
     rows.append("")
     rows.extend(
         [

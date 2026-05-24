@@ -844,6 +844,9 @@ def test_help_about_and_explicit_memory(m):
         assert "values: intelligence, competence, craft" in about
         assert "$$$$$_" in about
         assert about.index("$$$$$_") < about.index("version:")
+        logo_rows = [m.strip_ansi(row) for row in m.format_about_header(width=90)[:6]]
+        logo_left_pads = [len(row) - len(row.lstrip(" ")) for row in logo_rows]
+        assert len(set(logo_left_pads)) == 1
         assert "Model routes:" not in about
         assert "assistant color:" not in about
         assert "spinner:" not in about
