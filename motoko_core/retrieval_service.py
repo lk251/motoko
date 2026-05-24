@@ -18,6 +18,7 @@ from motoko_core.retrieval import (
     repo_context_text_and_source,
     score_text,
     selected_evidence_excerpt,
+    selected_temporal_evidence_excerpt,
     token_counts,
     unavailable_context_source,
 )
@@ -173,6 +174,40 @@ def _temporal_evidence_rows(index: dict, query: str, env: HybridRetrievalEnviron
     return selected
 
 
+def _candidate_temporal_dates(candidate: dict) -> set[str]:
+    dates = set()
+    for row in candidate.get("evidence_rows", []) or []:
+        date = str(row.get("date", "")).strip()
+        if date:
+            dates.add(date)
+    return dates
+
+
+def _selected_candidates_with_required_temporal_dates(
+    candidates: list[dict],
+    *,
+    limit: int,
+    temporal_dates: list[str],
+) -> list[dict]:
+    selected = list(candidates[: max(0, int(limit or 0))])
+    if not temporal_dates:
+        return selected
+    selected_keys = {tuple(row.get("key", ())) for row in selected}
+    for date in temporal_dates:
+        if any(date in _candidate_temporal_dates(row) for row in selected):
+            continue
+        for row in candidates:
+            key = tuple(row.get("key", ()))
+            if key in selected_keys:
+                continue
+            if date not in _candidate_temporal_dates(row):
+                continue
+            selected.append(row)
+            selected_keys.add(key)
+            break
+    return selected
+
+
 def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironment) -> RetrievalServiceResult:
     """Run Motoko's hybrid document retrieval for one index.
 
@@ -282,6 +317,11 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             if key in temporal_candidate_keys
         }
     selected_candidates, hybrid_report = rerank_hybrid_candidates_with_environment(index, query, rerank_candidates, env)
+    selected_candidate_rows = _selected_candidates_with_required_temporal_dates(
+        selected_candidates,
+        limit=top_chunks,
+        temporal_dates=temporal_dates,
+    )
     selected_chunks = [
         (
             candidate.get("hybrid_score", candidate.get("score", 0)),
@@ -301,7 +341,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                 "structured_task": candidate.get("structured_task", ""),
             },
         )
-        for candidate in selected_candidates[:top_chunks]
+        for candidate in selected_candidate_rows
     ]
 
     parts = [
@@ -420,7 +460,14 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             evidence_rows = retrieval_details.get("evidence_rows", []) if isinstance(retrieval_details, dict) else []
             evidence_spans = []
             if evidence_rows:
-                excerpt, evidence_spans = selected_evidence_excerpt(evidence_rows, max_chars=remaining)
+                if "temporal" in retrieval_details.get("retrieval_methods", []):
+                    excerpt, evidence_spans = selected_temporal_evidence_excerpt(
+                        evidence_rows,
+                        max_chars=remaining,
+                        dates=temporal_dates,
+                    )
+                else:
+                    excerpt, evidence_spans = selected_evidence_excerpt(evidence_rows, max_chars=remaining)
                 excerpt_selection = {
                     "excerpt": excerpt,
                     "spans": evidence_spans,
@@ -598,7 +645,7 @@ class RetrievalService:
 
 def summarize_retrieval_sources(sources: list[dict], *, limit: int = 8) -> list[dict]:
     rows = []
-    for source in sources:
+    for order, source in enumerate(sources):
         if not isinstance(source, dict):
             continue
         kind = str(source.get("kind", ""))
@@ -629,7 +676,18 @@ def summarize_retrieval_sources(sources: list[dict], *, limit: int = 8) -> list[
         ):
             if source.get(key) not in (None, "", []):
                 row[key] = source.get(key)
+        row["_order"] = order
         rows.append(row)
-        if len(rows) >= limit:
-            break
-    return rows
+    priority = {
+        "index": 0,
+        "context-warning": 1,
+        "chunk": 2,
+        "file-summary": 3,
+    }
+    rows.sort(key=lambda row: (priority.get(str(row.get("kind", "")), 9), int(row.get("_order", 0))))
+    summarized = []
+    for row in rows[: max(0, int(limit or 0))]:
+        row = dict(row)
+        row.pop("_order", None)
+        summarized.append(row)
+    return summarized

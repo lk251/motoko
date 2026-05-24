@@ -1822,6 +1822,87 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert "selected newest dates present in source: 2026-05-19, 2026-05-18" in m.format_sources(sources)
 
 
+def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    old_max_retrieval_chars = m.MAX_RETRIEVAL_CHARS
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        m.MAX_RETRIEVAL_CHARS = 1200
+        with isolated_state() as tmp:
+            docs = tmp / "orgfiles"
+            docs.mkdir()
+            path = docs / "logbook.org"
+            older = (
+                "* [2026-05-18 Mon 11:14]\n"
+                "** log\n"
+                "May18 older action that should not be selected.\n"
+            )
+            second_latest = (
+                "* [2026-05-19 Tue 12:34]\n"
+                "** do\n"
+                "*** TODO May19 second-latest action\n"
+                "** log\n"
+                "The second latest dated entry is not the previous calendar day.\n"
+            )
+            latest = (
+                "* [2026-05-23 Sat 00:52]\n"
+                "** do\n"
+                "*** TODO May23 latest action\n"
+                "** log\n"
+                + ("Long May23 note that could crowd out the prior dated entry.\n" * 140)
+            )
+            content = older + "\n" + second_latest + "\n" + latest
+            path.write_text(content, encoding="utf-8")
+            index = {
+                "id": "nonconsecutive-logbook-index",
+                "name": "orgfiles",
+                "root": str(docs),
+                "created": "2026-05-24T00:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": "Daily logbook entries.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Logbook material with nonconsecutive latest dates.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                                "content_bytes": len(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            text, sources = m.retrieve_from_index(index, "summarize the last two days present in logbook.org")
+            assert "May23 latest action" in text
+            assert "May19 second-latest action" in text
+            assert "May18 older action" not in text
+            assert "2026-05-22" not in text
+            index_source = next(source for source in sources if source.get("kind") == "index")
+            assert index_source["temporal_selected_dates"] == ["2026-05-23", "2026-05-19"]
+            chunks = [source for source in sources if source.get("kind") == "chunk"]
+            assert chunks
+            assert chunks[0]["temporal_selected_dates"] == ["2026-05-23", "2026-05-19"]
+            production_sources = m.summarize_retrieval_sources(sources, limit=3)
+            assert production_sources[0]["kind"] == "index"
+            assert any(row["kind"] == "chunk" and row["path"].endswith("logbook.org") for row in production_sources)
+    finally:
+        m.MAX_RETRIEVAL_CHARS = old_max_retrieval_chars
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_live_index_retrieval_uses_service_boundary(m):
     with isolated_state() as tmp:
         docs = tmp / "orgfiles"
@@ -5736,6 +5817,7 @@ def main() -> int:
         test_named_file_query_boosts_matching_path,
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
+        test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates,
         test_live_index_retrieval_uses_service_boundary,
         test_render_context_with_sources_uses_live_retrieval_service,
         test_temporal_retrieval_finds_latest_org_dates_without_evidence_store,

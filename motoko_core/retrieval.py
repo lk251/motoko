@@ -1289,6 +1289,62 @@ def selected_evidence_excerpt(
     return excerpt[:max_chars].strip(), spans
 
 
+def selected_temporal_evidence_excerpt(
+    rows: list[dict],
+    *,
+    max_chars: int,
+    dates: list[str] | None = None,
+) -> tuple[str, list[dict]]:
+    date_order = [date for date in (dates or []) if date]
+    if not date_order:
+        date_order = sorted({str(row.get("date", "")) for row in rows if row.get("date")}, reverse=True)
+    selected = []
+    seen_keys = set()
+    for date in date_order:
+        dated_rows = [row for row in rows if str(row.get("date", "")) == date and str(row.get("text", "")).strip()]
+        dated_rows.sort(
+            key=lambda row: (
+                float(row.get("total", row.get("score", 0)) or 0),
+                len(str(row.get("text", "")).strip()),
+            ),
+            reverse=True,
+        )
+        for row in dated_rows:
+            key = (row.get("id"), row.get("start"), row.get("end"))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            selected.append(dict(row))
+            break
+    if not selected:
+        return selected_evidence_excerpt(rows, max_chars=max_chars)
+    max_chars = max(1, int(max_chars or 1))
+    separator_chars = 2 * max(0, len(selected) - 1)
+    total_chars = separator_chars + sum(len(str(row.get("text", "")).strip()) for row in selected)
+    if total_chars > max_chars:
+        available_chars = max(1, max_chars - separator_chars)
+        per_row = max(1, available_chars // max(1, len(selected)))
+        if available_chars >= 240 * len(selected):
+            per_row = max(240, per_row)
+        for row in selected:
+            row["text"] = compact_source_text_middle(str(row.get("text", "")).strip(), per_row)
+    excerpt = "\n\n".join(str(row.get("text", "")).strip() for row in selected if row.get("text"))
+    spans = [
+        {
+            "kind": row.get("kind", "evidence"),
+            "label": row.get("title") or row.get("date") or row.get("id", ""),
+            "start": row.get("start"),
+            "end": row.get("end"),
+            "evidence_id": row.get("id"),
+            "date": row.get("date", ""),
+            "todo": row.get("todo", ""),
+            "priority": row.get("priority", ""),
+        }
+        for row in selected
+    ]
+    return excerpt[:max_chars].strip(), spans
+
+
 def diagnose_retrieval_debug(index_report: dict, query: str) -> list[str]:
     notes = []
     chunks = index_report.get("chunks", [])
