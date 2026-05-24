@@ -64,6 +64,21 @@ def format_sources(sources: list[dict]) -> str:
                 )
             if source.get("path"):
                 lines.append(f"     path: {source.get('path', '')}")
+        elif kind == "skill-support":
+            matched = ", ".join(source.get("matched_terms", [])[:8]) or "-"
+            lines.append(
+                f"{idx:3d}  skill support  {source.get('name', '')}  "
+                f"{source.get('support_file', '')}  score {source.get('score', 0)}"
+            )
+            lines.append(f"     why: relevant support file for a learned procedure; matched {matched}")
+            if source.get("handler"):
+                effects = ", ".join(source.get("allowed_effects", [])[:6]) or "-"
+                lines.append(
+                    f"     handler: {source.get('handler', '')}  "
+                    f"kind: {source.get('skill_kind', '')}  effects: {effects}"
+                )
+            if source.get("path"):
+                lines.append(f"     path: {source.get('path', '')}")
         elif kind == "retrieval-plan":
             lines.append(
                 f"{idx:3d}  retrieval plan  {source.get('schema', '')}  "

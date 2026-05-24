@@ -10,6 +10,10 @@ not the easiest place to review what changed after a long work session.
   `SKILL.md`, or writing/removing confined support files under `references/`,
   `templates/`, or `scripts/`, while still requiring explicit acceptance and
   avoiding arbitrary script execution.
+- Added first-class skill support-file inspection and progressive disclosure.
+  `motoko skill support NAME [FILE]` and `/skill support NAME [FILE]` list or
+  show confined support files, and relevant support-file excerpts can now enter
+  chat context as visible `skill-support` sources.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

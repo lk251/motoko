@@ -500,6 +500,10 @@ motoko skills
 motoko skill show NAME
 motoko skill learn NAME --description "short description" --body "procedure to follow"
 motoko skill learn NAME --description "short description" --file SKILL.md --replace
+motoko skill support NAME [references/file.md]
+motoko skill patch NAME --old "old text" --new "new text"
+motoko skill write-file NAME references/file.md --content "supporting detail"
+motoko skill remove-file NAME references/file.md --yes
 motoko skill delete NAME --yes
 motoko skill plan "query"
 motoko skill review [CONVERSATION_ID]
@@ -535,7 +539,11 @@ to a review-first internal action model. Pending suggestions may propose
 suggestion applies the action through Motoko's own validators, not through a
 general tool loop. Support files are confined to `references/`, `templates/`,
 and `scripts/` under the selected skill package; today scripts are inert text
-assets, not executable authority.
+assets, not executable authority. `motoko skill support NAME` lists support
+files, and `motoko skill support NAME references/file.md` shows one file.
+When a relevant skill is selected for a prompt, Motoko may include a bounded
+matching support-file excerpt as additional procedural context and record it in
+`/sources` as `skill-support`.
 
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the
@@ -651,6 +659,10 @@ Useful in-chat commands:
 /skills
 /skill show NAME
 /skill learn NAME --description DESC --body TEXT
+/skill support NAME [references/file.md]
+/skill patch NAME --old OLD --new NEW [--file SKILL.md|references/file.md]
+/skill write-file NAME references/file.md --content TEXT
+/skill remove-file NAME references/file.md --yes
 /skill delete NAME
 /forget ID
 /memorize

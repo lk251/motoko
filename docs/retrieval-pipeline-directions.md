@@ -182,10 +182,12 @@ perform bounded inspectable work.
 Motoko now has an internal review-first `skill_manage` action layer for
 `create`, `patch`, `write_file`, and `remove_file` suggestions. Support files
 are useful for preserving references, templates, and script-like deterministic
-procedures under an existing skill package, but they remain stored text assets
-unless a later reviewed runner gives them bounded execution authority. Scripts
-must not become broad shell execution, cross-realm access, or a way around
-document allowlists.
+procedures under an existing skill package. They are inspectable with
+`motoko skill support`, and bounded matching excerpts may be selected as
+`skill-support` sources when the parent skill is relevant. They remain stored
+text assets unless a later reviewed runner gives them bounded execution
+authority. Scripts must not become broad shell execution, cross-realm access,
+or a way around document allowlists.
 
 ## Evaluation Requirements
 

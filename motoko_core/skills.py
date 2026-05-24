@@ -374,6 +374,71 @@ def _resolve_support_file(root: pathlib.Path, name: str, file_path: str) -> tupl
     return row, target, rel.as_posix()
 
 
+def list_skill_support_files(root: pathlib.Path, name: str) -> list[dict]:
+    row = load_skill(root, name)
+    if row.get("builtin"):
+        return []
+    rows = []
+    for item in row.get("support_files", []) or []:
+        try:
+            _skill, path, rel = _resolve_support_file(root, row.get("name", name), item)
+            exists = path.exists() and path.is_file() and not path.is_symlink()
+            rows.append(
+                {
+                    "skill": row.get("slug", ""),
+                    "path": str(path),
+                    "support_file": rel,
+                    "exists": exists,
+                    "size_bytes": path.stat().st_size if exists else 0,
+                    "updated_at": _dt.datetime.fromtimestamp(
+                        path.stat().st_mtime,
+                        _dt.timezone.utc,
+                    ).astimezone().isoformat(timespec="seconds") if exists else "",
+                }
+            )
+        except (OSError, SystemExit) as exc:
+            rows.append(
+                {
+                    "skill": row.get("slug", ""),
+                    "path": "",
+                    "support_file": str(item),
+                    "exists": False,
+                    "size_bytes": 0,
+                    "updated_at": "",
+                    "error": str(exc),
+                }
+            )
+    return rows
+
+
+def read_skill_support_file(
+    root: pathlib.Path,
+    name: str,
+    file_path: str,
+    *,
+    max_chars: int = MAX_SKILL_SUPPORT_FILE,
+) -> dict:
+    row, path, rel = _resolve_support_file(root, name, file_path)
+    if not path.exists() or not path.is_file():
+        raise SystemExit(f"support file not found: {rel}")
+    if path.is_symlink():
+        raise SystemExit(f"refusing to read symlinked support file: {rel}")
+    text = path.read_text(encoding="utf-8")
+    truncated = len(text) > max_chars
+    return {
+        "skill": row.get("slug", ""),
+        "path": str(path),
+        "support_file": rel,
+        "content": text[:max_chars],
+        "truncated": truncated,
+        "size_bytes": path.stat().st_size,
+        "updated_at": _dt.datetime.fromtimestamp(
+            path.stat().st_mtime,
+            _dt.timezone.utc,
+        ).astimezone().isoformat(timespec="seconds"),
+    }
+
+
 def _update_skill_support_files(
     root: pathlib.Path,
     name: str,
@@ -669,6 +734,32 @@ def render_skills_with_sources(
             continue
         parts.append(header + excerpt)
         used += len(header) + len(excerpt) + 2
+        support_sources = []
+        for support in rank_skill_support_files(root, row, query, limit=2):
+            support_header = f"\nSupport file: {support.get('support_file', '')}\n"
+            remaining = max_chars - used - len(support_header)
+            if remaining <= 0:
+                break
+            support_excerpt = support.get("content", "")[:remaining].strip()
+            if not support_excerpt:
+                continue
+            parts.append(support_header.strip() + "\n" + support_excerpt)
+            used += len(support_header) + len(support_excerpt) + 2
+            support_sources.append(
+                {
+                    "kind": "skill-support",
+                    "name": row.get("name", ""),
+                    "description": row.get("description", ""),
+                    "skill_kind": row.get("kind", DEFAULT_SKILL_KIND),
+                    "handler": row.get("handler", DEFAULT_SKILL_HANDLER),
+                    "allowed_effects": row.get("allowed_effects", [])[:8],
+                    "path": support.get("path", ""),
+                    "support_file": support.get("support_file", ""),
+                    "score": support.get("score", 0),
+                    "matched_terms": support.get("matched_terms", [])[:12],
+                    "updated_at": support.get("updated_at", ""),
+                }
+            )
         sources.append(
             {
                 "kind": "skill",
@@ -683,7 +774,41 @@ def render_skills_with_sources(
                 "updated_at": row.get("updated_at", ""),
             }
         )
+        sources.extend(support_sources)
     return "\n\n".join(parts), sources
+
+
+def rank_skill_support_files(root: pathlib.Path, skill: dict, query: str, *, limit: int = 2) -> list[dict]:
+    query_terms = skill_tokens(query)
+    if not query_terms or skill.get("builtin"):
+        return []
+    ranked = []
+    for support in list_skill_support_files(root, skill.get("name") or skill.get("slug", "")):
+        if not support.get("exists"):
+            continue
+        try:
+            row = read_skill_support_file(
+                root,
+                skill.get("name") or skill.get("slug", ""),
+                support.get("support_file", ""),
+                max_chars=8000,
+            )
+        except (OSError, SystemExit):
+            continue
+        normalized_path = row.get("support_file", "").replace("/", " ").replace(".", " ").replace("-", " ")
+        haystack = "\n".join([row.get("support_file", ""), normalized_path, row.get("content", "")])
+        terms = skill_tokens(haystack)
+        overlap = query_terms & terms
+        if not overlap:
+            continue
+        item = dict(row)
+        item["score"] = len(overlap) * 10
+        if any(term in skill_tokens(row.get("support_file", "")) for term in query_terms):
+            item["score"] += 20
+        item["matched_terms"] = sorted(overlap)
+        ranked.append(item)
+    ranked.sort(key=lambda row: (row.get("score", 0), row.get("updated_at", "")), reverse=True)
+    return ranked[: max(0, int(limit or 0))]
 
 
 def format_skills_list(rows: list[dict]) -> str:

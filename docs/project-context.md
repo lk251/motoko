@@ -202,7 +202,9 @@ Current UI direction:
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to
   `references/`, `templates/`, and `scripts/`; scripts are inert text until a
-  separate reviewed runner exists.
+  separate reviewed runner exists. Support files should be inspectable with
+  explicit commands and loaded into chat only by bounded progressive disclosure
+  when they match the current prompt.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.
@@ -1226,10 +1228,13 @@ that shape through a narrower internal action model: `create`, `patch`,
 `write_file`, and `remove_file` suggestions are pending realm-local proposals,
 not direct writes. Accepting a suggestion applies it through Motoko validators.
 Support files may live under `references/`, `templates/`, or `scripts/`, but
-scripts are stored text only until a separate reviewed runner exists. The local
-Motoko review heuristic is whether the action would save tokens, reduce errors,
-improve reliability, or encode project-specific craft; do not present that
-sentence as an upstream Hermes quote.
+scripts are stored text only until a separate reviewed runner exists. Motoko
+should expose support files through explicit listing/view commands and include
+bounded matching support-file excerpts as `skill-support` sources when a
+selected skill needs them. The local Motoko review heuristic is whether the
+action would save tokens, reduce errors, improve reliability, or encode
+project-specific craft; do not present that sentence as an upstream Hermes
+quote.
 
 ## NixOS-Facing Model Boundary
 

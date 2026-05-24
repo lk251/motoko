@@ -207,11 +207,13 @@ from motoko_core.skills import (  # noqa: E402
     delete_skill as core_delete_skill,
     format_skill as core_format_skill,
     format_skills_list,
+    list_skill_support_files as core_list_skill_support_files,
     list_skills as core_list_skills,
     load_skill as core_load_skill,
     manage_skill as core_manage_skill,
     normalize_skill_effects,
     normalize_skill_handler,
+    read_skill_support_file as core_read_skill_support_file,
     render_skills_with_sources as core_render_skills_with_sources,
     save_skill as core_save_skill,
     normalize_skill_manage_action,
@@ -798,6 +800,10 @@ SLASH_COMMANDS = [
     ("/skills", "list learned procedural skills"),
     ("/skill show NAME", "show a learned procedural skill"),
     ("/skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+    ("/skill support NAME [FILE]", "list or show confined skill support files"),
+    ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
+    ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
+    ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
     ("/skill suggestions", "show pending skill suggestions"),
     ("/skill accept ID", "accept a pending skill suggestion"),
     ("/skill reject ID", "reject a pending skill suggestion"),
@@ -4231,6 +4237,42 @@ def format_skill(name: str) -> str:
     return core_format_skill(core_load_skill(skills_dir(), name))
 
 
+def format_skill_supports(name: str) -> str:
+    row = core_load_skill(skills_dir(), name)
+    rows = core_list_skill_support_files(skills_dir(), name)
+    if row.get("builtin"):
+        return f"skill support files: {row.get('slug', name)}\nnone (built-in skill)"
+    if not rows:
+        return f"skill support files: {row.get('slug', name)}\nnone"
+    lines = [f"skill support files: {row.get('slug', name)}"]
+    for item in rows:
+        status = "present" if item.get("exists") else "missing"
+        lines.append(
+            f"- {item.get('support_file', '')}  {status}  "
+            f"{human_bytes(int(item.get('size_bytes', 0) or 0))}  {item.get('updated_at', '')}"
+        )
+        if item.get("error"):
+            lines.append(f"  error: {item.get('error', '')}")
+    return "\n".join(lines)
+
+
+def format_skill_support_file(name: str, file_path: str) -> str:
+    if not file_path:
+        return "usage: /skill support NAME FILE"
+    row = core_read_skill_support_file(skills_dir(), name, file_path)
+    lines = [
+        f"skill support file: {row.get('skill', '')}",
+        f"file: {row.get('support_file', '')}",
+        f"path: {row.get('path', '')}",
+        f"size: {human_bytes(int(row.get('size_bytes', 0) or 0))}",
+        f"updated: {row.get('updated_at', '')}",
+    ]
+    if row.get("truncated"):
+        lines.append("warning: content truncated")
+    lines.extend(["", row.get("content", "")])
+    return "\n".join(lines).rstrip()
+
+
 def learn_skill(
     name: str,
     *,
@@ -4306,6 +4348,47 @@ def format_skill_upgrade_report(report: dict) -> str:
 
 def upgrade_skills_text() -> str:
     return format_skill_upgrade_report(upgrade_skills())
+
+
+def manage_skill_result_text(result: dict) -> str:
+    skill = result.get("skill", {})
+    lines = [
+        f"skill managed: {skill.get('slug', '')}",
+        f"action: {result.get('action', '')}",
+    ]
+    if result.get("support_file"):
+        lines.append(f"support file: {result.get('support_file', '')}")
+    if result.get("path"):
+        lines.append(f"path: {result.get('path', '')}")
+    if result.get("message"):
+        lines.append(result.get("message", ""))
+    return "\n".join(lines)
+
+
+def manage_skill_text(
+    *,
+    action: str,
+    name: str,
+    file_path: str = "",
+    file_content: str = "",
+    old_string: str = "",
+    new_string: str = "",
+    replace_all: bool = False,
+) -> str:
+    result = core_manage_skill(
+        skills_dir(),
+        action=action,
+        name=name,
+        target_skill=name,
+        file_path=file_path,
+        file_content=file_content,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+        source="manual-skill-manage",
+        writer=atomic_write,
+    )
+    return manage_skill_result_text(result)
 
 
 def read_skill_suggestion_state() -> dict:
@@ -4688,7 +4771,8 @@ def format_skill_plan(query: str) -> str:
     prompt_skills = [
         source
         for source in skill_sources
-        if source.get("handler") == DEFAULT_SKILL_HANDLER
+        if source.get("kind") == "skill"
+        and source.get("handler") == DEFAULT_SKILL_HANDLER
         and DEFAULT_SKILL_EFFECTS[0] in source.get("allowed_effects", [])
     ]
     if prompt_skills:
@@ -4700,6 +4784,14 @@ def format_skill_plan(query: str) -> str:
             )
     else:
         lines.append("selected prompt skills: none")
+    prompt_support = [source for source in skill_sources if source.get("kind") == "skill-support"]
+    if prompt_support:
+        lines.append("selected support files:")
+        for row in prompt_support:
+            lines.append(
+                f"- {row.get('name', '')}  {row.get('support_file', '')}  "
+                f"score={row.get('score', 0)}"
+            )
     lines.append("model calls: none")
     return "\n".join(lines)
 
@@ -4749,6 +4841,102 @@ def learn_skill_from_command(raw: str) -> str:
         body=args["body"],
         replace=args["replace"],
     )
+
+
+def parse_skill_patch_args(raw: str) -> dict:
+    usage = "usage: /skill patch NAME --old OLD --new NEW [--file SKILL.md|references/x.md] [--all]"
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{usage}\nerror: {exc}") from exc
+    if not tokens:
+        raise SystemExit(usage)
+    name = tokens[0]
+    old_string = ""
+    new_string = ""
+    file_path = "SKILL.md"
+    replace_all = False
+    idx = 1
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "--all":
+            replace_all = True
+            idx += 1
+            continue
+        if token in {"--file", "-f"}:
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            file_path = tokens[idx + 1]
+            idx += 2
+            continue
+        if token == "--old":
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            old_string = tokens[idx + 1]
+            idx += 2
+            continue
+        if token == "--new":
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            new_string = tokens[idx + 1]
+            idx += 2
+            continue
+        raise SystemExit(f"{usage}\nunknown argument: {token}")
+    if not old_string or not new_string:
+        raise SystemExit(usage)
+    return {
+        "name": name,
+        "file_path": file_path,
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": replace_all,
+    }
+
+
+def parse_skill_write_file_args(raw: str) -> dict:
+    usage = "usage: /skill write-file NAME SUPPORT_PATH (--content TEXT | --from PATH)"
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{usage}\nerror: {exc}") from exc
+    if len(tokens) < 2:
+        raise SystemExit(usage)
+    name = tokens[0]
+    file_path = tokens[1]
+    file_content = ""
+    source_path = ""
+    idx = 2
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token == "--content":
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            file_content = tokens[idx + 1]
+            idx += 2
+            continue
+        if token == "--from":
+            if idx + 1 >= len(tokens):
+                raise SystemExit(usage)
+            source_path = tokens[idx + 1]
+            idx += 2
+            continue
+        raise SystemExit(f"{usage}\nunknown argument: {token}")
+    if bool(file_content) == bool(source_path):
+        raise SystemExit(usage)
+    if source_path:
+        file_content = pathlib.Path(source_path).read_text(encoding="utf-8")
+    return {"name": name, "file_path": file_path, "file_content": file_content}
+
+
+def parse_skill_remove_file_args(raw: str) -> dict:
+    usage = "usage: /skill remove-file NAME SUPPORT_PATH --yes"
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise SystemExit(f"{usage}\nerror: {exc}") from exc
+    if len(tokens) < 3 or "--yes" not in tokens[2:]:
+        raise SystemExit(usage)
+    return {"name": tokens[0], "file_path": tokens[1]}
 
 
 def load_profile_dossier() -> dict | None:
@@ -12761,6 +12949,10 @@ HELP_SECTIONS = [
             ("/skills", "list learned procedural skills"),
             ("/skill show NAME", "show a learned procedural skill"),
             ("/skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+            ("/skill support NAME [FILE]", "list or show confined skill support files"),
+            ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
+            ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
+            ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
             ("/skill delete NAME", "delete a learned procedural skill"),
             ("/skill suggestions", "list pending skill suggestions"),
             ("/skill suggestion ID", "show a pending skill suggestion"),
@@ -12826,6 +13018,10 @@ HELP_SECTIONS = [
             ("motoko skill list", "list learned procedural skills"),
             ("motoko skill show NAME", "show a learned procedural skill"),
             ("motoko skill learn NAME --description DESC --body TEXT", "save a learned procedural skill"),
+            ("motoko skill support NAME [FILE]", "list or show confined skill support files"),
+            ("motoko skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
+            ("motoko skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
+            ("motoko skill remove-file NAME FILE --yes", "remove a confined skill support file"),
             ("motoko skill delete NAME --yes", "delete a learned procedural skill"),
             ("motoko skill suggestions", "show pending skill suggestions"),
             ("motoko skill suggestion ID", "show a skill suggestion"),
@@ -13340,6 +13536,13 @@ def memory_profile_report_command_request(text: str):
             return "/skill list", format_skills
         if subcommand in {"show", "view"} and subbody:
             return "/skill show", lambda: format_skill(subbody)
+        if subcommand == "support" and subbody:
+            support_parts = subbody.split(maxsplit=1)
+            support_name = support_parts[0]
+            support_file = support_parts[1] if len(support_parts) > 1 else ""
+            if support_file:
+                return "/skill support", lambda: format_skill_support_file(support_name, support_file)
+            return "/skill support", lambda: format_skill_supports(support_name)
         if subcommand in {"suggestion", "suggestion-show"} and subbody:
             return "/skill suggestion", lambda: format_skill_suggestion(subbody)
         if subcommand == "plan":
@@ -13403,6 +13606,18 @@ def skill_mutation_command_request(text: str, conv: dict):
         if not subbody:
             return "/skill delete", lambda: "usage: /skill delete NAME"
         return "/skill delete", lambda: delete_skill_text(subbody)
+    if subcommand == "patch":
+        if not subbody:
+            return "/skill patch", lambda: "usage: /skill patch NAME --old OLD --new NEW [--file SKILL.md|references/x.md] [--all]"
+        return "/skill patch", lambda: manage_skill_text(action="patch", **parse_skill_patch_args(subbody))
+    if subcommand == "write-file":
+        if not subbody:
+            return "/skill write-file", lambda: "usage: /skill write-file NAME SUPPORT_PATH (--content TEXT | --from PATH)"
+        return "/skill write-file", lambda: manage_skill_text(action="write_file", **parse_skill_write_file_args(subbody))
+    if subcommand == "remove-file":
+        if not subbody:
+            return "/skill remove-file", lambda: "usage: /skill remove-file NAME SUPPORT_PATH --yes"
+        return "/skill remove-file", lambda: manage_skill_text(action="remove_file", **parse_skill_remove_file_args(subbody))
     if subcommand == "accept":
         if not subbody:
             return "/skill accept", lambda: "usage: /skill accept SUGGESTION_ID"
@@ -13936,7 +14151,14 @@ def setup_readline_completion() -> None:
                     if command.startswith("/skill ")
                 ]
                 matches = [item for item in sorted(set(subcommands)) if item.startswith(text)]
-            elif parts and parts[0] == "/skill" and len(parts) <= 3 and parts[1] in {"show", "delete"}:
+            elif parts and parts[0] == "/skill" and len(parts) <= 3 and parts[1] in {
+                "show",
+                "delete",
+                "support",
+                "patch",
+                "write-file",
+                "remove-file",
+            }:
                 matches = [item for item in completion_ids("skill") if item.startswith(text)]
             elif parts and parts[0] in {"/resume"}:
                 matches = [item for item in completion_ids("conversation") if item.startswith(text)]
@@ -15160,7 +15382,14 @@ class MotokoTui:
                 if not current or suffix.startswith(current) or value.startswith(stripped):
                     options.append({"kind": "command", "value": value, "label": command, "description": description})
             return options
-        if first == "/skill" and len(words) <= 3 and len(words) >= 2 and words[1] in {"show", "delete"}:
+        if first == "/skill" and len(words) <= 3 and len(words) >= 2 and words[1] in {
+            "show",
+            "delete",
+            "support",
+            "patch",
+            "write-file",
+            "remove-file",
+        }:
             return [
                 {
                     "kind": "skill",
@@ -16664,6 +16893,31 @@ def command_skill(args) -> None:
         if not args.yes:
             raise SystemExit("refusing to delete skill without --yes")
         print(delete_skill_text(args.name))
+    elif args.skill_command == "support":
+        if args.file:
+            print_report(format_skill_support_file(args.name, args.file))
+        else:
+            print_report(format_skill_supports(args.name))
+    elif args.skill_command == "patch":
+        print(
+            manage_skill_text(
+                action="patch",
+                name=args.name,
+                file_path=args.file_path,
+                old_string=args.old,
+                new_string=args.new,
+                replace_all=args.replace_all,
+            )
+        )
+    elif args.skill_command == "write-file":
+        if bool(args.content) == bool(args.source_file):
+            raise SystemExit("use exactly one of --content or --from")
+        content = args.content if args.content is not None else pathlib.Path(args.source_file).read_text(encoding="utf-8")
+        print(manage_skill_text(action="write_file", name=args.name, file_path=args.file, file_content=content))
+    elif args.skill_command == "remove-file":
+        if not args.yes:
+            raise SystemExit("refusing to remove support file without --yes")
+        print(manage_skill_text(action="remove_file", name=args.name, file_path=args.file))
     elif args.skill_command == "suggestions":
         print_report(format_skill_suggestions(status="pending" if args.pending else None))
     elif args.skill_command in {"suggestion", "suggestion-show"}:
@@ -17198,6 +17452,29 @@ def main(argv: list[str]) -> int:
     skill_delete.add_argument("name")
     skill_delete.add_argument("--yes", action="store_true", help="confirm deletion")
     skill_delete.set_defaults(func=command_skill)
+    skill_support = skill_sub.add_parser("support", help="list or show a skill support file")
+    skill_support.add_argument("name")
+    skill_support.add_argument("file", nargs="?")
+    skill_support.set_defaults(func=command_skill)
+    skill_patch = skill_sub.add_parser("patch", help="patch SKILL.md or a support file with exact text")
+    skill_patch.add_argument("name")
+    skill_patch.add_argument("--old", required=True)
+    skill_patch.add_argument("--new", required=True)
+    skill_patch.add_argument("--file-path", default="SKILL.md", help="SKILL.md or a confined support file path")
+    skill_patch.add_argument("--replace-all", action="store_true", help="replace every exact match")
+    skill_patch.set_defaults(func=command_skill)
+    skill_write_file = skill_sub.add_parser("write-file", help="write a confined skill support file")
+    skill_write_file.add_argument("name")
+    skill_write_file.add_argument("file")
+    skill_write_content = skill_write_file.add_mutually_exclusive_group(required=True)
+    skill_write_content.add_argument("--content")
+    skill_write_content.add_argument("--from", dest="source_file", help="read support file content from UTF-8 path")
+    skill_write_file.set_defaults(func=command_skill)
+    skill_remove_file = skill_sub.add_parser("remove-file", help="remove a confined skill support file")
+    skill_remove_file.add_argument("name")
+    skill_remove_file.add_argument("file")
+    skill_remove_file.add_argument("--yes", action="store_true", help="confirm removal")
+    skill_remove_file.set_defaults(func=command_skill)
     skill_suggestions = skill_sub.add_parser("suggestions", help="show pending skill suggestions")
     skill_suggestions.add_argument("--all", dest="pending", action="store_false", help="show accepted/rejected too")
     skill_suggestions.set_defaults(func=command_skill, pending=True)

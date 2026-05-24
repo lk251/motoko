@@ -366,6 +366,12 @@ def test_skill_manage_support_file_is_confined(m):
         support_path = m.skills_dir() / "retrieval-debugging" / "references" / "checklist.md"
         assert support_path.read_text(encoding="utf-8").startswith("Check recall")
         assert "support files: references/checklist.md" in m.format_skill("retrieval-debugging")
+        assert "references/checklist.md" in m.format_skill_supports("retrieval-debugging")
+        assert "Check recall" in m.format_skill_support_file("retrieval-debugging", "references/checklist.md")
+
+        rendered, sources = m.render_skills_with_sources("retrieval debugging checklist")
+        assert "Support file: references/checklist.md" in rendered
+        assert any(source.get("kind") == "skill-support" for source in sources)
 
         try:
             m.core_manage_skill(
@@ -380,6 +386,54 @@ def test_skill_manage_support_file_is_confined(m):
             assert "support file path" in str(exc)
         else:
             raise AssertionError("path traversal support file was accepted")
+
+
+def test_skill_manage_support_file_commands(m):
+    with isolated_state():
+        conv = m.new_conversation("Skill support commands")
+        conv["id"] = "skill-support-commands"
+        m.learn_skill_text(
+            "retrieval-debugging",
+            description="Debug retrieval failures.",
+            body="Prefer source-visible diagnostics before prompt changes.",
+        )
+        write_cmd = m.shared_command_request(
+            '/skill write-file retrieval-debugging references/terms.md --content "RaceFocus retrieval checklist support"',
+            conv,
+        )
+        assert write_cmd is not None
+        assert write_cmd.kind == m.COMMAND_KIND_MUTATION
+        _label, run = write_cmd
+        assert "support file written: references/terms.md" in run()
+
+        list_cmd = m.shared_command_request("/skill support retrieval-debugging", conv)
+        assert list_cmd is not None
+        assert list_cmd.kind == m.COMMAND_KIND_REPORT
+        _label, run = list_cmd
+        assert "references/terms.md" in run()
+
+        show_cmd = m.shared_command_request("/skill support retrieval-debugging references/terms.md", conv)
+        assert show_cmd is not None
+        _label, run = show_cmd
+        assert "RaceFocus retrieval checklist support" in run()
+
+        patch_cmd = m.shared_command_request(
+            '/skill patch retrieval-debugging --file references/terms.md --old RaceFocus --new Motoko',
+            conv,
+        )
+        assert patch_cmd is not None
+        _label, run = patch_cmd
+        assert "skill file patched: references/terms.md" in run()
+        assert "Motoko retrieval checklist support" in m.format_skill_support_file(
+            "retrieval-debugging",
+            "references/terms.md",
+        )
+
+        remove_cmd = m.shared_command_request("/skill remove-file retrieval-debugging references/terms.md --yes", conv)
+        assert remove_cmd is not None
+        _label, run = remove_cmd
+        assert "support file removed: references/terms.md" in run()
+        assert "references/terms.md" not in m.format_skill_supports("retrieval-debugging")
 
 
 def test_skill_upgrade_rewrites_legacy_skill_files(m):
@@ -6350,6 +6404,7 @@ def main() -> int:
         test_manual_skill_review_and_suggestion_detail,
         test_skill_suggestion_accepts_patch_action,
         test_skill_manage_support_file_is_confined,
+        test_skill_manage_support_file_commands,
         test_skill_upgrade_rewrites_legacy_skill_files,
         test_skill_plan_shows_prompt_and_retrieval_selection,
         test_interrupted_maintenance_resume,
