@@ -138,6 +138,8 @@ def format_sources(sources: list[dict]) -> str:
                 lines.append(
                     f"     evidence: {source.get('evidence_rows', 0)} row(s) from {source.get('evidence_store', '')}"
                 )
+            if source.get("temporal_selected_dates"):
+                lines.append("     temporal: selected newest dates present in source: " + ", ".join(source.get("temporal_selected_dates", [])[:8]))
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
         elif kind == "topic":
@@ -213,6 +215,8 @@ def format_sources(sources: list[dict]) -> str:
                     + str(source.get("excerpt_selection", ""))
                     + (f" ({detail})" if detail else "")
                 )
+            if source.get("temporal_selected_dates"):
+                lines.append("     temporal: selected newest dates present in source: " + ", ".join(source.get("temporal_selected_dates", [])[:8]))
             for warning in source.get("excerpt_warnings", [])[:2]:
                 lines.append(f"     warning: {warning}")
         else:

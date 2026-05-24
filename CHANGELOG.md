@@ -5,6 +5,10 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Clarified deterministic temporal retrieval context: when Motoko selects the
+  latest dated Org sections present in a source file, the prompt context and
+  `/sources` now state those selected dates explicitly so the chat model does
+  not assume missing intervening calendar days have entries.
 - Moved live hybrid index retrieval into `motoko_core.retrieval_service`,
   including candidate fusion, injected vector/evidence/source callbacks, and
   hybrid rerank control, while keeping the root `motoko` executable as a

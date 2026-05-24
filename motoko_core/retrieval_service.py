@@ -222,7 +222,9 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
     env.add_structured_task_candidates(index, query, candidates)
     lookup = _chunk_lookup(index)
-    for row in _temporal_evidence_rows(index, query, env):
+    temporal_rows = _temporal_evidence_rows(index, query, env)
+    temporal_dates = sorted({str(row.get("date", "")) for row in temporal_rows if row.get("date")}, reverse=True)
+    for row in temporal_rows:
         found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
         if not found:
             continue
@@ -319,6 +321,14 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         parts.extend(["Structured task signals:", signal_summary])
     if index_warnings:
         parts.append("Freshness warnings:\n" + "\n".join(f"- {warning}" for warning in index_warnings[:8]))
+    if temporal_dates:
+        parts.append(
+            "Temporal selection:\n"
+            "The query asked for recent dated Org sections from this source. "
+            "Motoko selected these as the newest dates present in the matching file(s): "
+            f"{', '.join(temporal_dates)}. "
+            "Do not assume missing intervening calendar dates have entries."
+        )
     index_source = {
         "kind": "index",
         "id": index.get("id", ""),
@@ -330,6 +340,8 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         "corpus_profile_schema": index.get("corpus_profile_schema", ""),
         "retrieval_service_schema": RETRIEVAL_SERVICE_SCHEMA,
     }
+    if temporal_dates:
+        index_source["temporal_selected_dates"] = temporal_dates
     if hybrid_report:
         index_source["retrieval"] = "hybrid-deep" if env.wants_deep_context(query) else "hybrid"
         index_source["hybrid_candidates"] = hybrid_report.get("candidate_count", 0)
@@ -454,6 +466,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                     "evidence_kind": evidence_spans[0].get("kind", "") if evidence_rows and evidence_spans else "",
                     "evidence_title": evidence_spans[0].get("label", "") if evidence_rows and evidence_spans else "",
                     "evidence_date": evidence_spans[0].get("date", "") if evidence_rows and evidence_spans else "",
+                    "temporal_selected_dates": temporal_dates if "temporal" in retrieval_details.get("retrieval_methods", []) else [],
                 }
             )
     diagnostics = {
@@ -611,6 +624,7 @@ def summarize_retrieval_sources(sources: list[dict], *, limit: int = 8) -> list[
             "evidence_id",
             "evidence_kind",
             "evidence_date",
+            "temporal_selected_dates",
             "warning",
         ):
             if source.get(key) not in (None, "", []):

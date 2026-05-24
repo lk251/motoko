@@ -1813,8 +1813,13 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert "2026-05-18" in text
         assert "2026-05-19" in text
         assert "2026-04-09" not in text
+        assert "newest dates present in the matching file(s): 2026-05-19, 2026-05-18" in text
+        index_source = next(source for source in sources if source.get("kind") == "index")
+        assert index_source["temporal_selected_dates"] == ["2026-05-19", "2026-05-18"]
         chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
         assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
+        assert chunk_sources[0]["temporal_selected_dates"] == ["2026-05-19", "2026-05-18"]
+        assert "selected newest dates present in source: 2026-05-19, 2026-05-18" in m.format_sources(sources)
 
 
 def test_live_index_retrieval_uses_service_boundary(m):
