@@ -101,6 +101,17 @@ def format_index_storage_audit(audit: dict) -> str:
                 f"- {item.get('safety', 'blocked')}: {item.get('kind', '')} "
                 f"{item.get('count', 0)} item(s); {item.get('reason', '')}"
             )
+    if audit.get("source_lifecycle_plans"):
+        lines.append("")
+        lines.append("source lifecycle work:")
+        for plan in audit.get("source_lifecycle_plans", [])[:8]:
+            counts = plan.get("source_counts", {}) or {}
+            count_text = ", ".join(f"{key} {value}" for key, value in sorted(counts.items()))
+            affected = sum(_safe_int(item.get("count")) for item in plan.get("affected_artifacts", []) or [])
+            lines.append(
+                f"- {plan.get('index', '')}: {count_text or 'source changes'}; "
+                f"{affected} derived artifact(s); {plan.get('recommended_action', '')}"
+            )
     if audit.get("missing_duplicate_targets"):
         lines.append("")
         lines.append("missing duplicate targets:")

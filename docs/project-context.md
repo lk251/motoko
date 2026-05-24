@@ -947,9 +947,10 @@ Live subsystem extraction status:
 - Artifact lifecycle service: partial. Lifecycle decision records exist, stale
   superseded index cleanup uses them, and index health now reports source
   lifecycle decisions for changed, deleted, or newly ignored indexed files.
-  There is not yet one service that owns cleanup across vector stores, evidence
-  stores, dossiers, memories, feedback fixtures, profiles, and
-  conversation-derived artifacts.
+  Source lifecycle plans now count dependent vector stores, evidence stores,
+  dossiers, retrieval debug/eval files, and feedback evals, and `index-storage`
+  surfaces that as rebuild-first work. There is still not one service that
+  applies cleanup/rebuild work across all of those artifact families.
 - TUI event loop through job/event paths: mostly complete. Worker creation now
   goes through the job supervisor and terminal writes remain single-owned, but
   `/stop`/interruption and foreground job responsiveness can still improve.
@@ -1062,13 +1063,15 @@ Current progress on this stretch:
 - Complete: feedback rows can be replayed as private retrieval-eval fixtures.
 - Complete: index health reports source lifecycle decisions for changed,
   deleted, and ignored indexed files.
+- Complete: source lifecycle plans count dependent derived artifacts and
+  surface rebuild-first work in `index-storage`.
 - Remaining: prompt-level context packing and some `/sources` source-record
   construction still need to converge on the retrieval service result.
 - Remaining: retrieval report paths should be reduced to renderers over the
   same structured result.
-- Remaining: artifact lifecycle needs a higher-level service for vectors,
-  evidence stores, dossiers, memories, feedback fixtures, profiles, and
-  conversation-derived artifacts.
+- Remaining: artifact lifecycle needs an apply path for vectors, evidence
+  stores, dossiers, memories, feedback fixtures, profiles, and
+  conversation-derived artifacts after rebuilds materialize replacement state.
 - Remaining: foreground interruption and queued prompt behavior need another
   bounded pass after the retrieval/lifecycle APIs are narrower.
 

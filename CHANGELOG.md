@@ -22,6 +22,9 @@ not the easiest place to review what changed after a long work session.
 - Expanded index health with source lifecycle decisions for indexed files that
   changed, were deleted, or are now ignored by `.motokoignore`, including the
   recommended rebuild or derived-artifact cleanup action.
+- Added an artifact lifecycle plan for source changes, with dependent
+  vector/evidence/dossier/eval artifact counts surfaced in `index-storage` as
+  rebuild-first work rather than deletion-safe cleanup.
 - Added a live-subsystem refactor boundary: runtime context, typed command
   requests, job supervision, model-route readiness, retrieval-service wrapping,
   artifact lifecycle decisions, and content-free observability now have

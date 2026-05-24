@@ -5073,11 +5073,25 @@ def test_index_change_summary_reports_source_lifecycle_decisions(m):
         try:
             m.quiet_model = lambda *args, **kwargs: "summary"
             index = m.build_document_index(str(docs))
+            m.atomic_write(
+                m.vector_store_path("vec-source-lifecycle"),
+                json.dumps({"id": "vec-source-lifecycle", "source_index": index["id"]}) + "\n",
+            )
+            m.atomic_write(
+                m.evidence_store_path("ev-source-lifecycle"),
+                json.dumps({"id": "ev-source-lifecycle", "source_index": index["id"]}) + "\n",
+            )
 
             source.write_text("* TODO [#A] Alpha\nUpdated body\n", encoding="utf-8")
             summary = m.index_change_summary(index)
             assert summary["source_lifecycle_counts"]["changed"] == 1
             assert summary["source_lifecycle"][0]["recommended_action"] == "reprocess-from-source"
+            plan = summary["artifact_lifecycle_plan"]
+            assert plan["recommended_action"] == "rebuild-index-and-refresh-derived-artifacts"
+            assert {item["kind"]: item["count"] for item in plan["affected_artifacts"]} == {
+                "evidence_store": 1,
+                "vector_store": 1,
+            }
             assert "changed 1" in m.format_index_health(summary)
 
             source.unlink()
@@ -5092,6 +5106,11 @@ def test_index_change_summary_reports_source_lifecycle_decisions(m):
             assert summary["source_lifecycle_counts"]["ignored"] == 1
             assert summary["source_lifecycle"][0]["recommended_action"] == "detach-derived-artifacts"
             assert "ignored-indexed 1" in m.format_index_health(summary)
+
+            audit = m.index_storage_audit()
+            assert audit["source_lifecycle_plans"]
+            assert any(item["kind"] == "source-lifecycle-work" for item in audit["blocked_cleanup"])
+            assert "source lifecycle work:" in m.format_index_storage_audit(audit)
         finally:
             m.quiet_model = old_quiet_model
 

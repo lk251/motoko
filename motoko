@@ -337,6 +337,7 @@ from motoko_core.runtime import (  # noqa: E402
     make_runtime_context,
 )
 from motoko_core.artifact_lifecycle import (  # noqa: E402
+    source_lifecycle_artifact_plan,
     source_lifecycle_state,
     superseded_index_cleanup_decision,
 )
@@ -6256,18 +6257,7 @@ def json_references_index(value, index_id: str) -> bool:
     return False
 
 
-def delete_json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> int:
-    removed = 0
-    for path in sorted(directory.glob("*.json")):
-        data = safe_load_json(path)
-        if data is not None and json_references_index(data, index_id):
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-                removed += 1
-    return removed
-
-
-def stores_referencing_index(directory: pathlib.Path, index_id: str) -> list[pathlib.Path]:
+def json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> list[pathlib.Path]:
     rows = []
     if not directory.exists():
         return rows
@@ -6276,6 +6266,19 @@ def stores_referencing_index(directory: pathlib.Path, index_id: str) -> list[pat
         if data is not None and json_references_index(data, index_id):
             rows.append(path)
     return rows
+
+
+def delete_json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> int:
+    removed = 0
+    for path in json_artifacts_referencing_index(directory, index_id):
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+            removed += 1
+    return removed
+
+
+def stores_referencing_index(directory: pathlib.Path, index_id: str) -> list[pathlib.Path]:
+    return json_artifacts_referencing_index(directory, index_id)
 
 
 def vector_progress_referencing_index(index_id: str) -> list[pathlib.Path]:
@@ -6288,6 +6291,21 @@ def vector_progress_referencing_index(index_id: str) -> list[pathlib.Path]:
         if data is not None and json_references_index(data, index_id):
             rows.append(path)
     return rows
+
+
+def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
+    if not index_id:
+        return {}
+    return {
+        "vector_store": len(stores_referencing_index(vector_stores_dir(), index_id)),
+        "evidence_store": len(stores_referencing_index(evidence_stores_dir(), index_id)),
+        "vector_progress": len(vector_progress_referencing_index(index_id)),
+        "topic_dossier": len(json_artifacts_referencing_index(topics_dir(), index_id)),
+        "memory_dossier": len(json_artifacts_referencing_index(dossiers_dir(), index_id)),
+        "retrieval_debug": len(json_artifacts_referencing_index(retrieval_debug_dir(), index_id)),
+        "retrieval_eval": len(json_artifacts_referencing_index(retrieval_evals_dir(), index_id)),
+        "feedback_eval": len(json_artifacts_referencing_index(feedback_evals_dir(), index_id)),
+    }
 
 
 def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:
@@ -6668,6 +6686,22 @@ def index_storage_audit() -> dict:
     stored_body_duplicates = sum(max(0, len(locations) - 1) for locations in stored_by_digest.values())
     older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
     stale_superseded_indexes = index_cleanup_candidates(indexes)
+    source_lifecycle_plans = []
+    for index in indexes:
+        summary = index_change_summary(index)
+        plan = summary.get("artifact_lifecycle_plan") or {}
+        if plan.get("status") != "needs-work":
+            continue
+        source_lifecycle_plans.append(
+            {
+                "index": index.get("id", ""),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "source_counts": plan.get("source_counts", {}),
+                "recommended_action": plan.get("recommended_action", ""),
+                "affected_artifacts": plan.get("affected_artifacts", []),
+            }
+        )
     safe_cleanup = []
     if stale_superseded_indexes:
         safe_cleanup.append(
@@ -6719,6 +6753,15 @@ def index_storage_audit() -> dict:
                 "reason": "some duplicate references cannot find stored chunk text in another index",
             }
         )
+    if source_lifecycle_plans:
+        blocked_cleanup.append(
+            {
+                "kind": "source-lifecycle-work",
+                "count": len(source_lifecycle_plans),
+                "safety": "rebuild-first",
+                "reason": "changed, deleted, or newly ignored source files need index refresh before derived-artifact cleanup",
+            }
+        )
     return {
         "schema": INDEX_STORAGE_AUDIT_SCHEMA_VERSION,
         "created": now(),
@@ -6746,6 +6789,7 @@ def index_storage_audit() -> dict:
         "rows": rows,
         "missing_duplicate_targets": missing_duplicate_refs[:50],
         "orphan_chunk_files": orphan_files[:50],
+        "source_lifecycle_plans": source_lifecycle_plans[:50],
         "safe_cleanup": safe_cleanup,
         "blocked_cleanup": blocked_cleanup,
     }
@@ -10471,6 +10515,11 @@ def index_change_summary(index: dict) -> dict:
             "ignored_dir_count": 0,
             "source_lifecycle": [],
             "source_lifecycle_counts": {},
+            "artifact_lifecycle_plan": source_lifecycle_artifact_plan(
+                index_id=str(index.get("id", "")),
+                source_lifecycle=[],
+                dependent_counts={},
+            ),
             "coverage_score": 0,
         }
     current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
@@ -10505,6 +10554,11 @@ def index_change_summary(index: dict) -> dict:
         if lifecycle.get("status") != "fresh":
             source_lifecycle.append(lifecycle)
     lifecycle_counts = dict(collections.Counter(item.get("status", "unknown") for item in source_lifecycle))
+    artifact_plan = source_lifecycle_artifact_plan(
+        index_id=str(index.get("id", "")),
+        source_lifecycle=source_lifecycle,
+        dependent_counts=artifact_dependency_counts_for_index(str(index.get("id", ""))),
+    )
     covered_files = len(known_paths & set(current_paths))
     new_bytes = 0
     for path in new_files:
@@ -10534,6 +10588,7 @@ def index_change_summary(index: dict) -> dict:
         "ignored_dir_count": candidate_report.get("ignored_dir_count", 0),
         "source_lifecycle": source_lifecycle[:50],
         "source_lifecycle_counts": lifecycle_counts,
+        "artifact_lifecycle_plan": artifact_plan,
         "coverage_score": coverage_score,
     }
 
