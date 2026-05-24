@@ -5873,6 +5873,93 @@ def test_context_catalog_prefers_latest_index_per_family(m):
         assert [row["id"] for row in ranked] == ["new-index"]
 
 
+def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            source = docs / "logbook.org"
+            current_content = "* [2026-05-24 Sun 09:00]\n** log\nFresh in-session note.\n"
+            source.write_text(current_content, encoding="utf-8")
+            m.add_allowed_dir(str(docs))
+            base = {
+                "name": "docs",
+                "root": str(docs.resolve()),
+                "glob": m.AUTO_INDEX_GLOB,
+                "files": [
+                    {
+                        "path": str(source.resolve()),
+                        "source_fingerprint": m.source_fingerprint(source),
+                        "summary": "Daily logbook entries.",
+                    }
+                ],
+            }
+            old_index = {
+                **base,
+                "id": "20260524-010000-aaaaaa",
+                "created": "2026-05-24T01:00:00+00:00",
+                "corpus_summary": "old attached summary",
+                "files": [
+                    {
+                        **base["files"][0],
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Old chunk.",
+                                "content": "* [2026-05-23 Sat 00:52]\n** log\nOld attached note.\n",
+                            }
+                        ],
+                    }
+                ],
+            }
+            new_index = {
+                **base,
+                "id": "20260524-020000-bbbbbb",
+                "created": "2026-05-24T02:00:00+00:00",
+                "corpus_summary": "new completed summary",
+                "files": [
+                    {
+                        **base["files"][0],
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Fresh chunk.",
+                                "content": current_content,
+                            }
+                        ],
+                    }
+                ],
+            }
+            m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
+            m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
+            conv = m.new_conversation("Open session")
+            conv["context_items"] = [m.context_item_from_index(old_index)]
+            m.save_conversation(conv)
+
+            package, values = m.build_prompt_context_package(
+                conv,
+                "summarize the last day present in logbook.org",
+            )
+
+            assert conv["context_items"][0]["id"] == new_index["id"]
+            assert "Fresh in-session note" in values["context_text"]
+            assert "Old attached note" not in values["context_text"]
+            assert any(source.get("id") == new_index["id"] for source in package.sources if source.get("kind") == "index")
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_index_resume_after_model_timeout(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -7472,6 +7559,7 @@ def main() -> int:
         test_list_indexes_ignores_progress_files,
         test_superseded_partials_do_not_look_unfinished,
         test_context_catalog_prefers_latest_index_per_family,
+        test_prompt_context_resyncs_attached_index_to_newer_completed_index,
         test_index_resume_after_model_timeout,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
         test_org_task_signals_drive_retrieval,

@@ -3902,6 +3902,8 @@ def run_retrieval_debug(
     query = query.strip()
     if not query:
         raise SystemExit("usage: retrieval-debug QUERY")
+    if conv is not None and not index_ids:
+        sync_attached_indexes_to_latest(conv)
     limit = max(1, min(int(limit or 8), 50))
     query_counts = token_counts(query)
     indexes = select_retrieval_debug_indexes(query, conv=conv, index_ids=index_ids)
@@ -12784,6 +12786,40 @@ def replace_attached_index(conv: dict, old_index_id: str, new_index: dict) -> No
     save_conversation(conv)
 
 
+def sync_attached_indexes_to_latest(conv: dict) -> list[str]:
+    """Refresh attached index references to newer completed same-family indexes.
+
+    This is deliberately cheap: it only swaps conversation context items to
+    already materialized index records. Source rebuilds, evidence refreshes,
+    and vector refreshes remain normal background work.
+    """
+
+    items = conv.setdefault("context_items", [])
+    if not items:
+        return []
+    available_indexes = list_indexes()
+    by_id = {str(index.get("id", "")): index for index in available_indexes if index.get("id")}
+    notes = []
+    changed = False
+    for idx, item in enumerate(list(items)):
+        if item.get("kind") != "index" or not item.get("id"):
+            continue
+        current = by_id.get(str(item.get("id", "")))
+        if current is None:
+            continue
+        latest = latest_index_for_family(current, available_indexes)
+        if latest is None or latest.get("id") == current.get("id"):
+            continue
+        if stored_record_sort_key(latest) <= stored_record_sort_key(current):
+            continue
+        items[idx] = context_item_from_index(latest)
+        changed = True
+        notes.append(f"attached newer index {current.get('id')} -> {latest.get('id')}")
+    if changed:
+        save_conversation(conv)
+    return notes
+
+
 def read_heavy_study_state() -> dict:
     path = heavy_study_path()
     if not path.exists():
@@ -13803,6 +13839,7 @@ def format_context_plan(plan: dict) -> str:
 
 
 def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, dict]:
+    sync_attached_indexes_to_latest(conv)
     identity = identity_config()
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)

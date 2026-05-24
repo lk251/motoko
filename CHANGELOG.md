@@ -5,6 +5,10 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Open conversations now resync attached corpus-index references to newer
+  completed same-family indexes before retrieval/debug context is built, so a
+  live Motoko session can use a freshly rebuilt source index without requiring
+  restart.
 - Expanded the agentic capability design note with the accepted skill package
   format, including the Hermes Agent comparison and Motoko's stricter
   per-script metadata and approval-contract path.
