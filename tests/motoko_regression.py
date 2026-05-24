@@ -1814,6 +1814,41 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
 
 
+def test_live_index_retrieval_uses_service_boundary(m):
+    with isolated_state() as tmp:
+        docs = tmp / "orgfiles"
+        docs.mkdir()
+        path = docs / "logbook.org"
+        content = "* [2026-05-23 Sat 00:36]\n** log\nRetrieval boundary smoke test.\n"
+        path.write_text(content, encoding="utf-8")
+        index = {
+            "id": "service-boundary-index",
+            "name": "orgfiles",
+            "root": str(docs),
+            "created": "2026-05-24T00:00:00+00:00",
+            "files": [
+                {
+                    "path": str(path),
+                    "source_fingerprint": m.source_fingerprint(path),
+                    "summary": "Daily logbook entries.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Retrieval boundary notes.",
+                            "content": content,
+                            "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            "content_bytes": len(content.encode("utf-8")),
+                        }
+                    ],
+                }
+            ],
+        }
+        text, sources = m.retrieve_from_index(index, "logbook.org retrieval boundary")
+        index_source = next(source for source in sources if source.get("kind") == "index")
+        assert index_source["retrieval_service_schema"] == "retrieval-service-v1"
+        assert "Retrieval boundary smoke test" in text
+
+
 def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
     with isolated_state() as tmp:
         docs = tmp / "orgfiles"
@@ -5412,6 +5447,7 @@ def main() -> int:
         test_named_file_query_boosts_matching_path,
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
+        test_live_index_retrieval_uses_service_boundary,
         test_hierarchical_evidence_store_retrieves_org_day_and_terms,
         test_span_selection_uses_embedding_and_rerank_routes,
         test_study_focus_recent_is_parsed_and_bounded,
