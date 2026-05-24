@@ -81,7 +81,8 @@ behavior:
 - structured per-user identity in `~/.config/motoko/config.json`;
 - per-user feature permissions in `~/.config/motoko/config.json`;
 - fixed read-only repo commands only in `repo-review` mode;
-- source documents are read-only;
+- source documents are read-only except for typed, confirmed
+  `project_file_write` actions under the reviewed agentic boundary;
 - memory, indexes, and topics stay under Motoko-owned state paths.
 
 Pydantic, containers, and other larger machinery are deliberately absent for
@@ -126,7 +127,7 @@ Accepted directions:
 
 Avoid for now:
 
-- autonomous file editing;
+- autonomous file editing outside typed, confirmed Motoko action records;
 - broad filesystem crawling without explicit allowlists;
 - provider/API key handling;
 - browser UI;
@@ -201,10 +202,12 @@ Current UI direction:
 - Tool planning should be inspectable without model calls. `/tools` should list
   the current skill-tool catalog, and `/action plan QUERY` should propose typed
   action records from known tools without running anything.
-- Goal-loop planning should be inspectable before execution exists. `/goal
-  plan OBJECTIVE`, `/goal list`, and `/goal preview FILE` may create or show
-  disabled `motoko-goal-loop-v1` drafts, but loops do not run until a separate
-  approval enables the runner.
+- Goal-loop planning and execution should stay explicit and inspectable.
+  `/goal plan OBJECTIVE`, `/goal list`, and `/goal preview FILE` may create or
+  show `motoko-goal-loop-v1` records. `/goal run FILE --yes` may run only an
+  explicit action list already present in the record, within declared budgets,
+  and each action still passes through the same validator, confirmation, and
+  ledger path. This is not an autonomous model-planning loop yet.
 - Skill-management actions should stay review-first and allowlisted. Motoko may
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to
@@ -214,7 +217,10 @@ Current UI direction:
   execute only approved stdlib Python skill tools with low-risk effects,
   bounded time/output, scrubbed environment, and private realm-local results;
   arbitrary scripts, shell, network, service control, privileged actions, and
-  project-file writes remain blocked.
+  script-owned project-file writes remain blocked. Project mutation is allowed
+  only through Motoko's typed, code-owned `project_file_write` action, with an
+  allowlisted path, `.motokoignore` enforcement, exact session confirmation,
+  overwrite hash checks, atomic writes, and content-safe ledgers.
   `/action ledger` and `/action result` should make tool runs inspectable while
   hiding private stdout/stderr/result content unless the owning user explicitly
   asks for it.

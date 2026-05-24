@@ -223,6 +223,7 @@ from motoko_core.skills import (  # noqa: E402
 )
 from motoko_core.agentic import (  # noqa: E402
     AgenticValidationError,
+    apply_project_file_write_action as core_apply_project_file_write_action,
     approve_tool as core_approve_tool,
     execute_skill_tool_action as core_execute_skill_tool_action,
     find_tool_result_path as core_find_tool_result_path,
@@ -851,12 +852,14 @@ SLASH_COMMANDS = [
     ("/tools", "list all declared skill tools and approval status"),
     ("/action plan QUERY", "propose typed skill-tool actions without running them"),
     ("/action preview FILE", "validate a typed action JSON file without execution"),
-    ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
+    ("/action run FILE [--yes]", "run an approved typed action"),
+    ("/action apply FILE --yes", "apply a confirmed project-file write action"),
     ("/action ledger", "show content-safe action/tool ledger rows"),
     ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
     ("/goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
     ("/goal list", "list saved goal-loop drafts"),
-    ("/goal preview FILE", "validate a goal-loop JSON file without execution"),
+    ("/goal preview FILE", "validate a goal-loop JSON file"),
+    ("/goal run FILE --yes", "run an explicit approved goal action list"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -4643,6 +4646,81 @@ def format_goal_loops(limit: int = 20) -> str:
     return core_format_goal_loop_list(core_list_goal_loops(goal_loops_dir()), limit=limit)
 
 
+def preview_action_record(action: dict) -> dict:
+    return core_validate_action_record(
+        action,
+        skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+        approval_path=tool_approvals_path(),
+        realm=identity_realm(),
+        path_checker=action_path_checker,
+        preview=True,
+    )
+
+
+def run_goal_text(path_text: str, *, yes: bool = False) -> str:
+    if not yes:
+        return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
+    if not path_text:
+        return "usage: motoko goal run FILE --yes"
+    try:
+        record = core_read_goal_loop(pathlib.Path(path_text).expanduser(), path_checker=goal_loop_path_checker)
+    except (OSError, GoalLoopValidationError) as exc:
+        return f"goal run:\nstatus: rejected\nerror: {exc}"
+    actions = record.get("actions") if isinstance(record.get("actions"), list) else []
+    if not actions:
+        return "goal run:\nstatus: refused\nerror: goal loop has no explicit actions"
+    budgets = record.get("budgets") if isinstance(record.get("budgets"), dict) else {}
+    max_steps = int(budgets.get("max_steps") or 1)
+    max_tool_calls = int(budgets.get("max_tool_calls") or 1)
+    if len(actions) > min(max_steps, max_tool_calls):
+        return (
+            "goal run:\n"
+            "status: refused\n"
+            f"error: {len(actions)} action(s) exceed step/tool budget "
+            f"({max_steps} steps, {max_tool_calls} tool calls)"
+        )
+    allowed_effects = set(record.get("allowed_effects", []))
+    allowed_tools = set(record.get("allowed_tools", []))
+    lines = [
+        "goal run:",
+        f"id: {record.get('id', '')}",
+        f"objective: {record.get('objective', '')}",
+        f"actions: {len(actions)}",
+    ]
+    completed = 0
+    for idx, action in enumerate(actions, 1):
+        try:
+            preview = preview_action_record(action)
+        except AgenticValidationError as exc:
+            lines.append(f"- action {idx}: rejected before run: {exc}")
+            break
+        effects = set(preview.get("allowed_effects", []))
+        if not effects <= allowed_effects:
+            lines.append(
+                f"- action {idx}: refused; effects {','.join(sorted(effects)) or 'none'} "
+                f"exceed goal allowed effects {','.join(sorted(allowed_effects)) or 'none'}"
+            )
+            break
+        if allowed_tools and preview.get("kind") == "skill_tool_run":
+            selector = f"{preview.get('skill', '')}/{preview.get('tool', '')}"
+            if selector not in allowed_tools and preview.get("tool", "") not in allowed_tools:
+                lines.append(f"- action {idx}: refused; tool {selector} is not in goal allowed_tools")
+                break
+        validation, result = execute_action_record(action, yes=yes)
+        status = result.get("status") if result else validation.get("status")
+        lines.append(f"- action {idx}: {validation.get('kind', '')} {status}")
+        if result and result.get("tool_run_id"):
+            lines.append(f"  run: {result.get('tool_run_id')}")
+        if result and result.get("error"):
+            lines.append(f"  error: {result.get('error')}")
+        if status != "completed":
+            break
+        completed += 1
+    lines.append(f"completed: {completed}/{len(actions)}")
+    lines.append("status: completed" if completed == len(actions) else "status: stopped")
+    return "\n".join(lines)
+
+
 def approve_skill_tool_text(name: str, tool: str, *, yes: bool = False) -> str:
     if not yes:
         return f"refusing to approve without --yes: motoko skill approve-tool {name} {tool} --yes"
@@ -4684,13 +4762,74 @@ def read_action_file(path_text: str) -> dict:
     return data
 
 
-def action_path_checker(_key: str, value: str) -> None:
+def allowed_root_for_path(path: pathlib.Path) -> pathlib.Path:
+    resolved = path.expanduser().resolve(strict=False)
+    directories = allowed_dirs()
+    if not directories:
+        raise AgenticValidationError(
+            "Motoko has no allowed document directories yet; run 'motoko allow-dir DIR' first"
+        )
+    for directory in directories:
+        root = directory.expanduser().resolve(strict=False)
+        if resolved == root or is_under(resolved, root):
+            return root
+    raise AgenticValidationError(
+        f"{resolved} is outside Motoko's allowed directories; run 'motoko allow-dir DIR' first"
+    )
+
+
+def require_project_write_allowed(path: pathlib.Path) -> pathlib.Path:
+    target = path.expanduser()
+    if not target.is_absolute():
+        raise AgenticValidationError("project writes require an absolute path")
+    raw = str(target).replace("\\", "/")
+    if "\x00" in raw:
+        raise AgenticValidationError("project write path contains NUL")
+    if any(part in {"", ".."} for part in pathlib.PurePosixPath(raw).parts):
+        raise AgenticValidationError("project write path must not contain traversal")
+    if identity_realm() == "mares" and (raw == "/home/personal" or raw.startswith("/home/personal/")):
+        raise AgenticValidationError("mares actions may not access /home/personal")
+    if target.name == MOTOKO_IGNORE_FILE:
+        raise AgenticValidationError("project write actions may not modify .motokoignore")
+    if any(part in SKIP_INDEX_DIR_NAMES for part in target.parts):
+        raise AgenticValidationError("project write actions may not target cache/VCS directories")
+    if target.exists() and target.is_dir():
+        raise AgenticValidationError("project write actions may not target directories")
+    if target.exists() and target.is_symlink():
+        raise AgenticValidationError("project write actions may not target symlinks")
+    parent = target.parent
+    if not parent.exists() or not parent.is_dir():
+        raise AgenticValidationError("project write parent directory must already exist")
+    if parent.is_symlink():
+        raise AgenticValidationError("project write parent directory must not be a symlink")
+    resolved_target = parent.resolve(strict=True) / target.name
+    root = allowed_root_for_path(resolved_target)
+    rel = rel_posix(resolved_target, root)
+    try:
+        rules, _info = parse_motoko_ignore(root)
+    except SystemExit as exc:
+        raise AgenticValidationError(str(exc)) from None
+    rule = motoko_ignore_matches(rules, rel, is_dir=False)
+    if rule is not None:
+        raise AgenticValidationError(
+            f"project write target is ignored by {MOTOKO_IGNORE_FILE}: {rel}"
+        )
+    return resolved_target
+
+
+def action_path_checker(_key: str, value: str, *, write: bool = False) -> None:
     raw = str(value or "").strip()
     if not raw:
         return
     candidate = pathlib.Path(raw).expanduser()
     if candidate.is_absolute():
-        require_allowed(candidate)
+        if write:
+            require_project_write_allowed(candidate)
+        else:
+            try:
+                require_allowed(candidate)
+            except SystemExit as exc:
+                raise AgenticValidationError(str(exc)) from None
 
 
 def validate_action_text(path_text: str, *, preview: bool = True) -> str:
@@ -4720,8 +4859,61 @@ def validate_action_text(path_text: str, *, preview: bool = True) -> str:
     return core_format_action_validation(validation)
 
 
-def run_action_text(path_text: str, *, yes: bool = False) -> str:
-    action = read_action_file(path_text)
+def rejected_action_validation(action: dict, reason: str) -> dict:
+    return {
+        "schema": "motoko-action-validation-v1",
+        "id": "",
+        "created_at": now(),
+        "realm": identity_realm(),
+        "kind": str(action.get("kind", "")) if isinstance(action, dict) else "",
+        "status": "rejected",
+        "approval": "not-applicable",
+        "reason": str(reason),
+        "action_hash": "",
+    }
+
+
+def failed_action_result(validation: dict, error: str) -> dict:
+    return {
+        "result_schema": "motoko-action-result-v1",
+        "action_id": validation.get("id", ""),
+        "tool_run_id": "",
+        "status": "failed",
+        "exit_code": "",
+        "duration_ms": 0,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_sha256": "",
+        "stderr_sha256": "",
+        "output_json_valid": False,
+        "private_result_path": "",
+        "target_path_sha256": validation.get("target_path_sha256", ""),
+        "mode": validation.get("mode", ""),
+        "bytes_written": 0,
+        "previous_sha256": "",
+        "new_sha256": "",
+        "error": str(error),
+    }
+
+
+def execute_validated_action(action: dict, validation: dict, *, session_approvals: set[str]) -> dict:
+    if validation.get("kind") == "skill_tool_run":
+        return core_execute_skill_tool_action(
+            action,
+            validation,
+            skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+            approval_path=tool_approvals_path(),
+            state_root=state_root(),
+            realm=identity_realm(),
+            session_approvals=session_approvals,
+            path_checker=action_path_checker,
+        )
+    if validation.get("kind") == "project_file_write":
+        return core_apply_project_file_write_action(action, validation)
+    raise AgenticValidationError(f"no runner for action kind: {validation.get('kind', '')}")
+
+
+def execute_action_record(action: dict, *, yes: bool = False) -> tuple[dict, dict | None]:
     session_approvals: set[str] = set()
     try:
         preview_validation = core_validate_action_record(
@@ -4744,52 +4936,34 @@ def run_action_text(path_text: str, *, yes: bool = False) -> str:
             preview=False,
         )
     except AgenticValidationError as exc:
-        validation = {
-            "schema": "motoko-action-validation-v1",
-            "id": "",
-            "created_at": now(),
-            "realm": identity_realm(),
-            "kind": str(action.get("kind", "")) if isinstance(action, dict) else "",
-            "status": "rejected",
-            "approval": "not-applicable",
-            "reason": str(exc),
-            "action_hash": "",
-        }
+        validation = rejected_action_validation(action, str(exc))
         core_write_action_ledger(action_ledger_path(), validation, status="rejected")
-        return core_format_action_validation(validation) + "\nnot run"
+        return validation, None
     if validation.get("status") != "valid":
         core_write_action_ledger(action_ledger_path(), validation, status="blocked")
-        return core_format_action_validation(validation) + "\nnot run"
+        return validation, None
     core_write_action_ledger(action_ledger_path(), validation, status="running")
     try:
-        result = core_execute_skill_tool_action(
-            action,
-            validation,
-            skill_resolver=lambda name: core_load_skill(skills_dir(), name),
-            approval_path=tool_approvals_path(),
-            state_root=state_root(),
-            realm=identity_realm(),
-            session_approvals=session_approvals,
-            path_checker=action_path_checker,
-        )
+        result = execute_validated_action(action, validation, session_approvals=session_approvals)
     except AgenticValidationError as exc:
-        result = {
-            "result_schema": "motoko-action-result-v1",
-            "action_id": validation.get("id", ""),
-            "tool_run_id": "",
-            "status": "failed",
-            "exit_code": "",
-            "duration_ms": 0,
-            "stdout_bytes": 0,
-            "stderr_bytes": 0,
-            "stdout_sha256": "",
-            "stderr_sha256": "",
-            "output_json_valid": False,
-            "private_result_path": "",
-            "error": str(exc),
-        }
+        result = failed_action_result(validation, str(exc))
     core_write_action_ledger(action_ledger_path(), {**validation, **result}, status=result.get("status", "unknown"))
+    return validation, result
+
+
+def run_action_text(path_text: str, *, yes: bool = False) -> str:
+    action = read_action_file(path_text)
+    validation, result = execute_action_record(action, yes=yes)
+    if result is None:
+        return core_format_action_validation(validation) + "\nnot run"
     return core_format_action_result(validation, result)
+
+
+def apply_action_text(path_text: str, *, yes: bool = False) -> str:
+    action = read_action_file(path_text)
+    if action.get("kind") != "project_file_write":
+        return "action apply:\nstatus: rejected\nerror: action apply currently supports only project_file_write"
+    return run_action_text(path_text, yes=yes)
 
 
 def learn_skill(
@@ -13504,12 +13678,14 @@ HELP_SECTIONS = [
             ("/tools", "list all declared skill tools and approval status"),
             ("/action plan QUERY", "propose typed skill-tool actions without running them"),
             ("/action preview FILE", "validate a typed action JSON file without execution"),
-            ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
+            ("/action run FILE [--yes]", "run an approved typed action"),
+            ("/action apply FILE --yes", "apply a confirmed project-file write action"),
             ("/action ledger", "show content-safe action/tool ledger rows"),
             ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
             ("/goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
             ("/goal list", "list saved goal-loop drafts"),
-            ("/goal preview FILE", "validate a goal-loop JSON file without execution"),
+            ("/goal preview FILE", "validate a goal-loop JSON file"),
+            ("/goal run FILE --yes", "run an explicit approved goal action list"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -13584,12 +13760,14 @@ HELP_SECTIONS = [
             ("motoko tools", "list all declared skill tools and approval status"),
             ("motoko action plan QUERY", "propose typed skill-tool actions without running them"),
             ("motoko action preview FILE", "validate a typed action JSON file without execution"),
-            ("motoko action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
+            ("motoko action run FILE [--yes]", "run an approved typed action"),
+            ("motoko action apply FILE --yes", "apply a confirmed project-file write action"),
             ("motoko action ledger", "show content-safe action/tool ledger rows"),
             ("motoko action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
             ("motoko goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
             ("motoko goal list", "list saved goal-loop drafts"),
-            ("motoko goal preview FILE", "validate a goal-loop JSON file without execution"),
+            ("motoko goal preview FILE", "validate a goal-loop JSON file"),
+            ("motoko goal run FILE --yes", "run an explicit approved goal action list"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -14125,6 +14303,12 @@ def memory_profile_report_command_request(text: str):
             file_args = [arg for arg in args if arg != "--yes"]
             if file_args:
                 return "/action run", lambda: run_action_text(file_args[0], yes=yes)
+        if subcommand == "apply" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            file_args = [arg for arg in args if arg != "--yes"]
+            if file_args:
+                return "/action apply", lambda: apply_action_text(file_args[0], yes=yes)
         if subcommand == "ledger":
             limit = 20
             if subbody:
@@ -14149,6 +14333,12 @@ def memory_profile_report_command_request(text: str):
             return "/goal list", lambda: format_goal_loops()
         if subcommand == "preview" and subbody:
             return "/goal preview", lambda: format_goal_preview(subbody)
+        if subcommand == "run" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            file_args = [arg for arg in args if arg != "--yes"]
+            if file_args:
+                return "/goal run", lambda: run_goal_text(file_args[0], yes=yes)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -17613,6 +17803,8 @@ def command_action(args) -> None:
         print_report(validate_action_text(args.file, preview=True))
     elif args.action_command == "run":
         print_report(run_action_text(args.file, yes=args.yes))
+    elif args.action_command == "apply":
+        print_report(apply_action_text(args.file, yes=args.yes))
     elif args.action_command == "ledger":
         print_report(format_action_ledger(limit=args.limit))
     elif args.action_command == "result":
@@ -17644,6 +17836,8 @@ def command_goal(args) -> None:
         print_report(format_goal_loops(limit=args.limit))
     elif args.goal_command == "preview":
         print_report(format_goal_preview(args.file))
+    elif args.goal_command == "run":
+        print_report(run_goal_text(args.file, yes=args.yes))
     else:
         raise SystemExit("unknown goal command")
 
@@ -18234,6 +18428,10 @@ def main(argv: list[str]) -> int:
     action_run.add_argument("file")
     action_run.add_argument("--yes", action="store_true", help="grant one-session confirmation for this run")
     action_run.set_defaults(func=command_action)
+    action_apply = action_sub.add_parser("apply", help="apply a confirmed project-file write action")
+    action_apply.add_argument("file")
+    action_apply.add_argument("--yes", action="store_true", help="confirm this project-file write")
+    action_apply.set_defaults(func=command_action)
     action_ledger = action_sub.add_parser("ledger", help="show content-safe action/tool ledger rows")
     action_ledger.add_argument("--limit", type=int, default=20)
     action_ledger.set_defaults(func=command_action)
@@ -18242,7 +18440,7 @@ def main(argv: list[str]) -> int:
     action_result.add_argument("--private", action="store_true", help="show private stdout/stderr/output JSON in this user account")
     action_result.set_defaults(func=command_action)
 
-    goal = sub.add_parser("goal", help="preview and inspect durable goal-loop records; execution is disabled")
+    goal = sub.add_parser("goal", help="preview, inspect, and run explicit durable goal-loop records")
     goal_sub = goal.add_subparsers(dest="goal_command", required=True)
     goal_plan = goal_sub.add_parser("plan", help="preview a durable goal-loop record without execution")
     goal_plan.add_argument("objective", nargs="+")
@@ -18261,6 +18459,10 @@ def main(argv: list[str]) -> int:
     goal_preview = goal_sub.add_parser("preview", help="validate a goal-loop JSON file without execution")
     goal_preview.add_argument("file")
     goal_preview.set_defaults(func=command_goal)
+    goal_run = goal_sub.add_parser("run", help="run an explicit approved goal action list")
+    goal_run.add_argument("file")
+    goal_run.add_argument("--yes", action="store_true", help="confirm this goal run")
+    goal_run.set_defaults(func=command_goal)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

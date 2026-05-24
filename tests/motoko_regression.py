@@ -6898,6 +6898,122 @@ def test_action_run_keeps_project_write_tools_disabled(m):
         assert "project-writing skill tools are not enabled" in output
 
 
+def test_project_file_write_action_is_code_owned_and_confirmed(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / ".motokoignore").write_text("ignored.org\narchive/\n", encoding="utf-8")
+        (docs / "existing.org").write_text("* Old\n", encoding="utf-8")
+        archive = docs / "archive"
+        archive.mkdir()
+        m.add_allowed_dir(str(docs))
+
+        target = docs / "new.org"
+        action_path = tmp / "project-write.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "project_file_write",
+                    "path": str(target),
+                    "mode": "create",
+                    "content": "* New\nsecret body\n",
+                    "reason": "Create a bounded project file through Motoko-owned write machinery.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        preview = m.validate_action_text(str(action_path), preview=True)
+        assert "kind: project_file_write" in preview
+        assert "status: needs_confirmation" in preview
+        assert "effects: write_allowed_project" in preview
+
+        blocked = m.run_action_text(str(action_path))
+        assert "status: blocked" in blocked
+        assert not target.exists()
+
+        output = m.apply_action_text(str(action_path), yes=True)
+        assert "action run:" in output
+        assert "status: completed" in output
+        assert "bytes written:" in output
+        assert target.read_text(encoding="utf-8") == "* New\nsecret body\n"
+
+        ledger_text = "\n".join(json.dumps(row, ensure_ascii=False) for row in m.read_jsonl(m.action_ledger_path()))
+        assert "secret body" not in ledger_text
+        assert str(target) not in ledger_text
+        assert "target_path_sha256" in ledger_text
+
+        ignored_action = tmp / "ignored-write.json"
+        ignored_action.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "project_file_write",
+                    "path": str(docs / "ignored.org"),
+                    "mode": "create",
+                    "content": "* Ignored\n",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        ignored = m.validate_action_text(str(ignored_action), preview=True)
+        assert "status: rejected" in ignored
+        assert "ignored by .motokoignore" in ignored
+
+
+def test_project_file_write_overwrite_requires_expected_hash(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        target = docs / "existing.org"
+        target.write_text("* Old\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        missing_expected = tmp / "missing-expected.json"
+        missing_expected.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "project_file_write",
+                    "path": str(target),
+                    "mode": "overwrite",
+                    "content": "* New\n",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rejected = m.validate_action_text(str(missing_expected), preview=True)
+        assert "status: rejected" in rejected
+        assert "overwrite requires expected_sha256" in rejected
+
+        good = tmp / "overwrite.json"
+        good.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "project_file_write",
+                    "path": str(target),
+                    "mode": "overwrite",
+                    "expected_sha256": m.sha256_file(target),
+                    "content": "* New\n",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        output = m.apply_action_text(str(good), yes=True)
+        assert "status: completed" in output
+        assert target.read_text(encoding="utf-8") == "* New\n"
+
+
 def test_goal_loop_preview_save_and_list_without_execution(m):
     with isolated_state() as tmp:
         preview = m.format_goal_plan(
@@ -6945,6 +7061,50 @@ def test_goal_loop_preview_save_and_list_without_execution(m):
         assert "forbidden effect" in rejected
 
 
+def test_goal_loop_runs_explicit_confirmed_action_list(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        target = docs / "goal-output.org"
+        action = {
+            "schema": "motoko-action-v1",
+            "kind": "project_file_write",
+            "path": str(target),
+            "mode": "create",
+            "content": "* Goal output\n",
+            "reason": "Explicit goal action.",
+        }
+        goal_path = tmp / "goal.json"
+        goal_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-goal-loop-v1",
+                    "objective": "Create one bounded file",
+                    "allowed_effects": ["write_allowed_project"],
+                    "budgets": {"max_steps": 2, "max_tool_calls": 2, "max_model_calls": 1, "max_minutes": 5},
+                    "actions": [action],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        preview = m.format_goal_preview(str(goal_path))
+        assert "actions: 1" in preview
+        assert "runner: explicit action list" in preview
+
+        refused = m.run_goal_text(str(goal_path), yes=False)
+        assert "status: refused" in refused
+        assert not target.exists()
+
+        output = m.run_goal_text(str(goal_path), yes=True)
+        assert "goal run:" in output
+        assert "completed: 1/1" in output
+        assert "status: completed" in output
+        assert target.read_text(encoding="utf-8") == "* Goal output\n"
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -6968,7 +7128,10 @@ def main() -> int:
         test_action_run_executes_approved_tool_and_records_private_result,
         test_tool_catalog_and_action_plan_are_inspectable_without_running,
         test_action_run_keeps_project_write_tools_disabled,
+        test_project_file_write_action_is_code_owned_and_confirmed,
+        test_project_file_write_overwrite_requires_expected_hash,
         test_goal_loop_preview_save_and_list_without_execution,
+        test_goal_loop_runs_explicit_confirmed_action_list,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

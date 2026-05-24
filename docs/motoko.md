@@ -513,11 +513,13 @@ motoko tools
 motoko action plan "query"
 motoko action preview ACTION.json
 motoko action run ACTION.json [--yes]
+motoko action apply ACTION.json --yes
 motoko action ledger [--limit N]
 motoko action result RUN_ID [--private]
 motoko goal plan "objective" [--save]
 motoko goal list
 motoko goal preview GOAL.json
+motoko goal run GOAL.json --yes
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -550,8 +552,9 @@ to a review-first internal action model. Pending suggestions may propose
 `create`, `patch`, `write_file`, or `remove_file` actions. Accepting a
 suggestion applies the action through Motoko's own validators, not through a
 general tool loop. Support files are confined to `references/`, `templates/`,
-and `scripts/` under the selected skill package; today scripts are inert text
-assets, not executable authority. `motoko skill support NAME` lists support
+and `scripts/` under the selected skill package. Scripts are inert unless they
+have adjacent tool metadata, current fingerprint approval, and a typed action
+record accepted by Motoko validators. `motoko skill support NAME` lists support
 files, and `motoko skill support NAME references/file.md` shows one file.
 When a relevant skill is selected for a prompt, Motoko may include a bounded
 matching support-file excerpt as additional procedural context and record it in
@@ -563,8 +566,9 @@ NAME` validates and displays those declarations, fingerprints, effects, and
 approval status. `motoko skill approve-tool NAME TOOL --yes` approves only the
 current script and metadata fingerprints. `motoko action preview ACTION.json`
 validates a typed `motoko-action-v1` record and writes a private user-state
-ledger row without execution. `motoko action run ACTION.json [--yes]` runs only
-approved `skill_tool_run` records through the narrow stdlib Python runner:
+ledger row without execution. `motoko action run ACTION.json [--yes]` runs
+approved typed actions. Approved `skill_tool_run` records go through the
+narrow stdlib Python runner:
 structured JSON on stdin, scrubbed environment, fixed skill-package working
 directory, timeout and output byte limits, JSON object output validation, and
 private inputs/results stored under the current user's Motoko state. `--yes`
@@ -573,6 +577,15 @@ requires confirmation. Executable script tools are treated as having the
 `external_process` effect even when old metadata omits it, so approvals show
 the actual authority being granted; script tools cannot declare
 `prompt_only`.
+
+Project-file mutation uses a separate code-owned action kind,
+`project_file_write`, not arbitrary script side effects. `motoko action apply
+ACTION.json --yes` can create or overwrite a file only under an allowed root,
+only outside `.motokoignore` exclusions and VCS/cache directories, only with
+one exact session confirmation, and only through Motoko's atomic write path.
+Overwrite actions require the current `expected_sha256` of the target. Action
+ledgers store hashes, byte counts, effects, and statuses, not file content or
+raw target paths.
 
 `motoko tools` lists all declared skill tools across learned skills, including
 approval state and effects. `motoko action plan "query"` is the first
@@ -584,13 +597,16 @@ result RUN_ID` shows metadata for a private tool run result; add `--private`
 only in the owning Unix account when you intentionally want stdout/stderr and
 parsed JSON output printed.
 
-Goal loops are preview-only for now. `motoko goal plan "objective"` builds a
-disabled `motoko-goal-loop-v1` record with objective, scope, allowed
-tools/effects, budgets, stop conditions, and phases. `--save` stores the draft
-under the current user's Motoko state; `motoko goal list` and `motoko goal
-preview GOAL.json` inspect saved or external loop records. Execution is not
-enabled yet. `write_allowed_project` and `network` loops require explicit
-future approval; `service_control` and `privileged` are rejected.
+Goal loops are still deliberately narrow. `motoko goal plan "objective"` builds
+a `motoko-goal-loop-v1` record with objective, scope, allowed tools/effects,
+budgets, stop conditions, and phases. `--save` stores the draft under the
+current user's Motoko state; `motoko goal list` and `motoko goal preview
+GOAL.json` inspect saved or external loop records. `motoko goal run GOAL.json
+--yes` only runs an explicit action list already present in the loop record,
+and each action still passes through the same action validator, effect checks,
+budgets, confirmations, and ledger path. There is no autonomous model loop yet.
+`network` loops require future approval; `service_control` and `privileged`
+are rejected.
 
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the
@@ -602,11 +618,12 @@ source scoping, Org date parsing, and evidence extraction; the skill records
 why and when that handler should run.
 
 Motoko does not execute arbitrary skill scripts, shell snippets, network tools,
-service-control actions, privileged actions, or project-file-writing tools.
-The first runner is deliberately limited to approved stdlib Python tools with
-low-risk effects such as allowlisted reads and Motoko-state writes. Broader
-mutation requires a later reviewed design step. The accepted design for that
-runner lives in `docs/agentic-capability-design.md`.
+service-control actions, privileged actions, or script-owned project-file
+writes. Skill scripts remain limited to approved stdlib Python tools with
+low-risk effects such as allowlisted reads and Motoko-state writes. Project
+mutation is available only through the typed, code-owned `project_file_write`
+action described above. The accepted design for that runner lives in
+`docs/agentic-capability-design.md`.
 
 Skill schema changes include a deterministic upgrade path. Run
 `motoko skill upgrade` to rewrite learned `SKILL.md` files to the current

@@ -33,6 +33,16 @@ not the easiest place to review what changed after a long work session.
   list`, and `motoko goal preview` can create or inspect disabled
   `motoko-goal-loop-v1` drafts with budgets, scopes, allowed effects/tools,
   stop conditions, and phases. Execution remains disabled pending approval.
+- Added code-owned project-file write actions: `motoko action apply FILE
+  --yes` and `/action apply FILE --yes` can apply confirmed
+  `project_file_write` records under allowlisted roots, outside
+  `.motokoignore` and VCS/cache paths, with overwrite hash checks, atomic
+  writes, exact session confirmation, and content-safe action ledgers. Script
+  tools still cannot write project files directly.
+- Added the first narrow goal-loop runner: `motoko goal run FILE --yes` and
+  `/goal run FILE --yes` execute only explicit action lists already present in
+  `motoko-goal-loop-v1` records, within budgets and allowed effects/tools.
+  Autonomous model-planned loops remain disabled.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

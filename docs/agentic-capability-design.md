@@ -2,7 +2,7 @@
 
 Date: 2026-05-24
 
-Status: design review in progress.
+Status: approved boundary; implementation in progress.
 
 This document tracks the reviewed path for adding skill-script execution,
 general tool running, and goal loops to Motoko. The target is not to turn
@@ -151,6 +151,22 @@ That gives Motoko useful deterministic tools without immediately granting
 project-file mutation. Project-file writes can follow after the runner has
 good previews, confirmations, evals, and interruption behavior.
 
+Approval checkpoint, 2026-05-24:
+
+- The user approved the next authority step under this exact boundary:
+  project mutation is a code-owned typed action, not arbitrary script write
+  authority. Script tools may propose or prepare data, but Motoko's validator
+  and applier own the filesystem effect.
+- `write_allowed_project` remains disabled for script-backed tools. The
+  approved path is `project_file_write`, with an absolute allowlisted target,
+  `.motokoignore` and VCS/cache enforcement, one exact session confirmation,
+  overwrite hash checks, atomic writes, and content-safe ledger rows.
+- Goal-loop execution may begin only as an explicit action-list runner. The
+  loop record declares objective, budgets, allowed effects/tools, and concrete
+  actions; every action still passes through the normal validator,
+  confirmation, execution, and ledger path. Autonomous model-planned loops
+  remain a later design step.
+
 Implementation recipe:
 
 1. Add an effect registry with the effect tiers above. Unknown effects must
@@ -176,6 +192,11 @@ Implementation recipe:
    Motoko state, not in admin-visible logs.
 8. Keep `service_control` and `privileged` effects forbidden. Motoko must not
    use sudo, setuid helpers, or direct systemd control.
+9. For project-file mutation, implement a first-class `project_file_write`
+   action. It should create or overwrite only files under Motoko allowlists,
+   never ignored paths, never VCS/cache directories, and never symlink targets
+   or parents. Overwrites require an `expected_sha256` match. The ledger stores
+   hashes and byte counts, not raw file content.
 
 ## Skill Package Format
 
@@ -365,7 +386,8 @@ Implementation recipe:
 
 1. Define `motoko-action-v1` as a small family of typed action records:
    `skill_handler_run`, `skill_tool_run`, `artifact_lifecycle_plan`,
-   `artifact_lifecycle_apply`, and later `goal_loop_step`.
+   `artifact_lifecycle_apply`, `project_file_write`, and later
+   `goal_loop_step`.
 2. Add an action parser that accepts JSON-like data from internal planners, not
    executable text. It should reject multiple actions unless the caller is an
    approved goal loop with a declared budget.
@@ -399,7 +421,9 @@ Accepted rules:
   effect contract includes `read_allowed_files`.
 - Skill tools must obey `.motokoignore` for corpus/document operations.
 - Scripts may write Motoko-owned state only with `write_motoko_state`; project
-  writes require `write_allowed_project` and explicit confirmation policy.
+  writes require the code-owned `project_file_write` action, the
+  `write_allowed_project` effect, and explicit confirmation policy. Script
+  tools do not receive direct project-write authority.
 - Absolute paths, path traversal, symlinks escaping the allowed root, hidden
   cross-account state, and broad home-directory access are denied.
 - `service_control` and `privileged` remain forbidden effects.
@@ -657,9 +681,10 @@ Approval gates still required:
 - `network`: not enabled. To enable it, require a NixOS-reviewed wrapper or
   policy, explicit destination/purpose metadata, no ambient secrets, and
   content-safe telemetry.
-- Goal loops: not enabled. To enable them, require an approved loop record
-  with objective, scope, allowed skills/tools, budgets, stop conditions,
-  checkpoints, pause/resume, cancellation, and final audit.
+- Autonomous goal loops: not enabled. The only enabled loop runner is the
+  explicit-action form documented below. To enable model-planned loops, require
+  an approved loop record with objective, scope, allowed skills/tools, budgets,
+  stop conditions, checkpoints, pause/resume, cancellation, and final audit.
 - Stronger containment: not required for the current low-risk runner, but
   needed before broad terminal-like tools, network tools, or project mutation.
   This should be NixOS-owned, not a hidden Python-side privilege expansion.
@@ -674,14 +699,36 @@ Goal-loop preview checkpoint, 2026-05-24:
 - Added `motoko goal list`, `/goal list`, `motoko goal preview FILE`, and
   `/goal preview FILE`. These validate and inspect loop records without
   execution.
-- Goal-loop execution remains disabled. Low-risk effects can be previewed as
-  `draft`; `write_allowed_project` and `network` produce `needs_approval`;
-  `service_control` and `privileged` are rejected.
+- Goal-loop execution was disabled at this checkpoint. Low-risk effects could
+  be previewed as `draft`; `write_allowed_project` and `network` produced
+  `needs_approval`; `service_control` and `privileged` were rejected.
+
+Project-write and goal-run checkpoint, 2026-05-24:
+
+- Added the code-owned `project_file_write` action kind. It requires an
+  absolute allowlisted target path, respects `.motokoignore`, rejects
+  VCS/cache directories and symlink targets, requires one exact session
+  confirmation, and writes atomically. Overwrite mode requires the current
+  `expected_sha256` of the target.
+- Added `motoko action apply FILE --yes` and `/action apply FILE --yes` for
+  confirmed project-file writes. `motoko action run FILE [--yes]` can dispatch
+  both approved script-tool actions and typed project-file writes, but
+  script-owned project writing remains blocked.
+- Extended `motoko-goal-loop-v1` with an optional explicit `actions` list and
+  added `motoko goal run FILE --yes` / `/goal run FILE --yes`. The runner does
+  not ask a model to plan; it executes only the concrete actions in the record,
+  within budgets and allowed effects/tools, and each action still passes
+  through the normal action validator and ledger.
+- Goal loops are now executable only in this narrow explicit-action form.
+  Autonomous plan/retrieve/act/observe loops remain a later reviewed step.
 
 ## Goal Loops
 
-Goal loops should come after the planner/handler/tool boundary is solid. The
-intended shape is a durable, user-approved loop record with:
+Goal loops should remain staged. The current enabled form is an explicit
+action-list runner: the loop record contains concrete typed actions and Motoko
+runs them through the normal validator, confirmation, budget, and ledger path.
+The later autonomous form should come after this explicit runner stays stable.
+The intended durable record contains:
 
 - objective;
 - scope;
@@ -692,9 +739,9 @@ intended shape is a durable, user-approved loop record with:
 - checkpoint ledger;
 - final audit.
 
-A loop should run explicit phases: plan, retrieve, act through approved
-handlers/tools, observe, reflect/audit, persist artifacts or feedback, and
-either continue or stop. Loops must be pauseable, resumable, visible in job
-status, and conservative by default: read-only loops first, then
-user-confirmed local mutations, and only later broader automation after
-separate review.
+A future autonomous loop should run explicit phases: plan, retrieve, act
+through approved handlers/tools, observe, reflect/audit, persist artifacts or
+feedback, and either continue or stop. Loops must be pauseable, resumable,
+visible in job status, and conservative by default: explicit action lists
+first, then read-only model-planned loops, then user-confirmed local mutations,
+and only later broader automation after separate review.

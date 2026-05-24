@@ -14,6 +14,7 @@ import re
 import uuid
 
 from motoko_core.agentic import (
+    ACTION_SCHEMA,
     EFFECT_NETWORK,
     EFFECT_PRIVILEGED,
     EFFECT_READ_ALLOWED_FILES,
@@ -38,6 +39,7 @@ MAX_ALLOWED_TOOLS = 20
 MAX_BUDGET_STEPS = 50
 MAX_BUDGET_CALLS = 200
 MAX_BUDGET_MINUTES = 24 * 60
+MAX_GOAL_ACTIONS = 50
 
 FORBIDDEN_GOAL_EFFECTS = {EFFECT_SERVICE_CONTROL, EFFECT_PRIVILEGED}
 APPROVAL_REQUIRED_EFFECTS = {EFFECT_WRITE_ALLOWED_PROJECT, EFFECT_NETWORK}
@@ -117,6 +119,25 @@ def normalize_budgets(value) -> dict:
     }
 
 
+def normalize_actions(value) -> list[dict]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise GoalLoopValidationError("actions must be a list")
+    if len(value) > MAX_GOAL_ACTIONS:
+        raise GoalLoopValidationError(f"actions has too many entries (max {MAX_GOAL_ACTIONS})")
+    rows = []
+    for idx, item in enumerate(value, 1):
+        if not isinstance(item, dict):
+            raise GoalLoopValidationError(f"actions[{idx}] must be an object")
+        if item.get("schema") != ACTION_SCHEMA:
+            raise GoalLoopValidationError(f"actions[{idx}] has unsupported action schema: {item.get('schema')}")
+        if "command" in item or "shell" in item:
+            raise GoalLoopValidationError(f"actions[{idx}] must not contain shell or command")
+        rows.append(dict(item))
+    return rows
+
+
 def validate_scope_paths(scope: list[str], *, path_checker=None) -> None:
     for item in scope:
         text = str(item or "").strip()
@@ -140,6 +161,7 @@ def make_goal_loop_record(
     allowed_effects: list[str] | None = None,
     budgets: dict | None = None,
     stop_conditions: list[str] | None = None,
+    actions: list[dict] | None = None,
 ) -> dict:
     objective = str(objective or "").strip()
     if not objective:
@@ -147,6 +169,7 @@ def make_goal_loop_record(
     if len(objective) > MAX_OBJECTIVE_CHARS:
         raise GoalLoopValidationError(f"objective is too long (max {MAX_OBJECTIVE_CHARS} chars)")
     stamp = utc_now()
+    normalized_actions = normalize_actions(actions)
     return {
         "schema": GOAL_LOOP_SCHEMA,
         "id": safe_goal_id(loop_id),
@@ -164,7 +187,8 @@ def make_goal_loop_record(
             label="stop_conditions",
         ),
         "phases": ["plan", "retrieve", "act", "observe", "audit", "checkpoint"],
-        "execution_enabled": False,
+        "actions": normalized_actions,
+        "execution_enabled": bool(normalized_actions),
     }
 
 
@@ -181,6 +205,7 @@ def validate_goal_loop_record(record: dict, *, path_checker=None) -> dict:
         allowed_effects=record.get("allowed_effects") if isinstance(record.get("allowed_effects"), list) else [],
         budgets=record.get("budgets") if isinstance(record.get("budgets"), dict) else {},
         stop_conditions=record.get("stop_conditions") if isinstance(record.get("stop_conditions"), list) else None,
+        actions=record.get("actions") if "actions" in record else [],
     )
     validate_scope_paths(normalized["scope"], path_checker=path_checker)
     requested_effects = set(normalized["allowed_effects"])
@@ -193,7 +218,6 @@ def validate_goal_loop_record(record: dict, *, path_checker=None) -> dict:
     else:
         normalized["status"] = GOAL_LOOP_STATUS_NEEDS_APPROVAL
         normalized["approval"] = "required-for-nonstandard-effects"
-    normalized["execution_enabled"] = False
     return normalized
 
 
@@ -245,7 +269,11 @@ def format_goal_loop(record: dict) -> str:
     )
     lines.append("stop conditions: " + ", ".join(record.get("stop_conditions", [])))
     lines.append("phases: " + ", ".join(record.get("phases", [])))
-    lines.append("runner: disabled until explicit goal-loop execution approval")
+    lines.append(f"actions: {len(record.get('actions', []) or [])}")
+    if record.get("execution_enabled"):
+        lines.append("runner: explicit action list; run with motoko goal run FILE --yes")
+    else:
+        lines.append("runner: disabled until an explicit action list is attached")
     return "\n".join(lines)
 
 

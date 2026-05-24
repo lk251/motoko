@@ -8,6 +8,7 @@ the first narrow script runner for approved stdlib Python skill tools.
 from __future__ import annotations
 
 import datetime as _dt
+import contextlib
 import hashlib
 import json
 import os
@@ -65,6 +66,7 @@ SUPPORTED_ACTION_KINDS = {
     "skill_tool_run",
     "artifact_lifecycle_plan",
     "artifact_lifecycle_apply",
+    "project_file_write",
     "goal_loop_step",
 }
 SUPPORTED_INTERPRETERS = {"python3"}
@@ -76,6 +78,7 @@ MAX_TIMEOUT_SECONDS = 3600
 MAX_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
 MAX_RESULT_PREVIEW_CHARS = 1200
+MAX_PROJECT_WRITE_BYTES = 1024 * 1024
 
 
 class AgenticValidationError(ValueError):
@@ -265,6 +268,72 @@ def validate_path_argument_boundaries(arguments: dict, tool: dict, *, realm: str
                 raise AgenticValidationError("mares actions may not access /home/personal")
             if path_checker is not None:
                 path_checker(key, item)
+
+
+def validate_project_file_write_action(
+    action: dict,
+    *,
+    realm: str,
+    path_checker=None,
+    preview: bool = False,
+    session_approvals: set[str] | None = None,
+) -> dict:
+    path_text = str(action.get("path") or "").strip()
+    if not path_text:
+        raise AgenticValidationError("project_file_write requires path")
+    if "\x00" in path_text:
+        raise AgenticValidationError("project_file_write path contains NUL")
+    target = pathlib.Path(path_text).expanduser()
+    if not target.is_absolute():
+        raise AgenticValidationError("project_file_write path must be absolute")
+    raw_posix = path_text.replace("\\", "/")
+    if any(part in {"", ".."} for part in pathlib.PurePosixPath(raw_posix).parts):
+        raise AgenticValidationError("project_file_write path must not contain traversal")
+    if realm == "mares" and (raw_posix == "/home/personal" or raw_posix.startswith("/home/personal/")):
+        raise AgenticValidationError("mares actions may not access /home/personal")
+    if path_checker is not None:
+        path_checker("path", path_text, write=True)
+    mode = str(action.get("mode") or "create").strip().lower()
+    if mode not in {"create", "overwrite"}:
+        raise AgenticValidationError("project_file_write mode must be create or overwrite")
+    content = action.get("content")
+    if not isinstance(content, str):
+        raise AgenticValidationError("project_file_write content must be a string")
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) > MAX_PROJECT_WRITE_BYTES:
+        raise AgenticValidationError(f"project_file_write content exceeds {MAX_PROJECT_WRITE_BYTES} bytes")
+    expected_sha = str(action.get("expected_sha256") or "").strip()
+    if expected_sha and not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        raise AgenticValidationError("expected_sha256 must be a lowercase sha256 hex digest")
+    if mode == "create" and expected_sha:
+        raise AgenticValidationError("expected_sha256 is only valid for overwrite")
+    if mode == "overwrite" and not expected_sha:
+        raise AgenticValidationError("project_file_write overwrite requires expected_sha256")
+    content_sha = sha256_bytes(content_bytes)
+    repeat_key = project_file_write_session_key(
+        action,
+        target_path=str(target),
+        mode=mode,
+        content_sha256=content_sha,
+        expected_sha256=expected_sha,
+    )
+    session_ok = repeat_key in (session_approvals or set())
+    status = "valid"
+    approval = "session-confirmed" if session_ok else "session-confirmation-required"
+    if not session_ok:
+        status = "needs_confirmation" if preview else "blocked"
+    return {
+        "target_path": str(target),
+        "target_path_sha256": sha256_text(str(target)),
+        "mode": mode,
+        "content_bytes": len(content_bytes),
+        "content_sha256": content_sha,
+        "expected_sha256": expected_sha,
+        "session_repeat_key": repeat_key,
+        "session_repeat_eligible": True,
+        "status": status,
+        "approval": approval,
+    }
 
 
 class SessionApprovalStore:
@@ -521,6 +590,25 @@ def session_approval_key(action: dict, tool: dict | None = None) -> str:
     return sha256_text(stable_json(key))
 
 
+def project_file_write_session_key(
+    action: dict,
+    *,
+    target_path: str,
+    mode: str,
+    content_sha256: str,
+    expected_sha256: str,
+) -> str:
+    key = {
+        "schema": action.get("schema"),
+        "kind": action.get("kind"),
+        "target_path_sha256": sha256_text(str(target_path)),
+        "mode": mode,
+        "content_sha256": content_sha256,
+        "expected_sha256": expected_sha256,
+    }
+    return sha256_text(stable_json(key))
+
+
 def action_id(action: dict) -> str:
     return "act-" + uuid.uuid4().hex[:16]
 
@@ -596,6 +684,17 @@ def validate_action_record(
             }
         )
         return result
+    if kind == "project_file_write":
+        project = validate_project_file_write_action(
+            action,
+            realm=realm,
+            path_checker=path_checker,
+            preview=preview,
+            session_approvals=session_approvals,
+        )
+        result.update(project)
+        result["allowed_effects"] = [EFFECT_WRITE_ALLOWED_PROJECT]
+        return result
     if kind == "skill_handler_run":
         skill_name = str(action.get("skill") or "").strip()
         if not skill_name:
@@ -625,6 +724,79 @@ def validate_action_record(
     return result
 
 
+def _atomic_project_write(path: pathlib.Path, text: str, *, mode_bits: int) -> None:
+    tmp = path.with_name(f".{path.name}.motoko-tmp-{uuid.uuid4().hex[:12]}")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.chmod(mode_bits & 0o777)
+        tmp.replace(path)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def apply_project_file_write_action(action: dict, validation: dict) -> dict:
+    """Apply one already validated code-owned project-file write action."""
+    if validation.get("status") != "valid":
+        raise AgenticValidationError(f"cannot apply invalid action: {validation.get('status', '')}")
+    if validation.get("kind") != "project_file_write":
+        raise AgenticValidationError(f"unsupported project apply action kind: {validation.get('kind', '')}")
+    target = pathlib.Path(str(action.get("path") or "")).expanduser()
+    if not target.is_absolute():
+        raise AgenticValidationError("project_file_write path must be absolute")
+    parent = target.parent
+    if not parent.exists() or not parent.is_dir():
+        raise AgenticValidationError("project_file_write parent directory must already exist")
+    if parent.is_symlink():
+        raise AgenticValidationError("project_file_write refuses symlinked parent directories")
+    if target.exists() and target.is_symlink():
+        raise AgenticValidationError("project_file_write refuses symlink targets")
+    if target.exists() and target.is_dir():
+        raise AgenticValidationError("project_file_write refuses directory targets")
+
+    mode = str(validation.get("mode") or action.get("mode") or "create").strip().lower()
+    expected_sha = str(validation.get("expected_sha256") or action.get("expected_sha256") or "").strip()
+    content = action.get("content")
+    if not isinstance(content, str):
+        raise AgenticValidationError("project_file_write content must be a string")
+    content_bytes = content.encode("utf-8")
+    if len(content_bytes) > MAX_PROJECT_WRITE_BYTES:
+        raise AgenticValidationError(f"project_file_write content exceeds {MAX_PROJECT_WRITE_BYTES} bytes")
+
+    if mode == "create":
+        if target.exists():
+            raise AgenticValidationError("project_file_write create target already exists")
+        previous_sha = ""
+        mode_bits = 0o644
+    elif mode == "overwrite":
+        if not target.exists():
+            raise AgenticValidationError("project_file_write overwrite target does not exist")
+        if not expected_sha:
+            raise AgenticValidationError("project_file_write overwrite requires expected_sha256")
+        previous_sha = file_sha256(target)
+        if previous_sha != expected_sha:
+            raise AgenticValidationError("project_file_write expected_sha256 does not match target")
+        mode_bits = target.stat().st_mode & 0o777
+    else:
+        raise AgenticValidationError("project_file_write mode must be create or overwrite")
+
+    start = time.monotonic()
+    _atomic_project_write(target, content, mode_bits=mode_bits)
+    duration_ms = int((time.monotonic() - start) * 1000)
+    return {
+        "result_schema": ACTION_RESULT_SCHEMA,
+        "action_id": validation.get("id", ""),
+        "status": "completed",
+        "duration_ms": duration_ms,
+        "target_path_sha256": validation.get("target_path_sha256", ""),
+        "mode": mode,
+        "bytes_written": len(content_bytes),
+        "previous_sha256": previous_sha,
+        "new_sha256": file_sha256(target),
+        "error": "",
+    }
+
+
 def ledger_record(validation: dict, *, status: str | None = None) -> dict:
     allowed = {
         "id",
@@ -644,6 +816,14 @@ def ledger_record(validation: dict, *, status: str | None = None) -> dict:
         "session_repeat_eligible",
         "argument_hash",
         "action_hash",
+        "target_path_sha256",
+        "mode",
+        "content_bytes",
+        "content_sha256",
+        "expected_sha256",
+        "bytes_written",
+        "previous_sha256",
+        "new_sha256",
         "result_schema",
         "tool_run_id",
         "private_result_path",
@@ -986,6 +1166,14 @@ def format_action_validation(validation: dict) -> str:
             lines.append(f"{key.replace('_', ' ')}: {validation.get(key)}")
     if validation.get("allowed_effects"):
         lines.append("effects: " + ", ".join(validation.get("allowed_effects", [])))
+    if validation.get("kind") == "project_file_write":
+        if validation.get("target_path"):
+            lines.append(f"target path: {validation.get('target_path')}")
+        lines.append(f"mode: {validation.get('mode', '')}")
+        lines.append(f"content bytes: {validation.get('content_bytes', 0)}")
+        lines.append(f"content sha256: {validation.get('content_sha256', '')}")
+        if validation.get("expected_sha256"):
+            lines.append(f"expected sha256: {validation.get('expected_sha256', '')}")
     if validation.get("session_repeat_eligible"):
         lines.append(f"session repeat key: {validation.get('session_repeat_key', '')}")
     if validation.get("reason"):
@@ -1008,6 +1196,22 @@ def format_action_result(validation: dict, result: dict | None = None) -> str:
             lines.append(f"{key.replace('_', ' ')}: {validation.get(key)}")
     if validation.get("allowed_effects"):
         lines.append("effects: " + ", ".join(validation.get("allowed_effects", [])))
+    if validation.get("kind") == "project_file_write":
+        if validation.get("target_path"):
+            lines.append(f"target path: {validation.get('target_path')}")
+        lines.extend(
+            [
+                f"mode: {result.get('mode', validation.get('mode', ''))}",
+                f"bytes written: {result.get('bytes_written', 0)}",
+                f"target path sha256: {result.get('target_path_sha256', validation.get('target_path_sha256', ''))}",
+                f"previous sha256: {result.get('previous_sha256', '')}",
+                f"new sha256: {result.get('new_sha256', '')}",
+                f"duration: {result.get('duration_ms', 0)} ms",
+            ]
+        )
+        if result.get("error"):
+            lines.append(f"error: {result.get('error', '')}")
+        return "\n".join(lines)
     lines.extend(
         [
             f"tool run: {result.get('tool_run_id', '')}",
