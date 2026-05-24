@@ -39,11 +39,16 @@ Motoko uses:
 
 - `/nix/store/.../python3` from the NixOS system closure;
 - the Python standard library only;
-- the existing loopback MTP model endpoint at `127.0.0.1:8083`;
+- approved per-realm local model routes from
+  `~/.config/motoko/local-models.json`;
 - files in the `personal` account's own home directory.
 
-On `.#hb3-headless`, the default Qwen3.6 service starts at boot. The
-`personal` account cannot start, stop, or restart the llama.cpp model services.
+On `.#hb3-headless`, NixOS owns the llama.cpp worker catalog, model paths,
+service flags, Unix sockets, and route policy. Motoko can request approved
+route endpoints, read content-free route status, stop a declared route through
+`motoko-model stop ROUTE`, and read content-free metrics through
+`motoko-model metrics ROUTE`; Motoko cannot call `systemctl`, load arbitrary
+model paths, pass arbitrary llama.cpp flags, or mutate NixOS policy.
 
 ## Storage
 
@@ -438,6 +443,9 @@ motoko model-routes
 motoko models
 motoko models qwen36-chat-default
 motoko model-stop qwen36-chat-default
+motoko models qwen36-chat
+motoko model-stop qwen36-chat
+motoko model-metrics qwen36-chat
 motoko model-eval
 motoko index-enrich INDEX_ID
 motoko index-enrich --all
@@ -468,6 +476,27 @@ content.
 prompt sizes and shows which approved chat route the context governor would
 choose. Use `--run` only when you explicitly want to send real synthetic model
 requests.
+
+`motoko model-routes`, `/model-routes`, `motoko models`, and `/models` consume
+NixOS-declared route metadata such as `request_policy`, `scheduling`,
+`idle_seconds`, `safety_policy`, `cache`, and `maxParallel`. Request policy can
+declare sampling presets, structured-output fields, reasoning/thinking
+presets, and prompt-cache measurement support. Motoko applies these policy
+fields to approved local model requests and records only content-free metadata
+in `/last-call`, such as route, model id, estimated tokens, selected sampling
+preset, selected reasoning preset, thinking budget, whether structured output
+was requested, and timing counters.
+
+For prompt-cache measurement, use:
+
+```bash
+motoko model-metrics ROUTE
+```
+
+This delegates to `motoko-model metrics ROUTE` and prints bounded,
+content-free service counters. Motoko does not call `/slots`, does not use
+persistent slot or KV cache files, and does not write prompts, responses,
+filenames, summaries, memories, or retrieved context to admin-owned logs.
 
 `motoko list` displays compact `created`, `updated`, `branch`, and
 `conversation` columns. Full timestamps remain stored in the conversation JSON.
@@ -711,6 +740,7 @@ Useful in-chat commands:
 /models [ROUTE]
 /model-status [ROUTE]
 /model-stop ROUTE
+/model-metrics ROUTE
 /retrieval-eval
 /retrieval-debug QUERY
 /retrieval-preview QUERY

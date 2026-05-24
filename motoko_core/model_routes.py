@@ -144,6 +144,62 @@ def normalize_route_cache_policy(raw) -> dict:
     return policy
 
 
+def bounded_json_value(raw, *, depth: int = 0, max_depth: int = 6):
+    """Return a bounded JSON-ish value suitable for local route metadata."""
+    if depth > max_depth:
+        return None
+    if isinstance(raw, bool) or raw is None:
+        return raw
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip()[:2000]
+    if isinstance(raw, list):
+        values = []
+        for item in raw[:128]:
+            value = bounded_json_value(item, depth=depth + 1, max_depth=max_depth)
+            if value is not None:
+                values.append(value)
+        return values
+    if isinstance(raw, dict):
+        values = {}
+        for key, value in list(raw.items())[:128]:
+            if not isinstance(key, str) or not key.strip():
+                continue
+            normalized = bounded_json_value(value, depth=depth + 1, max_depth=max_depth)
+            if normalized is not None:
+                values[key.strip()[:120]] = normalized
+        return values
+    return None
+
+
+def normalize_policy_dict(raw) -> dict:
+    value = bounded_json_value(raw)
+    return value if isinstance(value, dict) else {}
+
+
+def normalize_request_policy(raw) -> dict:
+    return normalize_policy_dict(raw)
+
+
+def normalize_scheduling_policy(raw) -> dict:
+    return normalize_policy_dict(raw)
+
+
+def normalize_safety_policy(raw) -> dict:
+    return normalize_policy_dict(raw)
+
+
+def normalize_idle_seconds(raw) -> int | None:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
 def normalize_endpoint_paths(raw) -> list[str]:
     if isinstance(raw, str):
         raw = [raw]
@@ -275,6 +331,10 @@ def local_model_route_summary(route_id: str, raw: dict, catalog: dict | None = N
         or route_string_value(model_record, "sha256", "hash"),
         "openai_compatible": bool(raw.get("openai_compatible") or raw.get("openaiCompatible")),
         "reranker_endpoint_status": str(raw.get("reranker_endpoint_status") or ""),
+        "request_policy": normalize_request_policy(raw.get("request_policy") or raw.get("requestPolicy")),
+        "scheduling": normalize_scheduling_policy(raw.get("scheduling")),
+        "idle_seconds": normalize_idle_seconds(raw.get("idle_seconds") or raw.get("idleSeconds")),
+        "safety_policy": normalize_safety_policy(raw.get("safety_policy") or raw.get("safetyPolicy")),
     }
 
 
@@ -371,6 +431,11 @@ def merged_local_model_route(route: str) -> dict:
         return {}
     info = {key: value for key, value in raw.items() if isinstance(key, str)}
     info.setdefault("catalog_route", route_id)
+    summary = local_model_route_summary(route_id, raw, catalog)
+    for key in ("request_policy", "scheduling", "idle_seconds", "safety_policy"):
+        value = summary.get(key)
+        if value not in ({}, None):
+            info[key] = value
     model_ref = info.get("model_id") or info.get("modelId") or info.get("model") or info.get("model_name")
     model_record = {}
     if isinstance(model_ref, str):

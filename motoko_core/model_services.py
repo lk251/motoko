@@ -59,6 +59,57 @@ def format_route_cache_policy(route_info: dict) -> str:
     return "; cache " + ", ".join(pieces) if pieces else ""
 
 
+def format_route_request_policy(route_info: dict) -> str:
+    policy = route_info.get("request_policy") if isinstance(route_info.get("request_policy"), dict) else {}
+    if not policy:
+        return ""
+    pieces = []
+    sampling = policy.get("sampling_presets") or policy.get("samplingPresets")
+    if isinstance(sampling, dict) and sampling:
+        pieces.append("sampling=" + "/".join(sorted(str(key) for key in sampling)[:8]))
+    structured = policy.get("structured_output") or policy.get("structuredOutput")
+    if isinstance(structured, dict) and structured.get("supported"):
+        fields = []
+        if structured.get("json_schema_field") or structured.get("jsonSchemaField"):
+            fields.append(str(structured.get("json_schema_field") or structured.get("jsonSchemaField")))
+        if structured.get("grammar_field") or structured.get("grammarField"):
+            fields.append(str(structured.get("grammar_field") or structured.get("grammarField")))
+        pieces.append("structured=on" + (f"({','.join(fields)})" if fields else ""))
+    reasoning = policy.get("reasoning")
+    if isinstance(reasoning, dict) and reasoning.get("supported"):
+        presets = reasoning.get("presets") if isinstance(reasoning.get("presets"), dict) else {}
+        preset_text = "/" + "/".join(sorted(str(key) for key in presets)[:8]) if presets else ""
+        fmt = str(reasoning.get("format") or "").strip()
+        pieces.append("reasoning=on" + (f":{fmt}" if fmt else "") + preset_text)
+    measurement = policy.get("cache_measurement") or policy.get("cacheMeasurement")
+    if isinstance(measurement, dict) and measurement.get("supported"):
+        pieces.append("cache-measurement=on")
+    return "; request " + ", ".join(pieces) if pieces else ""
+
+
+def format_route_scheduling_policy(route_info: dict) -> str:
+    scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
+    pieces = []
+    if route_info.get("idle_seconds") is not None:
+        pieces.append(f"idle={route_info.get('idle_seconds')}s")
+    for key in ("lane", "parallelSlots", "warmup", "residency"):
+        value = scheduling.get(key)
+        if isinstance(value, (str, int, float, bool)):
+            pieces.append(f"{key}={value}")
+    if isinstance(scheduling.get("fanout"), bool):
+        pieces.append("fanout=on" if scheduling.get("fanout") else "fanout=off")
+    return "; scheduling " + ", ".join(pieces) if pieces else ""
+
+
+def format_route_safety_policy(route_info: dict) -> str:
+    policy = route_info.get("safety_policy") if isinstance(route_info.get("safety_policy"), dict) else {}
+    disabled = policy.get("disabled_server_surfaces") or policy.get("disabledServerSurfaces")
+    if isinstance(disabled, list) and disabled:
+        values = [str(item) for item in disabled[:12]]
+        return "; safety disabled=" + "/".join(values)
+    return ""
+
+
 def model_service_selector_tokens(info: dict) -> set[str]:
     tokens = {
         str(info.get("route", "")),
@@ -107,6 +158,9 @@ def add_model_service_route(
             row["request_path"] = summary.get("request_path", "")
         if not row.get("endpoint_paths"):
             row["endpoint_paths"] = summary.get("endpoint_paths", [])
+        for key in ("request_policy", "scheduling", "idle_seconds", "safety_policy"):
+            if key in summary and not row.get(key):
+                row[key] = summary.get(key)
 
 
 def build_model_service_rows(
@@ -129,6 +183,10 @@ def build_model_service_rows(
             "manager_kind": summary.get("manager_kind", ""),
             "model_path": summary.get("model_path", ""),
             "max_parallel": summary.get("max_parallel") or 1,
+            "request_policy": summary.get("request_policy", {}),
+            "scheduling": summary.get("scheduling", {}),
+            "idle_seconds": summary.get("idle_seconds"),
+            "safety_policy": summary.get("safety_policy", {}),
             "description": ", ".join(summary.get("tasks", [])),
         }
         add_model_service_route(rows, info, summary=summary)
@@ -175,6 +233,17 @@ def format_model_service_status(info: dict, *, include_status: bool = True, stat
     if info.get("_embedding_dimensions"):
         lines.append(f"  embedding dimensions: {info.get('_embedding_dimensions')}")
     lines.append(f"  max parallel: {info.get('max_parallel', 1)}")
+    if info.get("idle_seconds") is not None:
+        lines.append(f"  idle seconds: {info.get('idle_seconds')}")
+    request_policy = format_route_request_policy(info)
+    if request_policy:
+        lines.append(f"  {request_policy.lstrip('; ')}")
+    scheduling_policy = format_route_scheduling_policy(info)
+    if scheduling_policy:
+        lines.append(f"  {scheduling_policy.lstrip('; ')}")
+    safety_policy = format_route_safety_policy(info)
+    if safety_policy:
+        lines.append(f"  {safety_policy.lstrip('; ')}")
     if info.get("manager_kind"):
         lines.append(f"  manager: {info.get('manager_kind')}")
     if include_status and endpoint_text.startswith("unix://") and status_provider is not None:
@@ -228,6 +297,7 @@ def format_model_services_report(
         "Model services:",
         "status source: motoko-model status ROUTE (content-free)",
         "control: /model-stop ROUTE uses motoko-model stop ROUTE; Motoko never calls systemctl",
+        "metrics: /model-metrics ROUTE uses motoko-model metrics ROUTE when declared by NixOS",
         "note: backend=active is service/process state; it does not prove full weights are resident in VRAM",
     ]
     return "\n".join(header) + "\n\n" + "\n\n".join(status_formatter(row) for row in rows)

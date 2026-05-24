@@ -76,18 +76,211 @@ def model_request_timeout(endpoint_text: str, timeout: float, socket_activation_
     return timeout
 
 
+def route_request_policy(route_info: dict) -> dict:
+    policy = route_info.get("request_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def policy_section(policy: dict, *keys: str) -> dict:
+    for key in keys:
+        value = policy.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def payload_path_set(payload: dict, path: str, value) -> None:
+    parts = [part for part in str(path).split(".") if part]
+    if not parts:
+        return
+    target = payload
+    for part in parts[:-1]:
+        child = target.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            target[part] = child
+        target = child
+    target[parts[-1]] = value
+
+
+def payload_path_get(payload: dict, path: str):
+    target = payload
+    for part in [part for part in str(path).split(".") if part]:
+        if not isinstance(target, dict) or part not in target:
+            return None
+        target = target[part]
+    return target
+
+
+SAFE_SAMPLING_FIELDS = {
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "typical_p",
+    "repeat_penalty",
+    "presence_penalty",
+    "frequency_penalty",
+    "seed",
+    "mirostat",
+    "mirostat_tau",
+    "mirostat_eta",
+}
+
+
+def apply_sampling_preset(payload: dict, policy: dict, sampling_preset: str | None) -> str:
+    preset_name = str(sampling_preset or "").strip()
+    if not preset_name:
+        return ""
+    presets = policy_section(policy, "sampling_presets", "samplingPresets")
+    preset = presets.get(preset_name)
+    if not isinstance(preset, dict):
+        return ""
+    for key, value in preset.items():
+        if key in SAFE_SAMPLING_FIELDS and isinstance(value, (int, float, bool, str)):
+            payload[key] = value
+    return preset_name
+
+
+def apply_structured_output(
+    payload: dict,
+    policy: dict,
+    *,
+    json_schema=None,
+    grammar: str | None = None,
+) -> dict:
+    structured = policy_section(policy, "structured_output", "structuredOutput")
+    if structured and not structured.get("supported"):
+        return {"json_schema": False, "grammar": False}
+    used = {"json_schema": False, "grammar": False}
+    if json_schema is not None:
+        field = str(structured.get("json_schema_field") or structured.get("jsonSchemaField") or "json_schema")
+        payload[field] = json_schema
+        used["json_schema"] = True
+    if grammar:
+        field = str(structured.get("grammar_field") or structured.get("grammarField") or "grammar")
+        payload[field] = grammar
+        used["grammar"] = True
+    return used
+
+
+def apply_reasoning_policy(
+    payload: dict,
+    policy: dict,
+    *,
+    reasoning_preset: str | None = None,
+    thinking_budget_tokens: int | None = None,
+    enable_thinking: bool | None = None,
+) -> dict:
+    reasoning = policy_section(policy, "reasoning")
+    if not reasoning or not reasoning.get("supported"):
+        return {}
+    selected_name = str(reasoning_preset or reasoning.get("default_preset") or reasoning.get("defaultPreset") or "").strip()
+    presets = reasoning.get("presets") if isinstance(reasoning.get("presets"), dict) else {}
+    selected = presets.get(selected_name) if selected_name else {}
+    if not isinstance(selected, dict):
+        selected = {}
+    if enable_thinking is None and isinstance(selected.get("enable_thinking"), bool):
+        enable_thinking = selected.get("enable_thinking")
+    if thinking_budget_tokens is None and selected.get("thinking_budget_tokens") is not None:
+        try:
+            thinking_budget_tokens = int(selected.get("thinking_budget_tokens"))
+        except (TypeError, ValueError):
+            thinking_budget_tokens = None
+    enable_field = str(
+        reasoning.get("per_request_enable_field")
+        or reasoning.get("perRequestEnableField")
+        or "chat_template_kwargs.enable_thinking"
+    )
+    budget_field = str(
+        reasoning.get("per_request_budget_field")
+        or reasoning.get("perRequestBudgetField")
+        or "thinking_budget_tokens"
+    )
+    if enable_thinking is not None:
+        payload_path_set(payload, enable_field, bool(enable_thinking))
+    if thinking_budget_tokens is not None and thinking_budget_tokens >= -1:
+        payload_path_set(payload, budget_field, int(thinking_budget_tokens))
+    return {
+        "reasoning_preset": selected_name,
+        "enable_field": enable_field,
+        "budget_field": budget_field,
+        "thinking_budget_tokens": payload_path_get(payload, budget_field),
+        "enable_thinking": payload_path_get(payload, enable_field),
+        "format": str(reasoning.get("format") or ""),
+    }
+
+
 def chat_completion_payload(
     route_info: dict,
     messages: list[dict],
     *,
     temperature: float,
     stream: bool,
+    sampling_preset: str | None = None,
+    json_schema=None,
+    grammar: str | None = None,
+    reasoning_preset: str | None = None,
+    thinking_budget_tokens: int | None = None,
+    enable_thinking: bool | None = None,
+    max_tokens: int | None = None,
 ) -> dict:
-    return {
+    payload = {
         "model": route_info["model"],
         "messages": messages,
         "temperature": temperature,
         "stream": stream,
+    }
+    if max_tokens is not None:
+        payload["max_tokens"] = max(1, int(max_tokens))
+    policy = route_request_policy(route_info)
+    apply_sampling_preset(payload, policy, sampling_preset)
+    apply_structured_output(payload, policy, json_schema=json_schema, grammar=grammar)
+    apply_reasoning_policy(
+        payload,
+        policy,
+        reasoning_preset=reasoning_preset,
+        thinking_budget_tokens=thinking_budget_tokens,
+        enable_thinking=enable_thinking,
+    )
+    return payload
+
+
+def request_policy_metadata(
+    route_info: dict,
+    payload: dict,
+    *,
+    sampling_preset: str | None = None,
+    json_schema=None,
+    grammar: str | None = None,
+    reasoning_preset: str | None = None,
+) -> dict:
+    policy = route_request_policy(route_info)
+    reasoning = policy_section(policy, "reasoning")
+    structured = policy_section(policy, "structured_output", "structuredOutput")
+    json_schema_field = str(structured.get("json_schema_field") or structured.get("jsonSchemaField") or "json_schema")
+    grammar_field = str(structured.get("grammar_field") or structured.get("grammarField") or "grammar")
+    budget_field = str(
+        reasoning.get("per_request_budget_field")
+        or reasoning.get("perRequestBudgetField")
+        or "thinking_budget_tokens"
+    )
+    enable_field = str(
+        reasoning.get("per_request_enable_field")
+        or reasoning.get("perRequestEnableField")
+        or "chat_template_kwargs.enable_thinking"
+    )
+    return {
+        "sampling_preset": str(sampling_preset or ""),
+        "structured_json_schema": json_schema_field in payload,
+        "structured_grammar": grammar_field in payload,
+        "reasoning_preset": str(reasoning_preset or ""),
+        "reasoning_format": str(reasoning.get("format") or "") if isinstance(reasoning, dict) else "",
+        "thinking_budget_tokens": payload_path_get(payload, budget_field),
+        "enable_thinking": payload_path_get(payload, enable_field),
+        "cache_measurement_supported": bool(
+            policy_section(policy, "cache_measurement", "cacheMeasurement").get("supported")
+        ),
     }
 
 

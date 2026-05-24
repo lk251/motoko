@@ -127,6 +127,7 @@ from motoko_core.model_io import (  # noqa: E402
     parse_openai_stream_line_parts,
     raise_if_cancelled,
     read_json_response,
+    request_policy_metadata,
 )
 from motoko_core.model_routes import (  # noqa: E402
     MODEL_ROUTE_AUDIT,
@@ -152,6 +153,9 @@ from motoko_core.model_routes import (  # noqa: E402
     normalize_endpoint_paths,
     normalize_model_route,
     normalize_route_cache_policy,
+    normalize_request_policy,
+    normalize_safety_policy,
+    normalize_scheduling_policy,
     route_kv_cache_policy,
     route_int_value,
     route_model_name,
@@ -166,6 +170,9 @@ from motoko_core.model_services import (  # noqa: E402
     format_model_services_report,
     format_model_stop_report,
     format_route_cache_policy,
+    format_route_request_policy,
+    format_route_safety_policy,
+    format_route_scheduling_policy,
     local_model_helper_route,
     local_model_status_is_activating,
     local_model_status_text_with_runner,
@@ -816,6 +823,7 @@ SLASH_COMMANDS = [
     ("/models [ROUTE]", "show local model service status"),
     ("/model-status [ROUTE]", "alias for /models"),
     ("/model-stop ROUTE", "stop a local model service through motoko-model"),
+    ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
     ("/feedback-eval", "turn private feedback into eval fixtures"),
     ("/action-eval", "run deterministic agentic action safety checks"),
@@ -922,6 +930,7 @@ SHELL_COMMANDS = [
     "models",
     "model-status",
     "model-stop",
+    "model-metrics",
     "model-eval",
     "retrieval-eval",
     "feedback-eval",
@@ -2081,6 +2090,10 @@ def catalog_route_info(route_id: str, *, logical_route: str = MODEL_ROUTE_CHAT) 
         "cache": normalize_route_cache_policy(raw.get("cache")),
         "metrics_endpoint": str(raw.get("metrics_endpoint") or ""),
         "metrics_path": str(raw.get("metrics_path") or ""),
+        "request_policy": summary.get("request_policy") or normalize_request_policy(raw.get("request_policy") or raw.get("requestPolicy")),
+        "scheduling": summary.get("scheduling") or normalize_scheduling_policy(raw.get("scheduling")),
+        "idle_seconds": summary.get("idle_seconds"),
+        "safety_policy": summary.get("safety_policy") or normalize_safety_policy(raw.get("safety_policy") or raw.get("safetyPolicy")),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(logical_route, ""),
         "ctx_size": route_context_size(raw) or route_context_size(summary) or 0,
         "quant": route_quant_label(raw),
@@ -2209,6 +2222,10 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "cache": normalize_route_cache_policy(local_route.get("cache")) if uses_catalog_endpoint else {},
         "metrics_endpoint": str(local_route.get("metrics_endpoint") or "") if uses_catalog_endpoint else "",
         "metrics_path": str(local_route.get("metrics_path") or "") if uses_catalog_endpoint else "",
+        "request_policy": normalize_request_policy(local_route.get("request_policy")) if uses_catalog_endpoint else {},
+        "scheduling": normalize_scheduling_policy(local_route.get("scheduling")) if uses_catalog_endpoint else {},
+        "idle_seconds": local_route.get("idle_seconds") if uses_catalog_endpoint else None,
+        "safety_policy": normalize_safety_policy(local_route.get("safety_policy")) if uses_catalog_endpoint else {},
         "ctx_size": route_context_size(local_route) or 0,
         "quant": route_quant_label(local_route),
         "tasks": [str(item) for item in local_route.get("tasks", [])] if isinstance(local_route.get("tasks"), list) else [],
@@ -2299,6 +2316,13 @@ def chat_route_candidates() -> list[dict]:
         base = dict(base)
         base["governor_source"] = "logical-chat"
         candidates.append(base)
+    if (
+        os.environ.get("MOTOKO_ENDPOINT")
+        or os.environ.get("MOTOKO_MODEL")
+        or os.environ.get(model_route_env_key(MODEL_ROUTE_CHAT, "endpoint"))
+        or os.environ.get(model_route_env_key(MODEL_ROUTE_CHAT, "model"))
+    ):
+        return candidates
     catalog = load_local_model_catalog()
     for route_id, raw in local_model_catalog_routes(catalog).items():
         if not isinstance(route_id, str):
@@ -2434,6 +2458,103 @@ def model_route_for_request(route: str, messages: list[dict]) -> tuple[dict, dic
     return select_chat_route(messages)
 
 
+def route_policy_section(route_info: dict, *keys: str) -> dict:
+    policy = route_info.get("request_policy") if isinstance(route_info.get("request_policy"), dict) else {}
+    for key in keys:
+        value = policy.get(key)
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def route_sampling_presets(route_info: dict) -> dict:
+    return route_policy_section(route_info, "sampling_presets", "samplingPresets")
+
+
+def route_reasoning_policy(route_info: dict) -> dict:
+    return route_policy_section(route_info, "reasoning")
+
+
+def sampling_preset_declared(route_info: dict, preset: str) -> bool:
+    return bool(preset) and preset in route_sampling_presets(route_info)
+
+
+def reasoning_preset_declared(route_info: dict, preset: str) -> bool:
+    presets = route_reasoning_policy(route_info).get("presets")
+    return bool(preset) and isinstance(presets, dict) and preset in presets
+
+
+def default_sampling_preset_for_route(route_info: dict, route: str, *, structured: bool = False) -> str:
+    route = normalize_model_route(route)
+    if structured or route in {
+        MODEL_ROUTE_INDEX_CHUNK,
+        MODEL_ROUTE_INDEX_FILE,
+        MODEL_ROUTE_INDEX_CORPUS,
+        MODEL_ROUTE_INDEX_LABEL,
+        MODEL_ROUTE_MEMORY,
+        MODEL_ROUTE_TITLE,
+    }:
+        candidate = "deterministic"
+    elif route in {MODEL_ROUTE_CHAT, MODEL_ROUTE_TOPIC, MODEL_ROUTE_PROFILE, MODEL_ROUTE_AUDIT}:
+        candidate = "balanced"
+    else:
+        candidate = ""
+    return candidate if sampling_preset_declared(route_info, candidate) else ""
+
+
+def selected_sampling_preset(
+    route_info: dict,
+    route: str,
+    *,
+    explicit: str | None = None,
+    structured: bool = False,
+) -> str:
+    if explicit is not None:
+        explicit = explicit.strip()
+        return explicit if sampling_preset_declared(route_info, explicit) else ""
+    return default_sampling_preset_for_route(route_info, route, structured=structured)
+
+
+def selected_reasoning_preset(route_info: dict, route: str, *, explicit: str | None = None) -> str:
+    policy = route_reasoning_policy(route_info)
+    if not policy.get("supported"):
+        return ""
+    if explicit is None:
+        env_value = os.environ.get("MOTOKO_REASONING_PRESET")
+        if env_value is not None:
+            explicit = env_value.strip()
+        elif normalize_model_route(route) == MODEL_ROUTE_CHAT:
+            explicit = str(policy.get("default_preset") or policy.get("defaultPreset") or "default")
+        else:
+            explicit = ""
+    if explicit.lower() in {"", "off", "none", "0", "false", "no"}:
+        return ""
+    return explicit if reasoning_preset_declared(route_info, explicit) else ""
+
+
+def model_request_metadata(
+    route_info: dict,
+    payload: dict,
+    *,
+    sampling_preset: str,
+    reasoning_preset: str,
+    json_schema=None,
+    grammar: str | None = None,
+) -> dict:
+    metadata = request_policy_metadata(
+        route_info,
+        payload,
+        sampling_preset=sampling_preset,
+        json_schema=json_schema,
+        grammar=grammar,
+        reasoning_preset=reasoning_preset,
+    )
+    metadata["request_temperature"] = payload.get("temperature")
+    metadata["route_idle_seconds"] = route_info.get("idle_seconds")
+    metadata["route_max_parallel"] = route_info.get("max_parallel")
+    return metadata
+
+
 def model_call_started_record(
     route_info: dict,
     governor: dict,
@@ -2441,11 +2562,12 @@ def model_call_started_record(
     source_count: int | None = None,
     stream: bool = True,
     temperature: float = 0.7,
+    request_metadata: dict | None = None,
 ) -> dict:
     prompt_tokens = int(governor.get("prompt_tokens_estimate", 0) or 0)
     ctx_size = route_context_limit(route_info)
     context_percent = round((prompt_tokens / ctx_size) * 100, 3) if ctx_size else 0.0
-    return {
+    record = {
         "schema": MODEL_CALL_TELEMETRY_SCHEMA_VERSION,
         "created": now(),
         "status": "started",
@@ -2472,6 +2594,23 @@ def model_call_started_record(
         "max_route_available": bool(governor.get("max_route_available")),
         "token_counting": "estimated-content-free",
     }
+    metadata = request_metadata if isinstance(request_metadata, dict) else {}
+    for key in (
+        "sampling_preset",
+        "reasoning_preset",
+        "reasoning_format",
+        "thinking_budget_tokens",
+        "enable_thinking",
+        "structured_json_schema",
+        "structured_grammar",
+        "cache_measurement_supported",
+        "request_temperature",
+        "route_idle_seconds",
+        "route_max_parallel",
+    ):
+        if key in metadata and metadata.get(key) not in ("", None):
+            record[key] = metadata.get(key)
+    return record
 
 
 def write_last_model_call(record: dict) -> None:
@@ -2504,6 +2643,17 @@ def write_last_model_call(record: dict) -> None:
             "source_count",
             "stream",
             "temperature",
+            "request_temperature",
+            "sampling_preset",
+            "reasoning_preset",
+            "reasoning_format",
+            "thinking_budget_tokens",
+            "enable_thinking",
+            "structured_json_schema",
+            "structured_grammar",
+            "cache_measurement_supported",
+            "route_idle_seconds",
+            "route_max_parallel",
             "governor_reason",
             "candidate_count",
             "max_route_available",
@@ -2592,6 +2742,33 @@ def format_last_model_call(record: dict | None = None) -> str:
     )
     if record.get("source_count") is not None:
         lines.append(f"sources: {record.get('source_count')}")
+    policy_lines = []
+    if record.get("sampling_preset"):
+        policy_lines.append(f"sampling={record.get('sampling_preset')}")
+    if record.get("reasoning_preset"):
+        budget = (
+            f":{record.get('thinking_budget_tokens')}tok"
+            if record.get("thinking_budget_tokens") is not None
+            else ""
+        )
+        policy_lines.append(f"reasoning={record.get('reasoning_preset')}{budget}")
+    structured = []
+    if record.get("structured_json_schema"):
+        structured.append("json_schema")
+    if record.get("structured_grammar"):
+        structured.append("grammar")
+    if structured:
+        policy_lines.append("structured=" + "/".join(structured))
+    if record.get("cache_measurement_supported"):
+        policy_lines.append("cache-measurement=declared")
+    if policy_lines:
+        lines.append("request policy: " + ", ".join(policy_lines))
+    if record.get("route_idle_seconds") is not None or record.get("route_max_parallel") is not None:
+        lines.append(
+            "route policy: "
+            f"idle={record.get('route_idle_seconds', '-')}s "
+            f"maxParallel={record.get('route_max_parallel', '-')}"
+        )
     if record.get("duration_seconds") is not None:
         lines.append(f"duration: {record.get('duration_seconds')}s")
     if record.get("time_to_first_token_seconds") is not None:
@@ -2782,10 +2959,17 @@ def format_model_routes(*, include_defaults: bool = False) -> str:
         kv_cache = info.get("kv_cache") if isinstance(info.get("kv_cache"), dict) else {}
         kv_location = str(kv_cache.get("location") or "").strip()
         kv = f"; KV={kv_location}" if kv_location else ""
-        cache = format_route_cache_policy(info)
+        policy_text = "".join(
+            [
+                format_route_cache_policy(info),
+                format_route_request_policy(info),
+                format_route_scheduling_policy(info),
+                format_route_safety_policy(info),
+            ]
+        )
         lines.append(
             f"  {route}: {info['model']} endpoint={info['endpoint']} "
-            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}{profile}{kv}{cache}; {info['description']})"
+            f"({marker}; lane={model_route_lane(route)}{manager}{catalog_route}{profile}{kv}{policy_text}; {info['description']})"
         )
     lines.append("")
     lines.append(format_chat_route_governor())
@@ -2857,6 +3041,24 @@ def stop_model_service(selector: str) -> str:
         raise SystemExit(f"motoko-model stop {route_name} failed: {exc}") from exc
     after = compact_local_model_status(local_model_status_text(info))
     return format_model_stop_report(route_name, before=before, output=output, after=after)
+
+
+def model_service_metrics(selector: str) -> str:
+    info = resolve_model_service_route(selector)
+    route_name = local_model_helper_route(info)
+    if not endpoint_is_unix(str(info.get("endpoint") or "")):
+        raise SystemExit(f"model route {route_name} is not a NixOS Unix-socket service")
+    try:
+        output = run_local_model_helper("metrics", info)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"motoko-model metrics {route_name} failed: {exc}") from exc
+    return "\n".join(
+        [
+            f"model metrics: {route_name}",
+            "source: motoko-model metrics ROUTE (content-free service counters)",
+            (output.strip() or "no metrics reported")[:5000],
+        ]
+    )
 
 
 def model_route_lane(route: str) -> str:
@@ -3847,6 +4049,7 @@ def model_output_cache_key(
     route_info: dict,
     temperature: float,
     prompt_version: str,
+    request_options: dict | None = None,
 ) -> tuple[str, str]:
     material = {
         "schema": MODEL_OUTPUT_CACHE_SCHEMA_VERSION,
@@ -3855,6 +4058,7 @@ def model_output_cache_key(
         "model": route_info["model"],
         "temperature": temperature,
         "prompt_version": prompt_version,
+        "request_options": request_options or {},
         "messages": messages,
     }
     raw = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -3891,6 +4095,7 @@ def write_model_output_cache(
     input_sha256: str,
     label: str,
     output: str,
+    request_options: dict | None = None,
 ) -> None:
     data = {
         "schema": MODEL_OUTPUT_CACHE_SCHEMA_VERSION,
@@ -3901,6 +4106,7 @@ def write_model_output_cache(
         "endpoint": route_info["endpoint"],
         "temperature": temperature,
         "prompt_version": prompt_version,
+        "request_options": request_options or {},
         "input_sha256": input_sha256,
         "label": compact_text(label, 300),
         "output": output,
@@ -7860,6 +8066,10 @@ def quiet_model(
     temperature: float = 0.2,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
+    sampling_preset: str | None = None,
+    json_schema=None,
+    grammar: str | None = None,
+    reasoning_preset: str | None = None,
 ) -> str:
     return call_model(
         messages,
@@ -7868,6 +8078,10 @@ def quiet_model(
         echo=False,
         timeout=timeout,
         route=route,
+        sampling_preset=sampling_preset,
+        json_schema=json_schema,
+        grammar=grammar,
+        reasoning_preset=reasoning_preset,
     ).strip()
 
 
@@ -7899,12 +8113,15 @@ def summarize_text(
         {"role": "user", "content": prompt},
     ]
     route_info = model_route(route)
+    sampling_preset = selected_sampling_preset(route_info, route_info["route"])
+    request_options = {"sampling_preset": sampling_preset} if sampling_preset else {}
     if model_output_cache_enabled(route_info["route"]):
         cache_key, input_sha256 = model_output_cache_key(
             messages,
             route_info=route_info,
             temperature=0.2,
             prompt_version=prompt_version,
+            request_options=request_options,
         )
         cached = read_model_output_cache(cache_key, route_info=route_info, prompt_version=prompt_version)
         if cached is not None:
@@ -7918,6 +8135,7 @@ def summarize_text(
         temperature=0.2,
         timeout=timeout,
         route=route_info["route"],
+        sampling_preset=sampling_preset,
     )
     if cache_key:
         write_model_output_cache(
@@ -7928,6 +8146,7 @@ def summarize_text(
             input_sha256=input_sha256,
             label=label,
             output=result,
+            request_options=request_options,
         )
     return result
 
@@ -9651,6 +9870,10 @@ def capability_route_request_info(row: dict, *, default_path: str) -> dict:
         "model": str(row.get("model") or ""),
         "manager_kind": str(row.get("manager_kind") or ""),
         "max_parallel": row.get("max_parallel") or 1,
+        "request_policy": normalize_request_policy(row.get("request_policy")),
+        "scheduling": normalize_scheduling_policy(row.get("scheduling")),
+        "idle_seconds": row.get("idle_seconds"),
+        "safety_policy": normalize_safety_policy(row.get("safety_policy")),
         "model_path": str(row.get("model_path") or ""),
         "download_url": str(row.get("download_url") or ""),
         "download_hash": str(row.get("download_hash") or ""),
@@ -13608,10 +13831,50 @@ def call_model(
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
     source_count: int | None = None,
+    sampling_preset: str | None = None,
+    json_schema=None,
+    grammar: str | None = None,
+    reasoning_preset: str | None = None,
+    thinking_budget_tokens: int | None = None,
+    enable_thinking: bool | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
-    payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=stream)
-    reasoning = apply_chat_reasoning_payload(payload, route_info)
+    effective_sampling_preset = selected_sampling_preset(
+        route_info,
+        route_info.get("route", route),
+        explicit=sampling_preset,
+        structured=json_schema is not None or bool(grammar),
+    )
+    effective_reasoning_preset = selected_reasoning_preset(
+        route_info,
+        route_info.get("route", route),
+        explicit=reasoning_preset,
+    )
+    payload = chat_completion_payload(
+        route_info,
+        messages,
+        temperature=temperature,
+        stream=stream,
+        sampling_preset=effective_sampling_preset,
+        json_schema=json_schema,
+        grammar=grammar,
+        reasoning_preset=effective_reasoning_preset,
+        thinking_budget_tokens=thinking_budget_tokens,
+        enable_thinking=enable_thinking,
+        max_tokens=max_tokens,
+    )
+    reasoning = {}
+    if not effective_reasoning_preset:
+        reasoning = apply_chat_reasoning_payload(payload, route_info)
+    request_metadata = model_request_metadata(
+        route_info,
+        payload,
+        sampling_preset=effective_sampling_preset,
+        reasoning_preset=effective_reasoning_preset,
+        json_schema=json_schema,
+        grammar=grammar,
+    )
     started = time.monotonic()
     record = model_call_started_record(
         route_info,
@@ -13619,6 +13882,7 @@ def call_model(
         source_count=source_count,
         stream=stream,
         temperature=temperature,
+        request_metadata=request_metadata,
     )
     add_reasoning_to_model_call_record(record, reasoning)
     write_last_model_call(record)
@@ -13746,10 +14010,50 @@ def call_model_with_callback(
     on_connection=None,
     on_response=None,
     source_count: int | None = None,
+    sampling_preset: str | None = None,
+    json_schema=None,
+    grammar: str | None = None,
+    reasoning_preset: str | None = None,
+    thinking_budget_tokens: int | None = None,
+    enable_thinking: bool | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
-    payload = chat_completion_payload(route_info, messages, temperature=temperature, stream=True)
-    reasoning = apply_chat_reasoning_payload(payload, route_info)
+    effective_sampling_preset = selected_sampling_preset(
+        route_info,
+        route_info.get("route", route),
+        explicit=sampling_preset,
+        structured=json_schema is not None or bool(grammar),
+    )
+    effective_reasoning_preset = selected_reasoning_preset(
+        route_info,
+        route_info.get("route", route),
+        explicit=reasoning_preset,
+    )
+    payload = chat_completion_payload(
+        route_info,
+        messages,
+        temperature=temperature,
+        stream=True,
+        sampling_preset=effective_sampling_preset,
+        json_schema=json_schema,
+        grammar=grammar,
+        reasoning_preset=effective_reasoning_preset,
+        thinking_budget_tokens=thinking_budget_tokens,
+        enable_thinking=enable_thinking,
+        max_tokens=max_tokens,
+    )
+    reasoning = {}
+    if not effective_reasoning_preset:
+        reasoning = apply_chat_reasoning_payload(payload, route_info)
+    request_metadata = model_request_metadata(
+        route_info,
+        payload,
+        sampling_preset=effective_sampling_preset,
+        reasoning_preset=effective_reasoning_preset,
+        json_schema=json_schema,
+        grammar=grammar,
+    )
     collected = []
     first_token_at = 0.0
     started = time.monotonic()
@@ -13759,6 +14063,7 @@ def call_model_with_callback(
         source_count=source_count,
         stream=True,
         temperature=temperature,
+        request_metadata=request_metadata,
     )
     add_reasoning_to_model_call_record(record, reasoning)
     write_last_model_call(record)
@@ -13872,6 +14177,7 @@ HELP_SECTIONS = [
             ("/model-routes", "show chat and background worker model routes"),
             ("/models [ROUTE]", "show local model service status from motoko-model"),
             ("/model-stop ROUTE", "stop a local model service through motoko-model"),
+            ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
             ("/feedback-eval", "turn private feedback into eval fixtures"),
             ("/action-eval", "run deterministic agentic action safety checks"),
@@ -14033,6 +14339,7 @@ HELP_SECTIONS = [
             ("motoko model-routes", "show chat and background worker model routes"),
             ("motoko models [ROUTE]", "show local model service status from motoko-model"),
             ("motoko model-stop ROUTE", "stop a local model service through motoko-model"),
+            ("motoko model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
             ("motoko retrieval-eval", "evaluate retrieval grounding on synthetic corpus fixtures"),
             ("motoko feedback-eval", "turn private feedback into eval fixtures"),
@@ -14497,6 +14804,11 @@ def model_command_request(text: str):
         if not selector:
             return "/model-stop", lambda: "usage: /model-stop ROUTE"
         return "/model-stop", lambda: stop_model_service(selector)
+    if primary == "/model-metrics":
+        selector = body
+        if not selector:
+            return "/model-metrics", lambda: "usage: /model-metrics ROUTE"
+        return "/model-metrics", lambda: model_service_metrics(selector)
     return None
 
 
@@ -15282,7 +15594,7 @@ def setup_readline_completion() -> None:
                 matches = [item for item in completion_ids("topic") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-dossier", "/dossier-show"}:
                 matches = [item for item in completion_ids("dossier") if item.startswith(text)]
-            elif parts and parts[0] in {"/models", "/model-status", "/model-stop"}:
+            elif parts and parts[0] in {"/models", "/model-status", "/model-stop", "/model-metrics"}:
                 matches = [item for item in completion_ids("model-route") if item.startswith(text)]
         else:
             matches = [name for name in SHELL_COMMANDS if name.startswith(text)]
@@ -16584,7 +16896,7 @@ class MotokoTui:
                 for row in list_dossiers()
                 if not current or item_matches_selector(row, current)
             ][:20]
-        if first in {"/models", "/model-status", "/model-stop"} and len(words) <= 2:
+        if first in {"/models", "/model-status", "/model-stop", "/model-metrics"} and len(words) <= 2:
             return [
                 {
                     "kind": "model-route",
@@ -17085,6 +17397,17 @@ def propose_memories(
         memories, say exactly: NO_MEMORY
         """
     ).strip()
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "memories": {
+                "type": "array",
+                "items": {"type": "string"},
+            }
+        },
+        "required": ["memories"],
+    }
     transcript = conversation_transcript_for_model(conv)
     messages = [
         {"role": "system", "content": prompt},
@@ -17097,7 +17420,16 @@ def propose_memories(
         echo=False,
         timeout=timeout,
         route=MODEL_ROUTE_MEMORY,
+        sampling_preset="deterministic",
+        json_schema=schema,
     ).strip()
+    parsed, _json_error = extract_json_object(proposal)
+    if parsed is not None and isinstance(parsed.get("memories"), list):
+        return [
+            str(item).strip()
+            for item in parsed.get("memories", [])[:AUTO_MEMORY_MAX_PROPOSALS]
+            if str(item).strip()
+        ]
     if proposal == "NO_MEMORY":
         return []
     memories = []
@@ -18226,6 +18558,10 @@ def command_model_stop(args) -> None:
     print_report(stop_model_service(args.route))
 
 
+def command_model_metrics(args) -> None:
+    print_report(model_service_metrics(args.route))
+
+
 def command_model_eval(args) -> None:
     report = run_worker_model_eval(args.route, timeout=args.timeout)
     if args.write:
@@ -18403,6 +18739,10 @@ def main(argv: list[str]) -> int:
     model_stop = sub.add_parser("model-stop", help="stop a local model service through motoko-model")
     model_stop.add_argument("route", help="logical or catalog route name")
     model_stop.set_defaults(func=command_model_stop)
+
+    model_metrics = sub.add_parser("model-metrics", help="show content-free llama.cpp route metrics from motoko-model")
+    model_metrics.add_argument("route", help="logical or catalog route name")
+    model_metrics.set_defaults(func=command_model_metrics)
 
     model_eval = sub.add_parser("model-eval", help="evaluate configured worker routes on synthetic fixtures")
     model_eval.add_argument(

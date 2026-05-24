@@ -1596,6 +1596,132 @@ def test_local_model_catalog_task_routes(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    FakeHandler.payloads = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            policy = {
+                "sampling_presets": {
+                    "balanced": {
+                        "temperature": 0.6,
+                        "top_p": 0.9,
+                        "min_p": 0.05,
+                        "repeat_penalty": 1.05,
+                    },
+                    "deterministic": {
+                        "temperature": 0.1,
+                        "top_p": 0.8,
+                        "min_p": 0.0,
+                        "repeat_penalty": 1.0,
+                    },
+                },
+                "structured_output": {
+                    "supported": True,
+                    "json_schema_field": "json_schema",
+                    "grammar_field": "grammar",
+                },
+                "reasoning": {
+                    "supported": True,
+                    "format": "deepseek",
+                    "per_request_budget_field": "thinking_budget_tokens",
+                    "per_request_enable_field": "chat_template_kwargs.enable_thinking",
+                    "presets": {
+                        "default": {
+                            "enable_thinking": True,
+                            "thinking_budget_tokens": 4096,
+                        },
+                        "high": {
+                            "enable_thinking": True,
+                            "thinking_budget_tokens": 16384,
+                        },
+                    },
+                },
+                "cache_measurement": {"supported": True},
+            }
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat": {
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                        "tasks": ["chat", "deep_synthesis"],
+                        "request_policy": policy,
+                        "scheduling": {"lane": "large-model", "parallelSlots": 1, "fanout": False},
+                        "idle_seconds": 300,
+                        "safety_policy": {"disabled_server_surfaces": ["tools", "props", "slots"]},
+                    },
+                    "qwen35-2b-worker": {
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/chat/completions",
+                        "modelId": "qwen3.5-2b-q4-k-m",
+                        "tasks": ["memory_maintenance"],
+                        "request_policy": policy,
+                        "scheduling": {"lane": "small-model", "parallelSlots": 8, "fanout": True},
+                        "idle_seconds": 45,
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            reply = m.quiet_model([{"role": "user", "content": "hello"}], timeout=2)
+            assert reply == "hello"
+            chat_payload = FakeHandler.payloads[-1]
+            assert chat_payload["model"] == "qwen3.6-27b-mtp-ud-q4-k-xl"
+            assert chat_payload["temperature"] == 0.6
+            assert chat_payload["top_p"] == 0.9
+            assert chat_payload["min_p"] == 0.05
+            assert chat_payload["repeat_penalty"] == 1.05
+            assert chat_payload["chat_template_kwargs"]["enable_thinking"] is True
+            assert chat_payload["thinking_budget_tokens"] == 4096
+            record = m.read_last_model_call()
+            assert record["sampling_preset"] == "balanced"
+            assert record["reasoning_preset"] == "default"
+            assert record["thinking_budget_tokens"] == 4096
+            assert record["cache_measurement_supported"] is True
+            assert "hello" not in json.dumps(record, ensure_ascii=False)
+
+            schema = {"type": "object", "properties": {"memories": {"type": "array"}}}
+            _ = m.quiet_model(
+                [{"role": "user", "content": "extract memory"}],
+                timeout=2,
+                route=m.MODEL_ROUTE_MEMORY,
+                sampling_preset="deterministic",
+                json_schema=schema,
+                reasoning_preset="high",
+            )
+            memory_payload = FakeHandler.payloads[-1]
+            assert memory_payload["model"] == "qwen3.5-2b-q4-k-m"
+            assert memory_payload["temperature"] == 0.1
+            assert memory_payload["json_schema"] == schema
+            assert memory_payload["thinking_budget_tokens"] == 16384
+
+            routes = m.format_model_routes(include_defaults=True)
+            assert "request sampling=balanced/deterministic" in routes
+            assert "structured=on(json_schema,grammar)" in routes
+            assert "reasoning=on:deepseek/default/high" in routes
+            assert "scheduling idle=300s" in routes
+            assert "safety disabled=tools/props/slots" in routes
+    finally:
+        server.shutdown()
+        server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
 def test_chat_context_governor_selects_declared_route_profiles(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -1952,6 +2078,8 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                     )
                 if command == "stop":
                     return f"stopped {route}"
+                if command == "metrics":
+                    return "llama_prompt_seconds_total 1.23\nllama_tokens_total 42"
                 raise AssertionError(f"unexpected helper command: {command}")
 
             try:
@@ -1968,6 +2096,11 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                 assert "control source: motoko-model stop qwen36-chat" in stopped
                 assert "helper: stopped qwen36-chat" in stopped
                 assert ("stop", "qwen36-chat") in calls
+
+                metrics = m.model_service_metrics("qwen36-chat")
+                assert "model metrics: qwen36-chat" in metrics
+                assert "llama_tokens_total 42" in metrics
+                assert ("metrics", "qwen36-chat") in calls
             finally:
                 m.run_local_model_helper = old_run_helper
     finally:
@@ -7172,6 +7305,7 @@ def main() -> int:
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
+        test_catalog_request_policy_shapes_chat_payload_and_telemetry,
         test_chat_context_governor_selects_declared_route_profiles,
         test_chat_context_governor_falls_back_without_max_profile,
         test_route_kv_offload_notice_detects_catalog_flag,
