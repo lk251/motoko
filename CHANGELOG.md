@@ -11,6 +11,9 @@ not the easiest place to review what changed after a long work session.
 - Accepted the planner-boundary design for agentic capabilities: model plans
   must become typed Motoko action records, and code-owned validators decide
   what may run.
+- Accepted the remaining agentic runner review items: realm/filesystem
+  boundaries, scrubbed tool environments, session-repeat approvals, private
+  ledgers, provenance, incremental evals, and the NixOS capability boundary.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

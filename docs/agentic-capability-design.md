@@ -29,30 +29,33 @@ points:
 - Planner boundary: accepted. The model may propose or select actions, but execution must
   go through typed Motoko action records validated by code. No free-form shell
   command should be executed directly from model text.
-- Filesystem and realm boundaries: scripts must stay inside the current user's
+- Filesystem and realm boundaries: accepted. Scripts must stay inside the current user's
   Motoko realm, respect document allowlists and `.motokoignore`, avoid
   `/home/personal` from `mares`, avoid copied cross-account state, and never
   get sudo or system-service authority.
-- Environment and sandboxing: strip secrets from environment variables, set a
+- Environment and sandboxing: accepted. Strip secrets from environment variables, set a
   controlled working directory, bound runtime and output size, decide whether
   network is forbidden by default, and prefer NixOS-declared wrappers if OS
   sandboxing becomes necessary.
-- User experience: provide dry-run/preview, concise explanation of the planned
+- User experience: accepted. Provide dry-run/preview, concise explanation of the planned
   effect, confirmation for mutating actions, visible progress, `/stop` and
   pause behavior, and an inspectable result in `/sources` or a tool ledger.
-- Observability and privacy: job status, telemetry, and admin-visible service
+  Repetitive confirmed actions may be approved for the rest of the current
+  session when the action type, tool, effect set, and scope do not broaden.
+- Observability and privacy: accepted. Job status, telemetry, and admin-visible service
   logs must remain content-free. Prompts, retrieved excerpts, filenames,
   summaries, script inputs/outputs, and tool results stay in the user's Motoko
   state only.
-- Provenance and artifact lifecycle: every tool-produced artifact needs schema,
+- Provenance and artifact lifecycle: accepted. Every tool-produced artifact needs schema,
   builder, skill/tool id, input hashes, source spans where applicable,
   created-at, quality status, and a migration or source-reprocess path when
   schemas change.
-- Evaluation gate: add synthetic fixtures and private feedback-derived evals
+- Evaluation gate: accepted. Add synthetic fixtures and private feedback-derived evals
   before a runner affects production behavior. Evals should cover refusal of
   unsafe actions, argument validation, output parsing, interruption, stale
-  artifact handling, and source-grounding quality.
-- NixOS boundary: if a tool requires system packages, sandboxes, helper users,
+  artifact handling, and source-grounding quality. This should not block the
+  first implementation; ship a small eval harness now and grow it from usage.
+- NixOS boundary: accepted. If a tool requires system packages, sandboxes, helper users,
   service control, model files, or network policy, NixOS declares that surface;
   Motoko consumes approved interfaces and does not call `sudo` or `systemctl`.
 
@@ -379,6 +382,210 @@ Implementation recipe:
 7. Add tests for valid action records, unknown kinds, unknown skills/tools,
    malformed arguments, direct shell attempts, missing approvals, stale
    fingerprints, `.motokoignore` denial, and confirmation-required actions.
+
+## Filesystem and Realm Boundaries
+
+Decision: accepted on 2026-05-24.
+
+Tool and handler authority is always realm-local and scope-limited. Motoko may
+read or write only what the accepted effect contract permits, only in the
+current user's realm, and only under explicitly allowed roots.
+
+Accepted rules:
+
+- `mares` must not read `/home/personal`, copy personal Motoko state, or rely
+  on Javier/admin account state.
+- Skill tools may read allowlisted project/document roots only when the tool's
+  effect contract includes `read_allowed_files`.
+- Skill tools must obey `.motokoignore` for corpus/document operations.
+- Scripts may write Motoko-owned state only with `write_motoko_state`; project
+  writes require `write_allowed_project` and explicit confirmation policy.
+- Absolute paths, path traversal, symlinks escaping the allowed root, hidden
+  cross-account state, and broad home-directory access are denied.
+- `service_control` and `privileged` remain forbidden effects.
+
+Implementation recipe:
+
+1. Centralize path checks for skill tools and actions: resolve paths, reject
+   path traversal, reject cross-realm roots, and require an allowed base.
+2. Reuse existing allowlist and `.motokoignore` logic for document/project
+   reads instead of creating a separate runner-specific policy.
+3. Add tests for allowed relative paths, denied absolute paths outside scope,
+   denied `..`, denied symlink escape, ignored files, and `/home/personal`
+   denial from `mares`.
+
+## Environment and Sandboxing
+
+Decision: accepted on 2026-05-24.
+
+Motoko should start with a strict process environment and stdlib-only runner.
+If stronger OS sandboxing becomes necessary, NixOS should declare reviewed
+wrappers; Motoko should consume those wrappers rather than inventing host
+authority.
+
+Accepted rules:
+
+- Script tools run with a scrubbed environment, fixed working directory,
+  bounded runtime, bounded stdout/stderr, and no inherited secrets.
+- Network is off by default at the Motoko policy layer. Network-capable tools
+  require an explicit `network` effect and a later reviewed NixOS policy.
+- Supported interpreters start narrow. The first implementation should support
+  only repo-reviewed `python3` scripts through a declared wrapper name; no
+  shell interpreter, no arbitrary executable path, and no `PATH` guessing for
+  authority.
+- Tools must receive structured JSON arguments, not shell-expanded strings.
+
+Implementation recipe:
+
+1. Define a safe default tool environment with only content-free variables
+   needed for stable execution.
+2. Define timeout and output-limit enforcement in the runner layer.
+3. Require script metadata to name an approved wrapper/interpreter pair.
+4. Leave stronger wrappers, helper users, seccomp/bubblewrap, or network
+   policy as NixOS-owned extensions.
+
+## User Experience
+
+Decision: accepted on 2026-05-24.
+
+Tool use should feel clear and interruptible. Motoko should explain the exact
+planned effect before risky work, then make results inspectable without
+dumping private data into ordinary chat.
+
+Accepted rules:
+
+- Mutating or higher-risk actions get dry-run/preview first.
+- Confirmation records can be one-shot, persistent approval-contract records,
+  or session-repeat approvals. Session-repeat approval applies only while the
+  current Motoko session is alive and only for the same action kind, skill,
+  tool, effects, confirmation policy, and non-broader scope.
+- `/stop` must interrupt active foreground tool work where possible and mark
+  the ledger entry as interrupted.
+- Rejected, previewed, confirmed, running, completed, failed, and interrupted
+  states should be visible from an inspection command.
+
+Implementation recipe:
+
+1. Add session-local approval records in memory, separate from persistent tool
+   approvals under Motoko state.
+2. Add a dry-run/preview path that validates and describes an action without
+   executing it.
+3. Add result inspection through the action/tool ledger before wiring results
+   into `/sources`.
+4. Add cancellation checks around long-running tool work.
+
+## Observability and Privacy
+
+Decision: accepted on 2026-05-24.
+
+Motoko needs enough telemetry to debug behavior without leaking private
+content to admin-visible logs or service journals.
+
+Accepted rules:
+
+- Job status, route status, and admin-visible logs remain content-free.
+- Private prompts, retrieved excerpts, filenames, summaries, memories, script
+  inputs/outputs, and tool results stay in the current user's Motoko state.
+- Ledgers may store content hashes, schema ids, tool ids, effect tiers,
+  statuses, durations, byte counts, and paths only when the ledger is
+  user-owned. Content-free public summaries should avoid filenames when they
+  may reveal private corpora.
+
+Implementation recipe:
+
+1. Add a realm-local action/tool ledger under Motoko state.
+2. Split ledger metadata into content-safe fields and private detail fields.
+3. Keep terminal reports user-local; do not write request/response bodies to
+   journald or admin-owned logs.
+
+## Provenance and Artifact Lifecycle
+
+Decision: accepted on 2026-05-24.
+
+Every durable tool output must be traceable and upgradable or explicitly
+rebuildable from source.
+
+Accepted rules:
+
+- Tool-produced artifacts need schema, builder, skill id, tool id, action id,
+  input hashes, source spans where applicable, created-at, quality status, and
+  source realm/security context.
+- Schema changes need deterministic migrations when possible. If a new schema
+  needs information missing from the old artifact, mark the artifact for
+  resumable source reprocessing.
+- Artifact cleanup follows existing lifecycle planning: changed/deleted/ignored
+  sources should make dependent artifacts stale before deletion.
+
+Implementation recipe:
+
+1. Reuse existing artifact lifecycle paths where possible instead of creating a
+   separate tool-artifact cleanup system.
+2. Add tool/action provenance fields to new tool artifacts and ledgers.
+3. Add migration hooks for action/tool schemas before production use.
+
+## Evaluation Gate
+
+Decision: accepted on 2026-05-24.
+
+Evals should guide implementation without becoming a reason to stall the first
+safe version. The first runner can ship with focused synthetic tests and an
+explicit path for feedback-derived eval rows.
+
+Accepted rules:
+
+- Add synthetic tests now for validation, refusal, previews, ledgers, and
+  interruption semantics.
+- Add a command/report surface for agentic eval fixtures as soon as production
+  tool behavior exists.
+- Private feedback from real use can become per-realm eval rows, but feedback
+  does not directly mutate production policy.
+
+Implementation recipe:
+
+1. Start with deterministic unit/regression tests for the runner substrate.
+2. Add feedback-derived eval storage later under the current user's Motoko
+   state, following the existing retrieval feedback pattern.
+3. Keep model-judged evals optional; deterministic safety evals are required.
+
+## NixOS Boundary
+
+Decision: accepted on 2026-05-24.
+
+NixOS owns system capability. Motoko owns realm-local planning, validation, and
+use of approved interfaces.
+
+Accepted rules:
+
+- Motoko does not call `sudo`, direct `systemctl`, or arbitrary service-control
+  commands.
+- If a tool needs a package, sandbox, helper user, service endpoint, model
+  file, network policy, or wrapper, NixOS declares it.
+- Motoko discovers and uses approved local model/service surfaces through
+  existing catalog and helper interfaces such as `motoko-model`, not through
+  direct service mutation.
+
+Implementation recipe:
+
+1. Keep tool metadata wrapper names declarative and inspectable.
+2. Deny tools that require undeclared system capability.
+3. Document any future NixOS-side requirement before implementation.
+
+## Implementation Work Plan
+
+Status: active.
+
+This plan implements the accepted design without widening authority beyond the
+reviewed boundary:
+
+1. Keep admin/reasoning-stream changes only if validation stays green.
+2. Add the accepted design sections and recipes to this document.
+3. Implement an effect registry and strict tool metadata validator.
+4. Implement realm-local persistent approvals and session-repeat approvals.
+5. Implement typed action records, action validation, preview formatting, and
+   content-safe ledgers.
+6. Expose inspection commands for skill tools and action previews.
+7. Add focused deterministic tests for safe and unsafe paths.
+8. Run repository validation and commit locally.
 
 ## Goal Loops
 
