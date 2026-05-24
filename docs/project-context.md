@@ -877,6 +877,193 @@ Current implementation progress:
   interactive checklist above remains the deployment soak path after Javier
   updates the Motoko flake input and rebuilds.
 
+### Refactor Progress Report, 2026-05-24
+
+The first two refactor milestones are complete for the safety level that was
+intended: Motoko now has focused internal modules and live-subsystem boundary
+objects, while the root `motoko` executable remains the compatibility facade
+for orchestration that still coordinates realm-local state, terminal behavior,
+model requests, cancellation, and background work.
+
+Internal refactor roadmap status:
+
+- Architecture baseline: complete. The subsystem boundaries, invariants, and
+  validation path are recorded in this document.
+- Pure utilities: complete. Text, terminal, styling, wrapping, and report/TUI
+  formatting helpers have moved into `motoko_core`.
+- State, paths, and JSON I/O: complete for the foundation. Generic
+  realm-local paths, atomic JSON writes, JSON loading, and JSONL helpers live
+  in `motoko_core.state`; domain-specific mutations are still split across
+  their owning services and the root facade.
+- Model boundary: complete for this phase. `model_io`, `model_routes`,
+  `model_services`, and `model_manager` isolate transport, route catalog
+  parsing, approved `motoko-model` helper interaction, and content-free
+  diagnostics. The root facade still decides when to make live model calls.
+- Corpus selection and freshness: complete. `.motokoignore`, allowlist,
+  skip-rule, fingerprint, source metadata, and freshness helpers live in
+  `motoko_core.corpus_selection`.
+- Retrieval layers: mostly complete as pure helpers. Lexical scoring,
+  evidence spans, vector primitives, rerank response parsing, source reports,
+  preview/debug formatting, context-plan accounting, and retrieval eval helpers
+  are importable. Live hybrid orchestration over actual indexes, evidence
+  stores, vector stores, rerank routes, and source readers still mostly lives
+  in the root facade.
+- Memory and conversation services: mostly complete. Conversation persistence,
+  conversation cleanup helpers, memory ranking/rendering, maintenance
+  checkpoints, feedback fixtures, and dossier/profile rendering helpers are
+  importable. The root facade still coordinates full lifecycle actions that
+  touch several artifact families at once.
+- TUI refactor: substantially complete for pure behavior. Input editing,
+  overlay pages, message formatting, bottom status composition, and live-answer
+  display helpers are importable. The root facade still owns terminal mode,
+  event draining, and actual writes.
+- Command dispatch: complete for shared semantics. Typed command requests and
+  shared dispatch helpers cover report, mutation, context attachment, memory,
+  vector/evidence/index, repo, title/rename, blocking foreground work, and
+  feedback commands. Session/control commands remain explicit at the UI
+  boundary because their behavior is intentionally TUI or line-mode specific.
+
+Live subsystem extraction status:
+
+- Characterization coverage: complete enough for the completed milestone.
+  Tests cover the new runtime context, typed command metadata, job snapshots,
+  model-route manager, retrieval-service wrapper, artifact lifecycle decisions,
+  observability scrubbing, TUI rendering helpers, and input editing helpers.
+- Runtime context: complete. `motoko_core.runtime` exposes
+  `runtime-context-v1`, and `/status` reports it.
+- Command boundary: complete. `CommandRequest` records classify command work
+  before the UI decides how to execute it.
+- Job supervisor: complete for in-process jobs. `motoko_core.jobs` tracks
+  job identity, lane/kind metadata, stop/pause flags, progress, checkpoint
+  metadata, and report formatting. Deeper durable job ownership remains a
+  future improvement.
+- Model route manager: complete. The route manager uses only the approved
+  `motoko-model` helper path and content-free status data.
+- Retrieval service: partial by design. `motoko_core.retrieval_service` wraps
+  live attached-context retrieval through injected callbacks, but the complete
+  hybrid retrieval pipeline is not yet owned by the service. This is the best
+  next refactor target.
+- Artifact lifecycle service: partial. Lifecycle decision records exist and
+  stale superseded index cleanup uses them, but there is not yet one service
+  that owns stale/deleted/ignored cleanup across indexes, vector stores,
+  evidence stores, dossiers, memories, feedback fixtures, profiles, and
+  conversation-derived artifacts.
+- TUI event loop through job/event paths: mostly complete. Worker creation now
+  goes through the job supervisor and terminal writes remain single-owned, but
+  `/stop`/interruption and foreground job responsiveness can still improve.
+- Content-free observability: complete for this phase. `/status`,
+  `/last-call`, model reports, and job/progress reports avoid request and
+  response bodies.
+- Soak/eval gate: complete for the committed milestone. Automated validation
+  passed before commit, and deployment smoke checks confirmed the live runtime
+  schema, fresh index quality, hybrid retrieval, vector/evidence freshness, and
+  `/sources` output.
+
+The most important remaining architectural debt is that the root `motoko`
+facade is still large and still owns live orchestration. That is acceptable for
+the completed milestone, but future work should shrink it by moving complete
+live subsystems behind tested service APIs rather than continuing to add more
+top-level orchestration.
+
+### Next Long Refactor Stretch: Retrieval Ownership
+
+The next long autonomous work stretch should make retrieval the first live
+subsystem with real ownership rather than only pure helper extraction. This is
+the best next target because retrieval is where Motoko's intelligence,
+source-grounding, vector/rerank work, deterministic Org/date truth, feedback
+evals, and future reflection audits meet.
+
+Goal: `motoko_core.retrieval_service` should own the live hybrid retrieval
+pipeline through explicit injected stores, route callers, and source readers,
+while the root `motoko` facade keeps only CLI/TUI plumbing, state-root
+selection, and backward-compatible wrappers.
+
+Planned steps:
+
+1. Baseline and characterization. Map the current live retrieval call graph in
+   the root facade and add narrow tests around the exact behaviors that must
+   not regress: query term handling, path mentions, evidence-store priority,
+   vector/rerank fusion, source record shape, stale warnings, and `/sources`
+   provenance.
+2. Service input model. Define small stdlib dataclasses for retrieval requests,
+   retrieval environment, store handles, source readers, route callers,
+   retrieval budgets, and output records. Keep prompts, source excerpts, and
+   filenames inside user-owned Motoko state and in returned in-memory records,
+   not in content-free observability reports.
+3. Move live index/source selection behind the service. Let the service accept
+   attached indexes and source readers, decide freshness/staleness warnings,
+   apply `.motokoignore`/deleted-source signals supplied by corpus selection,
+   and return structured diagnostics.
+4. Move hybrid candidate generation into the service. The service should fuse
+   lexical/path/task candidates, deterministic structured signals, evidence
+   rows, vector recall, and reranker scores in one place. Lexical and
+   deterministic truth must remain first-class; vector recall is an additional
+   candidate lane, not a replacement.
+5. Move evidence/subspan selection into the service. Bounded subspans, Org day
+   and heading spans, date evidence, query windows, embedding/rerank subspan
+   preparation, and parent provenance should become service-owned behavior.
+6. Add deterministic temporal selection for dated Org/logbook questions. When
+   a query asks for "last", "latest", "yesterday", "today", or "last two
+   days" in a dated Org file, deterministic date ranking should provide
+   high-priority evidence before normal semantic ranking. This addresses the
+   current failure mode where retrieval is grounded but not strictly
+   chronological.
+7. Move context packing and source-record construction into the service. The
+   service should own which snippets become prompt context, what appears in
+   `/sources`, and how source audit records distinguish strong evidence,
+   summary-only context, stale evidence, and missing evidence.
+8. Move retrieval reports into the service. `/retrieval-preview`,
+   `/retrieval-debug`, `/vector-query` integration notes, source audit
+   summaries, and retrieval-eval inputs should come from the same structured
+   result object instead of parallel report paths.
+9. Wire feedback fixtures into retrieval evaluation. User `/up` and `/down`
+   rows should be usable as private per-realm retrieval eval fixtures, so
+   future ranking changes can be tested against real failures without letting
+   feedback directly mutate ranking behavior.
+10. Tighten artifact lifecycle after retrieval is service-owned. Create a
+    higher-level lifecycle service that can decide cleanup/rebuild work across
+    indexes, evidence stores, vector stores, topic dossiers, memory dossiers,
+    feedback evals, profile state, and conversation-derived artifacts when
+    files are edited, deleted, ignored, or reprocessed.
+11. Improve interruption and foreground responsiveness. After retrieval and
+    lifecycle work have narrower APIs, route answer preparation, report work,
+    foreground study/index/vector operations, `/stop`, queued prompts, and
+    progress events through the job supervisor with clearer cancellation
+    checkpoints and less TUI blocking.
+12. Keep observability content-free. Extend `observability-v1` only with
+    counts, durations, route names, job ids, schema versions, and status
+    states. Do not expose prompts, responses, snippets, private filenames,
+    memories, or summaries in admin-owned logs or service output.
+13. Update docs and migration notes as APIs settle. Keep `docs/motoko.md`,
+    `docs/project-context.md`, and `CHANGELOG.md` aligned with any new command
+    behavior, source-selection behavior, lifecycle decisions, or user-visible
+    retrieval diagnostics.
+14. Validate and commit in narrow chunks. Prefer several local commits:
+    characterization tests, service input model, candidate fusion move,
+    evidence/context packing move, temporal selector, lifecycle expansion,
+    interruption improvements, and docs. Run syntax/regression/TTY/eval checks
+    for code changes and `nix flake check` before the final commit in the
+    stretch.
+
+Completion criteria for this next stretch:
+
+- The root facade no longer owns the core hybrid retrieval algorithm; it calls
+  the retrieval service with explicit environment objects and renders the
+  returned result.
+- `/sources`, `/retrieval-preview`, `/retrieval-debug`, chat context packing,
+  and retrieval evals use the same underlying retrieval result shape.
+- Dated Org/logbook "latest days" questions use deterministic temporal
+  evidence before semantic ranking.
+- Feedback rows can become private retrieval eval fixtures without changing
+  production ranking directly.
+- Artifact cleanup/rebuild decisions are centralized enough that deleted or
+  ignored sources have one clear lifecycle path across indexes, vectors,
+  evidence, dossiers, and feedback-derived artifacts.
+- `/stop` and queued prompt behavior are no worse than before, and any
+  foreground-job changes include direct tests or a clear manual soak checklist.
+- All changes remain stdlib-only, realm-local, and compatible with the stable
+  `motoko` command.
+
 ## Roadmap Candidates
 
 The following path looks attractive, but it is not mandatory and should remain
