@@ -939,14 +939,16 @@ Live subsystem extraction status:
   future improvement.
 - Model route manager: complete. The route manager uses only the approved
   `motoko-model` helper path and content-free status data.
-- Retrieval service: partial by design. `motoko_core.retrieval_service` wraps
-  live attached-context retrieval through injected callbacks, but the complete
-  hybrid retrieval pipeline is not yet owned by the service. This is the best
-  next refactor target.
-- Artifact lifecycle service: partial. Lifecycle decision records exist and
-  stale superseded index cleanup uses them, but there is not yet one service
-  that owns stale/deleted/ignored cleanup across indexes, vector stores,
-  evidence stores, dossiers, memories, feedback fixtures, profiles, and
+- Retrieval service: in progress and now live. `motoko_core.retrieval_service`
+  owns live index retrieval, lexical/path/task/evidence/vector candidate
+  fusion, deterministic temporal Org evidence selection, and hybrid rerank
+  control through injected callbacks. Context packing, report formatting, and
+  some source-record construction still remain in the root facade.
+- Artifact lifecycle service: partial. Lifecycle decision records exist, stale
+  superseded index cleanup uses them, and index health now reports source
+  lifecycle decisions for changed, deleted, or newly ignored indexed files.
+  There is not yet one service that owns cleanup across vector stores, evidence
+  stores, dossiers, memories, feedback fixtures, profiles, and
   conversation-derived artifacts.
 - TUI event loop through job/event paths: mostly complete. Worker creation now
   goes through the job supervisor and terminal writes remain single-owned, but
@@ -1044,6 +1046,29 @@ Planned steps:
     interruption improvements, and docs. Run syntax/regression/TTY/eval checks
     for code changes and `nix flake check` before the final commit in the
     stretch.
+
+Current progress on this stretch:
+
+- Complete: characterization coverage for live retrieval service boundaries.
+- Complete: service request/result/environment types for injected stores,
+  vector/rerank callbacks, source readers, and retrieval budgets.
+- Complete: live hybrid index retrieval and candidate fusion moved behind the
+  retrieval service.
+- Complete: hybrid rerank control moved behind the retrieval service.
+- Complete: deterministic temporal Org/logbook selection for recent/latest
+  dated questions.
+- Complete: feedback rows can be replayed as private retrieval-eval fixtures.
+- Complete: index health reports source lifecycle decisions for changed,
+  deleted, and ignored indexed files.
+- Remaining: context packing and `/sources` source-record construction still
+  need to converge on the retrieval service result.
+- Remaining: retrieval report paths should be reduced to renderers over the
+  same structured result.
+- Remaining: artifact lifecycle needs a higher-level service for vectors,
+  evidence stores, dossiers, memories, feedback fixtures, profiles, and
+  conversation-derived artifacts.
+- Remaining: foreground interruption and queued prompt behavior need another
+  bounded pass after the retrieval/lifecycle APIs are narrower.
 
 Completion criteria for this next stretch:
 

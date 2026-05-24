@@ -5,6 +5,19 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Moved live hybrid index retrieval into `motoko_core.retrieval_service`,
+  including candidate fusion, injected vector/evidence/source callbacks, and
+  hybrid rerank control, while keeping the root `motoko` executable as a
+  compatibility facade.
+- Added deterministic temporal retrieval for dated Org/logbook questions, so
+  "last", "latest", "today", "yesterday", and similar queries prefer the
+  newest matching source evidence before ordinary semantic ranking.
+- Made `motoko retrieval-eval` replay private per-realm feedback fixtures as
+  evaluation rows, letting future retrieval changes be checked against real
+  feedback without letting feedback directly mutate production ranking.
+- Expanded index health with source lifecycle decisions for indexed files that
+  changed, were deleted, or are now ignored by `.motokoignore`, including the
+  recommended rebuild or derived-artifact cleanup action.
 - Added a live-subsystem refactor boundary: runtime context, typed command
   requests, job supervision, model-route readiness, retrieval-service wrapping,
   artifact lifecycle decisions, and content-free observability now have
