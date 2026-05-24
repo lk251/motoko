@@ -195,6 +195,9 @@ Current UI direction:
   upgrade` and the cheap maintenance pass rewrite old learned `SKILL.md` files
   into the current schema instead of relying on chat memory or one-off manual
   repair.
+- Skill planning should be inspectable without model calls. `/skill plan QUERY`
+  should show prompt skill selection and deterministic handler activation
+  before any future scripts or tools can affect behavior.
 - `/study QUERY` is the explicit bounded study command. It should prefer
   reusing existing topic or memory dossiers, then build a topic dossier from
   attached/relevant indexes, then fall back to a memory/conversation dossier.

@@ -500,6 +500,7 @@ motoko skill show NAME
 motoko skill learn NAME --description "short description" --body "procedure to follow"
 motoko skill learn NAME --description "short description" --file SKILL.md --replace
 motoko skill delete NAME --yes
+motoko skill plan "query"
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -545,6 +546,11 @@ Skill schema changes include a deterministic upgrade path. Run
 `motoko skill upgrade` to rewrite learned `SKILL.md` files to the current
 schema; after-answer maintenance also runs this cheap upgrade pass so old
 realm-local skills converge without one-off manual repair.
+
+Use `motoko skill plan "query"` or `/skill plan QUERY` to inspect which
+prompt skills and pre-retrieval handlers would be selected for a query without
+calling a model. This is the main debugging surface for the planner/handler
+boundary.
 
 After-answer maintenance may also suggest skill candidates when a conversation
 contains repeatable procedural knowledge: user corrections, workflow changes,

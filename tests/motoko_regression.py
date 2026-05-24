@@ -337,6 +337,33 @@ def test_skill_upgrade_rewrites_legacy_skill_files(m):
         assert second["upgraded"] == 0
 
 
+def test_skill_plan_shows_prompt_and_retrieval_selection(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "racefocus-response-style",
+            description="RaceFocus planning responses",
+            body="Keep VR, 2D HUD, and OBS renderer contexts distinct.",
+        )
+        temporal = m.format_skill_plan("summarize the last three days present in logbook.org")
+        assert "activated retrieval skills:" in temporal
+        assert "org-temporal-retrieval" in temporal
+        assert "builtin:org_temporal_latest_entries" in temporal
+        assert "count=3" in temporal
+        assert "model calls: none" in temporal
+
+        prompt = m.format_skill_plan("RaceFocus OBS renderer plan")
+        assert "selected prompt skills:" in prompt
+        assert "racefocus-response-style" in prompt
+
+        conv = m.new_conversation("Skill plan")
+        conv["id"] = "skill-plan"
+        report = m.shared_command_request("/skill plan RaceFocus OBS renderer plan", conv)
+        assert report is not None
+        assert report.kind == m.COMMAND_KIND_REPORT
+        _label, run = report
+        assert "racefocus-response-style" in run()
+
+
 def test_interrupted_maintenance_resume(m):
     with isolated_state():
         conv = m.new_conversation("Resume")
@@ -6190,6 +6217,7 @@ def main() -> int:
         test_auto_maintenance_suggests_skill_without_saving_it,
         test_manual_skill_review_and_suggestion_detail,
         test_skill_upgrade_rewrites_legacy_skill_files,
+        test_skill_plan_shows_prompt_and_retrieval_selection,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,

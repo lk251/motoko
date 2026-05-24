@@ -20,6 +20,8 @@ not the easiest place to review what changed after a long work session.
 - Added deterministic skill schema upgrades through `motoko skill upgrade` and
   the cheap after-answer maintenance lane, so old learned `SKILL.md` files can
   converge to the current schema.
+- Added `motoko skill plan` and `/skill plan` to inspect prompt-skill ranking
+  and deterministic handler activation for a query without calling a model.
 - Converted the built-in `org-temporal-retrieval` skill into a real retrieval
   skill that declares `builtin:org_temporal_latest_entries`; `/sources` now
   shows the activated skill plan and handler when source-scoped temporal

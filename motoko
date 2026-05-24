@@ -259,6 +259,7 @@ from motoko_core.retrieval import (  # noqa: E402
     span_model_text as core_span_model_text,
     window_evidence_spans,
 )
+from motoko_core.retrieval_planner import build_retrieval_plan  # noqa: E402
 from motoko_core.vector_store import (  # noqa: E402
     bounded_vector_embedding_text,
     dense_normalize,
@@ -4463,6 +4464,54 @@ def review_skill_suggestions_text(conv: dict, *, source: str = "manual-skill-rev
 
 def render_skills_with_sources(query: str) -> tuple[str, list[dict]]:
     return core_render_skills_with_sources(skills_dir(), query)
+
+
+def format_skill_plan(query: str) -> str:
+    query = str(query or "").strip()
+    if not query:
+        return "usage: /skill plan QUERY"
+    _skill_text, skill_sources = render_skills_with_sources(query)
+    retrieval_plan = build_retrieval_plan(query, skills=list_skills())
+    lines = [
+        f"skill plan: {query}",
+        f"retrieval plan: {retrieval_plan.get('schema', '')} ({retrieval_plan.get('status', '')})",
+    ]
+    activated = retrieval_plan.get("activated_skills", [])
+    if activated:
+        lines.append("activated retrieval skills:")
+        for row in activated:
+            effects = ", ".join(row.get("allowed_effects", []))
+            lines.append(
+                f"- {row.get('slug', '')}  handler={row.get('handler', '')}  "
+                f"effects={effects}"
+            )
+    else:
+        lines.append("activated retrieval skills: none")
+    if retrieval_plan.get("temporal"):
+        temporal = retrieval_plan.get("temporal", {})
+        lines.append(
+            "temporal intent: "
+            f"count={temporal.get('requested_count', '')} "
+            f"sources={', '.join(temporal.get('path_mentions', [])[:6])} "
+            f"handler={temporal.get('handler', '')}"
+        )
+    prompt_skills = [
+        source
+        for source in skill_sources
+        if source.get("handler") == DEFAULT_SKILL_HANDLER
+        and DEFAULT_SKILL_EFFECTS[0] in source.get("allowed_effects", [])
+    ]
+    if prompt_skills:
+        lines.append("selected prompt skills:")
+        for row in prompt_skills:
+            lines.append(
+                f"- {row.get('name', '')}  score={row.get('score', 0)}  "
+                f"{row.get('description', '')}"
+            )
+    else:
+        lines.append("selected prompt skills: none")
+    lines.append("model calls: none")
+    return "\n".join(lines)
 
 
 def parse_skill_learn_args(raw: str) -> dict:
@@ -12525,6 +12574,7 @@ HELP_SECTIONS = [
             ("/skill delete NAME", "delete a learned procedural skill"),
             ("/skill suggestions", "list pending skill suggestions"),
             ("/skill suggestion ID", "show a pending skill suggestion"),
+            ("/skill plan QUERY", "show skill/handler selection without a model call"),
             ("/skill review", "review this chat for reusable skill suggestions"),
             ("/skill upgrade", "deterministically upgrade learned skill files"),
             ("/skill accept ID", "accept a pending skill suggestion"),
@@ -12589,6 +12639,7 @@ HELP_SECTIONS = [
             ("motoko skill delete NAME --yes", "delete a learned procedural skill"),
             ("motoko skill suggestions", "show pending skill suggestions"),
             ("motoko skill suggestion ID", "show a skill suggestion"),
+            ("motoko skill plan QUERY", "show skill/handler selection without a model call"),
             ("motoko skill review [ID]", "review a conversation for reusable skill suggestions"),
             ("motoko skill upgrade", "deterministically upgrade learned skill files"),
             ("motoko skill accept ID", "accept a pending skill suggestion"),
@@ -13101,6 +13152,8 @@ def memory_profile_report_command_request(text: str):
             return "/skill show", lambda: format_skill(subbody)
         if subcommand in {"suggestion", "suggestion-show"} and subbody:
             return "/skill suggestion", lambda: format_skill_suggestion(subbody)
+        if subcommand == "plan":
+            return "/skill plan", lambda: format_skill_plan(subbody)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -16381,6 +16434,8 @@ def command_skill(args) -> None:
         print_report(review_skill_suggestions_text(conv))
     elif args.skill_command == "upgrade":
         print_report(upgrade_skills_text())
+    elif args.skill_command == "plan":
+        print_report(format_skill_plan(args.query))
     elif args.skill_command == "accept":
         print(accept_skill_suggestion_text(args.id))
     elif args.skill_command == "reject":
@@ -16915,6 +16970,9 @@ def main(argv: list[str]) -> int:
     skill_review.set_defaults(func=command_skill)
     skill_upgrade = skill_sub.add_parser("upgrade", help="deterministically upgrade skill files to the current schema")
     skill_upgrade.set_defaults(func=command_skill)
+    skill_plan = skill_sub.add_parser("plan", help="show skill and handler selection for a query without calling a model")
+    skill_plan.add_argument("query")
+    skill_plan.set_defaults(func=command_skill)
     skill_accept = skill_sub.add_parser("accept", help="accept a pending skill suggestion")
     skill_accept.add_argument("id")
     skill_accept.set_defaults(func=command_skill)
