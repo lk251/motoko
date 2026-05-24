@@ -5269,7 +5269,120 @@ def _agentic_eval_fixture_ignore_denial(docs: pathlib.Path, tmp: pathlib.Path) -
     }
 
 
-def _agentic_eval_fixture_script_project_write_blocked(tmp: pathlib.Path) -> dict:
+def _agentic_eval_write_reader_tool(*, requires_confirmation: bool = False) -> None:
+    learn_skill_text(
+        "eval-reader",
+        description="Eval document reader",
+        body="This tool declares bounded document reads.",
+        replace=True,
+    )
+    scripts = skills_dir() / "eval-reader" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "reader.py").write_text(
+        "import json, sys\n"
+        "data = json.loads(sys.stdin.read() or '{}')\n"
+        "args = data.get('arguments') or {}\n"
+        "print(json.dumps({'ok': True, 'path': args.get('path', '')}))\n",
+        encoding="utf-8",
+    )
+    (scripts / "reader.tool.json").write_text(
+        json.dumps(
+            {
+                "schema": "motoko-tool-v1",
+                "name": "reader",
+                "description": "Read an allowlisted document path.",
+                "script": "reader.py",
+                "interpreter": "python3",
+                "wrapper": "motoko-tool-python-stdlib",
+                "allowed_effects": ["read_allowed_files", "write_motoko_state"],
+                "argument_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                    "additionalProperties": False,
+                },
+                "input_schema": {"type": "object"},
+                "output_schema": {"type": "object"},
+                "timeout_seconds": 30,
+                "max_stdout_bytes": 65536,
+                "max_stderr_bytes": 16384,
+                "network": False,
+                "writes_project_files": False,
+                "requires_confirmation": requires_confirmation,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    approve_skill_tool_text("eval-reader", "reader", yes=True)
+
+
+def _agentic_eval_fixture_read_respects_ignore(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
+    _agentic_eval_write_reader_tool()
+    (docs / "ignored.org").write_text("* Ignored\n", encoding="utf-8")
+    action_file = tmp / "ignored-read.json"
+    write_eval_action_file(
+        action_file,
+        {
+            "schema": "motoko-action-v1",
+            "kind": "skill_tool_run",
+            "skill": "eval-reader",
+            "tool": "reader",
+            "arguments": {"path": str(docs / "ignored.org")},
+        },
+    )
+    preview = validate_action_text(str(action_file), preview=True)
+    ok = "status: rejected" in preview and "read path is ignored by .motokoignore" in preview
+    return {
+        "id": "motokoignore_skill_read_denied",
+        "status": "pass" if ok else "fail",
+        "checks": {
+            "rejected": "status: rejected" in preview,
+            "motokoignore_reason": "read path is ignored by .motokoignore" in preview,
+        },
+    }
+
+
+def _agentic_eval_fixture_session_confirmation_scopes_arguments(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
+    _agentic_eval_write_reader_tool(requires_confirmation=True)
+    keys = []
+    hashes = []
+    for name in ("existing.org", "second.org"):
+        (docs / name).write_text(f"* {name}\n", encoding="utf-8")
+        action_file = tmp / f"{name}.json"
+        write_eval_action_file(
+            action_file,
+            {
+                "schema": "motoko-action-v1",
+                "kind": "skill_tool_run",
+                "skill": "eval-reader",
+                "tool": "reader",
+                "arguments": {"path": str(docs / name)},
+            },
+        )
+        preview = validate_action_text(str(action_file), preview=True)
+        rows = read_jsonl(action_ledger_path())
+        keys.append(rows[-1].get("session_repeat_key") if rows else "")
+        hashes.append(rows[-1].get("argument_hash") if rows else "")
+        if "status: needs_confirmation" not in preview:
+            keys.append("")
+            hashes.append("")
+            break
+    ok = len(keys) >= 2 and keys[0] and keys[1] and keys[0] != keys[1] and hashes[0] != hashes[1]
+    return {
+        "id": "session_confirmation_scopes_arguments",
+        "status": "pass" if ok else "fail",
+        "checks": {
+            "first_key_present": bool(keys[0]) if keys else False,
+            "second_key_present": bool(keys[1]) if len(keys) > 1 else False,
+            "keys_differ": len(keys) > 1 and keys[0] != keys[1],
+            "argument_hashes_differ": len(hashes) > 1 and hashes[0] != hashes[1],
+        },
+    }
+
+
+def _agentic_eval_fixture_script_project_write_blocked(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
     learn_skill_text(
         "eval-project-writer",
         description="Eval project writer",
@@ -5318,7 +5431,7 @@ def _agentic_eval_fixture_script_project_write_blocked(tmp: pathlib.Path) -> dic
             "kind": "skill_tool_run",
             "skill": "eval-project-writer",
             "tool": "writer",
-            "arguments": {"path": "notes.org"},
+            "arguments": {"path": str(docs / "notes.org")},
         },
     )
     output = run_action_text(str(action_file), yes=True)
@@ -5436,7 +5549,9 @@ def run_action_eval() -> dict:
             fixtures = [
                 lambda: _agentic_eval_fixture_project_write(docs, tmp),
                 lambda: _agentic_eval_fixture_ignore_denial(docs, tmp),
-                lambda: _agentic_eval_fixture_script_project_write_blocked(tmp),
+                lambda: _agentic_eval_fixture_read_respects_ignore(docs, tmp),
+                lambda: _agentic_eval_fixture_session_confirmation_scopes_arguments(docs, tmp),
+                lambda: _agentic_eval_fixture_script_project_write_blocked(docs, tmp),
                 lambda: _agentic_eval_fixture_goal_runner(docs, tmp),
                 lambda: _agentic_eval_fixture_goal_budget(docs, tmp),
             ]
@@ -5582,14 +5697,28 @@ def action_path_checker(_key: str, value: str, *, write: bool = False) -> None:
     if not raw:
         return
     candidate = pathlib.Path(raw).expanduser()
-    if candidate.is_absolute():
-        if write:
-            require_project_write_allowed(candidate)
-        else:
-            try:
-                require_allowed(candidate)
-            except SystemExit as exc:
-                raise AgenticValidationError(str(exc)) from None
+    if not candidate.is_absolute():
+        candidate = pathlib.Path.cwd() / candidate
+    if write:
+        require_project_write_allowed(candidate)
+    else:
+        try:
+            require_allowed(candidate)
+        except SystemExit as exc:
+            raise AgenticValidationError(str(exc)) from None
+        root = allowed_root_for_path(candidate)
+        resolved_candidate = candidate.expanduser().resolve(strict=False)
+        rel = rel_posix(resolved_candidate, root)
+        try:
+            rules, _info = parse_motoko_ignore(root)
+        except SystemExit as exc:
+            raise AgenticValidationError(str(exc)) from None
+        is_dir = resolved_candidate.exists() and resolved_candidate.is_dir()
+        rule = motoko_ignore_matches(rules, rel, is_dir=is_dir)
+        if rule is not None:
+            raise AgenticValidationError(
+                f"read path is ignored by {MOTOKO_IGNORE_FILE}: {rel}"
+            )
 
 
 def validate_action_text(path_text: str, *, preview: bool = True) -> str:

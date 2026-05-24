@@ -6952,6 +6952,9 @@ def test_skill_tool_metadata_validation_and_approval(m):
 
 def test_action_preview_requires_approval_then_validates(m):
     with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
         write_demo_tool(m)
         action_path = tmp / "action.json"
         action_path.write_text(
@@ -6961,7 +6964,7 @@ def test_action_preview_requires_approval_then_validates(m):
                     "kind": "skill_tool_run",
                     "skill": "tool-backed-skill",
                     "tool": "demo",
-                    "arguments": {"path": "notes.org"},
+                    "arguments": {"path": str(docs / "notes.org")},
                     "reason": "Need a bounded deterministic helper.",
                 },
                 ensure_ascii=False,
@@ -7031,6 +7034,10 @@ def test_action_preview_rejects_shell_and_bad_tool_metadata(m):
 
 def test_action_run_executes_approved_tool_and_records_private_result(m):
     with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        note_path = docs / "notes.org"
         write_demo_tool(m)
         action_path = tmp / "run-action.json"
         action_path.write_text(
@@ -7040,7 +7047,7 @@ def test_action_run_executes_approved_tool_and_records_private_result(m):
                     "kind": "skill_tool_run",
                     "skill": "tool-backed-skill",
                     "tool": "demo",
-                    "arguments": {"path": "notes.org"},
+                    "arguments": {"path": str(note_path)},
                     "reason": "Need a bounded deterministic helper.",
                 },
                 ensure_ascii=False,
@@ -7065,7 +7072,7 @@ def test_action_run_executes_approved_tool_and_records_private_result(m):
         assert len(result_files) == 1
         result = json.loads(result_files[0].read_text(encoding="utf-8"))
         assert result["status"] == "completed"
-        assert result["output_json"]["path"] == "notes.org"
+        assert result["output_json"]["path"] == str(note_path)
         rows = m.read_jsonl(m.action_ledger_path())
         assert any(row.get("status") == "running" for row in rows)
         assert any(row.get("status") == "completed" and row.get("tool_run_id") for row in rows)
@@ -7076,32 +7083,178 @@ def test_action_run_executes_approved_tool_and_records_private_result(m):
         public_result = m.format_tool_result(run_id)
         assert "private content: hidden" in public_result
         private_result = m.format_tool_result(run_id, private=True)
-        assert '"path": "notes.org"' in private_result
+        assert f'"path": "{note_path}"' in private_result
+
+
+def test_skill_tool_relative_path_arguments_require_allowed_cwd(m):
+    old_cwd = os.getcwd()
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        other = tmp / "other"
+        docs.mkdir()
+        other.mkdir()
+        m.add_allowed_dir(str(docs))
+        write_demo_tool(m)
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+
+        action_path = tmp / "relative-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "tool-backed-skill",
+                    "tool": "demo",
+                    "arguments": {"path": "notes.org"},
+                    "reason": "Relative paths must resolve through Motoko's allowlist.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        os.chdir(other)
+        try:
+            rejected = m.validate_action_text(str(action_path), preview=True)
+            assert "status: rejected" in rejected
+            assert "outside Motoko's allowed directories" in rejected
+
+            os.chdir(docs)
+            accepted = m.validate_action_text(str(action_path), preview=True)
+            assert "status: valid" in accepted
+            output = m.run_action_text(str(action_path))
+            assert "status: completed" in output
+        finally:
+            os.chdir(old_cwd)
+
+
+def test_skill_tool_read_paths_respect_motokoignore(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / ".motokoignore").write_text("archive.org\narchive/\n", encoding="utf-8")
+        (docs / "keep.org").write_text("* Keep\n", encoding="utf-8")
+        (docs / "archive.org").write_text("* Archive\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        write_demo_tool(m)
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+
+        ignored_action = tmp / "ignored-read.json"
+        ignored_action.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "tool-backed-skill",
+                    "tool": "demo",
+                    "arguments": {"path": str(docs / "archive.org")},
+                    "reason": "Ignored files must not be read through skill tools.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        ignored = m.validate_action_text(str(ignored_action), preview=True)
+        assert "status: rejected" in ignored
+        assert "read path is ignored by .motokoignore" in ignored
+
+        keep_action = tmp / "keep-read.json"
+        keep_action.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "tool-backed-skill",
+                    "tool": "demo",
+                    "arguments": {"path": str(docs / "keep.org")},
+                    "reason": "Non-ignored allowlisted files may be read.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        keep = m.validate_action_text(str(keep_action), preview=True)
+        assert "status: valid" in keep
+
+
+def test_skill_tool_session_confirmation_is_argument_scoped(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        write_demo_tool(m)
+        metadata_path = m.skills_dir() / "tool-backed-skill" / "scripts" / "demo.tool.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["requires_confirmation"] = True
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False) + "\n", encoding="utf-8")
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+
+        keys = []
+        hashes = []
+        for name in ("a.org", "b.org"):
+            action_path = tmp / f"{name}.json"
+            action_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "motoko-action-v1",
+                        "kind": "skill_tool_run",
+                        "skill": "tool-backed-skill",
+                        "tool": "demo",
+                        "arguments": {"path": str(docs / name)},
+                        "reason": "Check session confirmation scope.",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            preview = m.validate_action_text(str(action_path), preview=True)
+            assert "status: needs_confirmation" in preview
+            row = m.read_jsonl(m.action_ledger_path())[-1]
+            keys.append(row.get("session_repeat_key"))
+            hashes.append(row.get("argument_hash"))
+
+        assert keys[0] != keys[1]
+        assert hashes[0] != hashes[1]
 
 
 def test_tool_catalog_and_action_plan_are_inspectable_without_running(m):
-    with isolated_state():
-        write_demo_tool(m)
-        catalog = m.format_tool_catalog()
-        assert "tool catalog:" in catalog
-        assert "tool-backed-skill/demo" in catalog
-        assert "external_process" in catalog
+    old_cwd = os.getcwd()
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        os.chdir(docs)
+        try:
+            write_demo_tool(m)
+            catalog = m.format_tool_catalog()
+            assert "tool catalog:" in catalog
+            assert "tool-backed-skill/demo" in catalog
+            assert "external_process" in catalog
 
-        plan = m.format_action_plan("use demo for logbook.org")
-        assert "action plan:" in plan
-        assert "model calls: none" in plan
-        assert "tool-backed-skill/demo" in plan
-        assert "status=needs_approval" in plan
-        assert '"path": "logbook.org"' in plan
+            plan = m.format_action_plan("use demo for logbook.org")
+            assert "action plan:" in plan
+            assert "model calls: none" in plan
+            assert "tool-backed-skill/demo" in plan
+            assert "status=needs_approval" in plan
+            assert '"path": "logbook.org"' in plan
 
-        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
-        plan = m.format_action_plan("use demo for logbook.org")
-        assert "status=valid" in plan
-        assert "approval=persistent" in plan
+            m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+            plan = m.format_action_plan("use demo for logbook.org")
+            assert "status=valid" in plan
+            assert "approval=persistent" in plan
+        finally:
+            os.chdir(old_cwd)
 
 
 def test_action_run_keeps_project_write_tools_disabled(m):
     with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
         m.learn_skill_text(
             "project-writer",
             description="Project write tool",
@@ -7149,7 +7302,7 @@ def test_action_run_keeps_project_write_tools_disabled(m):
                     "kind": "skill_tool_run",
                     "skill": "project-writer",
                     "tool": "writer",
-                    "arguments": {"path": "notes.org"},
+                    "arguments": {"path": str(docs / "notes.org")},
                     "reason": "Attempt a project mutation.",
                 },
                 ensure_ascii=False,
@@ -7280,9 +7433,12 @@ def test_project_file_write_overwrite_requires_expected_hash(m):
 
 def test_goal_loop_preview_save_and_list_without_execution(m):
     with isolated_state() as tmp:
+        docs = tmp / "orgfiles"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
         preview = m.format_goal_plan(
             "Review orgfiles priorities",
-            scope=["orgfiles"],
+            scope=[str(docs)],
             allowed_tools=["tool-backed-skill/demo"],
             allowed_effects=["read_allowed_files", "write_motoko_state"],
             save=True,
@@ -7301,7 +7457,7 @@ def test_goal_loop_preview_save_and_list_without_execution(m):
 
         broad = m.format_goal_plan(
             "Patch project files",
-            scope=["orgfiles"],
+            scope=[str(docs)],
             allowed_effects=["write_allowed_project"],
         )
         assert "status: needs_approval" in broad
@@ -7471,13 +7627,15 @@ def test_action_eval_report_covers_agentic_safety_fixtures(m):
         assert {
             "project_file_write_confirmed",
             "motokoignore_project_write_denied",
+            "motokoignore_skill_read_denied",
+            "session_confirmation_scopes_arguments",
             "script_project_write_blocked",
             "explicit_goal_run_confirmed",
             "goal_budget_refuses_extra_actions",
         } <= fixture_ids
         text = m.format_action_eval_report(report)
         assert "action eval:" in text
-        assert "fixtures: 5/5 passed" in text
+        assert "fixtures: 7/7 passed" in text
 
 
 def main() -> int:
@@ -7501,6 +7659,9 @@ def main() -> int:
         test_action_preview_requires_approval_then_validates,
         test_action_preview_rejects_shell_and_bad_tool_metadata,
         test_action_run_executes_approved_tool_and_records_private_result,
+        test_skill_tool_relative_path_arguments_require_allowed_cwd,
+        test_skill_tool_read_paths_respect_motokoignore,
+        test_skill_tool_session_confirmation_is_argument_scoped,
         test_tool_catalog_and_action_plan_are_inspectable_without_running,
         test_action_run_keeps_project_write_tools_disabled,
         test_project_file_write_action_is_code_owned_and_confirmed,

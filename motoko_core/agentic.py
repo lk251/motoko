@@ -578,6 +578,7 @@ def matching_approval(path: pathlib.Path, tool: dict, *, realm: str | None = Non
 
 
 def session_approval_key(action: dict, tool: dict | None = None) -> str:
+    arguments = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
     key = {
         "schema": action.get("schema"),
         "kind": action.get("kind"),
@@ -586,6 +587,7 @@ def session_approval_key(action: dict, tool: dict | None = None) -> str:
         "effects": (tool or {}).get("allowed_effects", []),
         "writes_project_files": bool((tool or {}).get("writes_project_files")),
         "network": bool((tool or {}).get("network")),
+        "argument_hash": sha256_text(stable_json(arguments)),
     }
     return sha256_text(stable_json(key))
 

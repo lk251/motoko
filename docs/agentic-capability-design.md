@@ -777,12 +777,33 @@ Action-eval checkpoint, 2026-05-24:
   surface for agentic safety fixtures. The eval runs in a temporary Motoko
   state/config root, calls no model, and uses no real user corpus content.
 - Current fixtures cover confirmed code-owned project writes, unconfirmed write
-  blocking, `.motokoignore` denial, script-owned project-write blocking,
-  explicit goal action-list confirmation, and goal budget refusal.
+  blocking, `.motokoignore` denial for project writes and skill-tool document
+  reads, argument-scoped session confirmation, script-owned project-write
+  blocking, explicit goal action-list confirmation, and goal budget refusal.
 - `--write` stores the JSON report under the current user's Motoko state in
   `action-evals/`. These evals are deterministic safety checks; private
   feedback-derived agentic eval rows can come later after real usage reveals
   useful cases.
+
+Adversarial audit checkpoint, 2026-05-24:
+
+- Detailed report: `docs/adversarial-design-audit-2026-05-24.md`.
+- Compared Motoko's current skill/tool/action/goal-loop machinery with
+  `NousResearch/hermes-agent` commit
+  `186bf25cb11077b8c158dbfc1f768e48bc28b0db`, focusing on skills,
+  `skill_manage`, skill scanning, curator behavior, tool guardrails, and tool
+  execution.
+- Fixed three concrete boundary issues found by the audit:
+  relative skill-tool path arguments now resolve through the current working
+  directory and allowlist; skill-tool read paths now respect `.motokoignore`;
+  and same-session confirmations now include an argument hash so approval for
+  one invocation cannot silently authorize a broader one.
+- Open risks remain explicit rather than hidden: current script tools are
+  policy-confined but not OS-confined, active foreground script cancellation
+  still needs an interrupted ledger path, a full skill lifecycle/curator layer
+  is not implemented, autonomous model-planned loops remain disabled by
+  design, and artifact lifecycle application still needs to cover every
+  derived artifact family.
 
 Durable goal-run checkpoint, 2026-05-24:
 

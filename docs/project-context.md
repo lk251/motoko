@@ -1303,6 +1303,10 @@ that sentence as an upstream Hermes quote.
 ## Agentic Capability Design Gate
 
 Detailed design review lives in `docs/agentic-capability-design.md`.
+The current adversarial review of the Hermes-inspired skill/tool/action path
+lives in `docs/adversarial-design-audit-2026-05-24.md`; read it before
+expanding script tools, goal loops, skill lifecycle behavior, or project-write
+authority.
 
 Motoko now has the first tightly scoped tool and skill-script execution path,
 but broader execution remains a reviewed architecture change, not a background
