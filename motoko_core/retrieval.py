@@ -1181,7 +1181,7 @@ def add_hybrid_candidate(
         row["task_boost"] = max(float(row.get("task_boost", 0) or 0), numeric_score)
         if details.get("task"):
             row["structured_task"] = details.get("task")
-    elif method == "evidence":
+    elif method in {"evidence", "temporal"}:
         row["evidence_score"] = max(float(row.get("evidence_score", 0) or 0), numeric_score)
         row["structured_score"] = max(float(row.get("structured_score", 0) or 0), float(details.get("structured", 0) or 0))
         row["path_boost"] = max(float(row.get("path_boost", 0) or 0), float(details.get("path_boost", 0) or 0))

@@ -1849,6 +1849,83 @@ def test_live_index_retrieval_uses_service_boundary(m):
         assert "Retrieval boundary smoke test" in text
 
 
+def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "orgfiles"
+            docs.mkdir()
+            path = docs / "logbook.org"
+            old_content = (
+                "* [2026-04-09 Thu 12:39]\n"
+                "** log\n"
+                "Older logbook material repeats logbook.org latest days many times.\n"
+            )
+            recent_content = (
+                "* [2026-05-18 Mon 11:14]\n"
+                "** do\n"
+                "*** TODO Keep the first recent day\n"
+                "** log\n"
+                "First recent log entry.\n\n"
+                "* [2026-05-19 Tue 12:34]\n"
+                "** do\n"
+                "*** TODO Keep the second recent day\n"
+                "** log\n"
+                "Second recent log entry.\n"
+            )
+            path.write_text(old_content + "\n" + recent_content, encoding="utf-8")
+            index = {
+                "id": "temporal-index",
+                "name": "orgfiles",
+                "root": str(docs),
+                "created": "2026-05-24T00:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": "Daily logbook entries.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Older logbook material.",
+                                "content": old_content,
+                                "content_sha256": m.sha256_hex(old_content.encode("utf-8")),
+                                "content_bytes": len(old_content.encode("utf-8")),
+                            },
+                            {
+                                "chunk": 2,
+                                "summary": "Recent logbook material.",
+                                "content": recent_content,
+                                "content_sha256": m.sha256_hex(recent_content.encode("utf-8")),
+                                "content_bytes": len(recent_content.encode("utf-8")),
+                            },
+                        ],
+                    }
+                ],
+            }
+
+            text, sources = m.retrieve_from_index(index, "summarize the last two days present in logbook.org")
+            assert "2026-05-18" in text
+            assert "2026-05-19" in text
+            assert "2026-04-09" not in text
+            chunks = [source for source in sources if source.get("kind") == "chunk"]
+            assert chunks
+            assert "temporal" in chunks[0].get("retrieval_methods", [])
+            assert chunks[0].get("excerpt_selection") == "evidence-store"
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
     with isolated_state() as tmp:
         docs = tmp / "orgfiles"
@@ -5448,6 +5525,7 @@ def main() -> int:
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
         test_live_index_retrieval_uses_service_boundary,
+        test_temporal_retrieval_finds_latest_org_dates_without_evidence_store,
         test_hierarchical_evidence_store_retrieves_org_day_and_terms,
         test_span_selection_uses_embedding_and_rerank_routes,
         test_study_focus_recent_is_parsed_and_bounded,

@@ -7,6 +7,10 @@ from typing import Callable
 
 from motoko_core.retrieval import (
     add_hybrid_candidate,
+    org_dated_section_spans,
+    query_date_mentions,
+    query_path_match_boost,
+    query_requested_recent_section_count,
     score_text,
     selected_evidence_excerpt,
     token_counts,
@@ -62,6 +66,56 @@ def _chunk_lookup(index: dict) -> dict[tuple[str, str], tuple[dict, dict]]:
     return lookup
 
 
+def _temporal_evidence_rows(index: dict, query: str, env: HybridRetrievalEnvironment) -> list[dict]:
+    exact_dates = set(query_date_mentions(query))
+    recent_count = query_requested_recent_section_count(query)
+    if not exact_dates and not recent_count:
+        return []
+    rows = []
+    query_counts = token_counts(query)
+    for file_item in index.get("files", []):
+        path = file_item.get("path", "")
+        path_boost = query_path_match_boost(query, path)
+        file_match = path_boost > 0 or score_text(query_counts, "\n".join([path, file_item.get("summary", "")])) > 0
+        if not file_match and not exact_dates:
+            continue
+        for chunk in file_item.get("chunks", []):
+            content = env.read_chunk_content(index, chunk)
+            for span in org_dated_section_spans(content):
+                date = str(span.get("date", ""))
+                if not date:
+                    continue
+                text = content[int(span.get("start", 0) or 0) : int(span.get("end", 0) or 0)].strip()
+                if not text:
+                    continue
+                rows.append(
+                    {
+                        "id": f"{path}#{chunk.get('chunk', '')}:date:{date}:{span.get('start', 0)}",
+                        "kind": "org_date_exact" if exact_dates else "org_date_recent",
+                        "path": path,
+                        "chunk": chunk.get("chunk"),
+                        "date": date,
+                        "title": date,
+                        "start": int(span.get("start", 0) or 0),
+                        "end": int(span.get("end", 0) or 0),
+                        "text": text,
+                        "text_chars": len(text),
+                        "path_boost": path_boost,
+                        "structured": 7000 if exact_dates else 6000,
+                        "total": (9000 if exact_dates else 8000) + path_boost,
+                        "matched_terms": [term for term in query_counts if term in text.lower()][:16],
+                    }
+                )
+    if exact_dates:
+        wanted = exact_dates
+    else:
+        selected_dates = sorted({row.get("date", "") for row in rows if row.get("date")})
+        wanted = set(selected_dates[-max(1, min(recent_count, len(selected_dates))) :])
+    selected = [row for row in rows if row.get("date") in wanted]
+    selected.sort(key=lambda row: (str(row.get("date", "")), int(row.get("start", 0) or 0)), reverse=True)
+    return selected
+
+
 def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironment) -> RetrievalServiceResult:
     """Run Motoko's hybrid document retrieval for one index.
 
@@ -103,12 +157,21 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     chunk_rows.sort(key=lambda row: row[0], reverse=True)
     selected_files = [row[1] for row in file_rows[:top_files] if row[0] > 0]
     candidates: dict[tuple[str, str], dict] = {}
+    temporal_candidate_keys: set[tuple[str, str]] = set()
     lexical_candidates = [row for row in chunk_rows[: env.max_rerank_candidates] if row[0] > 0]
     if not lexical_candidates:
         lexical_candidates = chunk_rows[: min(2, len(chunk_rows))]
     for score, file_item, chunk, score_parts in lexical_candidates:
         add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
     env.add_structured_task_candidates(index, query, candidates)
+    lookup = _chunk_lookup(index)
+    for row in _temporal_evidence_rows(index, query, env):
+        found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
+        if not found:
+            continue
+        file_item, chunk = found
+        add_hybrid_candidate(candidates, file_item, chunk, "temporal", row.get("total", 0), row)
+        temporal_candidate_keys.add((file_item.get("path", ""), str(chunk.get("chunk", ""))))
 
     evidence_report = None
     evidence_warning = ""
@@ -123,7 +186,6 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         except SystemExit as exc:
             evidence_warning = str(exc).splitlines()[0][:240]
         else:
-            lookup = _chunk_lookup(index)
             for row in evidence_report.get("rows", [])[: max(top_chunks * 2, env.evidence_context_limit)]:
                 found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
                 if not found:
@@ -147,14 +209,20 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             except SystemExit as exc:
                 vector_warning = str(exc).splitlines()[0][:240]
             else:
-                lookup = _chunk_lookup(index)
                 for row in vector_report.get("rows", [])[: env.max_rerank_candidates]:
                     found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
                     if not found:
                         continue
                     file_item, chunk = found
                     add_hybrid_candidate(candidates, file_item, chunk, "vector", row.get("score", 0), row)
-    selected_candidates, hybrid_report = env.rerank_hybrid_candidates(index, query, candidates)
+    rerank_candidates = candidates
+    if temporal_candidate_keys:
+        rerank_candidates = {
+            key: value
+            for key, value in candidates.items()
+            if key in temporal_candidate_keys
+        }
+    selected_candidates, hybrid_report = env.rerank_hybrid_candidates(index, query, rerank_candidates)
     selected_chunks = [
         (
             candidate.get("hybrid_score", candidate.get("score", 0)),
