@@ -174,6 +174,7 @@ from motoko_core.model_services import (  # noqa: E402
     format_route_safety_policy,
     format_route_scheduling_policy,
     local_model_helper_route,
+    parse_local_model_status,
     local_model_status_is_activating,
     local_model_status_text_with_runner,
     local_model_verify_hint as local_model_verify_hint_core,
@@ -502,6 +503,7 @@ LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
 SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
 LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
 MODEL_LOADING_RETRY_SECONDS = 2.0
+MODEL_RESIDENCY_DEFAULT_CHAT_GRACE_SECONDS = 90
 CHAT_CONTEXT_MODE_ENV = "MOTOKO_CHAT_CONTEXT_MODE"
 CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
 CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
@@ -10755,6 +10757,10 @@ def rerank_documents(
         "top_n": len(documents),
     }
     try:
+        prepare_route_residency_for_request(route_info)
+    except RouteResidencyBusy as exc:
+        raise SystemExit(f"rerank request deferred: {exc}") from exc
+    try:
         with open_model_response(
             route_info,
             payload,
@@ -10787,6 +10793,10 @@ def embed_texts(
         "input": texts,
         "encoding_format": "float",
     }
+    try:
+        prepare_route_residency_for_request(route_info)
+    except RouteResidencyBusy as exc:
+        raise SystemExit(f"embedding request deferred: {exc}") from exc
     try:
         with open_model_response(
             route_info,
@@ -14711,6 +14721,192 @@ def local_model_verify_hint(route_info: dict) -> str:
     )
 
 
+class RouteResidencyBusy(RuntimeError):
+    """A route should wait because another route currently owns useful GPU residency."""
+
+
+def route_exclusive_lane(route_info: dict) -> str:
+    scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
+    value = scheduling.get("exclusiveLane") or scheduling.get("exclusive_lane")
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def route_is_large_chat(route_info: dict) -> bool:
+    route_name = str(route_info.get("catalog_route") or route_info.get("route", "")).lower()
+    if route_exclusive_lane(route_info) == "large-chat":
+        return True
+    if normalize_model_route(str(route_info.get("route") or ""), strict=False) == MODEL_ROUTE_CHAT and route_profile(route_info):
+        return True
+    return route_name.startswith("qwen36-chat")
+
+
+def route_needs_large_chat_release(route_info: dict) -> bool:
+    if not endpoint_is_unix(str(route_info.get("endpoint") or "")):
+        return False
+    if normalize_model_route(str(route_info.get("route") or ""), strict=False) == MODEL_ROUTE_CHAT:
+        return False
+    return not route_is_large_chat(route_info)
+
+
+def local_model_status_busy(status_text: str) -> bool:
+    values = parse_local_model_status(status_text)
+    for key in (
+        "active_requests",
+        "requests_active",
+        "inflight_requests",
+        "busy_requests",
+        "slots_processing",
+        "slot_processing",
+    ):
+        raw = values.get(key)
+        if raw is None:
+            continue
+        try:
+            if int(raw) > 0:
+                return True
+        except ValueError:
+            if raw.strip().lower() in {"true", "yes", "busy", "active"}:
+                return True
+    for key in ("busy", "serving", "request_active"):
+        if values.get(key, "").strip().lower() in {"1", "true", "yes", "busy", "active"}:
+            return True
+    return False
+
+
+def local_route_status_active(status_text: str) -> bool:
+    values = parse_local_model_status(status_text)
+    backend = values.get("backend", "").strip().lower()
+    proxy = values.get("proxy", "").strip().lower()
+    return backend in {"active", "activating"} or proxy in {"active", "activating"}
+
+
+def route_residency_grace_seconds(route_info: dict) -> int:
+    scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
+    for key in (
+        "residencyGraceSeconds",
+        "residency_grace_seconds",
+        "releaseGraceSeconds",
+        "release_grace_seconds",
+        "chatGraceSeconds",
+        "chat_grace_seconds",
+    ):
+        value = scheduling.get(key)
+        try:
+            seconds = int(value)
+        except (TypeError, ValueError):
+            continue
+        if seconds >= 0:
+            return min(seconds, 900)
+    try:
+        seconds = int(route_info.get("idle_seconds") or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds > 0:
+        return min(seconds, 900)
+    return MODEL_RESIDENCY_DEFAULT_CHAT_GRACE_SECONDS
+
+
+def recent_large_chat_grace_remaining(route_info: dict) -> int:
+    route_name = local_model_helper_route(route_info)
+    record = read_last_model_call()
+    if str(record.get("status") or "") != "completed":
+        return 0
+    if str(record.get("catalog_route") or "") != route_name:
+        return 0
+    if normalize_model_route(str(record.get("route") or ""), strict=False) != MODEL_ROUTE_CHAT:
+        return 0
+    finished = parse_timestamp(str(record.get("finished") or ""))
+    if finished is None:
+        return 0
+    elapsed = (_dt.datetime.now(_dt.timezone.utc).astimezone() - finished.astimezone()).total_seconds()
+    remaining = route_residency_grace_seconds(route_info) - int(max(0, elapsed))
+    return max(0, remaining)
+
+
+def local_model_catalog_route_infos(*, logical_route: str = MODEL_ROUTE_CHAT) -> list[dict]:
+    infos = []
+    catalog = load_local_model_catalog()
+    for route_id in local_model_catalog_routes(catalog):
+        if not isinstance(route_id, str):
+            continue
+        info = catalog_route_info(route_id, logical_route=logical_route)
+        if info:
+            infos.append(info)
+    return infos
+
+
+def prepare_worker_route_residency(route_info: dict, *, phase_callback=None) -> list[str]:
+    if not route_needs_large_chat_release(route_info):
+        return []
+    target_route = local_model_helper_route(route_info)
+    notes = []
+    seen = set()
+    for chat_info in chat_route_candidates():
+        chat_route = local_model_helper_route(chat_info)
+        if not chat_route or chat_route == target_route or chat_route in seen:
+            continue
+        seen.add(chat_route)
+        if not endpoint_is_unix(str(chat_info.get("endpoint") or "")) or not route_is_large_chat(chat_info):
+            continue
+        status_text = local_model_status_text(chat_info)
+        values = parse_local_model_status(status_text)
+        backend = values.get("backend", "").strip().lower()
+        proxy = values.get("proxy", "").strip().lower()
+        if backend not in {"active", "activating"} and proxy not in {"active", "activating"}:
+            continue
+        if local_model_status_busy(status_text):
+            raise RouteResidencyBusy(f"worker route {target_route} queued behind active chat route {chat_route}")
+        remaining = recent_large_chat_grace_remaining(chat_info)
+        if remaining > 0:
+            raise RouteResidencyBusy(
+                f"worker route {target_route} waiting {remaining}s for recent chat route {chat_route}"
+            )
+        if phase_callback is not None:
+            phase_callback(f"releasing({chat_route})")
+        try:
+            run_local_model_helper("stop", chat_info)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            notes.append(f"could not release {chat_route}: {type(exc).__name__}")
+            continue
+        notes.append(f"released {chat_route}")
+    return notes
+
+
+def prepare_chat_route_residency(route_info: dict, *, phase_callback=None) -> list[str]:
+    if not endpoint_is_unix(str(route_info.get("endpoint") or "")) or not route_is_large_chat(route_info):
+        return []
+    target_route = local_model_helper_route(route_info)
+    notes = []
+    seen = {target_route}
+    for info in local_model_catalog_route_infos(logical_route=MODEL_ROUTE_CHAT):
+        route_name = local_model_helper_route(info)
+        if not route_name or route_name in seen:
+            continue
+        seen.add(route_name)
+        if route_is_large_chat(info) or not endpoint_is_unix(str(info.get("endpoint") or "")):
+            continue
+        status_text = local_model_status_text(info)
+        if not local_route_status_active(status_text):
+            continue
+        if local_model_status_busy(status_text):
+            raise RouteResidencyBusy(f"chat route {target_route} queued behind active worker route {route_name}")
+        if phase_callback is not None:
+            phase_callback(f"releasing({route_name})")
+        try:
+            run_local_model_helper("stop", info)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            notes.append(f"could not release {route_name}: {type(exc).__name__}")
+            continue
+        notes.append(f"released {route_name}")
+    return notes
+
+
+def prepare_route_residency_for_request(route_info: dict, *, phase_callback=None) -> list[str]:
+    if route_is_large_chat(route_info):
+        return prepare_chat_route_residency(route_info, phase_callback=phase_callback)
+    return prepare_worker_route_residency(route_info, phase_callback=phase_callback)
+
+
 @contextlib.contextmanager
 def open_model_response(
     route_info: dict,
@@ -14785,6 +14981,10 @@ def call_model(
     reasoning = {}
     if not effective_reasoning_preset:
         reasoning = apply_chat_reasoning_payload(payload, route_info)
+    try:
+        prepare_route_residency_for_request(route_info)
+    except RouteResidencyBusy as exc:
+        raise SystemExit(f"model request deferred: {exc}") from exc
     request_metadata = model_request_metadata(
         route_info,
         payload,
@@ -14970,8 +15170,10 @@ def run_queued_memory_proposals(
         if str(row.get("status", "pending")) not in retry_statuses:
             continue
         conversation_id = str(row.get("conversation_id", ""))
+        memory_route_info = model_route(MODEL_ROUTE_MEMORY)
+        memory_route_name = local_model_helper_route(memory_route_info)
         if phase_callback is not None:
-            phase_callback("memory: proposing")
+            phase_callback(f"memory: proposing({memory_route_name})")
         row["status"] = "running"
         row["attempts"] = int(row.get("attempts", 0) or 0) + 1
         row["updated"] = now()
@@ -14989,10 +15191,29 @@ def run_queued_memory_proposals(
             processed += 1
             continue
         try:
+            prepare_route_residency_for_request(
+                memory_route_info,
+                phase_callback=(lambda phase: phase_callback(f"memory: {phase}")) if phase_callback else None,
+            )
+            if phase_callback is not None:
+                phase_callback(f"memory: proposing({memory_route_name})")
             proposals = propose_memories_bounded(
                 conv,
                 timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
             )
+        except RouteResidencyBusy as exc:
+            row["status"] = "pending"
+            row["updated"] = now()
+            row["last_error"] = str(exc)
+            if "recent chat route" in str(exc):
+                notes.append("memory proposal waiting for recent chat route")
+            elif "active chat route" in str(exc):
+                notes.append("memory proposal queued behind active chat route")
+            else:
+                notes.append("memory proposal queued behind model residency")
+            write_memory_proposal_queue(rows)
+            processed += 1
+            continue
         except (Exception, SystemExit) as exc:
             row["status"] = "pending"
             row["updated"] = now()
@@ -15135,6 +15356,10 @@ def call_model_with_callback(
     reasoning = {}
     if not effective_reasoning_preset:
         reasoning = apply_chat_reasoning_payload(payload, route_info)
+    try:
+        prepare_route_residency_for_request(route_info)
+    except RouteResidencyBusy as exc:
+        raise SystemExit(f"model request deferred: {exc}") from exc
     request_metadata = model_request_metadata(
         route_info,
         payload,

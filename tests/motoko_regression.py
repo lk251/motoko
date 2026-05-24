@@ -187,7 +187,7 @@ def test_maintenance_state_and_phases(m):
             phases = []
             notes = m.auto_maintain_conversation(conv, phase_callback=phases.append, state=state)
             assert "memory: checking" in phases
-            assert "memory: proposing" in phases
+            assert any(phase.startswith("memory: proposing(") for phase in phases)
             assert "memory: saving" in phases
             assert phases[-1] == "memory: done"
             assert notes == ["saved 1 queued durable memory"]
@@ -309,6 +309,40 @@ def test_running_memory_proposal_queue_recovers_after_restart(m):
 
         assert any("saved 1 queued durable memory" in note for note in notes)
         assert m.queued_memory_proposal_count() == 0
+
+
+def test_memory_proposal_queue_defers_behind_active_chat_route(m):
+    with isolated_state():
+        conv = m.new_conversation("Busy route memory")
+        conv["id"] = "busy-route-memory"
+        conv["messages"] = [
+            {"role": "user", "content": "Keep memory work queued."},
+            {"role": "assistant", "content": "Yes."},
+            {"role": "user", "content": "Do not race active chat."},
+            {"role": "assistant", "content": "Understood."},
+        ]
+        write_conversation(m, conv)
+        m.enqueue_memory_proposal(conv, message_count=len(conv["messages"]))
+
+        old_prepare = m.prepare_route_residency_for_request
+        old_propose = m.propose_memories_bounded
+        try:
+            m.prepare_route_residency_for_request = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                m.RouteResidencyBusy("worker route qwen35-2b-worker queued behind active chat route qwen36-chat-default")
+            )
+            m.propose_memories_bounded = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("proposal should not run when chat route is busy")
+            )
+            notes = m.run_queued_memory_proposals(current_conv=conv)
+        finally:
+            m.prepare_route_residency_for_request = old_prepare
+            m.propose_memories_bounded = old_propose
+
+        assert notes == ["memory proposal queued behind active chat route"]
+        assert m.queued_memory_proposal_count() == 1
+        rows = m.read_memory_proposal_queue()
+        assert rows[0]["status"] == "pending"
+        assert "active chat route" in rows[0]["last_error"]
 
 
 def test_delete_conversation_removes_memory_proposal_jobs(m):
@@ -2211,6 +2245,226 @@ def test_local_model_status_diagnostic_uses_catalog_route_without_hashing(m):
         finally:
             m.run_local_model_helper = old_run_helper
             m.shutil.which = old_which
+
+
+def test_worker_route_releases_idle_large_chat_route(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        socket_dir.mkdir()
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen36-chat-default": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-default.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                    "tasks": ["chat", "default_chat"],
+                    "route_profile": "default",
+                    "selection": {"default": True, "priority": 100},
+                    "scheduling": {"exclusiveLane": "large-chat", "parallelSlots": 1, "fanout": False},
+                },
+                "qwen35-2b-worker": {
+                    "endpoint": f"unix://{socket_dir / 'qwen35-2b-worker.sock'}",
+                    "modelId": "qwen3.5-2b-q4-k-m",
+                    "tasks": ["memory_maintenance"],
+                    "scheduling": {"parallelSlots": 8, "fanout": True},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=qwen36-chat-default\nsocket=active\nproxy=active\nbackend=active\nactive_requests=0\n"
+                if m.local_model_helper_route(info) == "qwen36-chat-default"
+                else "route=qwen35-2b-worker\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+
+            def fake_run_helper(command, info, *, timeout=m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS):
+                calls.append((command, m.local_model_helper_route(info)))
+                return "stopped"
+
+            m.run_local_model_helper = fake_run_helper
+            worker = m.model_route(m.MODEL_ROUTE_MEMORY)
+            notes = m.prepare_worker_route_residency(worker)
+            assert notes == ["released qwen36-chat-default"]
+            assert calls == [("stop", "qwen36-chat-default")]
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
+def test_worker_route_defers_when_large_chat_route_is_busy(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        socket_dir.mkdir()
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen36-chat-default": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-default.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                    "tasks": ["chat", "default_chat"],
+                    "route_profile": "default",
+                    "selection": {"default": True, "priority": 100},
+                    "scheduling": {"exclusiveLane": "large-chat", "parallelSlots": 1, "fanout": False},
+                },
+                "qwen35-2b-worker": {
+                    "endpoint": f"unix://{socket_dir / 'qwen35-2b-worker.sock'}",
+                    "modelId": "qwen3.5-2b-q4-k-m",
+                    "tasks": ["memory_maintenance"],
+                    "scheduling": {"parallelSlots": 8, "fanout": True},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=qwen36-chat-default\nsocket=active\nproxy=active\nbackend=active\nactive_requests=1\n"
+                if m.local_model_helper_route(info) == "qwen36-chat-default"
+                else "route=qwen35-2b-worker\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+            m.run_local_model_helper = lambda command, info, **_kwargs: calls.append(
+                (command, m.local_model_helper_route(info))
+            )
+            worker = m.model_route(m.MODEL_ROUTE_MEMORY)
+            try:
+                m.prepare_worker_route_residency(worker)
+            except m.RouteResidencyBusy as exc:
+                assert "queued behind active chat route qwen36-chat-default" in str(exc)
+            else:
+                raise AssertionError("busy large chat route should defer worker route")
+            assert calls == []
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
+def test_worker_route_waits_for_recent_large_chat_grace(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen36-chat-default": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-default.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                    "tasks": ["chat", "default_chat"],
+                    "route_profile": "default",
+                    "selection": {"default": True, "priority": 100},
+                    "idle_seconds": 120,
+                    "scheduling": {"exclusiveLane": "large-chat", "parallelSlots": 1, "fanout": False},
+                },
+                "qwen35-2b-worker": {
+                    "endpoint": f"unix://{socket_dir / 'qwen35-2b-worker.sock'}",
+                    "modelId": "qwen3.5-2b-q4-k-m",
+                    "tasks": ["memory_maintenance"],
+                    "scheduling": {"parallelSlots": 8, "fanout": True},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+        m.atomic_write(
+            m.last_model_call_path(),
+            json.dumps(
+                {
+                    "schema": m.MODEL_CALL_TELEMETRY_SCHEMA_VERSION,
+                    "status": "completed",
+                    "route": m.MODEL_ROUTE_CHAT,
+                    "catalog_route": "qwen36-chat-default",
+                    "finished": m.now(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+        )
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=qwen36-chat-default\nsocket=active\nproxy=active\nbackend=active\nactive_requests=0\n"
+                if m.local_model_helper_route(info) == "qwen36-chat-default"
+                else "route=qwen35-2b-worker\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+            m.run_local_model_helper = lambda command, info, **_kwargs: calls.append(
+                (command, m.local_model_helper_route(info))
+            )
+            worker = m.model_route(m.MODEL_ROUTE_MEMORY)
+            try:
+                m.prepare_worker_route_residency(worker)
+            except m.RouteResidencyBusy as exc:
+                assert "waiting" in str(exc)
+                assert "recent chat route qwen36-chat-default" in str(exc)
+            else:
+                raise AssertionError("recent chat route should keep its residency grace")
+            assert calls == []
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
+def test_chat_route_releases_idle_worker_routes(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen36-chat-default": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-default.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                    "tasks": ["chat", "default_chat"],
+                    "route_profile": "default",
+                    "selection": {"default": True, "priority": 100},
+                    "scheduling": {"exclusiveLane": "large-chat", "parallelSlots": 1, "fanout": False},
+                },
+                "qwen35-2b-worker": {
+                    "endpoint": f"unix://{socket_dir / 'qwen35-2b-worker.sock'}",
+                    "modelId": "qwen3.5-2b-q4-k-m",
+                    "tasks": ["memory_maintenance"],
+                    "scheduling": {"parallelSlots": 8, "fanout": True},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=qwen35-2b-worker\nsocket=active\nproxy=active\nbackend=active\nactive_requests=0\n"
+                if m.local_model_helper_route(info) == "qwen35-2b-worker"
+                else "route=qwen36-chat-default\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+
+            def fake_run_helper(command, info, *, timeout=m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS):
+                calls.append((command, m.local_model_helper_route(info)))
+                return "stopped"
+
+            m.run_local_model_helper = fake_run_helper
+            chat = m.model_route(m.MODEL_ROUTE_CHAT)
+            notes = m.prepare_route_residency_for_request(chat)
+            assert notes == ["released qwen35-2b-worker"]
+            assert calls == [("stop", "qwen35-2b-worker")]
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
 
 
 def test_model_service_status_and_stop_use_motoko_model_helper(m):
@@ -7954,6 +8208,11 @@ def main() -> int:
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
         test_memory_proposal_sends_transcript_not_assistant_prefill,
+        test_memory_proposal_helper_timeout_respects_socket_activation,
+        test_memory_proposal_queue_retries_until_saved,
+        test_running_memory_proposal_queue_recovers_after_restart,
+        test_memory_proposal_queue_defers_behind_active_chat_route,
+        test_delete_conversation_removes_memory_proposal_jobs,
         test_skill_suggestion_parser_uses_local_review_signal,
         test_skill_registry_downgrades_unknown_handlers_and_effects,
         test_auto_maintenance_suggests_skill_without_saving_it,
@@ -8012,6 +8271,10 @@ def main() -> int:
         test_context_bench_dry_run_uses_governor_without_model_call,
         test_embedding_route_fails_fast_when_model_file_missing,
         test_local_model_status_diagnostic_uses_catalog_route_without_hashing,
+        test_worker_route_releases_idle_large_chat_route,
+        test_worker_route_defers_when_large_chat_route_is_busy,
+        test_worker_route_waits_for_recent_large_chat_grace,
+        test_chat_route_releases_idle_worker_routes,
         test_model_service_status_and_stop_use_motoko_model_helper,
         test_summary_reductions_fan_out_across_worker_routes,
         test_sources_fallback_lists_attached_topic_context,

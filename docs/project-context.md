@@ -1496,6 +1496,22 @@ KV placement from route names; use catalog `kv_offload` and
 prompt-prefix/KV reuse belongs in the deployed local model service if
 measurement shows it is worthwhile.
 
+Background and maintenance worker routes must also respect model residency.
+Large chat routes may stay resident briefly after a foreground answer because
+the user may continue chatting and prompt-cache locality matters. Before a
+non-chat worker route starts, Motoko should inspect same-realm large-chat routes
+from `local-models.json`: if a large route is idle/resident and outside its
+recent-chat grace window, it may release it through `motoko-model stop ROUTE`;
+if a large route is actively serving or was just used, the worker should remain
+queued or fail with a clear content-free defer reason instead of racing systemd
+or llama.cpp restart loops. Conversely, before a large chat route starts,
+Motoko should release idle non-chat worker routes so foreground chat does not
+race stale worker residency. This policy applies to memory maintenance, titles,
+skill review, profile/dossier work, indexing, embeddings, rerank work, and
+future worker lanes. Status may mention route names and unit state, but must
+not log prompts, responses, retrieved context, filenames, memories, summaries,
+corpora, or conversation text.
+
 The main chat route may use llama.cpp per-request reasoning controls. Motoko
 sets `reasoning_format="deepseek"`,
 `chat_template_kwargs.enable_thinking`, and `thinking_budget_tokens` only for

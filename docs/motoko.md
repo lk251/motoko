@@ -429,7 +429,7 @@ The bottom status line starts with the conversation title rather than the
 assistant name. It includes the model badge, for example
 `qwen3.6-27b-mtp:8083`, and reports active memory and background-study phases
 such as
-`mem: proposing(model)`, `bg-light: catalog(cpu)`, or
+`mem: proposing(qwen35-2b-worker)`, `bg-light: catalog(cpu)`, or
 `bg-heavy: summarizing chunk file 6/54 chunk 10/100 9% eta 3h12m`.
 
 ## Daily Usage Tips
@@ -547,6 +547,12 @@ fields to approved local model requests and records only content-free metadata
 in `/last-call`, such as route, model id, estimated tokens, selected sampling
 preset, selected reasoning preset, thinking budget, whether structured output
 was requested, and timing counters.
+For background and maintenance worker calls, Motoko also uses scheduling
+metadata to avoid GPU residency fights: idle same-realm large chat routes may
+be released through `motoko-model stop ROUTE` after their recent-chat grace
+window, while workers defer when a large chat route reports active requests or
+was just used. Before large foreground chat starts, Motoko also releases idle
+worker routes so stale worker residency does not block the chat model.
 
 For prompt-cache measurement, use:
 

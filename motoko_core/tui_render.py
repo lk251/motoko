@@ -64,8 +64,8 @@ def status_display_lines(
         count = f" x{report_running}" if report_running > 1 else ""
         status_parts.append(style(f"{label}{count}", "turquoise"))
     if maintaining:
-        phase = maintenance_phase
-        label = "mem: proposing(model)" if phase == "memory: proposing" else f"mem: {phase}"
+        phase = str(maintenance_phase or "")
+        label = "mem: " + phase.removeprefix("memory: ")
         status_parts.append(style(f"{label} {human_duration(maintenance_elapsed)}".rstrip(), "turquoise"))
     if pending_count:
         status_parts.append(style(f"queued:{pending_count}", "yellow"))
