@@ -515,6 +515,9 @@ motoko action preview ACTION.json
 motoko action run ACTION.json [--yes]
 motoko action ledger [--limit N]
 motoko action result RUN_ID [--private]
+motoko goal plan "objective" [--save]
+motoko goal list
+motoko goal preview GOAL.json
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -580,6 +583,14 @@ typed action JSON candidates without running anything or calling a model.
 result RUN_ID` shows metadata for a private tool run result; add `--private`
 only in the owning Unix account when you intentionally want stdout/stderr and
 parsed JSON output printed.
+
+Goal loops are preview-only for now. `motoko goal plan "objective"` builds a
+disabled `motoko-goal-loop-v1` record with objective, scope, allowed
+tools/effects, budgets, stop conditions, and phases. `--save` stores the draft
+under the current user's Motoko state; `motoko goal list` and `motoko goal
+preview GOAL.json` inspect saved or external loop records. Execution is not
+enabled yet. `write_allowed_project` and `network` loops require explicit
+future approval; `service_control` and `privileged` are rejected.
 
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the

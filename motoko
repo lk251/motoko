@@ -366,6 +366,16 @@ from motoko_core.jobs import (  # noqa: E402
     JobSupervisor,
     format_job_snapshots,
 )
+from motoko_core.goal_loops import (  # noqa: E402
+    GoalLoopValidationError,
+    format_goal_loop as core_format_goal_loop,
+    format_goal_loop_list as core_format_goal_loop_list,
+    list_goal_loops as core_list_goal_loops,
+    make_goal_loop_record,
+    read_goal_loop as core_read_goal_loop,
+    validate_goal_loop_record,
+    write_goal_loop as core_write_goal_loop,
+)
 from motoko_core.model_manager import (  # noqa: E402
     ModelRouteManager,
 )
@@ -409,6 +419,8 @@ from motoko_core.state import (  # noqa: E402
     evidence_stores_dir,
     feedback_eval_path,
     feedback_evals_dir,
+    goal_loop_path,
+    goal_loops_dir,
     heavy_study_path,
     index_data_dir,
     index_partial_path,
@@ -842,6 +854,9 @@ SLASH_COMMANDS = [
     ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
     ("/action ledger", "show content-safe action/tool ledger rows"),
     ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
+    ("/goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
+    ("/goal list", "list saved goal-loop drafts"),
+    ("/goal preview FILE", "validate a goal-loop JSON file without execution"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -4571,6 +4586,61 @@ def format_tool_result(selector: str, *, private: bool = False) -> str:
     except AgenticValidationError as exc:
         return f"tool result: error\nerror: {exc}"
     return core_format_tool_private_result(data, private=private)
+
+
+def goal_loop_path_checker(_key: str, value: str) -> None:
+    action_path_checker(_key, value)
+
+
+def format_goal_plan(
+    objective: str,
+    *,
+    scope: list[str] | None = None,
+    allowed_tools: list[str] | None = None,
+    allowed_effects: list[str] | None = None,
+    max_steps: int = 3,
+    max_model_calls: int = 6,
+    max_tool_calls: int = 6,
+    max_minutes: int = 30,
+    save: bool = False,
+) -> str:
+    try:
+        record = make_goal_loop_record(
+            objective,
+            scope=scope or [],
+            allowed_tools=allowed_tools or [],
+            allowed_effects=allowed_effects or [],
+            budgets={
+                "max_steps": max_steps,
+                "max_model_calls": max_model_calls,
+                "max_tool_calls": max_tool_calls,
+                "max_minutes": max_minutes,
+            },
+        )
+        record = validate_goal_loop_record(record, path_checker=goal_loop_path_checker)
+    except GoalLoopValidationError as exc:
+        return f"goal loop preview:\nstatus: rejected\nerror: {exc}"
+    if save:
+        core_write_goal_loop(goal_loop_path(record["id"]), record)
+    text = core_format_goal_loop(record)
+    if save:
+        text += f"\nsaved: {goal_loop_path(record['id'])}"
+    return text
+
+
+def format_goal_preview(path_text: str) -> str:
+    if not path_text:
+        return "usage: motoko goal preview FILE"
+    try:
+        path = pathlib.Path(path_text).expanduser()
+        record = core_read_goal_loop(path, path_checker=goal_loop_path_checker)
+    except (OSError, GoalLoopValidationError) as exc:
+        return f"goal loop preview:\nstatus: rejected\nerror: {exc}"
+    return core_format_goal_loop(record)
+
+
+def format_goal_loops(limit: int = 20) -> str:
+    return core_format_goal_loop_list(core_list_goal_loops(goal_loops_dir()), limit=limit)
 
 
 def approve_skill_tool_text(name: str, tool: str, *, yes: bool = False) -> str:
@@ -13437,6 +13507,9 @@ HELP_SECTIONS = [
             ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
             ("/action ledger", "show content-safe action/tool ledger rows"),
             ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
+            ("/goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
+            ("/goal list", "list saved goal-loop drafts"),
+            ("/goal preview FILE", "validate a goal-loop JSON file without execution"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -13514,6 +13587,9 @@ HELP_SECTIONS = [
             ("motoko action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
             ("motoko action ledger", "show content-safe action/tool ledger rows"),
             ("motoko action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
+            ("motoko goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
+            ("motoko goal list", "list saved goal-loop drafts"),
+            ("motoko goal preview FILE", "validate a goal-loop JSON file without execution"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -14063,6 +14139,16 @@ def memory_profile_report_command_request(text: str):
             selectors = [arg for arg in args if arg != "--private"]
             if selectors:
                 return "/action result", lambda: format_tool_result(selectors[0], private=private)
+    if primary == "/goal":
+        parts = body.split(maxsplit=1)
+        subcommand = parts[0] if parts else ""
+        subbody = parts[1].strip() if len(parts) > 1 else ""
+        if subcommand == "plan" and subbody:
+            return "/goal plan", lambda: format_goal_plan(subbody)
+        if subcommand in {"list", "ls"}:
+            return "/goal list", lambda: format_goal_loops()
+        if subcommand == "preview" and subbody:
+            return "/goal preview", lambda: format_goal_preview(subbody)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -17539,6 +17625,29 @@ def command_tools(_args) -> None:
     print_report(format_tool_catalog())
 
 
+def command_goal(args) -> None:
+    if args.goal_command == "plan":
+        print_report(
+            format_goal_plan(
+                " ".join(args.objective),
+                scope=args.scope,
+                allowed_tools=args.tool,
+                allowed_effects=args.effect,
+                max_steps=args.max_steps,
+                max_model_calls=args.max_model_calls,
+                max_tool_calls=args.max_tool_calls,
+                max_minutes=args.max_minutes,
+                save=args.save,
+            )
+        )
+    elif args.goal_command in {"list", "ls"}:
+        print_report(format_goal_loops(limit=args.limit))
+    elif args.goal_command == "preview":
+        print_report(format_goal_preview(args.file))
+    else:
+        raise SystemExit("unknown goal command")
+
+
 def command_personality(args) -> None:
     if args.personality_command in (None, "show"):
         print_personality()
@@ -18132,6 +18241,26 @@ def main(argv: list[str]) -> int:
     action_result.add_argument("run_id")
     action_result.add_argument("--private", action="store_true", help="show private stdout/stderr/output JSON in this user account")
     action_result.set_defaults(func=command_action)
+
+    goal = sub.add_parser("goal", help="preview and inspect durable goal-loop records; execution is disabled")
+    goal_sub = goal.add_subparsers(dest="goal_command", required=True)
+    goal_plan = goal_sub.add_parser("plan", help="preview a durable goal-loop record without execution")
+    goal_plan.add_argument("objective", nargs="+")
+    goal_plan.add_argument("--scope", action="append", default=[], help="allowlisted scope path or label")
+    goal_plan.add_argument("--tool", action="append", default=[], help="allowed skill/tool selector")
+    goal_plan.add_argument("--effect", action="append", default=[], help="allowed effect tier")
+    goal_plan.add_argument("--max-steps", type=int, default=3)
+    goal_plan.add_argument("--max-model-calls", type=int, default=6)
+    goal_plan.add_argument("--max-tool-calls", type=int, default=6)
+    goal_plan.add_argument("--max-minutes", type=int, default=30)
+    goal_plan.add_argument("--save", action="store_true", help="save the preview as a disabled goal-loop draft")
+    goal_plan.set_defaults(func=command_goal)
+    goal_list = goal_sub.add_parser("list", aliases=["ls"], help="list saved goal-loop drafts")
+    goal_list.add_argument("--limit", type=int, default=20)
+    goal_list.set_defaults(func=command_goal)
+    goal_preview = goal_sub.add_parser("preview", help="validate a goal-loop JSON file without execution")
+    goal_preview.add_argument("file")
+    goal_preview.set_defaults(func=command_goal)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

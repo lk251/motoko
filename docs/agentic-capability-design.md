@@ -664,6 +664,20 @@ Approval gates still required:
   needed before broad terminal-like tools, network tools, or project mutation.
   This should be NixOS-owned, not a hidden Python-side privilege expansion.
 
+Goal-loop preview checkpoint, 2026-05-24:
+
+- Added preview-only goal-loop records with schema `motoko-goal-loop-v1`.
+  `motoko goal plan OBJECTIVE` and `/goal plan OBJECTIVE` build a disabled
+  loop draft with objective, scope, allowed tools/effects, budgets, stop
+  conditions, and phases. `--save` stores the draft under the current user's
+  Motoko state.
+- Added `motoko goal list`, `/goal list`, `motoko goal preview FILE`, and
+  `/goal preview FILE`. These validate and inspect loop records without
+  execution.
+- Goal-loop execution remains disabled. Low-risk effects can be previewed as
+  `draft`; `write_allowed_project` and `network` produce `needs_approval`;
+  `service_control` and `privileged` are rejected.
+
 ## Goal Loops
 
 Goal loops should come after the planner/handler/tool boundary is solid. The

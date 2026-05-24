@@ -201,6 +201,10 @@ Current UI direction:
 - Tool planning should be inspectable without model calls. `/tools` should list
   the current skill-tool catalog, and `/action plan QUERY` should propose typed
   action records from known tools without running anything.
+- Goal-loop planning should be inspectable before execution exists. `/goal
+  plan OBJECTIVE`, `/goal list`, and `/goal preview FILE` may create or show
+  disabled `motoko-goal-loop-v1` drafts, but loops do not run until a separate
+  approval enables the runner.
 - Skill-management actions should stay review-first and allowlisted. Motoko may
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to

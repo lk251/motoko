@@ -29,6 +29,10 @@ not the easiest place to review what changed after a long work session.
   `motoko tools` / `/tools`, `motoko action plan QUERY` /
   `/action plan QUERY`, content-safe action ledger reports, and private
   opt-in tool-result inspection.
+- Added preview-only goal-loop records: `motoko goal plan`, `motoko goal
+  list`, and `motoko goal preview` can create or inspect disabled
+  `motoko-goal-loop-v1` drafts with budgets, scopes, allowed effects/tools,
+  stop conditions, and phases. Execution remains disabled pending approval.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

@@ -6898,6 +6898,53 @@ def test_action_run_keeps_project_write_tools_disabled(m):
         assert "project-writing skill tools are not enabled" in output
 
 
+def test_goal_loop_preview_save_and_list_without_execution(m):
+    with isolated_state() as tmp:
+        preview = m.format_goal_plan(
+            "Review orgfiles priorities",
+            scope=["orgfiles"],
+            allowed_tools=["tool-backed-skill/demo"],
+            allowed_effects=["read_allowed_files", "write_motoko_state"],
+            save=True,
+        )
+        assert "goal loop preview:" in preview
+        assert "status: draft" in preview
+        assert "execution enabled: no" in preview
+        listing = m.format_goal_loops()
+        assert "goal loops:" in listing
+        assert "Review orgfiles priorities" in listing
+
+        path = next(m.goal_loops_dir().glob("*.json"))
+        preview_file = m.format_goal_preview(str(path))
+        assert "goal loop preview:" in preview_file
+        assert "runner: disabled" in preview_file
+
+        broad = m.format_goal_plan(
+            "Patch project files",
+            scope=["orgfiles"],
+            allowed_effects=["write_allowed_project"],
+        )
+        assert "status: needs_approval" in broad
+        assert "required-for-write_allowed_project" in broad
+
+        bad = tmp / "bad-goal.json"
+        bad.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-goal-loop-v1",
+                    "objective": "Bad loop",
+                    "allowed_effects": ["privileged"],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        rejected = m.format_goal_preview(str(bad))
+        assert "status: rejected" in rejected
+        assert "forbidden effect" in rejected
+
+
 def main() -> int:
     m = load_motoko()
     tests = [
@@ -6921,6 +6968,7 @@ def main() -> int:
         test_action_run_executes_approved_tool_and_records_private_result,
         test_tool_catalog_and_action_plan_are_inspectable_without_running,
         test_action_run_keeps_project_write_tools_disabled,
+        test_goal_loop_preview_save_and_list_without_execution,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,
