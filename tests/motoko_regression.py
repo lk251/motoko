@@ -1174,6 +1174,73 @@ class FakeHandler(BaseHTTPRequestHandler):
         return
 
 
+class SlotCacheHandler(BaseHTTPRequestHandler):
+    payloads = []
+    paths = []
+    slot_payloads = []
+
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.paths.append(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8")) if body else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if self.path.startswith("/slots/"):
+            self.__class__.slot_payloads.append((self.path, payload))
+            action = self.path.split("action=", 1)[-1]
+            response = {
+                "id_slot": 0,
+                "filename": payload.get("filename", ""),
+                "n_saved": 123 if action.startswith("save") else 0,
+                "n_restored": 123 if action.startswith("restore") else 0,
+                "n_written": 456,
+                "n_read": 456,
+                "n_erased": 123 if action.startswith("erase") else 0,
+            }
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+            return
+        self.__class__.payloads.append(payload)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        event = {"choices": [{"delta": {"content": "OK"}}]}
+        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *_args):
+        return
+
+
+class SlotCacheFailingHandler(SlotCacheHandler):
+    def do_POST(self):  # noqa: N802 - stdlib handler API
+        self.__class__.paths.append(self.path)
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length)
+        try:
+            payload = json.loads(body.decode("utf-8")) if body else {}
+        except json.JSONDecodeError:
+            payload = {}
+        if self.path.startswith("/slots/"):
+            self.__class__.slot_payloads.append((self.path, payload))
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"slot unavailable"}}')
+            return
+        self.__class__.payloads.append(payload)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        event = {"choices": [{"delta": {"content": "OK"}}]}
+        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
 class ReasoningHandler(BaseHTTPRequestHandler):
     payloads = []
 
@@ -1802,6 +1869,215 @@ def test_local_model_catalog_task_routes(m):
             assert "prompt-cache=on" in text
             assert "metrics-endpoint=unix:///run/motoko-llm/mares/qwen35-2b-worker.sock path=/metrics" in text
     finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_slot_cache_capability_respects_route_gates(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat-default": {
+                        "endpoint": f"unix://{tmp / 'chat.sock'}",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "default_chat"],
+                        "route_profile": "default",
+                        "context_tokens": 131072,
+                        "selection": {"default": True},
+                        "cache": {
+                            "prompt": True,
+                            "persistentSlotCache": True,
+                            "slotsEndpoint": True,
+                            "slotSavePath": str(tmp / "slots"),
+                        },
+                        "safety_policy": {"disabled_server_surfaces": ["tools", "slots_endpoint"]},
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            route = m.model_route(m.MODEL_ROUTE_CHAT)
+            assert route["cache"]["slotsEndpoint"] is True
+            assert route["cache"]["slotSavePath"] == str(tmp / "slots")
+            capability = m.slot_cache_capability(route)
+            assert capability["supported"] is False
+            assert any("disables slot surfaces" in reason for reason in capability["reasons"])
+            report = m.format_model_services("qwen36-chat-default")
+            assert "persistent-slots=declared" in report
+            assert "slots-endpoint=on" in report
+            assert f"slot-save-path={tmp / 'slots'}" in report
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    SlotCacheHandler.payloads = []
+    SlotCacheHandler.paths = []
+    SlotCacheHandler.slot_payloads = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            socket_path = tmp / "chat-slot.sock"
+            server = UnixHTTPServer(str(socket_path), SlotCacheHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat-default": {
+                        "endpoint": f"unix://{socket_path}",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "model": "qwen-slot-test",
+                        "tasks": ["chat", "default_chat"],
+                        "route_profile": "default",
+                        "context_tokens": 131072,
+                        "selection": {"default": True},
+                        "maxParallel": 1,
+                        "cache": {
+                            "prompt": True,
+                            "persistentSlotCache": True,
+                            "slotsEndpoint": True,
+                            "slotSavePath": str(tmp / "slots"),
+                        },
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            tokens = []
+            first = m.call_model_with_callback(
+                [{"role": "user", "content": "hello slot cache"}],
+                on_token=tokens.append,
+                timeout=2,
+                slot_cache_context={"conversation_id": "conv-slot"},
+            )
+            assert first == "OK"
+            assert SlotCacheHandler.payloads[-1]["id_slot"] == 0
+            assert SlotCacheHandler.payloads[-1]["cache_prompt"] is True
+            assert any(path == "/slots/0?action=save" for path, _payload in SlotCacheHandler.slot_payloads)
+            manifest_text = m.slot_cache_manifest_path().read_text(encoding="utf-8")
+            assert "hello slot cache" not in manifest_text
+            assert "conv-slot" in manifest_text
+            first_record = m.read_last_model_call()
+            assert first_record["slot_cache_status"] == "supported"
+            assert first_record["slot_cache_restore"] == "miss"
+            assert first_record["slot_cache_save"] == "saved"
+
+            SlotCacheHandler.payloads = []
+            SlotCacheHandler.slot_payloads = []
+            second = m.call_model_with_callback(
+                [{"role": "user", "content": "hello slot cache followup"}],
+                on_token=lambda _token: None,
+                timeout=2,
+                slot_cache_context={"conversation_id": "conv-slot"},
+            )
+            assert second == "OK"
+            paths = [path for path, _payload in SlotCacheHandler.slot_payloads]
+            assert "/slots/0?action=restore" in paths
+            assert "/slots/0?action=save" in paths
+            assert SlotCacheHandler.payloads[-1]["id_slot"] == 0
+            second_record = m.read_last_model_call()
+            assert second_record["slot_cache_restore"] == "restored"
+            assert second_record["slot_cache_save"] == "saved"
+            assert second_record["slot_cache_n_restored"] == 123
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_slot_cache_failures_are_nonfatal_cache_misses(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    SlotCacheFailingHandler.payloads = []
+    SlotCacheFailingHandler.paths = []
+    SlotCacheFailingHandler.slot_payloads = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            socket_path = tmp / "chat-slot-failing.sock"
+            server = UnixHTTPServer(str(socket_path), SlotCacheFailingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat-default": {
+                        "endpoint": f"unix://{socket_path}",
+                        "model": "qwen-slot-test",
+                        "tasks": ["chat", "default_chat"],
+                        "route_profile": "default",
+                        "context_tokens": 131072,
+                        "selection": {"default": True},
+                        "cache": {
+                            "prompt": True,
+                            "persistentSlotCache": True,
+                            "slotsEndpoint": True,
+                            "slotSavePath": str(tmp / "slots"),
+                        },
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            text = m.call_model_with_callback(
+                [{"role": "user", "content": "slot save can fail"}],
+                on_token=lambda _token: None,
+                timeout=2,
+                slot_cache_context={"conversation_id": "conv-slot-fail"},
+            )
+            assert text == "OK"
+            record = m.read_last_model_call()
+            assert record["status"] == "completed"
+            assert record["slot_cache_save"] == "failed"
+            assert record["slot_cache_save_error_type"] in {"OSError", "URLError"}
+            assert m.read_slot_cache_manifest()["records"] == []
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
         if old_endpoint is None:
             os.environ.pop("MOTOKO_ENDPOINT", None)
         else:
@@ -8583,6 +8859,9 @@ def main() -> int:
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
+        test_slot_cache_capability_respects_route_gates,
+        test_persistent_slot_cache_saves_and_restores_chat_slot,
+        test_slot_cache_failures_are_nonfatal_cache_misses,
         test_catalog_request_policy_shapes_chat_payload_and_telemetry,
         test_chat_context_governor_selects_declared_route_profiles,
         test_chat_context_governor_falls_back_without_max_profile,

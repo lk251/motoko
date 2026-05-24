@@ -134,13 +134,29 @@ def normalize_route_cache_policy(raw) -> dict:
         else:
             if 0.0 <= value <= 1.0:
                 policy["slotPromptSimilarity"] = value
-    for key in ("metrics", "persistentSlotCache"):
+    for key in ("metrics", "persistentSlotCache", "slotsEndpoint"):
         if isinstance(raw.get(key), bool):
             policy[key] = raw[key]
-    for key in ("slotsEndpoint", "note"):
+    for key in (
+        "slotsEndpoint",
+        "slotSavePath",
+        "slot_save_path",
+        "slotSaveRoot",
+        "slot_save_root",
+        "note",
+    ):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             policy[key] = value.strip()[:1000]
+    for key in ("slotId", "slot_id", "persistentSlotId", "persistent_slot_id"):
+        if key not in raw:
+            continue
+        try:
+            value = int(raw.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            policy[key] = value
     return policy
 
 
@@ -332,6 +348,7 @@ def local_model_route_summary(route_id: str, raw: dict, catalog: dict | None = N
         or route_string_value(model_record, "sha256", "hash"),
         "openai_compatible": bool(raw.get("openai_compatible") or raw.get("openaiCompatible")),
         "reranker_endpoint_status": str(raw.get("reranker_endpoint_status") or ""),
+        "cache": normalize_route_cache_policy(raw.get("cache")),
         "request_policy": normalize_request_policy(raw.get("request_policy") or raw.get("requestPolicy")),
         "scheduling": normalize_scheduling_policy(raw.get("scheduling")),
         "idle_seconds": normalize_idle_seconds(raw.get("idle_seconds") or raw.get("idleSeconds")),
@@ -433,7 +450,7 @@ def merged_local_model_route(route: str) -> dict:
     info = {key: value for key, value in raw.items() if isinstance(key, str)}
     info.setdefault("catalog_route", route_id)
     summary = local_model_route_summary(route_id, raw, catalog)
-    for key in ("request_policy", "scheduling", "idle_seconds", "safety_policy"):
+    for key in ("cache", "request_policy", "scheduling", "idle_seconds", "safety_policy"):
         value = summary.get(key)
         if value not in ({}, None):
             info[key] = value

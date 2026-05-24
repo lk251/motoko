@@ -419,6 +419,63 @@ def open_model_response(
                 on_response(None)
 
 
+def route_json_request(
+    route_info: dict,
+    request_path: str,
+    *,
+    method: str = "POST",
+    payload: dict | None = None,
+    timeout: float,
+    socket_activation_min_timeout: float,
+) -> dict:
+    """Call a non-chat JSON endpoint on a declared model route."""
+    endpoint_text = str(route_info["endpoint"])
+    request_timeout = model_request_timeout(endpoint_text, timeout, socket_activation_min_timeout)
+    request_path = request_path if request_path.startswith("/") else "/" + request_path
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Host": "localhost"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if endpoint_is_unix(endpoint_text):
+        parsed = urllib.parse.urlparse(endpoint_text)
+        socket_path = urllib.parse.unquote(parsed.path)
+        if not socket_path:
+            raise OSError(f"empty Unix socket endpoint for route {route_info.get('route', '')}")
+        conn = UnixSocketHTTPConnection(socket_path, timeout=request_timeout)
+        try:
+            conn.request(method.upper(), request_path, body=data, headers=headers)
+            resp = conn.getresponse()
+            body = resp.read(64000).decode("utf-8", errors="replace")
+            if resp.status >= 400:
+                raise OSError(f"route endpoint returned HTTP {resp.status}: {body[:1200]}")
+            if not body.strip():
+                return {}
+            try:
+                value = json.loads(body)
+            except json.JSONDecodeError:
+                return {"text": body[:4000]}
+            return value if isinstance(value, dict) else {"value": value}
+        finally:
+            conn.close()
+    parsed = urllib.parse.urlparse(endpoint_text)
+    if not parsed.scheme or not parsed.netloc:
+        raise OSError(f"unsupported endpoint for route {route_info.get('route', '')}")
+    request_parts = urllib.parse.urlsplit(request_path)
+    target = urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, request_parts.path or "/", "", request_parts.query, "")
+    )
+    req = urllib.request.Request(target, data=data, headers=headers, method=method.upper())
+    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+        body = resp.read(64000).decode("utf-8", errors="replace")
+    if not body.strip():
+        return {}
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError:
+        return {"text": body[:4000]}
+    return value if isinstance(value, dict) else {"value": value}
+
+
 def read_json_response(resp) -> str:
     event = json.loads(resp.read().decode("utf-8", errors="replace"))
     choices = event.get("choices") or []

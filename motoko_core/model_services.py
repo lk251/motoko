@@ -53,6 +53,23 @@ def format_route_cache_policy(route_info: dict) -> str:
         pieces.append("persistent-slots=declared")
     elif "persistentSlotCache" in policy:
         pieces.append("persistent-slots=off")
+    if "slotsEndpoint" in policy:
+        slots_endpoint = policy.get("slotsEndpoint")
+        if isinstance(slots_endpoint, str):
+            pieces.append(f"slots-endpoint={slots_endpoint}")
+        else:
+            pieces.append("slots-endpoint=on" if slots_endpoint else "slots-endpoint=off")
+    slot_id = policy.get("slotId", policy.get("slot_id", policy.get("persistentSlotId", policy.get("persistent_slot_id"))))
+    if slot_id is not None:
+        pieces.append(f"slot-id={slot_id}")
+    slot_path = (
+        policy.get("slotSavePath")
+        or policy.get("slot_save_path")
+        or policy.get("slotSaveRoot")
+        or policy.get("slot_save_root")
+    )
+    if isinstance(slot_path, str) and slot_path.strip():
+        pieces.append(f"slot-save-path={slot_path.strip()[:160]}")
     if route_info.get("metrics_endpoint"):
         metrics_path = route_info.get("metrics_path") or "/metrics"
         pieces.append(f"metrics-endpoint={route_info.get('metrics_endpoint')} path={metrics_path}")
@@ -158,7 +175,7 @@ def add_model_service_route(
             row["request_path"] = summary.get("request_path", "")
         if not row.get("endpoint_paths"):
             row["endpoint_paths"] = summary.get("endpoint_paths", [])
-        for key in ("request_policy", "scheduling", "idle_seconds", "safety_policy"):
+        for key in ("cache", "request_policy", "scheduling", "idle_seconds", "safety_policy"):
             if key in summary and not row.get(key):
                 row[key] = summary.get(key)
 
@@ -183,6 +200,7 @@ def build_model_service_rows(
             "manager_kind": summary.get("manager_kind", ""),
             "model_path": summary.get("model_path", ""),
             "max_parallel": summary.get("max_parallel") or 1,
+            "cache": summary.get("cache", {}),
             "request_policy": summary.get("request_policy", {}),
             "scheduling": summary.get("scheduling", {}),
             "idle_seconds": summary.get("idle_seconds"),
@@ -235,6 +253,9 @@ def format_model_service_status(info: dict, *, include_status: bool = True, stat
     lines.append(f"  max parallel: {info.get('max_parallel', 1)}")
     if info.get("idle_seconds") is not None:
         lines.append(f"  idle seconds: {info.get('idle_seconds')}")
+    cache_policy = format_route_cache_policy(info)
+    if cache_policy:
+        lines.append(f"  {cache_policy.lstrip('; ')}")
     request_policy = format_route_request_policy(info)
     if request_policy:
         lines.append(f"  {request_policy.lstrip('; ')}")

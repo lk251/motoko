@@ -368,20 +368,26 @@ Current sequencing notes:
   implementation. Keep enforcing it while routing smaller worker models only to
   bounded summary, label, dossier, and audit tasks that pass evals.
 - Prompt and output caching already exists for deterministic model-derived
-  background artifacts. The remaining prompt/KV-cache work belongs mostly to
-  the NixOS llama.cpp service layer. Motoko reads declared route cache policy
-  from `~/.config/motoko/local-models.json`, reports it in `/model-routes`,
-  exposes content-free worker state through `/models`, and keeps prompts
-  stable, explicit, and easy to cache.
-- Persistent slot/KV cache files are an attractive but deferred optimization,
-  not a correctness requirement. Before enabling them, write a reviewed design
-  that treats the cache as prompt-derived private state: realm-local paths
-  under the user's Motoko state or another reviewed user-private directory,
-  strict permissions, model/tokenizer/prompt-template/route/context-size
-  fingerprints, invalidation on model or prompt/schema changes, bounded garbage
-  collection, no cross-realm reuse, no admin-owned content logs, and tests that
-  stale or wrong-route caches cannot be reused. Motoko must continue to
-  reconstruct correct prompts from durable state when no KV cache is available.
+  background artifacts. Motoko now has the client-side machinery for reviewed
+  persistent slot/KV cache use, while NixOS still owns whether a route exposes
+  the needed llama.cpp flags and endpoints. Motoko reads declared route cache
+  policy from `~/.config/motoko/local-models.json`, reports it in
+  `/model-routes`, exposes content-free worker state through `/models`, and
+  keeps prompts stable, explicit, and easy to cache.
+- Persistent slot/KV cache support now exists behind explicit route capability
+  gates. Motoko treats it as a performance optimization, not a correctness
+  requirement: she still reconstructs correct prompts from durable
+  conversation, memory, retrieval, profile, and artifact state if no cache is
+  available. Live use requires NixOS to declare `route.cache.persistentSlotCache
+  = true`, a `slotsEndpoint`, and a `slotSavePath` for the route, while leaving
+  the relevant slot surfaces enabled. Motoko stores only a realm-local,
+  content-free manifest under `~/.local/state/motoko/slot-cache/`; llama.cpp
+  owns the actual KV files inside its declared `--slot-save-path`. Manifest
+  records are keyed by conversation id, route/model/context/slot fingerprint,
+  and content-free cache filename. Prompts, responses, retrieved context,
+  filenames, memories, summaries, corpora, and reasoning text must not be
+  written to admin-owned logs or content-free telemetry. Cache restore/save
+  failure is treated as a cache miss, never as an answer failure.
 - Embedding and reranker routes are now expected to be discovered from
   NixOS-owned `~/.config/motoko/local-models.json` by `kind`, `tasks`,
   `endpoint_paths`, dimensions, and advertised parallelism. Motoko stores
@@ -1564,8 +1570,11 @@ stopped or idle-unloaded, its in-process prompt/KV cache is lost; the next
 activation reloads the model and Motoko sends the needed prompt again. Keeping a
 large chat route resident briefly after an answer can preserve cache locality
 for likely follow-up chat, but no answer may depend on that cache surviving.
-Persistent slot/KV cache files remain disallowed unless the privacy/security
-design is explicitly reviewed.
+Reviewed persistent slot/KV cache support exists only behind route capability
+gates: the cache must be declared by NixOS, stored in a realm-local service path,
+fingerprinted by route/model/context/slot details, and tracked in Motoko only by
+a content-free private manifest. Restore/save/erase failures are cache misses,
+not answer failures.
 
 Background and maintenance worker routes must also respect model residency.
 Large chat routes may stay resident briefly after a foreground answer because
@@ -1627,6 +1636,10 @@ corpus-derived content.
 When NixOS declares route cache fields such as `route.cache.prompt`,
 `reuseMinTokens`, `cacheRamMiB`, `slotPromptSimilarity`, `metrics`, and
 `metrics_endpoint`, Motoko should treat them as declared service capabilities
-for display and measurement. Motoko must not call `/slots`, use persistent slot
-files, log request/response content, or write corpus-derived data outside the
-current user's Motoko state.
+for display and measurement. Persistent slot/KV cache is the one reviewed
+exception to the previous no-`/slots` rule: Motoko may call
+`/slots/{id}?action=restore|save|erase` only when the same NixOS route
+declares persistent slots, a slot endpoint, a slot-save path, and no safety
+policy disabling those surfaces. Motoko does not write the KV files directly;
+it records a private manifest and lets llama.cpp save/restore by opaque,
+content-free filename. The feature must remain optional and non-fatal.

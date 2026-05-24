@@ -386,6 +386,15 @@ from motoko_core.goal_loops import (  # noqa: E402
     validate_goal_loop_record,
     write_goal_loop as core_write_goal_loop,
 )
+from motoko_core.slot_cache import (  # noqa: E402
+    clear_slot_cache_records,
+    erase_slot_cache,
+    prepare_slot_cache_for_request,
+    read_slot_cache_manifest,
+    save_slot_cache_after_request,
+    slot_cache_capability,
+    slot_cache_report,
+)
 from motoko_core.model_manager import (  # noqa: E402
     ModelRouteManager,
 )
@@ -461,6 +470,7 @@ from motoko_core.state import (  # noqa: E402
     safe_load_json,
     skill_suggestions_path,
     skills_dir,
+    slot_cache_manifest_path,
     state_root,
     study_jobs_path,
     study_state_path,
@@ -837,6 +847,7 @@ SLASH_COMMANDS = [
     ("/model-status [ROUTE]", "alias for /models"),
     ("/model-stop ROUTE", "stop a local model service through motoko-model"),
     ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
+    ("/slot-cache [ROUTE]", "show persistent slot/KV cache capability"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
     ("/feedback-eval", "turn private feedback into eval fixtures"),
     ("/action-eval", "run deterministic agentic action safety checks"),
@@ -947,6 +958,7 @@ SHELL_COMMANDS = [
     "model-status",
     "model-stop",
     "model-metrics",
+    "slot-cache",
     "model-eval",
     "retrieval-eval",
     "feedback-eval",
@@ -2790,6 +2802,17 @@ def write_last_model_call(record: dict) -> None:
             "cache_measurement_supported",
             "route_idle_seconds",
             "route_max_parallel",
+            "slot_cache_status",
+            "slot_cache_restore",
+            "slot_cache_save",
+            "slot_cache_slot_id",
+            "slot_cache_record",
+            "slot_cache_n_restored",
+            "slot_cache_n_saved",
+            "slot_cache_manifest",
+            "slot_cache_manifest_error_type",
+            "slot_cache_restore_error_type",
+            "slot_cache_save_error_type",
             "governor_reason",
             "candidate_count",
             "max_route_available",
@@ -2802,6 +2825,34 @@ def write_last_model_call(record: dict) -> None:
     }
     with contextlib.suppress(OSError, PermissionError):
         atomic_write(last_model_call_path(), json.dumps(redacted, ensure_ascii=False, indent=2) + "\n")
+
+
+def add_slot_cache_to_model_call_record(record: dict, context: dict | None) -> None:
+    if not isinstance(context, dict):
+        return
+    capability = context.get("capability") if isinstance(context.get("capability"), dict) else {}
+    if capability:
+        record["slot_cache_status"] = "supported" if capability.get("supported") else "unsupported"
+    if context.get("restore"):
+        record["slot_cache_restore"] = str(context.get("restore"))
+    if context.get("save"):
+        record["slot_cache_save"] = str(context.get("save"))
+    if context.get("slot_id") is not None:
+        record["slot_cache_slot_id"] = int(context.get("slot_id") or 0)
+    if context.get("filename"):
+        record["slot_cache_record"] = hashlib.sha256(str(context.get("filename")).encode()).hexdigest()[:16]
+    if context.get("restore_n") is not None:
+        record["slot_cache_n_restored"] = int(context.get("restore_n") or 0)
+    if context.get("save_n") is not None:
+        record["slot_cache_n_saved"] = int(context.get("save_n") or 0)
+    if context.get("manifest"):
+        record["slot_cache_manifest"] = str(context.get("manifest"))
+    if context.get("manifest_error_type"):
+        record["slot_cache_manifest_error_type"] = str(context.get("manifest_error_type"))
+    if context.get("restore_error_type"):
+        record["slot_cache_restore_error_type"] = str(context.get("restore_error_type"))
+    if context.get("save_error_type"):
+        record["slot_cache_save_error_type"] = str(context.get("save_error_type"))
 
 
 def finish_model_call_record(
@@ -2897,6 +2948,17 @@ def format_last_model_call(record: dict | None = None) -> str:
         policy_lines.append("structured=" + "/".join(structured))
     if record.get("cache_measurement_supported"):
         policy_lines.append("cache-measurement=declared")
+    if record.get("slot_cache_status"):
+        detail = (
+            f"{record.get('slot_cache_status')}"
+            f" restore={record.get('slot_cache_restore', '-')}"
+            f" save={record.get('slot_cache_save', '-')}"
+        )
+        if record.get("slot_cache_slot_id") is not None:
+            detail += f" slot={record.get('slot_cache_slot_id')}"
+        if record.get("slot_cache_manifest"):
+            detail += f" manifest={record.get('slot_cache_manifest')}"
+        policy_lines.append(f"slot-cache={detail}")
     if policy_lines:
         lines.append("request policy: " + ", ".join(policy_lines))
     if record.get("route_idle_seconds") is not None or record.get("route_max_parallel") is not None:
@@ -3195,6 +3257,45 @@ def model_service_metrics(selector: str) -> str:
             (output.strip() or "no metrics reported")[:5000],
         ]
     )
+
+
+def format_slot_cache(selector: str | None = None) -> str:
+    route_info = resolve_model_service_route(selector) if selector else None
+    return slot_cache_report(route_info)
+
+
+def slot_cache_clear_text(selector: str | None = None, *, conversation_id: str = "", yes: bool = False) -> str:
+    route_name = ""
+    if selector:
+        route_name = local_model_helper_route(resolve_model_service_route(selector))
+    report = clear_slot_cache_records(route_name=route_name, conversation_id=conversation_id, yes=yes)
+    return "\n".join(
+        [
+            "slot/KV cache clear:",
+            f"status: {report.get('status', '')}",
+            f"records removed: {report.get('records_removed', 0)}",
+            f"files deleted: {report.get('files_deleted', 0)}",
+            f"records remaining: {report.get('records_remaining', 0)}",
+        ]
+    )
+
+
+def slot_cache_erase_text(selector: str) -> str:
+    info = resolve_model_service_route(selector)
+    route_name = local_model_helper_route(info)
+    report = erase_slot_cache(info)
+    lines = [
+        f"slot/KV active slot erase: {route_name}",
+        f"status: {report.get('status', '')}",
+    ]
+    capability = report.get("capability") if isinstance(report.get("capability"), dict) else {}
+    for reason in capability.get("reasons", [])[:8]:
+        lines.append(f"reason: {reason}")
+    if report.get("n_erased") is not None:
+        lines.append(f"n_erased: {report.get('n_erased')}")
+    if report.get("error_type"):
+        lines.append(f"error type: {report.get('error_type')}")
+    return "\n".join(lines)
 
 
 def model_route_lane(route: str) -> str:
@@ -15042,6 +15143,7 @@ def call_model(
     thinking_budget_tokens: int | None = None,
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
+    slot_cache_context: dict | None = None,
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
     effective_sampling_preset = selected_sampling_preset(
@@ -15075,6 +15177,13 @@ def call_model(
         prepare_route_residency_for_request(route_info)
     except RouteResidencyBusy as exc:
         raise SystemExit(f"model request deferred: {exc}") from exc
+    slot_context = None
+    if slot_cache_context:
+        slot_context = prepare_slot_cache_for_request(
+            route_info,
+            payload,
+            conversation_id=str(slot_cache_context.get("conversation_id") or ""),
+        )
     request_metadata = model_request_metadata(
         route_info,
         payload,
@@ -15093,6 +15202,7 @@ def call_model(
         request_metadata=request_metadata,
     )
     add_reasoning_to_model_call_record(record, reasoning)
+    add_slot_cache_to_model_call_record(record, slot_context)
     write_last_model_call(record)
     spinner = ThinkingSpinner(enabled=echo)
     try:
@@ -15100,10 +15210,16 @@ def call_model(
         with open_model_response(route_info, payload, timeout=timeout, prepare_residency=False) as resp:
             if stream:
                 reply = read_streaming_response(resp, echo=echo, spinner=spinner)
+                if slot_context is not None:
+                    slot_context = save_slot_cache_after_request(route_info, slot_context)
+                    add_slot_cache_to_model_call_record(record, slot_context)
                 finish_model_call_record(record, started=started, completion_text=reply)
                 return reply
             spinner.stop()
             reply = read_json_response(resp)
+            if slot_context is not None:
+                slot_context = save_slot_cache_after_request(route_info, slot_context)
+                add_slot_cache_to_model_call_record(record, slot_context)
             finish_model_call_record(record, started=started, completion_text=reply)
             return reply
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
@@ -15417,6 +15533,7 @@ def call_model_with_callback(
     thinking_budget_tokens: int | None = None,
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
+    slot_cache_context: dict | None = None,
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
     effective_sampling_preset = selected_sampling_preset(
@@ -15450,6 +15567,13 @@ def call_model_with_callback(
         prepare_route_residency_for_request(route_info)
     except RouteResidencyBusy as exc:
         raise SystemExit(f"model request deferred: {exc}") from exc
+    slot_context = None
+    if slot_cache_context:
+        slot_context = prepare_slot_cache_for_request(
+            route_info,
+            payload,
+            conversation_id=str(slot_cache_context.get("conversation_id") or ""),
+        )
     request_metadata = model_request_metadata(
         route_info,
         payload,
@@ -15470,6 +15594,7 @@ def call_model_with_callback(
         request_metadata=request_metadata,
     )
     add_reasoning_to_model_call_record(record, reasoning)
+    add_slot_cache_to_model_call_record(record, slot_context)
     write_last_model_call(record)
     try:
         raise_if_cancelled(cancel_event)
@@ -15528,6 +15653,9 @@ def call_model_with_callback(
         )
         raise
     reply = "".join(collected)
+    if slot_context is not None:
+        slot_context = save_slot_cache_after_request(route_info, slot_context)
+        add_slot_cache_to_model_call_record(record, slot_context)
     finish_model_call_record(
         record,
         started=started,
@@ -15584,6 +15712,8 @@ HELP_SECTIONS = [
             ("/models [ROUTE]", "show local model service status from motoko-model"),
             ("/model-stop ROUTE", "stop a local model service through motoko-model"),
             ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
+            ("/slot-cache [ROUTE]", "show persistent slot/KV cache capability and manifest records"),
+            ("/slot-cache erase ROUTE", "erase a route's active slot through the declared slot endpoint"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
             ("/feedback-eval", "turn private feedback into eval fixtures"),
             ("/action-eval", "run deterministic agentic action safety checks"),
@@ -15749,6 +15879,9 @@ HELP_SECTIONS = [
             ("motoko models [ROUTE]", "show local model service status from motoko-model"),
             ("motoko model-stop ROUTE", "stop a local model service through motoko-model"),
             ("motoko model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
+            ("motoko slot-cache [ROUTE]", "show persistent slot/KV cache capability and manifest records"),
+            ("motoko slot-cache clear [ROUTE] --yes", "remove content-free slot-cache manifest records"),
+            ("motoko slot-cache erase ROUTE", "erase a route's active slot through the declared slot endpoint"),
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
             ("motoko retrieval-eval", "evaluate retrieval grounding on synthetic corpus fixtures"),
             ("motoko feedback-eval", "turn private feedback into eval fixtures"),
@@ -16066,6 +16199,10 @@ def format_status(conv: dict | None = None) -> str:
         chat_route_state = "not a NixOS Unix-socket route"
         chat_status_source = "not available"
     runtime = current_runtime_context()
+    slot_manifest = read_slot_cache_manifest()
+    slot_records = [
+        row for row in slot_manifest.get("records", []) if isinstance(row, dict)
+    ]
 
     lines = [
         f"runtime schema: {runtime.get('schema', '')}",
@@ -16079,6 +16216,7 @@ def format_status(conv: dict | None = None) -> str:
         "model routes: " + ", ".join(f"{route}={model_route_badge(route)}" for route in configured_model_routes()),
         f"chat route state: {chat_route_state}",
         f"model status source: {chat_status_source}",
+        f"slot/KV cache: {len(slot_records)} record(s), {slot_cache_manifest_path()}",
         "background lanes: cpu, small-model, large-model",
         f"state: {state_root()}",
         f"config: {config_root()}",
@@ -16265,6 +16403,32 @@ def model_command_request(text: str):
         if not selector:
             return "/model-metrics", lambda: "usage: /model-metrics ROUTE"
         return "/model-metrics", lambda: model_service_metrics(selector)
+    if primary == "/slot-cache":
+        parts = body.split()
+        if parts and parts[0] == "erase":
+            if len(parts) < 2:
+                return "/slot-cache erase", lambda: "usage: /slot-cache erase ROUTE"
+            return "/slot-cache erase", lambda: slot_cache_erase_text(parts[1])
+        if parts and parts[0] == "clear":
+            yes = "--yes" in parts
+            conversation_id = ""
+            route_parts = []
+            idx = 1
+            while idx < len(parts):
+                item = parts[idx]
+                if item == "--yes":
+                    idx += 1
+                    continue
+                if item == "--conversation" and idx + 1 < len(parts):
+                    conversation_id = parts[idx + 1]
+                    idx += 2
+                    continue
+                route_parts.append(item)
+                idx += 1
+            selector = " ".join(route_parts).strip() or None
+            return "/slot-cache clear", lambda: slot_cache_clear_text(selector, conversation_id=conversation_id, yes=yes)
+        selector = body or None
+        return "/slot-cache", lambda: format_slot_cache(selector)
     return None
 
 
@@ -17064,7 +17228,7 @@ def setup_readline_completion() -> None:
                 matches = [item for item in completion_ids("topic") if item.startswith(text)]
             elif parts and parts[0] in {"/attach-dossier", "/dossier-show"}:
                 matches = [item for item in completion_ids("dossier") if item.startswith(text)]
-            elif parts and parts[0] in {"/models", "/model-status", "/model-stop", "/model-metrics"}:
+            elif parts and parts[0] in {"/models", "/model-status", "/model-stop", "/model-metrics", "/slot-cache"}:
                 matches = [item for item in completion_ids("model-route") if item.startswith(text)]
         else:
             matches = [name for name in SHELL_COMMANDS if name.startswith(text)]
@@ -17975,6 +18139,7 @@ class MotokoTui:
                     on_connection=self.set_active_model_connection,
                     on_response=self.set_active_model_response,
                     source_count=len(sources),
+                    slot_cache_context={"conversation_id": self.conv.get("id", "")},
                 )
                 self.put_event(("done", reply, sources_with_answer_audit(user_text, reply, sources)))
             except RuntimeError as exc:
@@ -18370,7 +18535,7 @@ class MotokoTui:
                 for row in list_dossiers()
                 if not current or item_matches_selector(row, current)
             ][:20]
-        if first in {"/models", "/model-status", "/model-stop", "/model-metrics"} and len(words) <= 2:
+        if first in {"/models", "/model-status", "/model-stop", "/model-metrics", "/slot-cache"} and len(words) <= 2:
             return [
                 {
                     "kind": "model-route",
@@ -18770,7 +18935,11 @@ def chat_loop(conv: dict) -> None:
             print(f"sys memory saved from this prompt ({explicit_saved})")
         print("\n" + assistant_label("Motoko "), end="", flush=True)
         messages, sources = build_messages(conv, user_text)
-        reply = call_model(messages, source_count=len(sources))
+        reply = call_model(
+            messages,
+            source_count=len(sources),
+            slot_cache_context={"conversation_id": conv.get("id", "")},
+        )
         conv["last_sources"] = sources_with_answer_audit(user_text, reply, sources)
         conv["messages"].append({"role": "assistant", "content": reply})
         save_conversation(conv)
@@ -20040,6 +20209,44 @@ def command_model_metrics(args) -> None:
     print_report(model_service_metrics(args.route))
 
 
+def command_slot_cache(args) -> None:
+    raw_args = list(getattr(args, "slot_cache_args", []) or [])
+    command = "status"
+    route = ""
+    conversation_id = ""
+    yes = False
+    if raw_args and raw_args[0] in {"status", "clear", "erase"}:
+        command = raw_args.pop(0)
+    if command == "clear":
+        idx = 0
+        route_parts = []
+        while idx < len(raw_args):
+            item = raw_args[idx]
+            if item == "--yes":
+                yes = True
+                idx += 1
+                continue
+            if item == "--conversation" and idx + 1 < len(raw_args):
+                conversation_id = raw_args[idx + 1]
+                idx += 2
+                continue
+            route_parts.append(item)
+            idx += 1
+        route = " ".join(route_parts).strip()
+    elif raw_args:
+        route = " ".join(raw_args).strip()
+    if command == "status":
+        print_report(format_slot_cache(route or None))
+    elif command == "clear":
+        print_report(slot_cache_clear_text(route or None, conversation_id=conversation_id, yes=yes))
+    elif command == "erase":
+        if not route:
+            raise SystemExit("usage: motoko slot-cache erase ROUTE")
+        print_report(slot_cache_erase_text(route))
+    else:
+        raise SystemExit("unknown slot-cache command")
+
+
 def command_model_eval(args) -> None:
     report = run_worker_model_eval(args.route, timeout=args.timeout)
     if args.write:
@@ -20224,6 +20431,14 @@ def main(argv: list[str]) -> int:
     model_metrics = sub.add_parser("model-metrics", help="show content-free llama.cpp route metrics from motoko-model")
     model_metrics.add_argument("route", help="logical or catalog route name")
     model_metrics.set_defaults(func=command_model_metrics)
+
+    slot_cache_cmd = sub.add_parser("slot-cache", help="show or manage persistent slot/KV cache metadata")
+    slot_cache_cmd.add_argument(
+        "slot_cache_args",
+        nargs="*",
+        help="optional: [status ROUTE], [clear ROUTE --conversation ID --yes], or [erase ROUTE]",
+    )
+    slot_cache_cmd.set_defaults(func=command_slot_cache)
 
     model_eval = sub.add_parser("model-eval", help="evaluate configured worker routes on synthetic fixtures")
     model_eval.add_argument(

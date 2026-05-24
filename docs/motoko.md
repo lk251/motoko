@@ -570,9 +570,24 @@ motoko model-metrics ROUTE
 ```
 
 This delegates to `motoko-model metrics ROUTE` and prints bounded,
-content-free service counters. Motoko does not call `/slots`, does not use
-persistent slot or KV cache files, and does not write prompts, responses,
-filenames, summaries, memories, or retrieved context to admin-owned logs.
+content-free service counters. Persistent slot/KV cache is available only when
+the NixOS route catalog explicitly declares it for a route. Inspect it with:
+
+```bash
+motoko slot-cache [ROUTE]
+motoko slot-cache clear [ROUTE] --yes
+motoko slot-cache erase ROUTE
+```
+
+Motoko stores only a realm-local, content-free manifest under
+`~/.local/state/motoko/slot-cache/`. The llama.cpp worker owns the actual KV
+files behind its declared `--slot-save-path`; Motoko calls the declared
+`/slots/{id}?action=restore|save|erase` endpoint only when
+`persistentSlotCache`, `slotsEndpoint`, and `slotSavePath` are enabled and the
+route safety policy does not disable those surfaces. Cache restore/save failure
+is treated as a cache miss. Motoko must remain correct with no persistent KV
+cache and must not write prompts, responses, filenames, summaries, memories,
+retrieved context, corpora, or reasoning text to admin-owned logs.
 
 `motoko list` displays compact `created`, `updated`, `branch`, and
 `conversation` columns. Full timestamps remain stored in the conversation JSON.
@@ -1135,13 +1150,14 @@ If NixOS declares a route cache policy in
 `motoko model-routes` display those content-free capabilities, including prompt
 cache enablement, reuse threshold, cache RAM, slot prompt similarity, metrics
 availability, and metrics endpoint. Motoko reads those fields as service-owned
-capabilities. She keeps prompts stable and explicit, but does not call `/slots`,
-does not persist KV cache files, and does not fake prompt/KV caching in user
-state.
-Persistent slot/KV cache files are deferred until a separate design review
-covers privacy, realm-local storage, permissions, route/model/prompt-template
-fingerprints, invalidation, garbage collection, and stale-cache tests. Motoko
-must remain correct when no server-side KV cache survives.
+capabilities. She keeps prompts stable and explicit, and she uses persistent
+slot/KV cache only through the reviewed route capability gates described above.
+She does not fake prompt/KV caching in user state: the user state contains only
+the manifest, while llama.cpp saves and restores the actual slot cache file.
+The manifest uses route/model/context/slot fingerprints so old cache records do
+not carry across route or model changes. `/last-call` may show content-free
+slot-cache status such as `restore=miss|restored|failed` and
+`save=saved|failed`; it must not contain prompt or response text.
 
 When the NixOS catalog is keyed by worker service name instead of Motoko route
 name, Motoko resolves routes through each catalog entry's `tasks` list. For

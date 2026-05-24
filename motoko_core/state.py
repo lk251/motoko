@@ -136,6 +136,15 @@ def model_cache_dir() -> pathlib.Path:
     return ensure_private_dir(root / "model-cache")
 
 
+def slot_cache_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "slot-cache")
+
+
+def slot_cache_manifest_path() -> pathlib.Path:
+    return slot_cache_dir() / "manifest.json"
+
+
 def model_evals_dir() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return ensure_private_dir(root / "model-evals")
