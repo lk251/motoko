@@ -110,8 +110,8 @@ motoko status
 ```
 
 and includes it in the system prompt and `/sources` provenance for each answer.
-`motoko about` is the compact introduction screen: Motoko's name, version,
-brief purpose and development values, the Mares ASCII logo in the assistant
+`motoko about` is the compact introduction screen: Motoko's name, brief
+description, development values, version, the Mares ASCII logo in the assistant
 color, identity/realm, active chat model and endpoint, background lanes, state
 paths, and permissions. The logo is rendered first and left-justified, with
 the Motoko/version/values text below it so narrow terminals do not interleave

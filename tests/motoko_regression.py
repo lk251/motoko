@@ -845,10 +845,14 @@ def test_help_about_and_explicit_memory(m):
         assert "Evals are specialized health checks" in tips
         about = m.format_about()
         assert "Motoko" in about
+        assert "local corpora, memory, and repo review" in about
         assert "model badge:" in about
         assert "values: intelligence, competence, craft" in about
         assert "$$$$$_" in about
-        assert about.index("$$$$$_") < about.index("version:")
+        assert about.index("$$$$$_") < about.index("Motoko")
+        assert about.index("Motoko") < about.index("values:")
+        assert about.index("values:") < about.index("version:")
+        assert about.index("version:") < about.index("revision:")
         logo_rows = [m.strip_ansi(row) for row in m.format_about_header(width=90)[:6]]
         logo_left_pads = [len(row) - len(row.lstrip(" ")) for row in logo_rows]
         assert len(set(logo_left_pads)) == 1
