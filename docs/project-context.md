@@ -1492,6 +1492,29 @@ fake OpenAI responses are necessary, but they do not exercise socket
 activation, route exclusivity, llama.cpp residency, restart loops, or the
 interaction between foreground chat and background workers.
 
+The root cause was a wrong diagnostic abstraction. An OpenAI-compatible route
+looks like a simple HTTP endpoint, but in this project it is a schedulable local
+GPU resource owned by the NixOS service layer. It has process residency, socket
+activation, prompt/KV cache locality, idle unload, route exclusivity, restart
+limits, and contention with other routes in the same realm. Security ownership
+and diagnostic ownership are different: NixOS owns the service boundary, but
+Motoko still has to reason from the declared route metadata and content-free
+service state before deciding whether a request failed because of prompt shape,
+transport, model loading, active work, or VRAM residency.
+
+Future local-model debugging must start with two planes, not one:
+
+- application/protocol plane: payload shape, prompt construction, timeout,
+  streaming, JSON/grammar/schema behavior, and model error response;
+- resource/scheduling plane: route catalog metadata, active/resident routes,
+  socket activation, restart loops, idle grace, exclusive lanes, context/KV
+  placement, and whether another same-realm route is holding useful GPU state.
+
+Tests should reflect both planes. Mocked HTTP tests catch prompt and transport
+regressions, but residency bugs need fake route catalogs, fake content-free
+`motoko-model status` output, and assertions that Motoko queues, defers,
+releases, or retries routes without inspecting or logging private content.
+
 For future model-route bugs, the default diagnosis should include:
 
 - trace every Motoko-owned model entry point, especially direct
@@ -1524,6 +1547,16 @@ KV placement from route names; use catalog `kv_offload` and
 `kv_cache.location`. Do not fake server-side KV caching inside Motoko;
 prompt-prefix/KV reuse belongs in the deployed local model service if
 measurement shows it is worthwhile.
+
+Prompt/KV cache is a performance feature, not a correctness feature. Motoko
+must always be able to reconstruct the next request from durable conversation,
+memory, retrieval, profile, and artifact state. If a llama.cpp route process is
+stopped or idle-unloaded, its in-process prompt/KV cache is lost; the next
+activation reloads the model and Motoko sends the needed prompt again. Keeping a
+large chat route resident briefly after an answer can preserve cache locality
+for likely follow-up chat, but no answer may depend on that cache surviving.
+Persistent slot/KV cache files remain disallowed unless the privacy/security
+design is explicitly reviewed.
 
 Background and maintenance worker routes must also respect model residency.
 Large chat routes may stay resident briefly after a foreground answer because
