@@ -98,22 +98,33 @@ def model_request_failure_detail(prefix: str, exc: BaseException, hint: str = ""
     return detail
 
 
-def parse_openai_stream_line(raw: bytes) -> tuple[bool, str]:
+def parse_openai_stream_line_parts(raw: bytes) -> tuple[bool, str, str]:
     line = raw.decode("utf-8", errors="replace").strip()
     if not line or not line.startswith("data:"):
-        return False, ""
+        return False, "", ""
     data = line[5:].strip()
     if data == "[DONE]":
-        return True, ""
+        return True, "", ""
     try:
         event = json.loads(data)
     except json.JSONDecodeError:
-        return False, ""
+        return False, "", ""
     choices = event.get("choices") or []
     if not choices:
-        return False, ""
+        return False, "", ""
     delta = choices[0].get("delta") or {}
-    return False, delta.get("content") or ""
+    reasoning = (
+        delta.get("reasoning_content")
+        or delta.get("reasoning")
+        or delta.get("reasoningContent")
+        or ""
+    )
+    return False, delta.get("content") or "", reasoning
+
+
+def parse_openai_stream_line(raw: bytes) -> tuple[bool, str]:
+    done, content, _reasoning = parse_openai_stream_line_parts(raw)
+    return done, content
 
 
 @contextlib.contextmanager

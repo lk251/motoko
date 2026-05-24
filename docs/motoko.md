@@ -458,10 +458,11 @@ picker. This avoids typing long conversation IDs for normal use.
 
 `motoko last-call` and `/last-call` show the most recent content-free model
 call record: route, catalog route, route profile, declared KV location,
-selected context tier, estimated prompt and completion tokens, context pressure,
-source count, elapsed time, and estimated generation speed. The record
-deliberately omits prompt text, response text, filenames, excerpts, summaries,
-and other corpus-derived content.
+reasoning preset and budget, selected context tier, estimated prompt and
+completion tokens, context pressure, source count, elapsed time, and estimated
+generation speed. The record deliberately omits prompt text, response text,
+reasoning text, filenames, excerpts, summaries, and other corpus-derived
+content.
 
 `motoko context-bench` is dry-run by default. It builds synthetic content-free
 prompt sizes and shows which approved chat route the context governor would
@@ -833,6 +834,24 @@ by per-realm worker users such as `mares-llm` or `personal-llm`. Motoko talks to
 those OpenAI-compatible Unix sockets, but does not call `systemctl` or run
 llama.cpp as the current user. Use `motoko-model list/info/verify/start/stop/status`
 for model-service operations.
+
+Main chat reasoning is controlled per request, not by separate NixOS route
+profiles. Motoko sends llama.cpp DeepSeek-style reasoning fields only on the
+logical chat route:
+
+```text
+reasoning_format = deepseek
+chat_template_kwargs.enable_thinking = true|false
+thinking_budget_tokens = N
+```
+
+Use `MOTOKO_REASONING=off|low|default|high|max` for one process. The default is
+`default`, which enables thinking with a 4096-token budget. `low` uses 1024,
+`high` uses 16384, and `max` is unrestricted. Streaming reasoning switches the
+active TUI answer row to `Thinking`, shows the latest reasoning text dimmed and
+truncated for fit, and returns to `Answering` when normal answer tokens stream.
+It is not inserted into the conversation transcript, prompt history,
+`/last-call`, logs, or shared state.
 
 All routes still fall back to the normal chat endpoint until config,
 environment variables, or the NixOS local-model catalog override them, so the

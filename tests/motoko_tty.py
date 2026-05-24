@@ -210,12 +210,14 @@ def main() -> int:
             {"role": "assistant", "content": "answer text"},
             60,
             assistant_color="cyan",
-            answer_phase="answering",
+            answer_phase="thinking",
             answer_phase_elapsed=12,
+            answer_reasoning="checking sources before answering",
         )
     )
     live_answer = strip_ansi(live_answer)
-    assert "Answering (12s)" in live_answer
+    assert "Thinking (12s)" in live_answer
+    assert "checking sources before answering" in live_answer
     assert "answer text" in live_answer
     status = "\n".join(
         status_display_lines(
