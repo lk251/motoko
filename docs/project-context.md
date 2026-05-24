@@ -1480,6 +1480,35 @@ Immediate next agentic implementation sequence, when development resumes:
 
 ## NixOS-Facing Model Boundary
 
+### Residency Diagnosis Lesson
+
+The May 2026 memory-maintenance timeout was initially misdiagnosed because the
+Motoko-side review treated local model calls as ordinary HTTP requests and
+looked mostly at prompt shape, timeout handling, and Python call sites. The
+missing step was to inspect the real NixOS route catalog and content-free
+service state as part of the same bug, including which model routes were
+resident or restarting on the GPU. Unit tests that monkeypatch `call_model` or
+fake OpenAI responses are necessary, but they do not exercise socket
+activation, route exclusivity, llama.cpp residency, restart loops, or the
+interaction between foreground chat and background workers.
+
+For future model-route bugs, the default diagnosis should include:
+
+- trace every Motoko-owned model entry point, especially direct
+  `open_model_response(...)` calls, embeddings, rerankers, streaming chat, and
+  helper subprocesses;
+- inspect `~/.config/motoko/local-models.json` for route `kind`, `tasks`,
+  `lane`, `selection`, `scheduling`, `idle_seconds`, `maxParallel`, and
+  endpoint paths instead of inferring behavior from logical route names;
+- use content-free `motoko-model status ROUTE` / `/models` data to distinguish
+  prompt/content failures from socket activation, model loading, active
+  requests, restart loops, and stale VRAM residency;
+- add regression tests that simulate service state and route conflicts, not
+  only prompt payloads or happy-path local HTTP responses;
+- put cross-cutting safeguards at the lowest Motoko-owned transport wrapper
+  when possible, so future direct request paths cannot bypass scheduling,
+  privacy, timeout, or cancellation policy.
+
 Motoko has repo-local support for named model routes, deterministic
 model-output caching, and a chat context governor. NixOS owns approved model
 files, worker users, sockets, VRAM residency, service hardening, and llama.cpp
@@ -1512,6 +1541,13 @@ maintenance, titles, skill review, profile/dossier work, indexing, embeddings,
 rerank work, and future worker lanes. Status may mention route names and unit
 state, but must not log prompts, responses, retrieved context, filenames,
 memories, summaries, corpora, or conversation text.
+
+If NixOS declares a non-chat route with an explicit `scheduling.exclusiveLane`
+or `selection.exclusiveLane`, Motoko should treat that as a real residency
+constraint too: release idle peers in the same declared lane, and defer rather
+than race an actively serving peer. Plain route `lane` values such as
+`worker-small`, `embedding`, or `reranker` are descriptive unless promoted to
+an explicit exclusive lane by the catalog.
 
 If residency prevents a durable background job from starting a model call, the
 job should be marked deferred/retryable rather than treated as a broken

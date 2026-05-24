@@ -2417,6 +2417,105 @@ def test_worker_route_waits_for_recent_large_chat_grace(m):
             m.run_local_model_helper = old_run_helper
 
 
+def test_worker_route_releases_idle_declared_exclusive_lane_peer(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        socket_dir.mkdir()
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "worker-a": {
+                    "endpoint": f"unix://{socket_dir / 'worker-a.sock'}",
+                    "modelId": "worker-a-model",
+                    "tasks": ["index_corpus"],
+                    "scheduling": {"exclusiveLane": "gpu-heavy", "parallelSlots": 1, "fanout": False},
+                },
+                "worker-b": {
+                    "endpoint": f"unix://{socket_dir / 'worker-b.sock'}",
+                    "modelId": "worker-b-model",
+                    "tasks": ["audit"],
+                    "scheduling": {"exclusiveLane": "gpu-heavy", "parallelSlots": 1, "fanout": False},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=worker-b\nsocket=active\nproxy=active\nbackend=active\nactive_requests=0\n"
+                if m.local_model_helper_route(info) == "worker-b"
+                else "route=worker-a\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+
+            def fake_run_helper(command, info, *, timeout=m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS):
+                calls.append((command, m.local_model_helper_route(info)))
+                return "stopped"
+
+            m.run_local_model_helper = fake_run_helper
+            worker = m.catalog_route_info("worker-a", logical_route=m.MODEL_ROUTE_INDEX_CORPUS)
+            notes = m.prepare_route_residency_for_request(worker)
+            assert notes == ["released worker-b"]
+            assert calls == [("stop", "worker-b")]
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
+def test_worker_route_defers_when_declared_exclusive_lane_peer_is_busy(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        socket_dir.mkdir()
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "worker-a": {
+                    "endpoint": f"unix://{socket_dir / 'worker-a.sock'}",
+                    "modelId": "worker-a-model",
+                    "tasks": ["index_corpus"],
+                    "scheduling": {"exclusiveLane": "gpu-heavy", "parallelSlots": 1, "fanout": False},
+                },
+                "worker-b": {
+                    "endpoint": f"unix://{socket_dir / 'worker-b.sock'}",
+                    "modelId": "worker-b-model",
+                    "tasks": ["audit"],
+                    "scheduling": {"exclusiveLane": "gpu-heavy", "parallelSlots": 1, "fanout": False},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=worker-b\nsocket=active\nproxy=active\nbackend=active\nactive_requests=1\n"
+                if m.local_model_helper_route(info) == "worker-b"
+                else "route=worker-a\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+            m.run_local_model_helper = lambda command, info, **_kwargs: calls.append(
+                (command, m.local_model_helper_route(info))
+            )
+            worker = m.catalog_route_info("worker-a", logical_route=m.MODEL_ROUTE_INDEX_CORPUS)
+            try:
+                m.prepare_route_residency_for_request(worker)
+            except m.RouteResidencyBusy as exc:
+                assert "exclusive lane gpu-heavy" in str(exc)
+            else:
+                raise AssertionError("busy exclusive-lane peer should defer worker route")
+            assert calls == []
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
 def test_chat_route_releases_idle_worker_routes(m):
     with isolated_state() as tmp:
         socket_dir = tmp / "sockets"
@@ -2571,6 +2670,45 @@ def test_chat_route_defers_when_large_chat_peer_is_busy(m):
         finally:
             m.local_model_status_text = old_status
             m.run_local_model_helper = old_run_helper
+
+
+def test_open_model_response_direct_calls_prepare_residency(m):
+    class FakeResponse:
+        def read(self):
+            return b"{}"
+
+    @contextlib.contextmanager
+    def fake_core(*_args, **_kwargs):
+        yield FakeResponse()
+
+    old_core = m.open_model_response_core
+    old_prepare = m.prepare_route_residency_for_request
+    calls = []
+    try:
+        m.open_model_response_core = fake_core
+
+        def fake_prepare(route_info, *, phase_callback=None):
+            calls.append((m.local_model_helper_route(route_info), phase_callback is not None))
+            return []
+
+        m.prepare_route_residency_for_request = fake_prepare
+        route_info = {
+            "route": "embedding",
+            "catalog_route": "qwen3-embedding-0b6",
+            "endpoint": "unix:///run/motoko-llm/mares/qwen3-embedding-0b6.sock",
+            "model": "qwen3-embedding-0.6b-q8-0",
+        }
+        with m.open_model_response(route_info, {"model": "x"}, timeout=1) as resp:
+            assert resp.read() == b"{}"
+        assert calls == [("qwen3-embedding-0b6", False)]
+
+        calls.clear()
+        with m.open_model_response(route_info, {"model": "x"}, timeout=1, prepare_residency=False) as resp:
+            assert resp.read() == b"{}"
+        assert calls == []
+    finally:
+        m.open_model_response_core = old_core
+        m.prepare_route_residency_for_request = old_prepare
 
 
 def test_model_service_status_and_stop_use_motoko_model_helper(m):
@@ -8457,9 +8595,12 @@ def main() -> int:
         test_worker_route_releases_idle_large_chat_route,
         test_worker_route_defers_when_large_chat_route_is_busy,
         test_worker_route_waits_for_recent_large_chat_grace,
+        test_worker_route_releases_idle_declared_exclusive_lane_peer,
+        test_worker_route_defers_when_declared_exclusive_lane_peer_is_busy,
         test_chat_route_releases_idle_worker_routes,
         test_chat_route_releases_idle_large_chat_peer,
         test_chat_route_defers_when_large_chat_peer_is_busy,
+        test_open_model_response_direct_calls_prepare_residency,
         test_model_service_status_and_stop_use_motoko_model_helper,
         test_summary_reductions_fan_out_across_worker_routes,
         test_sources_fallback_lists_attached_topic_context,

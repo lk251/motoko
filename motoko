@@ -10770,6 +10770,7 @@ def rerank_documents(
             payload,
             timeout=timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
+            prepare_residency=False,
         ) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
@@ -10807,6 +10808,7 @@ def embed_texts(
             payload,
             timeout=timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
+            prepare_residency=False,
         ) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
@@ -14761,14 +14763,21 @@ def model_request_deferred_by_residency(exc: BaseException) -> bool:
 
 def route_exclusive_lane(route_info: dict) -> str:
     scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
+    declared = route_declared_exclusive_lane(route_info)
+    if declared:
+        return declared
+    value = route_info.get("lane") or scheduling.get("lane")
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def route_declared_exclusive_lane(route_info: dict) -> str:
+    scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
     selection = route_info.get("selection") if isinstance(route_info.get("selection"), dict) else {}
     value = (
         scheduling.get("exclusiveLane")
         or scheduling.get("exclusive_lane")
         or selection.get("exclusiveLane")
         or selection.get("exclusive_lane")
-        or route_info.get("lane")
-        or scheduling.get("lane")
     )
     return str(value or "").strip().lower().replace("_", "-")
 
@@ -14914,6 +14923,40 @@ def prepare_worker_route_residency(route_info: dict, *, phase_callback=None) -> 
     return notes
 
 
+def prepare_declared_exclusive_lane_residency(route_info: dict, *, phase_callback=None) -> list[str]:
+    lane = route_declared_exclusive_lane(route_info)
+    if not lane:
+        return []
+    target_route = local_model_helper_route(route_info)
+    notes = []
+    seen = {target_route}
+    for info in local_model_catalog_route_infos(logical_route=MODEL_ROUTE_CHAT):
+        route_name = local_model_helper_route(info)
+        if not route_name or route_name in seen:
+            continue
+        seen.add(route_name)
+        if not endpoint_is_unix(str(info.get("endpoint") or "")):
+            continue
+        if route_declared_exclusive_lane(info) != lane:
+            continue
+        status_text = local_model_status_text(info)
+        if not local_route_status_active(status_text):
+            continue
+        if local_model_status_busy(status_text):
+            raise RouteResidencyBusy(
+                f"route {target_route} queued behind active route {route_name} in exclusive lane {lane}"
+            )
+        if phase_callback is not None:
+            phase_callback(f"releasing({route_name})")
+        try:
+            run_local_model_helper("stop", info)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            notes.append(f"could not release {route_name}: {type(exc).__name__}")
+            continue
+        notes.append(f"released {route_name}")
+    return notes
+
+
 def prepare_chat_route_residency(route_info: dict, *, phase_callback=None) -> list[str]:
     if not endpoint_is_unix(str(route_info.get("endpoint") or "")) or not route_is_large_chat(route_info):
         return []
@@ -14946,7 +14989,9 @@ def prepare_chat_route_residency(route_info: dict, *, phase_callback=None) -> li
 def prepare_route_residency_for_request(route_info: dict, *, phase_callback=None) -> list[str]:
     if route_is_large_chat(route_info):
         return prepare_chat_route_residency(route_info, phase_callback=phase_callback)
-    return prepare_worker_route_residency(route_info, phase_callback=phase_callback)
+    notes = prepare_declared_exclusive_lane_residency(route_info, phase_callback=phase_callback)
+    notes.extend(prepare_worker_route_residency(route_info, phase_callback=phase_callback))
+    return notes
 
 
 @contextlib.contextmanager
@@ -14959,7 +15004,10 @@ def open_model_response(
     on_connection=None,
     on_response=None,
     socket_activation_min_timeout: float | None = None,
+    prepare_residency: bool = True,
 ):
+    if prepare_residency:
+        prepare_route_residency_for_request(route_info)
     with open_model_response_core(
         route_info,
         payload,
@@ -15049,7 +15097,7 @@ def call_model(
     spinner = ThinkingSpinner(enabled=echo)
     try:
         spinner.start()
-        with open_model_response(route_info, payload, timeout=timeout) as resp:
+        with open_model_response(route_info, payload, timeout=timeout, prepare_residency=False) as resp:
             if stream:
                 reply = read_streaming_response(resp, echo=echo, spinner=spinner)
                 finish_model_call_record(record, started=started, completion_text=reply)
@@ -15432,6 +15480,7 @@ def call_model_with_callback(
             cancel_event=cancel_event,
             on_connection=on_connection,
             on_response=on_response,
+            prepare_residency=False,
         ) as resp:
             for raw in iter_cancelable_response_lines(resp, cancel_event):
                 raise_if_cancelled(cancel_event)
