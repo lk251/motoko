@@ -8,6 +8,9 @@ not the easiest place to review what changed after a long work session.
 - Expanded the agentic capability design note with the accepted skill package
   format, including the Hermes Agent comparison and Motoko's stricter
   per-script metadata and approval-contract path.
+- Accepted the planner-boundary design for agentic capabilities: model plans
+  must become typed Motoko action records, and code-owned validators decide
+  what may run.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

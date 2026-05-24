@@ -26,7 +26,7 @@ points:
 - Skill package format: accepted. Script assets under `scripts/` need metadata declaring
   interpreter, allowed arguments, allowed effects, input/output schemas, source
   fingerprint, provenance, and whether the script is executable or inert text.
-- Planner boundary: the model may propose or select actions, but execution must
+- Planner boundary: accepted. The model may propose or select actions, but execution must
   go through typed Motoko action records validated by code. No free-form shell
   command should be executed directly from model text.
 - Filesystem and realm boundaries: scripts must stay inside the current user's
@@ -310,6 +310,75 @@ Implementation recipe:
    changes.
 7. Do not execute any scripts in this step. First implement discovery,
    validation, display, fingerprinting, and approval-status reporting.
+
+## Planner Boundary
+
+Decision: accepted on 2026-05-24.
+
+The model may propose intentions, select skills, and request tools, but it must
+not directly emit executable shell, filesystem, network, or service operations
+that Motoko runs. Execution flows through typed Motoko action records. Motoko
+code validates those records against the accepted authority model, skill
+package metadata, approval store, realm boundary, `.motokoignore`, and
+confirmation policy before anything happens.
+
+The model is useful as planner; Motoko remains the authority boundary.
+
+Accepted action record shape:
+
+```json
+{
+  "schema": "motoko-action-v1",
+  "kind": "skill_tool_run",
+  "skill": "org-temporal-retrieval",
+  "tool": "latest_entries",
+  "arguments": {
+    "path": "logbook.org",
+    "count": 3
+  },
+  "reason": "Need latest dated entries from a specific Org source."
+}
+```
+
+Accepted planner rules:
+
+- Planner output is data, not authority. Natural-language instructions,
+  markdown, or shell-looking text are never executable by themselves.
+- Unknown action schemas, unknown action kinds, unknown skills, unknown tools,
+  unknown effects, malformed arguments, or missing approvals fail closed.
+- Built-in handlers and approved script tools share the same action-record
+  envelope, but validation dispatches them through different registries.
+- Free-form shell commands are not a supported action kind. If Motoko later
+  needs command execution, it must be represented as an approved script-backed
+  tool with a narrow argument schema and effect contract.
+- Planning can happen before retrieval, after retrieval, or inside an approved
+  goal loop, but every phase uses the same validator and ledger boundary.
+- The validator may rewrite safe defaults, narrow scope, or require user
+  confirmation, but it must not silently broaden the requested authority.
+- Rejected action records should produce a concise, inspectable explanation for
+  the user and, where useful, a safer preview-only alternative.
+
+Implementation recipe:
+
+1. Define `motoko-action-v1` as a small family of typed action records:
+   `skill_handler_run`, `skill_tool_run`, `artifact_lifecycle_plan`,
+   `artifact_lifecycle_apply`, and later `goal_loop_step`.
+2. Add an action parser that accepts JSON-like data from internal planners, not
+   executable text. It should reject multiple actions unless the caller is an
+   approved goal loop with a declared budget.
+3. Add an action validator that checks schema, kind, realm, skill id, tool id,
+   handler/tool registry membership, arguments, effects, approval status,
+   confirmation policy, and security boundaries.
+4. Add a dispatcher that only receives validated action objects. The dispatcher
+   should not parse model text or infer new authority.
+5. Record accepted, rejected, previewed, interrupted, and completed actions in
+   the realm-local ledger with content-safe metadata and private details kept
+   in the user's Motoko state.
+6. Expose an inspection command such as `motoko action validate FILE` or
+   `/action preview` before enabling model-generated actions in production.
+7. Add tests for valid action records, unknown kinds, unknown skills/tools,
+   malformed arguments, direct shell attempts, missing approvals, stale
+   fingerprints, `.motokoignore` denial, and confirmation-required actions.
 
 ## Goal Loops
 
