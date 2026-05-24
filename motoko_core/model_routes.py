@@ -314,6 +314,7 @@ def local_model_route_summary(route_id: str, raw: dict, catalog: dict | None = N
         "endpoint_paths": endpoint_paths,
         "request_path": endpoint_paths[0] if endpoint_paths else "",
         "tasks": sorted(task_set),
+        "lane": route_string_value(raw, "lane"),
         "route_profile": route_profile_value(raw),
         "role": route_string_value(raw, "role"),
         "context_tokens": route_int_value(raw, "context_tokens", "contextTokens"),

@@ -552,7 +552,11 @@ metadata to avoid GPU residency fights: idle same-realm large chat routes may
 be released through `motoko-model stop ROUTE` after their recent-chat grace
 window, while workers defer when a large chat route reports active requests or
 was just used. Before large foreground chat starts, Motoko also releases idle
-worker routes so stale worker residency does not block the chat model.
+worker routes and idle peer chat profiles so stale residency does not block the
+selected chat model.
+Deferred durable jobs are left retryable: memory proposals remain queued,
+partial indexes remain resumable, and vector refreshes keep progress for a
+later pass.
 
 For prompt-cache measurement, use:
 

@@ -1551,8 +1551,8 @@ def finish_index_progress(progress: dict | None, status: str, callback=None, *, 
     progress["status"] = status
     if status == "completed":
         progress["phase"] = "completed"
-    elif status == "paused":
-        progress["phase"] = "paused"
+    elif status in {"paused", "deferred"}:
+        progress["phase"] = status
     else:
         progress["phase"] = "failed"
     if error:
@@ -1569,6 +1569,8 @@ def format_index_progress_status(progress: dict) -> str:
         return "bg-heavy: index failed"
     if status == "paused":
         return "bg-heavy: index paused"
+    if status == "deferred":
+        return "bg-heavy: index deferred"
     current = int(progress.get("current_file_index", 0) or 0)
     total = int(progress.get("total_files", 0) or 0)
     files = f"file {current}/{total}" if total else "files"
@@ -2227,6 +2229,7 @@ def catalog_route_info(route_id: str, *, logical_route: str = MODEL_ROUTE_CHAT) 
         "idle_seconds": summary.get("idle_seconds"),
         "safety_policy": summary.get("safety_policy") or normalize_safety_policy(raw.get("safety_policy") or raw.get("safetyPolicy")),
         "description": MODEL_ROUTE_DESCRIPTIONS.get(logical_route, ""),
+        "lane": str(summary.get("lane") or route_string_value(raw, "lane") or ""),
         "ctx_size": route_context_size(raw) or route_context_size(summary) or 0,
         "quant": route_quant_label(raw),
         "tasks": summary.get("tasks", []),
@@ -2358,6 +2361,7 @@ def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
         "scheduling": normalize_scheduling_policy(local_route.get("scheduling")) if uses_catalog_endpoint else {},
         "idle_seconds": local_route.get("idle_seconds") if uses_catalog_endpoint else None,
         "safety_policy": normalize_safety_policy(local_route.get("safety_policy")) if uses_catalog_endpoint else {},
+        "lane": str(local_route.get("lane") or ""),
         "ctx_size": route_context_size(local_route) or 0,
         "quant": route_quant_label(local_route),
         "tasks": [str(item) for item in local_route.get("tasks", [])] if isinstance(local_route.get("tasks"), list) else [],
@@ -11284,8 +11288,14 @@ def refresh_vector_stores(
             report["items"].append(item)
             break
         except SystemExit as exc:
-            item["status"] = "failed"
-            item["error"] = str(exc)
+            if model_request_deferred_by_residency(exc):
+                item["status"] = "deferred"
+                item["note"] = str(exc)
+                report["items"].append(item)
+                break
+            else:
+                item["status"] = "failed"
+                item["error"] = str(exc)
         else:
             item["status"] = "built"
             item["store_id"] = store.get("id", "")
@@ -11300,6 +11310,8 @@ def refresh_vector_stores(
     report["built"] = built
     if any(item.get("status") == "paused" for item in report["items"]):
         report["status"] = "paused"
+    elif any(item.get("status") == "deferred" for item in report["items"]):
+        report["status"] = "deferred"
     else:
         report["status"] = "built" if built else ("empty" if not report["items"] else "no-build")
     return report
@@ -11572,6 +11584,8 @@ def build_embedding_vector_store_from_index(
                 run_parallel_batches(pending_batches, active_parallelism)
             except SystemExit as exc:
                 write_progress()
+                if model_request_deferred_by_residency(exc):
+                    raise
                 if active_parallelism <= 1:
                     raise
                 next_parallelism = max(1, active_parallelism // 2)
@@ -12855,7 +12869,10 @@ def build_document_index(
     except WorkPaused:
         raise
     except BaseException as exc:
-        finish_index_progress(progress, "failed", progress_callback, error=f"{type(exc).__name__}: {exc}")
+        deferred = model_request_deferred_by_residency(exc)
+        status = "deferred" if deferred else "failed"
+        error = f"{type(exc).__name__}: {exc}"
+        finish_index_progress(progress, status, progress_callback, error=error)
         write_partial_index(
             document_index_record(
                 index_id=index_id,
@@ -12868,8 +12885,8 @@ def build_document_index(
                 candidates=candidates,
                 selection_policy=selection_policy,
             ),
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
+            status=status,
+            error=error,
         )
         raise
 
@@ -13043,7 +13060,10 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
     except WorkPaused:
         raise
     except BaseException as exc:
-        finish_index_progress(progress, "failed", progress_callback, error=f"{type(exc).__name__}: {exc}")
+        deferred = model_request_deferred_by_residency(exc)
+        status = "deferred" if deferred else "failed"
+        error = f"{type(exc).__name__}: {exc}"
+        finish_index_progress(progress, status, progress_callback, error=error)
         write_partial_index(
             document_index_record(
                 index_id=index_id,
@@ -13056,8 +13076,8 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
                 candidates=candidates,
                 selection_policy=selection_policy,
             ),
-            status="failed",
-            error=f"{type(exc).__name__}: {exc}",
+            status=status,
+            error=error,
         )
         raise
 
@@ -14215,7 +14235,7 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
                 notes.append(f"vector store(s) refreshed: {built}")
                 catalog = write_context_catalog()
             for item in vector_report.get("items", [])[:3]:
-                if item.get("status") in {"skipped", "failed", "paused"}:
+                if item.get("status") in {"skipped", "failed", "paused", "deferred"}:
                     label = item.get("name") or item.get("index", "")
                     detail = item.get("error") or item.get("note") or item.get("reason", "")
                     notes.append(f"vector refresh {item.get('status')}: {label} {detail}".strip())
@@ -14725,9 +14745,31 @@ class RouteResidencyBusy(RuntimeError):
     """A route should wait because another route currently owns useful GPU residency."""
 
 
+MODEL_REQUEST_DEFERRED_PREFIXES = (
+    "model request deferred:",
+    "embedding request deferred:",
+    "rerank request deferred:",
+)
+
+
+def model_request_deferred_by_residency(exc: BaseException) -> bool:
+    if isinstance(exc, RouteResidencyBusy):
+        return True
+    text = str(exc).strip()
+    return any(text.startswith(prefix) for prefix in MODEL_REQUEST_DEFERRED_PREFIXES)
+
+
 def route_exclusive_lane(route_info: dict) -> str:
     scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
-    value = scheduling.get("exclusiveLane") or scheduling.get("exclusive_lane")
+    selection = route_info.get("selection") if isinstance(route_info.get("selection"), dict) else {}
+    value = (
+        scheduling.get("exclusiveLane")
+        or scheduling.get("exclusive_lane")
+        or selection.get("exclusiveLane")
+        or selection.get("exclusive_lane")
+        or route_info.get("lane")
+        or scheduling.get("lane")
+    )
     return str(value or "").strip().lower().replace("_", "-")
 
 
@@ -14883,13 +14925,13 @@ def prepare_chat_route_residency(route_info: dict, *, phase_callback=None) -> li
         if not route_name or route_name in seen:
             continue
         seen.add(route_name)
-        if route_is_large_chat(info) or not endpoint_is_unix(str(info.get("endpoint") or "")):
+        if not endpoint_is_unix(str(info.get("endpoint") or "")):
             continue
         status_text = local_model_status_text(info)
         if not local_route_status_active(status_text):
             continue
         if local_model_status_busy(status_text):
-            raise RouteResidencyBusy(f"chat route {target_route} queued behind active worker route {route_name}")
+            raise RouteResidencyBusy(f"chat route {target_route} queued behind active route {route_name}")
         if phase_callback is not None:
             phase_callback(f"releasing({route_name})")
         try:

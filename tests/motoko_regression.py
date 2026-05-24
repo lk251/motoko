@@ -2467,6 +2467,112 @@ def test_chat_route_releases_idle_worker_routes(m):
             m.run_local_model_helper = old_run_helper
 
 
+def test_chat_route_releases_idle_large_chat_peer(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen36-chat-default": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-default.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                    "tasks": ["chat", "default_chat"],
+                    "lane": "large-chat",
+                    "route_profile": "default",
+                    "selection": {"default": True, "priority": 100},
+                    "scheduling": {"parallelSlots": 1, "fanout": False},
+                },
+                "qwen36-chat-quality": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-quality.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                    "tasks": ["chat", "quality_chat"],
+                    "route_profile": "quality",
+                    "selection": {"priority": 80, "exclusiveLane": "large-chat"},
+                    "scheduling": {"parallelSlots": 1, "fanout": False},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=qwen36-chat-default\nsocket=active\nproxy=active\nbackend=active\nactive_requests=0\n"
+                if m.local_model_helper_route(info) == "qwen36-chat-default"
+                else "route=qwen36-chat-quality\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+
+            def fake_run_helper(command, info, *, timeout=m.LOCAL_MODEL_HELPER_TIMEOUT_SECONDS):
+                calls.append((command, m.local_model_helper_route(info)))
+                return "stopped"
+
+            m.run_local_model_helper = fake_run_helper
+            quality = m.catalog_route_info("qwen36-chat-quality", logical_route=m.MODEL_ROUTE_CHAT)
+            notes = m.prepare_route_residency_for_request(quality)
+            assert notes == ["released qwen36-chat-default"]
+            assert calls == [("stop", "qwen36-chat-default")]
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
+def test_chat_route_defers_when_large_chat_peer_is_busy(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen36-chat-default": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-default.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q4-k-xl",
+                    "tasks": ["chat", "default_chat"],
+                    "route_profile": "default",
+                    "selection": {"default": True, "priority": 100, "exclusiveLane": "large-chat"},
+                    "scheduling": {"parallelSlots": 1, "fanout": False},
+                },
+                "qwen36-chat-quality": {
+                    "endpoint": f"unix://{socket_dir / 'qwen36-chat-quality.sock'}",
+                    "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                    "tasks": ["chat", "quality_chat"],
+                    "route_profile": "quality",
+                    "selection": {"priority": 80, "exclusiveLane": "large-chat"},
+                    "scheduling": {"parallelSlots": 1, "fanout": False},
+                },
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+        old_status = m.local_model_status_text
+        old_run_helper = m.run_local_model_helper
+        calls = []
+        try:
+            m.local_model_status_text = lambda info: (
+                "route=qwen36-chat-default\nsocket=active\nproxy=active\nbackend=active\nactive_requests=1\n"
+                if m.local_model_helper_route(info) == "qwen36-chat-default"
+                else "route=qwen36-chat-quality\nsocket=active\nproxy=inactive\nbackend=inactive\n"
+            )
+            m.run_local_model_helper = lambda command, info, **_kwargs: calls.append(
+                (command, m.local_model_helper_route(info))
+            )
+            quality = m.catalog_route_info("qwen36-chat-quality", logical_route=m.MODEL_ROUTE_CHAT)
+            try:
+                m.prepare_route_residency_for_request(quality)
+            except m.RouteResidencyBusy as exc:
+                assert "active route qwen36-chat-default" in str(exc)
+            else:
+                raise AssertionError("busy large chat peer should defer selected chat route")
+            assert calls == []
+        finally:
+            m.local_model_status_text = old_status
+            m.run_local_model_helper = old_run_helper
+
+
 def test_model_service_status_and_stop_use_motoko_model_helper(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -5311,6 +5417,44 @@ def test_embedding_vector_store_uses_catalog_route(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_vector_refresh_model_residency_defer_is_retryable(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        index = {
+            "id": "vector-defer-index",
+            "name": "docs",
+            "root": str(docs),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": m.now(),
+            "corpus_summary": "",
+            "files": [],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+
+        old_build = m.build_vector_store_from_index
+        try:
+            m.build_vector_store_from_index = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                SystemExit("embedding request deferred: worker route qwen3-embedding-0b6 waiting 90s for recent chat route qwen36-chat-default")
+            )
+            report = m.refresh_vector_stores(
+                index_id=index["id"],
+                force=True,
+                limit=1,
+                method=m.LEXICAL_VECTOR_METHOD,
+            )
+        finally:
+            m.build_vector_store_from_index = old_build
+
+        assert report["status"] == "deferred"
+        assert report["built"] == 0
+        assert report["items"][0]["status"] == "deferred"
+        assert "embedding request deferred" in report["items"][0]["note"]
+        text = m.format_vector_refresh_report(report)
+        assert "vector refresh: deferred" in text
+        assert "note: embedding request deferred" in text
+
+
 def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -6487,6 +6631,45 @@ def test_index_resume_after_model_timeout(m):
             assert len(index["files"]) == 2
             assert any(file_item["path"].endswith("b.org") for file_item in index["files"])
             assert m.index_path(index["id"]).exists()
+            assert not m.index_partial_path(index["id"]).exists()
+        finally:
+            m.quiet_model = old_quiet_model
+
+
+def test_index_model_residency_defer_is_resumable_not_failed(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.org").write_text("* TODO Alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                SystemExit("model request deferred: worker route index_chunk waiting 90s for recent chat route qwen36-chat-default")
+            )
+            try:
+                m.build_document_index(str(docs))
+            except SystemExit as exc:
+                assert "request deferred" in str(exc)
+            else:
+                raise AssertionError("index build should defer on model residency contention")
+
+            partials = m.list_partial_indexes()
+            assert len(partials) == 1
+            partial = partials[0]
+            assert partial["status"] == "deferred"
+            assert partial["completed_files"] == 0
+            progress = m.read_index_progress(partial["id"])
+            assert progress is not None
+            assert progress["status"] == "deferred"
+            assert m.format_index_progress_status(progress) == "bg-heavy: index deferred"
+            assert m.list_resumable_partial_indexes()[0]["id"] == partial["id"]
+
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.resume_document_index(partial["id"])
+            assert index["id"] == partial["id"]
+            assert len(index["files"]) == 1
             assert not m.index_partial_path(index["id"]).exists()
         finally:
             m.quiet_model = old_quiet_model
@@ -8275,6 +8458,8 @@ def main() -> int:
         test_worker_route_defers_when_large_chat_route_is_busy,
         test_worker_route_waits_for_recent_large_chat_grace,
         test_chat_route_releases_idle_worker_routes,
+        test_chat_route_releases_idle_large_chat_peer,
+        test_chat_route_defers_when_large_chat_peer_is_busy,
         test_model_service_status_and_stop_use_motoko_model_helper,
         test_summary_reductions_fan_out_across_worker_routes,
         test_sources_fallback_lists_attached_topic_context,
@@ -8324,6 +8509,7 @@ def main() -> int:
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
+        test_vector_refresh_model_residency_defer_is_retryable,
         test_embedding_vector_store_splits_long_chunks_with_parent_mapping,
         test_embedding_vector_store_parallelizes_batches,
         test_embedding_parallelism_allows_32_cap,
@@ -8342,6 +8528,7 @@ def main() -> int:
         test_context_catalog_prefers_latest_index_per_family,
         test_prompt_context_resyncs_attached_index_to_newer_completed_index,
         test_index_resume_after_model_timeout,
+        test_index_model_residency_defer_is_resumable_not_failed,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
         test_org_task_signals_drive_retrieval,
         test_index_health_reports_new_files,
