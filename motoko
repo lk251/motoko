@@ -4987,7 +4987,40 @@ def format_goal_runs(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
-def execute_goal_run_record(run: dict, *, yes: bool) -> str:
+def interrupt_goal_run(
+    run: dict,
+    *,
+    cursor: int,
+    lines: list[str],
+    action_index: int | None = None,
+    kind: str = "",
+    validation_id: str = "",
+    tool_run_id: str = "",
+    error: str = "interrupted by request",
+) -> str:
+    actions = run.get("actions") if isinstance(run.get("actions"), list) else []
+    run["status"] = "interrupted"
+    run["cursor"] = max(0, min(len(actions), int(cursor or 0)))
+    run["error"] = error
+    if action_index is not None and 0 <= action_index < len(run.get("action_results", []) or []):
+        run["action_results"][action_index] = {
+            "index": action_index + 1,
+            "kind": kind or str(actions[action_index].get("kind", "")),
+            "status": "interrupted",
+            "validation_id": validation_id,
+            "tool_run_id": tool_run_id,
+            "error": error,
+        }
+    write_goal_run_record(run)
+    completed = sum(1 for row in run.get("action_results", []) if row.get("status") == "completed")
+    lines.append(f"interrupted: {error}")
+    lines.append(f"completed: {completed}/{len(actions)}")
+    lines.append("status: interrupted")
+    lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+    return "\n".join(lines)
+
+
+def execute_goal_run_record(run: dict, *, yes: bool, cancel_event=None) -> str:
     if not yes:
         return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
     actions = run.get("actions") if isinstance(run.get("actions"), list) else []
@@ -5098,7 +5131,24 @@ def execute_goal_run_record(run: dict, *, yes: bool) -> str:
                 }
                 write_goal_run_record(run)
                 break
-        validation, result = execute_action_record(action, yes=yes)
+        if cancellation_requested(cancel_event):
+            return interrupt_goal_run(
+                run,
+                cursor=idx0,
+                lines=lines,
+                error="interrupted before action execution",
+            )
+        try:
+            validation, result = execute_action_record(action, yes=yes, cancel_event=cancel_event)
+        except KeyboardInterrupt:
+            return interrupt_goal_run(
+                run,
+                cursor=idx0,
+                lines=lines,
+                action_index=idx0,
+                kind=str(action.get("kind", "")),
+                error="interrupted by keyboard",
+            )
         status = result.get("status") if result else validation.get("status")
         lines.append(f"- action {idx}: {validation.get('kind', '')} {status}")
         if result and result.get("tool_run_id"):
@@ -5113,6 +5163,12 @@ def execute_goal_run_record(run: dict, *, yes: bool) -> str:
             "tool_run_id": result.get("tool_run_id", "") if result else "",
             "error": result.get("error", "") if result else validation.get("reason", ""),
         }
+        if status == "interrupted":
+            run["status"] = "interrupted"
+            run["cursor"] = idx0
+            run["error"] = result.get("error", "interrupted") if result else "interrupted"
+            write_goal_run_record(run)
+            break
         if status != "completed":
             run["status"] = "stopped"
             run["cursor"] = idx0
@@ -5121,6 +5177,13 @@ def execute_goal_run_record(run: dict, *, yes: bool) -> str:
         completed += 1
         run["cursor"] = idx
         write_goal_run_record(run)
+        if cancellation_requested(cancel_event):
+            return interrupt_goal_run(
+                run,
+                cursor=idx,
+                lines=lines,
+                error="interrupted after action checkpoint",
+            )
     if completed == len(actions):
         run["status"] = "completed"
         run["cursor"] = len(actions)
@@ -5156,7 +5219,7 @@ def format_goal_run_result(run: dict) -> str:
     return "\n".join(lines)
 
 
-def run_goal_text(path_text: str, *, yes: bool = False) -> str:
+def run_goal_text(path_text: str, *, yes: bool = False, cancel_event=None) -> str:
     if not yes:
         return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
     if not path_text:
@@ -5168,15 +5231,15 @@ def run_goal_text(path_text: str, *, yes: bool = False) -> str:
         return f"goal run:\nstatus: rejected\nerror: {exc}"
     run = make_goal_run_record(record, source_path=source_path)
     write_goal_run_record(run)
-    return execute_goal_run_record(run, yes=yes)
+    return execute_goal_run_record(run, yes=yes, cancel_event=cancel_event)
 
 
-def resume_goal_run_text(selector: str, *, yes: bool = False) -> str:
+def resume_goal_run_text(selector: str, *, yes: bool = False, cancel_event=None) -> str:
     try:
         run = find_goal_run_record(selector)
     except GoalLoopValidationError as exc:
         return f"goal run:\nstatus: rejected\nerror: {exc}"
-    return execute_goal_run_record(run, yes=yes)
+    return execute_goal_run_record(run, yes=yes, cancel_event=cancel_event)
 
 
 @contextlib.contextmanager
@@ -5529,6 +5592,127 @@ def _agentic_eval_fixture_goal_budget(docs: pathlib.Path, tmp: pathlib.Path) -> 
     }
 
 
+def _agentic_eval_fixture_action_interruption(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
+    _agentic_eval_write_reader_tool()
+    action_file = tmp / "interrupt-action.json"
+    write_eval_action_file(
+        action_file,
+        {
+            "schema": "motoko-action-v1",
+            "kind": "skill_tool_run",
+            "skill": "eval-reader",
+            "tool": "reader",
+            "arguments": {"path": str(docs / "existing.org")},
+        },
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+    output = run_action_text(str(action_file), yes=True, cancel_event=cancel_event)
+    rows = read_jsonl(action_ledger_path())
+    invalid = {
+        "schema": "motoko-action-v1",
+        "kind": "shell",
+        "command": "echo not allowed",
+    }
+    validation, result = execute_action_record(invalid, yes=True, cancel_event=cancel_event)
+    ok = (
+        "status: interrupted" in output
+        and any(row.get("status") == "running" for row in rows)
+        and any(row.get("status") == "interrupted" for row in rows)
+        and validation.get("status") == "rejected"
+        and result is None
+    )
+    return {
+        "id": "action_interruption_records_ledger",
+        "status": "pass" if ok else "fail",
+        "checks": {
+            "run_interrupted": "status: interrupted" in output,
+            "running_ledger": any(row.get("status") == "running" for row in rows),
+            "interrupted_ledger": any(row.get("status") == "interrupted" for row in rows),
+            "invalid_stays_rejected": validation.get("status") == "rejected" and result is None,
+        },
+    }
+
+
+def _agentic_eval_fixture_goal_interruption_resume(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
+    first = docs / "interrupt-first.org"
+    second = docs / "interrupt-second.org"
+    goal_file = tmp / "goal-interrupt.json"
+    goal_file.write_text(
+        json.dumps(
+            {
+                "schema": "motoko-goal-loop-v1",
+                "objective": "Interrupt and resume explicit actions",
+                "allowed_effects": ["write_allowed_project"],
+                "budgets": {"max_steps": 2, "max_tool_calls": 2, "max_model_calls": 1, "max_minutes": 5},
+                "actions": [
+                    {
+                        "schema": "motoko-action-v1",
+                        "kind": "project_file_write",
+                        "path": str(first),
+                        "mode": "create",
+                        "content": "* First\n",
+                    },
+                    {
+                        "schema": "motoko-action-v1",
+                        "kind": "project_file_write",
+                        "path": str(second),
+                        "mode": "create",
+                        "content": "* Second\n",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    original_execute = globals()["execute_action_record"]
+    cancel_event = threading.Event()
+    calls = {"count": 0}
+
+    def interrupt_after_first(action, *, yes: bool = False, cancel_event=None):
+        validation, action_result = original_execute(action, yes=yes, cancel_event=cancel_event)
+        calls["count"] += 1
+        if calls["count"] == 1 and cancel_event is not None:
+            cancel_event.set()
+        return validation, action_result
+
+    try:
+        globals()["execute_action_record"] = interrupt_after_first
+        interrupted = run_goal_text(str(goal_file), yes=True, cancel_event=cancel_event)
+    finally:
+        globals()["execute_action_record"] = original_execute
+    run = next(
+        (
+            row
+            for row in list_goal_run_records(limit=20)
+            if row.get("objective") == "Interrupt and resume explicit actions"
+        ),
+        {},
+    )
+    resumed = resume_goal_run_text(str(run.get("id", "")), yes=True) if run.get("id") else ""
+    ok = (
+        "status: interrupted" in interrupted
+        and "status: completed" in resumed
+        and first.read_text(encoding="utf-8") == "* First\n"
+        and second.read_text(encoding="utf-8") == "* Second\n"
+        and calls["count"] == 1
+    )
+    return {
+        "id": "goal_interruption_preserves_completed_actions",
+        "status": "pass" if ok else "fail",
+        "checks": {
+            "interrupted": "status: interrupted" in interrupted,
+            "resume_completed": "status: completed" in resumed,
+            "first_completed_before_resume": first.exists(),
+            "second_completed_after_resume": second.exists(),
+            "completed_action_not_replayed": calls["count"] == 1,
+        },
+    }
+
+
 def run_action_eval() -> dict:
     report = {
         "schema": ACTION_EVAL_SCHEMA_VERSION,
@@ -5554,6 +5738,8 @@ def run_action_eval() -> dict:
                 lambda: _agentic_eval_fixture_script_project_write_blocked(docs, tmp),
                 lambda: _agentic_eval_fixture_goal_runner(docs, tmp),
                 lambda: _agentic_eval_fixture_goal_budget(docs, tmp),
+                lambda: _agentic_eval_fixture_action_interruption(docs, tmp),
+                lambda: _agentic_eval_fixture_goal_interruption_resume(docs, tmp),
             ]
             for fixture in fixtures:
                 started = time.monotonic()
@@ -5785,7 +5971,40 @@ def failed_action_result(validation: dict, error: str) -> dict:
     }
 
 
-def execute_validated_action(action: dict, validation: dict, *, session_approvals: set[str]) -> dict:
+def interrupted_action_result(validation: dict, error: str = "action interrupted") -> dict:
+    return {
+        "result_schema": "motoko-action-result-v1",
+        "action_id": validation.get("id", ""),
+        "tool_run_id": "",
+        "status": "interrupted",
+        "exit_code": "",
+        "duration_ms": 0,
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_sha256": "",
+        "stderr_sha256": "",
+        "output_json_valid": False,
+        "private_result_path": "",
+        "target_path_sha256": validation.get("target_path_sha256", ""),
+        "mode": validation.get("mode", ""),
+        "bytes_written": 0,
+        "previous_sha256": "",
+        "new_sha256": "",
+        "error": str(error),
+    }
+
+
+def cancellation_requested(cancel_event) -> bool:
+    return bool(cancel_event is not None and cancel_event.is_set())
+
+
+def execute_validated_action(
+    action: dict,
+    validation: dict,
+    *,
+    session_approvals: set[str],
+    cancel_event=None,
+) -> dict:
     if validation.get("kind") == "skill_tool_run":
         return core_execute_skill_tool_action(
             action,
@@ -5796,13 +6015,14 @@ def execute_validated_action(action: dict, validation: dict, *, session_approval
             realm=identity_realm(),
             session_approvals=session_approvals,
             path_checker=action_path_checker,
+            cancel_event=cancel_event,
         )
     if validation.get("kind") == "project_file_write":
-        return core_apply_project_file_write_action(action, validation)
+        return core_apply_project_file_write_action(action, validation, cancel_event=cancel_event)
     raise AgenticValidationError(f"no runner for action kind: {validation.get('kind', '')}")
 
 
-def execute_action_record(action: dict, *, yes: bool = False) -> tuple[dict, dict | None]:
+def execute_action_record(action: dict, *, yes: bool = False, cancel_event=None) -> tuple[dict, dict | None]:
     session_approvals: set[str] = set()
     try:
         preview_validation = core_validate_action_record(
@@ -5833,26 +6053,41 @@ def execute_action_record(action: dict, *, yes: bool = False) -> tuple[dict, dic
         return validation, None
     core_write_action_ledger(action_ledger_path(), validation, status="running")
     try:
-        result = execute_validated_action(action, validation, session_approvals=session_approvals)
+        if cancellation_requested(cancel_event) and validation.get("kind") == "project_file_write":
+            result = interrupted_action_result(validation, "action interrupted before execution")
+        else:
+            result = execute_validated_action(
+                action,
+                validation,
+                session_approvals=session_approvals,
+                cancel_event=cancel_event,
+            )
+    except KeyboardInterrupt:
+        result = interrupted_action_result(validation, "action interrupted by keyboard")
+    except RuntimeError as exc:
+        if str(exc) == "__motoko_stopped__":
+            result = interrupted_action_result(validation, "action interrupted by request")
+        else:
+            raise
     except AgenticValidationError as exc:
         result = failed_action_result(validation, str(exc))
     core_write_action_ledger(action_ledger_path(), {**validation, **result}, status=result.get("status", "unknown"))
     return validation, result
 
 
-def run_action_text(path_text: str, *, yes: bool = False) -> str:
+def run_action_text(path_text: str, *, yes: bool = False, cancel_event=None) -> str:
     action = read_action_file(path_text)
-    validation, result = execute_action_record(action, yes=yes)
+    validation, result = execute_action_record(action, yes=yes, cancel_event=cancel_event)
     if result is None:
         return core_format_action_validation(validation) + "\nnot run"
     return core_format_action_result(validation, result)
 
 
-def apply_action_text(path_text: str, *, yes: bool = False) -> str:
+def apply_action_text(path_text: str, *, yes: bool = False, cancel_event=None) -> str:
     action = read_action_file(path_text)
     if action.get("kind") != "project_file_write":
         return "action apply:\nstatus: rejected\nerror: action apply currently supports only project_file_write"
-    return run_action_text(path_text, yes=yes)
+    return run_action_text(path_text, yes=yes, cancel_event=cancel_event)
 
 
 def learn_skill(

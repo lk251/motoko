@@ -7089,6 +7089,54 @@ def test_action_run_executes_approved_tool_and_records_private_result(m):
         assert f'"path": "{note_path}"' in private_result
 
 
+def test_action_run_interruption_records_durable_status(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        note_path = docs / "notes.org"
+        write_demo_tool(m)
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        action_path = tmp / "interrupt-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "tool-backed-skill",
+                    "tool": "demo",
+                    "arguments": {"path": str(note_path)},
+                    "reason": "Check interruption status.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        cancel_event = threading.Event()
+        cancel_event.set()
+        output = m.run_action_text(str(action_path), cancel_event=cancel_event)
+        assert "status: interrupted" in output
+        rows = m.read_jsonl(m.action_ledger_path())
+        assert any(row.get("status") == "running" for row in rows)
+        assert any(row.get("status") == "interrupted" for row in rows)
+        results = list((m.state_root() / "tool-runs").glob("*/result.json"))
+        assert len(results) == 1
+        result = json.loads(results[0].read_text(encoding="utf-8"))
+        assert result["status"] == "interrupted"
+
+        invalid = {
+            "schema": "motoko-action-v1",
+            "kind": "shell",
+            "command": "echo should-not-run",
+        }
+        validation, result = m.execute_action_record(invalid, yes=True, cancel_event=cancel_event)
+        assert validation["status"] == "rejected"
+        assert result is None
+        assert m.read_jsonl(m.action_ledger_path())[-1]["status"] == "rejected"
+
+
 def test_skill_tool_relative_path_arguments_require_allowed_cwd(m):
     old_cwd = os.getcwd()
     with isolated_state() as tmp:
@@ -7587,8 +7635,8 @@ def test_goal_run_pause_resume_preserves_completed_actions(m):
         original_execute = m.execute_action_record
         calls = {"count": 0}
 
-        def pause_after_first(action, *, yes):
-            validation, result = original_execute(action, yes=yes)
+        def pause_after_first(action, *, yes, cancel_event=None):
+            validation, result = original_execute(action, yes=yes, cancel_event=cancel_event)
             calls["count"] += 1
             if calls["count"] == 1:
                 m.request_work_pause("test goal pause")
@@ -7621,6 +7669,79 @@ def test_goal_run_pause_resume_preserves_completed_actions(m):
         assert final["action_results"][1]["status"] == "completed"
 
 
+def test_goal_run_interruption_preserves_completed_actions(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        first = docs / "first.org"
+        second = docs / "second.org"
+        goal_path = tmp / "goal-interrupt.json"
+        goal_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-goal-loop-v1",
+                    "objective": "Interrupt after first file",
+                    "allowed_effects": ["write_allowed_project"],
+                    "budgets": {"max_steps": 2, "max_tool_calls": 2, "max_model_calls": 1, "max_minutes": 5},
+                    "actions": [
+                        {
+                            "schema": "motoko-action-v1",
+                            "kind": "project_file_write",
+                            "path": str(first),
+                            "mode": "create",
+                            "content": "* First\n",
+                        },
+                        {
+                            "schema": "motoko-action-v1",
+                            "kind": "project_file_write",
+                            "path": str(second),
+                            "mode": "create",
+                            "content": "* Second\n",
+                        },
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        original_execute = m.execute_action_record
+        cancel_event = threading.Event()
+        calls = {"count": 0}
+
+        def interrupt_after_first(action, *, yes, cancel_event=None):
+            validation, result = original_execute(action, yes=yes, cancel_event=cancel_event)
+            calls["count"] += 1
+            if calls["count"] == 1 and cancel_event is not None:
+                cancel_event.set()
+            return validation, result
+
+        try:
+            m.execute_action_record = interrupt_after_first
+            interrupted = m.run_goal_text(str(goal_path), yes=True, cancel_event=cancel_event)
+        finally:
+            m.execute_action_record = original_execute
+
+        assert "status: interrupted" in interrupted
+        assert first.read_text(encoding="utf-8") == "* First\n"
+        assert not second.exists()
+        run_record = m.safe_load_json(next(m.goal_runs_dir().glob("*.json")))
+        assert run_record["status"] == "interrupted"
+        assert run_record["cursor"] == 1
+        assert run_record["action_results"][0]["status"] == "completed"
+        assert run_record["action_results"][1]["status"] == "pending"
+
+        resumed = m.resume_goal_run_text(run_record["id"], yes=True)
+        assert "status: completed" in resumed
+        assert first.read_text(encoding="utf-8") == "* First\n"
+        assert second.read_text(encoding="utf-8") == "* Second\n"
+        final = m.find_goal_run_record(run_record["id"])
+        assert final["cursor"] == 2
+        assert final["action_results"][0]["status"] == "completed"
+        assert final["action_results"][1]["status"] == "completed"
+
+
 def test_action_eval_report_covers_agentic_safety_fixtures(m):
     with isolated_state():
         report = m.run_action_eval()
@@ -7635,10 +7756,12 @@ def test_action_eval_report_covers_agentic_safety_fixtures(m):
             "script_project_write_blocked",
             "explicit_goal_run_confirmed",
             "goal_budget_refuses_extra_actions",
+            "action_interruption_records_ledger",
+            "goal_interruption_preserves_completed_actions",
         } <= fixture_ids
         text = m.format_action_eval_report(report)
         assert "action eval:" in text
-        assert "fixtures: 7/7 passed" in text
+        assert "fixtures: 9/9 passed" in text
 
 
 def main() -> int:
@@ -7662,6 +7785,7 @@ def main() -> int:
         test_action_preview_requires_approval_then_validates,
         test_action_preview_rejects_shell_and_bad_tool_metadata,
         test_action_run_executes_approved_tool_and_records_private_result,
+        test_action_run_interruption_records_durable_status,
         test_skill_tool_relative_path_arguments_require_allowed_cwd,
         test_skill_tool_read_paths_respect_motokoignore,
         test_skill_tool_session_confirmation_is_argument_scoped,
@@ -7672,6 +7796,7 @@ def main() -> int:
         test_goal_loop_preview_save_and_list_without_execution,
         test_goal_loop_runs_explicit_confirmed_action_list,
         test_goal_run_pause_resume_preserves_completed_actions,
+        test_goal_run_interruption_preserves_completed_actions,
         test_action_eval_report_covers_agentic_safety_fixtures,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,

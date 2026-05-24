@@ -89,6 +89,10 @@ def utc_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def cancel_requested(cancel_event) -> bool:
+    return bool(cancel_event is not None and cancel_event.is_set())
+
+
 def stable_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -737,12 +741,25 @@ def _atomic_project_write(path: pathlib.Path, text: str, *, mode_bits: int) -> N
             tmp.unlink()
 
 
-def apply_project_file_write_action(action: dict, validation: dict) -> dict:
+def apply_project_file_write_action(action: dict, validation: dict, *, cancel_event=None) -> dict:
     """Apply one already validated code-owned project-file write action."""
     if validation.get("status") != "valid":
         raise AgenticValidationError(f"cannot apply invalid action: {validation.get('status', '')}")
     if validation.get("kind") != "project_file_write":
         raise AgenticValidationError(f"unsupported project apply action kind: {validation.get('kind', '')}")
+    if cancel_requested(cancel_event):
+        return {
+            "result_schema": ACTION_RESULT_SCHEMA,
+            "action_id": validation.get("id", ""),
+            "status": "interrupted",
+            "duration_ms": 0,
+            "target_path_sha256": validation.get("target_path_sha256", ""),
+            "mode": str(validation.get("mode") or action.get("mode") or "create").strip().lower(),
+            "bytes_written": 0,
+            "previous_sha256": "",
+            "new_sha256": "",
+            "error": "action interrupted before project write",
+        }
     target = pathlib.Path(str(action.get("path") or "")).expanduser()
     if not target.is_absolute():
         raise AgenticValidationError("project_file_write path must be absolute")
@@ -984,6 +1001,20 @@ def _decode_tool_bytes(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _stop_tool_process(proc: subprocess.Popen | None) -> None:
+    if proc is None or proc.poll() is not None:
+        return
+    with contextlib.suppress(Exception):
+        proc.terminate()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+
+
 def execute_skill_tool_action(
     action: dict,
     validation: dict,
@@ -994,6 +1025,7 @@ def execute_skill_tool_action(
     realm: str | None = None,
     session_approvals: set[str] | None = None,
     path_checker=None,
+    cancel_event=None,
 ) -> dict:
     """Run one already approved skill tool action through the narrow runner."""
     if validation.get("status") != "valid":
@@ -1040,24 +1072,48 @@ def execute_skill_tool_action(
     start = time.monotonic()
     proc = None
     timed_out = False
+    interrupted = False
+    interrupt_error = ""
     with tempfile.TemporaryFile() as stdout_fh, tempfile.TemporaryFile() as stderr_fh:
         try:
-            proc = subprocess.Popen(
-                [sys.executable, str(tool.get("script_path", ""))],
-                cwd=str(skill_package_dir(skill)),
-                env=safe_tool_environment(realm=realm, state_root=state_root, run_dir=run_dir),
-                stdin=subprocess.PIPE,
-                stdout=stdout_fh,
-                stderr=stderr_fh,
-                close_fds=True,
-            )
-            assert proc.stdin is not None
-            proc.communicate(input=stdin, timeout=float(tool.get("timeout_seconds") or 30))
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            if proc is not None:
-                proc.kill()
-                proc.communicate(timeout=5)
+            if cancel_requested(cancel_event):
+                interrupted = True
+                interrupt_error = "tool interrupted before subprocess start"
+            else:
+                proc = subprocess.Popen(
+                    [sys.executable, str(tool.get("script_path", ""))],
+                    cwd=str(skill_package_dir(skill)),
+                    env=safe_tool_environment(realm=realm, state_root=state_root, run_dir=run_dir),
+                    stdin=subprocess.PIPE,
+                    stdout=stdout_fh,
+                    stderr=stderr_fh,
+                    close_fds=True,
+                )
+                assert proc.stdin is not None
+                try:
+                    proc.stdin.write(stdin)
+                    proc.stdin.close()
+                except (BrokenPipeError, OSError):
+                    pass
+                deadline = start + float(tool.get("timeout_seconds") or 30)
+                while True:
+                    if cancel_requested(cancel_event):
+                        interrupted = True
+                        interrupt_error = "tool interrupted by request"
+                        _stop_tool_process(proc)
+                        break
+                    if proc.poll() is not None:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        _stop_tool_process(proc)
+                        break
+                    time.sleep(min(0.05, remaining))
+        except KeyboardInterrupt:
+            interrupted = True
+            interrupt_error = "tool interrupted by keyboard"
+            _stop_tool_process(proc)
         duration_ms = int((time.monotonic() - start) * 1000)
         stdout_data, stdout_truncated = _read_limited_binary(stdout_fh, int(tool.get("max_stdout_bytes") or 0))
         stderr_data, stderr_truncated = _read_limited_binary(stderr_fh, int(tool.get("max_stderr_bytes") or 0))
@@ -1071,7 +1127,10 @@ def execute_skill_tool_action(
     output_json_valid = False
     error = ""
     status = "completed"
-    if timed_out:
+    if interrupted:
+        status = "interrupted"
+        error = interrupt_error or "tool interrupted"
+    elif timed_out:
         status = "timeout"
         error = f"tool exceeded timeout of {tool.get('timeout_seconds')}s"
     elif stdout_truncated or stderr_truncated:
