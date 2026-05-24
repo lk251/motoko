@@ -26,6 +26,9 @@ not the easiest place to review what changed after a long work session.
   context.
 - Changed `/retrieval-preview` to read attached context from the structured
   context package instead of parsing it back out of the rendered system prompt.
+- Moved the stale-superseded index cleanup decision/apply loop into the
+  artifact-lifecycle boundary with filesystem operations supplied as injected
+  callbacks.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

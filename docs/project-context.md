@@ -1103,8 +1103,11 @@ Current progress on this stretch:
   displays into thin renderers over one richer result shape. `/retrieval-preview`
   now also reads attached context directly from the structured context package
   instead of parsing it back out of the rendered prompt.
-- Remaining: artifact lifecycle needs an apply path for vectors, evidence
-  stores, dossiers, memories, feedback fixtures, profiles, and
+- Progress: artifact lifecycle now owns the stale-superseded index cleanup
+  decision/apply loop through injected callbacks, so the root facade supplies
+  filesystem authority while lifecycle owns report shape and blocking logic.
+  Remaining lifecycle work is broader source-level apply support for vectors,
+  evidence stores, dossiers, memories, feedback fixtures, profiles, and
   conversation-derived artifacts after rebuilds materialize replacement state.
 - Complete: `Ctrl+C` now takes the same safe stop path as `/stop` while an
   answer is active, preserving the idle `Ctrl+C` exit behavior.
