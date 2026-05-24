@@ -1255,10 +1255,16 @@ def test_local_model_catalog_task_routes(m):
                         "modelId": "qwen3.5-9b-q4-k-m",
                         "tasks": ["index_corpus", "synthesis", "audit"],
                     },
-                    "qwen36-chat": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
-                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
-                        "tasks": ["chat", "deep_synthesis"],
+                    "qwen36-chat-default": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-default.sock",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "default_chat", "deep_synthesis"],
+                        "route_profile": "default",
+                        "role": "normal chat/default workhorse",
+                        "context_tokens": 131072,
+                        "kv_offload": True,
+                        "kv_cache": {"location": "gpu"},
+                        "selection": {"default": True, "priority": 100},
                     },
                 },
             }
@@ -1271,7 +1277,9 @@ def test_local_model_catalog_task_routes(m):
             file_route = m.model_route(m.MODEL_ROUTE_INDEX_FILE)
             corpus = m.model_route(m.MODEL_ROUTE_INDEX_CORPUS)
             memory = m.model_route(m.MODEL_ROUTE_MEMORY)
-            assert chat["catalog_route"] == "qwen36-chat"
+            assert chat["catalog_route"] == "qwen36-chat-default"
+            assert chat["route_profile"] == "default"
+            assert chat["kv_cache"]["location"] == "gpu"
             assert chunk["catalog_route"] == "qwen35-2b-worker"
             assert label["catalog_route"] == "ministral-3b-worker"
             assert file_route["catalog_route"] == "qwen3-4b-instruct-worker"
@@ -1295,7 +1303,99 @@ def test_local_model_catalog_task_routes(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
-def test_chat_context_governor_selects_q4_for_max_context(m):
+def test_chat_context_governor_selects_declared_route_profiles(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat-default": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-default.sock",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "default_chat", "deep_synthesis"],
+                        "route_profile": "default",
+                        "context_tokens": 131072,
+                        "kv_offload": True,
+                        "kv_cache": {"location": "gpu"},
+                        "selection": {"default": True, "priority": 100},
+                    },
+                    "qwen36-chat-quality": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-quality.sock",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
+                        "tasks": ["chat", "quality_chat", "short_context_chat", "deep_synthesis"],
+                        "route_profile": "quality",
+                        "context_tokens": 65536,
+                        "kv_offload": True,
+                        "kv_cache": {"location": "gpu"},
+                        "selection": {"priority": 80},
+                    },
+                    "qwen36-chat-deep": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-deep.sock",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "long_context_chat", "deep_synthesis"],
+                        "route_profile": "deep",
+                        "context_tokens": 131072,
+                        "kv_offload": True,
+                        "kv_cache": {"location": "gpu"},
+                        "selection": {"priority": 70},
+                    },
+                    "qwen36-chat-max": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-max.sock",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "max_context_chat", "deep_synthesis"],
+                        "route_profile": "max",
+                        "context_tokens": 262144,
+                        "kv_offload": False,
+                        "kv_cache": {"location": "host-ram"},
+                        "selection": {"priority": 30},
+                    },
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+
+            small, small_governor = m.select_chat_route([{"role": "user", "content": "hello"}])
+            assert small["catalog_route"] == "qwen36-chat-default"
+            assert small_governor["selected_tier"] == "chat_default"
+            assert not m.route_kv_offload_disabled(small)
+
+            quality, quality_governor = m.select_chat_route(
+                [{"role": "user", "content": "hello"}],
+                mode="quality",
+            )
+            assert quality["catalog_route"] == "qwen36-chat-quality"
+            assert quality_governor["selected_tier"] == "chat_quality"
+
+            medium = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEFAULT_SOFT_TOKENS + 1000) * 4)}]
+            deep, deep_governor = m.select_chat_route(medium)
+            assert deep["catalog_route"] == "qwen36-chat-deep"
+            assert deep_governor["selected_tier"] == "chat_deep"
+
+            large = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEEP_SOFT_TOKENS + 1000) * 4)}]
+            selected, governor = m.select_chat_route(large)
+            assert selected["catalog_route"] == "qwen36-chat-max"
+            assert governor["selected_tier"] == "chat_max"
+            assert governor["max_route_available"] is True
+            assert m.route_kv_offload_disabled(selected)
+            assert "Chat context governor:" in m.format_model_routes(include_defaults=True)
+            assert "profile=default" in m.format_model_routes(include_defaults=True)
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_chat_context_governor_falls_back_without_max_profile(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
     try:
@@ -1311,55 +1411,6 @@ def test_chat_context_governor_selects_q4_for_max_context(m):
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "deep_synthesis"],
                         "args": ["--ctx-size", "131072"],
-                    },
-                    "qwen36-chat-q4": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-q4.sock",
-                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
-                        "tasks": ["chat", "deep_synthesis", "max_context"],
-                        "args": ["--ctx-size", "262144"],
-                    },
-                },
-            }
-            m.ensure_private_dir(m.config_root())
-            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
-
-            small, small_governor = m.select_chat_route([{"role": "user", "content": "hello"}])
-            assert small["catalog_route"] == "qwen36-chat"
-            assert small_governor["selected_tier"] == "chat_default"
-
-            large = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEEP_SOFT_TOKENS + 1000) * 4)}]
-            selected, governor = m.select_chat_route(large)
-            assert selected["catalog_route"] == "qwen36-chat-q4"
-            assert governor["selected_tier"] == "chat_max"
-            assert governor["max_route_available"] is True
-            assert "Chat context governor:" in m.format_model_routes(include_defaults=True)
-    finally:
-        if old_endpoint is None:
-            os.environ.pop("MOTOKO_ENDPOINT", None)
-        else:
-            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
-        if old_model is None:
-            os.environ.pop("MOTOKO_MODEL", None)
-        else:
-            os.environ["MOTOKO_MODEL"] = old_model
-
-
-def test_chat_context_governor_falls_back_without_q4(m):
-    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
-    old_model = os.environ.get("MOTOKO_MODEL")
-    try:
-        os.environ.pop("MOTOKO_ENDPOINT", None)
-        os.environ.pop("MOTOKO_MODEL", None)
-        with isolated_state():
-            catalog = {
-                "realm": "mares",
-                "manager": {"kind": "systemd-socket-worker"},
-                "routes": {
-                    "qwen36-chat": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
-                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
-                        "tasks": ["chat", "deep_synthesis"],
-                        "args": ["--ctx-size", "262144"],
                     }
                 },
             }
@@ -1392,17 +1443,20 @@ def test_route_kv_offload_notice_detects_catalog_flag(m):
                 "realm": "mares",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
-                    "qwen36-chat": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
-                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
-                        "tasks": ["chat", "deep_synthesis"],
-                        "args": ["--ctx-size", "262144", "--no-kv-offload"],
+                    "qwen36-chat-max": {
+                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-max.sock",
+                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "tasks": ["chat", "max_context_chat", "deep_synthesis"],
+                        "route_profile": "max",
+                        "context_tokens": 262144,
+                        "kv_offload": False,
+                        "kv_cache": {"location": "host-ram"},
                     }
                 },
             }
             m.ensure_private_dir(m.config_root())
             m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
-            route, _governor = m.select_chat_route([{"role": "user", "content": "hello"}])
+            route, _governor = m.select_chat_route([{"role": "user", "content": "hello"}], mode="max")
             assert m.route_kv_offload_disabled(route)
     finally:
         if old_endpoint is None:
@@ -6238,8 +6292,8 @@ def main() -> int:
         test_model_route_config_and_summary_cache,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
-        test_chat_context_governor_selects_q4_for_max_context,
-        test_chat_context_governor_falls_back_without_q4,
+        test_chat_context_governor_selects_declared_route_profiles,
+        test_chat_context_governor_falls_back_without_max_profile,
         test_route_kv_offload_notice_detects_catalog_flag,
         test_tui_kv_notice_blinks_for_three_seconds,
         test_last_call_telemetry_is_content_free,
