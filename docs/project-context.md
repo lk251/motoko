@@ -1100,7 +1100,9 @@ Current progress on this stretch:
 - Progress: `retrieval-debug` now reads its production selected-source summary
   and content-free diagnostics from the same retrieval-service result object
   used for chat context. Remaining report work is to turn preview/debug/vector
-  displays into thin renderers over one richer result shape.
+  displays into thin renderers over one richer result shape. `/retrieval-preview`
+  now also reads attached context directly from the structured context package
+  instead of parsing it back out of the rendered prompt.
 - Remaining: artifact lifecycle needs an apply path for vectors, evidence
   stores, dossiers, memories, feedback fixtures, profiles, and
   conversation-derived artifacts after rebuilds materialize replacement state.

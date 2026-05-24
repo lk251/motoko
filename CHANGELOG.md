@@ -24,6 +24,8 @@ not the easiest place to review what changed after a long work session.
 - Added a shared retrieval-service result source summary so `retrieval-debug`
   reports production selected sources from the same result object used for chat
   context.
+- Changed `/retrieval-preview` to read attached context from the structured
+  context package instead of parsing it back out of the rendered system prompt.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.

@@ -12426,7 +12426,7 @@ def format_context_plan(plan: dict) -> str:
     return format_context_plan_core(plan, default_budget_chars=CONTEXT_PLAN_BUDGET_CHARS)
 
 
-def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, dict]:
     identity = identity_config()
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
@@ -12488,6 +12488,30 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         ],
         budget_chars=CONTEXT_PLAN_BUDGET_CHARS,
     )
+    return context_package, {
+        "identity": identity,
+        "personality_text": personality_text,
+        "profile_text": profile_text,
+        "memory_text": memory_text,
+        "skill_text": skill_text,
+        "recent_text": recent_text,
+        "summary_text": summary_text,
+        "context_text": context_text,
+        "catalog_text": catalog_text,
+    }
+
+
+def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+    context_package, context_values = build_prompt_context_package(conv, query)
+    identity = context_values["identity"]
+    personality_text = context_values["personality_text"]
+    profile_text = context_values["profile_text"]
+    memory_text = context_values["memory_text"]
+    skill_text = context_values["skill_text"]
+    recent_text = context_values["recent_text"]
+    summary_text = context_values["summary_text"]
+    context_text = context_values["context_text"]
+    catalog_text = context_values["catalog_text"]
     sources = list(context_package.sources)
     context_plan = context_package.context_plan
     sufficiency = context_sufficiency_note(conv, query, sources)
@@ -12554,10 +12578,6 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
     ).strip(), sources
 
 
-def extract_prompt_section(prompt: str, heading: str, stop_headings: list[str]) -> str:
-    return extract_prompt_section_core(prompt, heading, stop_headings)
-
-
 def format_source_kind_counts(source_kinds: dict) -> str:
     return format_source_kind_counts_core(source_kinds)
 
@@ -12566,14 +12586,11 @@ def format_retrieval_preview(conv: dict, query: str = "", *, max_chars: int = RE
     query = query.strip() or context_query_text(conv, conv.get("title", ""))
     if not query.strip():
         raise SystemExit("usage: /retrieval-preview QUERY")
-    prompt, sources = build_system_prompt_and_sources(conv, query)
+    context_package, _context_values = build_prompt_context_package(conv, query)
+    sources = list(context_package.sources)
     audit = answer_grounding_audit(query, "", sources)
-    context_plan = next((source for source in sources if source.get("kind") == "context-plan"), None)
-    attached_context = extract_prompt_section(
-        prompt,
-        "Attached documents and dossiers",
-        ["Available private context catalog", "Context selection plan"],
-    )
+    context_plan = context_package.context_plan
+    attached_context = context_package.text_for("attached context")
     return format_retrieval_preview_core(
         query,
         audit=audit,

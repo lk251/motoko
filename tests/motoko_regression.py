@@ -3141,6 +3141,7 @@ def test_system_prompt_uses_context_package_for_plan(m):
     with isolated_state():
         conv = m.new_conversation("Context package")
         prompt, sources = m.build_system_prompt_and_sources(conv, "planning")
+        package, values = m.build_prompt_context_package(conv, "planning")
         plan = next(source for source in sources if source.get("kind") == "context-plan")
 
         assert "Context selection plan:" in prompt
@@ -3148,6 +3149,7 @@ def test_system_prompt_uses_context_package_for_plan(m):
         lane_names = [row.get("lane") for row in plan.get("lanes", [])]
         assert lane_names[:2] == ["identity", "personality"]
         assert "attached context" in lane_names
+        assert package.text_for("attached context") == values["context_text"]
 
 
 def test_assistant_color_config(m):
