@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import importlib.machinery
 import importlib.util
 import json
@@ -4002,6 +4003,29 @@ def test_tui_clear_queue_discards_pending_prompts(m):
     assert ui.messages[-1]["content"] == "discarded 2 queued prompt(s)"
 
 
+def test_tui_blocking_command_records_foreground_job(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.conv = {"messages": []}
+    ui.messages = []
+    ui.scroll = 0
+    ui.dirty = False
+    ui.generating = False
+    ui.jobs = m.JobSupervisor(id_factory=lambda: "foreground-job")
+    ui.restore_for_blocking = lambda: None
+    ui.reenter_after_blocking = lambda: None
+    ui.seed_messages = lambda conv: []
+    ui.append = lambda role, content: ui.messages.append({"role": role, "content": content})
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        ui.run_blocking_command("Studying context...", lambda: "study done")
+
+    rows = ui.jobs.snapshots(include_done=True)
+    assert rows[0]["kind"] == "foreground"
+    assert rows[0]["lane"] == "cpu"
+    assert rows[0]["status"] == m.JOB_STATUS_COMPLETED
+    assert rows[0]["label"] == "Studying context..."
+
+
 def test_tui_stop_closes_active_model_request(m):
     class Closeable:
         def __init__(self):
@@ -6586,6 +6610,7 @@ def main() -> int:
         test_tui_prompt_is_saved_before_context_preparation,
         test_tui_stop_during_preparing_cancels_before_model_call,
         test_tui_clear_queue_discards_pending_prompts,
+        test_tui_blocking_command_records_foreground_job,
         test_tui_stop_closes_active_model_request,
         test_tui_ctrl_c_stops_active_answer_without_exiting,
         test_response_feedback_is_private_and_does_not_pollute_conversation,

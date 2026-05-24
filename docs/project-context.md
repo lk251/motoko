@@ -1111,8 +1111,10 @@ Current progress on this stretch:
   conversation-derived artifacts after rebuilds materialize replacement state.
 - Complete: `Ctrl+C` now takes the same safe stop path as `/stop` while an
   answer is active, preserving the idle `Ctrl+C` exit behavior.
-- Remaining: foreground blocking commands and study/index/vector operations can
-  still gain finer cancellation checkpoints after their APIs narrow further.
+- Progress: foreground blocking commands now register with the content-free job
+  supervisor while they run. Remaining foreground work is finer cooperative
+  cancellation checkpoints for study/index/vector operations after those APIs
+  narrow further.
 
 Completion criteria for this next stretch:
 

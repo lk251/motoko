@@ -345,6 +345,8 @@ from motoko_core.commands import (  # noqa: E402
     slash_command_value,
 )
 from motoko_core.jobs import (  # noqa: E402
+    JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
     JobSupervisor,
     format_job_snapshots,
 )
@@ -14941,6 +14943,13 @@ class MotokoTui:
             self.append("system", "Finish or wait for the current answer before running this blocking command.")
             return
         post_message: tuple[str, str] | None = None
+        job = getattr(self, "jobs", LIVE_JOB_SUPERVISOR).begin(
+            kind="foreground",
+            lane="cpu",
+            label=label,
+        )
+        job_status = JOB_STATUS_COMPLETED
+        job_error = ""
         self.restore_for_blocking()
         try:
             print()
@@ -14954,7 +14963,15 @@ class MotokoTui:
             print(style(text, "yellow"))
             post_message = ("system", text)
         except SystemExit as exc:
+            job_status = JOB_STATUS_FAILED
+            job_error = "SystemExit"
             text = str(exc)
+            print(style(text, "red"))
+            post_message = ("error", text)
+        except Exception as exc:
+            job_status = JOB_STATUS_FAILED
+            job_error = type(exc).__name__
+            text = f"{type(exc).__name__}: {exc}"
             print(style(text, "red"))
             post_message = ("error", text)
         except KeyboardInterrupt:
@@ -14964,6 +14981,11 @@ class MotokoTui:
             print(style(text, "yellow"))
             post_message = ("system", text)
         finally:
+            getattr(self, "jobs", LIVE_JOB_SUPERVISOR).finish(
+                job.job_id,
+                status=job_status,
+                error_type=job_error,
+            )
             self.reenter_after_blocking()
         self.messages = self.seed_messages(self.conv)
         if post_message:

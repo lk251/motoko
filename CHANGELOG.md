@@ -29,6 +29,9 @@ not the easiest place to review what changed after a long work session.
 - Moved the stale-superseded index cleanup decision/apply loop into the
   artifact-lifecycle boundary with filesystem operations supplied as injected
   callbacks.
+- Registered foreground blocking commands with the content-free job supervisor,
+  so `/study`, `/index`, and similar foreground work use the same job snapshot
+  machinery while they run.
 - Added `motoko-skill-v2` metadata and a pre-retrieval `retrieval_plan_v1`
   boundary so built-in skills can activate deterministic handlers before
   context packing instead of living only as final-prompt guidance.
