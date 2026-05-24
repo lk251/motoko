@@ -173,6 +173,8 @@ Current UI direction:
 - `/stop` should cancel the current answer during preparation or streaming and
   discard queued prompts from accidental paste batches; `/clear-queue` should
   discard queued prompts without stopping the active answer.
+- `Ctrl+C` should stop an active answer and discard queued prompts in the same
+  safe path as `/stop`; when Motoko is idle, `Ctrl+C` exits the TUI.
 - Conversation lists should use compact relative times while preserving full
   timestamps in JSON state.
 - Resume/list columns should be readable and compact:
@@ -952,8 +954,9 @@ Live subsystem extraction status:
   surfaces that as rebuild-first work. There is still not one service that
   applies cleanup/rebuild work across all of those artifact families.
 - TUI event loop through job/event paths: mostly complete. Worker creation now
-  goes through the job supervisor and terminal writes remain single-owned, but
-  `/stop`/interruption and foreground job responsiveness can still improve.
+  goes through the job supervisor and terminal writes remain single-owned.
+  `/stop` and `Ctrl+C` share the active-answer cancellation path, while
+  foreground blocking commands can still improve after more APIs narrow.
 - Content-free observability: complete for this phase. `/status`,
   `/last-call`, model reports, and job/progress reports avoid request and
   response bodies.
@@ -1072,8 +1075,10 @@ Current progress on this stretch:
 - Remaining: artifact lifecycle needs an apply path for vectors, evidence
   stores, dossiers, memories, feedback fixtures, profiles, and
   conversation-derived artifacts after rebuilds materialize replacement state.
-- Remaining: foreground interruption and queued prompt behavior need another
-  bounded pass after the retrieval/lifecycle APIs are narrower.
+- Complete: `Ctrl+C` now takes the same safe stop path as `/stop` while an
+  answer is active, preserving the idle `Ctrl+C` exit behavior.
+- Remaining: foreground blocking commands and study/index/vector operations can
+  still gain finer cancellation checkpoints after their APIs narrow further.
 
 Completion criteria for this next stretch:
 

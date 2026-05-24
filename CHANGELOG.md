@@ -25,6 +25,9 @@ not the easiest place to review what changed after a long work session.
 - Added an artifact lifecycle plan for source changes, with dependent
   vector/evidence/dossier/eval artifact counts surfaced in `index-storage` as
   rebuild-first work rather than deletion-safe cleanup.
+- Made `Ctrl+C` in the TUI stop an active answer and clear queued prompts,
+  matching `/stop`, instead of exiting while an answer worker may still be
+  running. Idle `Ctrl+C` still exits.
 - Added a live-subsystem refactor boundary: runtime context, typed command
   requests, job supervision, model-route readiness, retrieval-service wrapping,
   artifact lifecycle decisions, and content-free observability now have

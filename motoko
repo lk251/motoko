@@ -13349,6 +13349,28 @@ class MotokoTui:
                 with contextlib.suppress(Exception):
                     item.close()
 
+    def stop_active_answer(self) -> bool:
+        discarded = self.clear_queued_prompts()
+        if self.generating:
+            jobs = getattr(self, "jobs", None)
+            if jobs is not None:
+                jobs.request_stop_by_kind("answer")
+            self.cancel_event.set()
+            self.close_active_model_request()
+            self.answer_phase = "stopping"
+            self.answer_phase_started_monotonic = time.monotonic()
+            note = "stopping current answer"
+            if discarded:
+                note += f"; discarded {discarded} queued prompt(s)"
+            self.status = note
+            self.append("system", note)
+            return True
+        if discarded:
+            self.status = f"discarded {discarded} queued prompt(s)"
+            self.append("system", self.status)
+            return True
+        return False
+
     def append(self, role: str, content: str) -> dict:
         row = {"role": role, "content": content}
         self.messages.append(row)
@@ -13449,6 +13471,9 @@ class MotokoTui:
 
     def handle_key(self, key: str) -> None:
         if key == "\x03":
+            if self.generating or self.pending_prompts:
+                self.stop_active_answer()
+                return
             close_conversation(self.conv)
             self.running = False
             return
@@ -13705,22 +13730,7 @@ class MotokoTui:
                 self.status = "new conversation"
                 self.append("system", f"new conversation: {self.conv.get('title', 'Untitled')} [{self.conv.get('id', '')}]")
             elif text == "/stop":
-                discarded = self.clear_queued_prompts()
-                if self.generating:
-                    jobs = getattr(self, "jobs", None)
-                    if jobs is not None:
-                        jobs.request_stop_by_kind("answer")
-                    self.cancel_event.set()
-                    self.close_active_model_request()
-                    note = "stopping current answer"
-                    if discarded:
-                        note += f"; discarded {discarded} queued prompt(s)"
-                    self.status = note
-                    self.append("system", note)
-                elif discarded:
-                    self.status = f"discarded {discarded} queued prompt(s)"
-                    self.append("system", self.status)
-                else:
+                if not self.stop_active_answer():
                     self.append("system", "Motoko is not currently answering.")
             elif text == "/clear-queue":
                 discarded = self.clear_queued_prompts()

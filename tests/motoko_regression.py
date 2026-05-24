@@ -3292,7 +3292,34 @@ def test_tui_stop_closes_active_model_request(m):
     assert ui.cancel_event.is_set()
     assert response.closed
     assert connection.closed
+    assert ui.answer_phase == "stopping"
     assert ui.messages[-1]["content"] == "stopping current answer"
+
+
+def test_tui_ctrl_c_stops_active_answer_without_exiting(m):
+    with isolated_state():
+        conv = m.new_conversation("Interrupt")
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.running = True
+        ui.generating = True
+        ui.pending_prompts = m.collections.deque(["queued followup"])
+        ui.cancel_event = threading.Event()
+        ui.active_model_lock = threading.Lock()
+        ui.active_model_response = None
+        ui.active_model_connection = None
+
+        ui.handle_key("\x03")
+
+        assert ui.running
+        assert ui.cancel_event.is_set()
+        assert not ui.pending_prompts
+        assert ui.answer_phase == "stopping"
+        assert "discarded 1 queued prompt" in ui.messages[-1]["content"]
 
 
 def test_response_feedback_is_private_and_does_not_pollute_conversation(m):
@@ -5725,6 +5752,10 @@ def main() -> int:
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,
         test_tui_prompt_is_saved_before_context_preparation,
+        test_tui_stop_during_preparing_cancels_before_model_call,
+        test_tui_clear_queue_discards_pending_prompts,
+        test_tui_stop_closes_active_model_request,
+        test_tui_ctrl_c_stops_active_answer_without_exiting,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
         test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_eval_replays_private_feedback_fixtures,
