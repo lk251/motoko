@@ -384,7 +384,10 @@ Current sequencing notes:
   content-free manifest under `~/.local/state/motoko/slot-cache/`; llama.cpp
   owns the actual KV files inside its declared `--slot-save-path`. Manifest
   records are keyed by conversation id, route/model/context/slot fingerprint,
-  and content-free cache filename. Prompts, responses, retrieved context,
+  Motoko chat slot-cache namespace, and content-free cache filename. Bump
+  `CHAT_SLOT_CACHE_NAMESPACE_VERSION` when chat prompt assembly, context
+  packing, or template assumptions change enough that old slot files should not
+  be reused. Prompts, responses, retrieved context,
   filenames, memories, summaries, corpora, and reasoning text must not be
   written to admin-owned logs or content-free telemetry. Cache restore/save
   failure is treated as a cache miss, never as an answer failure.
@@ -1572,9 +1575,9 @@ large chat route resident briefly after an answer can preserve cache locality
 for likely follow-up chat, but no answer may depend on that cache surviving.
 Reviewed persistent slot/KV cache support exists only behind route capability
 gates: the cache must be declared by NixOS, stored in a realm-local service path,
-fingerprinted by route/model/context/slot details, and tracked in Motoko only by
-a content-free private manifest. Restore/save/erase failures are cache misses,
-not answer failures.
+fingerprinted by route/model/context/slot details plus Motoko's chat slot-cache
+namespace, and tracked in Motoko only by a content-free private manifest.
+Restore/save/erase failures are cache misses, not answer failures.
 
 Background and maintenance worker routes must also respect model residency.
 Large chat routes may stay resident briefly after a foreground answer because
@@ -1642,4 +1645,7 @@ exception to the previous no-`/slots` rule: Motoko may call
 declares persistent slots, a slot endpoint, a slot-save path, and no safety
 policy disabling those surfaces. Motoko does not write the KV files directly;
 it records a private manifest and lets llama.cpp save/restore by opaque,
-content-free filename. The feature must remain optional and non-fatal.
+content-free filename. The route fingerprint includes
+`CHAT_SLOT_CACHE_NAMESPACE_VERSION`, which is the Motoko-side invalidation knob
+for prompt/context-packing changes. The feature must remain optional and
+non-fatal.

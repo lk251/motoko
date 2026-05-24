@@ -23,6 +23,7 @@ from .state import atomic_write, ensure_private_dir, safe_load_json, slot_cache_
 
 SLOT_CACHE_SCHEMA_VERSION = "slot-kv-cache-v1"
 SLOT_CACHE_MANIFEST_SCHEMA_VERSION = "slot-kv-cache-manifest-v1"
+SLOT_CACHE_DEFAULT_CLIENT_NAMESPACE = "motoko-chat-slot-input-v1"
 SLOT_CACHE_ENV = "MOTOKO_SLOT_CACHE"
 SLOT_CACHE_TIMEOUT_SECONDS = 120.0
 SLOT_CACHE_SOCKET_ACTIVATION_SECONDS = 900.0
@@ -120,9 +121,15 @@ def route_disabled_slot_surfaces(route_info: dict) -> list[str]:
     return matches
 
 
-def route_slot_cache_fingerprint(route_info: dict) -> str:
+def _client_namespace(value: str | None = None) -> str:
+    value = str(value or "").strip()
+    return value or SLOT_CACHE_DEFAULT_CLIENT_NAMESPACE
+
+
+def route_slot_cache_fingerprint(route_info: dict, *, client_namespace: str | None = None) -> str:
     payload = {
         "schema": SLOT_CACHE_SCHEMA_VERSION,
+        "client_namespace": _client_namespace(client_namespace),
         "catalog_route": local_model_helper_route(route_info),
         "endpoint": str(route_info.get("endpoint") or ""),
         "model": str(route_info.get("model") or ""),
@@ -135,10 +142,10 @@ def route_slot_cache_fingerprint(route_info: dict) -> str:
     return _sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))[:24]
 
 
-def slot_cache_filename(route_info: dict, conversation_id: str) -> str:
+def slot_cache_filename(route_info: dict, conversation_id: str, *, client_namespace: str | None = None) -> str:
     route_token = _safe_component(local_model_helper_route(route_info), "route")
     conv_hash = _sha256_text(str(conversation_id))[:16]
-    route_hash = route_slot_cache_fingerprint(route_info)[:16]
+    route_hash = route_slot_cache_fingerprint(route_info, client_namespace=client_namespace)[:16]
     return f"motoko-slot-{route_token}-{conv_hash}-{route_hash}.bin"
 
 
@@ -214,13 +221,15 @@ def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def latest_slot_cache_record(route_info: dict, conversation_id: str) -> dict | None:
-    route_fingerprint = route_slot_cache_fingerprint(route_info)
+def latest_slot_cache_record(route_info: dict, conversation_id: str, *, client_namespace: str | None = None) -> dict | None:
+    route_fingerprint = route_slot_cache_fingerprint(route_info, client_namespace=client_namespace)
+    namespace = _client_namespace(client_namespace)
     records = [
         row
         for row in read_slot_cache_manifest().get("records", [])
         if row.get("schema") == SLOT_CACHE_SCHEMA_VERSION
         and row.get("conversation_id") == conversation_id
+        and row.get("client_namespace", SLOT_CACHE_DEFAULT_CLIENT_NAMESPACE) == namespace
         and row.get("route_fingerprint") == route_fingerprint
         and row.get("status") == "saved"
     ]
@@ -287,11 +296,14 @@ def prepare_slot_cache_for_request(
     payload: dict,
     *,
     conversation_id: str | None = None,
+    client_namespace: str | None = None,
     request_func=route_json_request,
 ) -> dict:
     capability = slot_cache_capability(route_info, automatic=True)
+    client_namespace = _client_namespace(client_namespace)
     context = {
         "schema": SLOT_CACHE_SCHEMA_VERSION,
+        "client_namespace": client_namespace,
         "capability": capability,
         "restore": "unsupported",
         "save": "not-attempted",
@@ -307,17 +319,17 @@ def prepare_slot_cache_for_request(
     payload["id_slot"] = slot_id
     if _cache_policy(route_info).get("prompt") is True:
         payload.setdefault("cache_prompt", True)
-    filename = slot_cache_filename(route_info, conversation_id)
+    filename = slot_cache_filename(route_info, conversation_id, client_namespace=client_namespace)
     context.update(
         {
             "conversation_id": conversation_id,
-            "route_fingerprint": route_slot_cache_fingerprint(route_info),
+            "route_fingerprint": route_slot_cache_fingerprint(route_info, client_namespace=client_namespace),
             "slot_id": slot_id,
             "filename": filename,
             "catalog_route": local_model_helper_route(route_info),
         }
     )
-    record = latest_slot_cache_record(route_info, conversation_id)
+    record = latest_slot_cache_record(route_info, conversation_id, client_namespace=client_namespace)
     if not record:
         context["restore"] = "miss"
         return context
@@ -379,6 +391,7 @@ def save_slot_cache_after_request(
     created = _now()
     record = {
         "schema": SLOT_CACHE_SCHEMA_VERSION,
+        "client_namespace": _client_namespace(str(context.get("client_namespace") or "")),
         "status": "saved",
         "created": created,
         "updated": created,
@@ -387,7 +400,10 @@ def save_slot_cache_after_request(
         "catalog_route": local_model_helper_route(route_info),
         "route": str(route_info.get("route") or ""),
         "route_profile": str(route_info.get("route_profile") or ""),
-        "route_fingerprint": str(context.get("route_fingerprint") or route_slot_cache_fingerprint(route_info)),
+        "route_fingerprint": str(
+            context.get("route_fingerprint")
+            or route_slot_cache_fingerprint(route_info, client_namespace=str(context.get("client_namespace") or ""))
+        ),
         "model": str(route_info.get("model") or ""),
         "quant": str(route_info.get("quant") or ""),
         "ctx_size": route_info.get("ctx_size") or route_info.get("context_tokens") or 0,
@@ -399,7 +415,11 @@ def save_slot_cache_after_request(
         "n_saved": int(response.get("n_saved") or 0) if isinstance(response, dict) else 0,
         "n_written": int(response.get("n_written") or 0) if isinstance(response, dict) else 0,
     }
-    previous = latest_slot_cache_record(route_info, conversation_id)
+    previous = latest_slot_cache_record(
+        route_info,
+        conversation_id,
+        client_namespace=str(context.get("client_namespace") or ""),
+    )
     if previous and previous.get("filename") == filename:
         record["created"] = previous.get("created") or created
         record["save_count"] = int(previous.get("save_count", 0) or 0) + 1

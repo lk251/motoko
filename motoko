@@ -546,6 +546,7 @@ MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
 MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
 MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
 MODEL_CALL_TELEMETRY_SCHEMA_VERSION = "model-call-telemetry-v1"
+CHAT_SLOT_CACHE_NAMESPACE_VERSION = "chat-slot-cache-input-v1"
 CONTEXT_GOVERNOR_SCHEMA_VERSION = "context-governor-v1"
 RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
 RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
@@ -2809,6 +2810,7 @@ def write_last_model_call(record: dict) -> None:
             "slot_cache_record",
             "slot_cache_n_restored",
             "slot_cache_n_saved",
+            "slot_cache_namespace",
             "slot_cache_manifest",
             "slot_cache_manifest_error_type",
             "slot_cache_restore_error_type",
@@ -2845,6 +2847,8 @@ def add_slot_cache_to_model_call_record(record: dict, context: dict | None) -> N
         record["slot_cache_n_restored"] = int(context.get("restore_n") or 0)
     if context.get("save_n") is not None:
         record["slot_cache_n_saved"] = int(context.get("save_n") or 0)
+    if context.get("client_namespace"):
+        record["slot_cache_namespace"] = str(context.get("client_namespace"))
     if context.get("manifest"):
         record["slot_cache_manifest"] = str(context.get("manifest"))
     if context.get("manifest_error_type"):
@@ -2956,6 +2960,8 @@ def format_last_model_call(record: dict | None = None) -> str:
         )
         if record.get("slot_cache_slot_id") is not None:
             detail += f" slot={record.get('slot_cache_slot_id')}"
+        if record.get("slot_cache_namespace"):
+            detail += f" namespace={record.get('slot_cache_namespace')}"
         if record.get("slot_cache_manifest"):
             detail += f" manifest={record.get('slot_cache_manifest')}"
         policy_lines.append(f"slot-cache={detail}")
@@ -15183,6 +15189,7 @@ def call_model(
             route_info,
             payload,
             conversation_id=str(slot_cache_context.get("conversation_id") or ""),
+            client_namespace=str(slot_cache_context.get("client_namespace") or CHAT_SLOT_CACHE_NAMESPACE_VERSION),
         )
     request_metadata = model_request_metadata(
         route_info,
@@ -15573,6 +15580,7 @@ def call_model_with_callback(
             route_info,
             payload,
             conversation_id=str(slot_cache_context.get("conversation_id") or ""),
+            client_namespace=str(slot_cache_context.get("client_namespace") or CHAT_SLOT_CACHE_NAMESPACE_VERSION),
         )
     request_metadata = model_request_metadata(
         route_info,
@@ -18139,7 +18147,10 @@ class MotokoTui:
                     on_connection=self.set_active_model_connection,
                     on_response=self.set_active_model_response,
                     source_count=len(sources),
-                    slot_cache_context={"conversation_id": self.conv.get("id", "")},
+                    slot_cache_context={
+                        "conversation_id": self.conv.get("id", ""),
+                        "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,
+                    },
                 )
                 self.put_event(("done", reply, sources_with_answer_audit(user_text, reply, sources)))
             except RuntimeError as exc:
@@ -18938,7 +18949,10 @@ def chat_loop(conv: dict) -> None:
         reply = call_model(
             messages,
             source_count=len(sources),
-            slot_cache_context={"conversation_id": conv.get("id", "")},
+            slot_cache_context={
+                "conversation_id": conv.get("id", ""),
+                "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,
+            },
         )
         conv["last_sources"] = sources_with_answer_audit(user_text, reply, sources)
         conv["messages"].append({"role": "assistant", "content": reply})

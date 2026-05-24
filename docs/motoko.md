@@ -1155,9 +1155,12 @@ slot/KV cache only through the reviewed route capability gates described above.
 She does not fake prompt/KV caching in user state: the user state contains only
 the manifest, while llama.cpp saves and restores the actual slot cache file.
 The manifest uses route/model/context/slot fingerprints so old cache records do
-not carry across route or model changes. `/last-call` may show content-free
-slot-cache status such as `restore=miss|restored|failed` and
-`save=saved|failed`; it must not contain prompt or response text.
+not carry across route or model changes. It also includes Motoko's chat slot
+cache namespace, which must be bumped when the chat prompt, context packing, or
+template assumptions change enough that old slot files should not be reused.
+`/last-call` may show content-free slot-cache status such as
+`restore=miss|restored|failed` and `save=saved|failed`; it must not contain
+prompt or response text.
 
 When the NixOS catalog is keyed by worker service name instead of Motoko route
 name, Motoko resolves routes through each catalog entry's `tasks` list. For

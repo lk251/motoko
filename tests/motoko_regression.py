@@ -1976,7 +1976,7 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
                 [{"role": "user", "content": "hello slot cache"}],
                 on_token=tokens.append,
                 timeout=2,
-                slot_cache_context={"conversation_id": "conv-slot"},
+                slot_cache_context={"conversation_id": "conv-slot", "client_namespace": "fixture-chat-v1"},
             )
             assert first == "OK"
             assert SlotCacheHandler.payloads[-1]["id_slot"] == 0
@@ -1985,10 +1985,12 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
             manifest_text = m.slot_cache_manifest_path().read_text(encoding="utf-8")
             assert "hello slot cache" not in manifest_text
             assert "conv-slot" in manifest_text
+            assert "fixture-chat-v1" in manifest_text
             first_record = m.read_last_model_call()
             assert first_record["slot_cache_status"] == "supported"
             assert first_record["slot_cache_restore"] == "miss"
             assert first_record["slot_cache_save"] == "saved"
+            assert first_record["slot_cache_namespace"] == "fixture-chat-v1"
 
             SlotCacheHandler.payloads = []
             SlotCacheHandler.slot_payloads = []
@@ -1996,7 +1998,7 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
                 [{"role": "user", "content": "hello slot cache followup"}],
                 on_token=lambda _token: None,
                 timeout=2,
-                slot_cache_context={"conversation_id": "conv-slot"},
+                slot_cache_context={"conversation_id": "conv-slot", "client_namespace": "fixture-chat-v1"},
             )
             assert second == "OK"
             paths = [path for path, _payload in SlotCacheHandler.slot_payloads]
@@ -2007,6 +2009,22 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
             assert second_record["slot_cache_restore"] == "restored"
             assert second_record["slot_cache_save"] == "saved"
             assert second_record["slot_cache_n_restored"] == 123
+
+            SlotCacheHandler.payloads = []
+            SlotCacheHandler.slot_payloads = []
+            third = m.call_model_with_callback(
+                [{"role": "user", "content": "hello slot cache new prompt namespace"}],
+                on_token=lambda _token: None,
+                timeout=2,
+                slot_cache_context={"conversation_id": "conv-slot", "client_namespace": "fixture-chat-v2"},
+            )
+            assert third == "OK"
+            third_paths = [path for path, _payload in SlotCacheHandler.slot_payloads]
+            assert "/slots/0?action=restore" not in third_paths
+            assert "/slots/0?action=save" in third_paths
+            third_record = m.read_last_model_call()
+            assert third_record["slot_cache_restore"] == "miss"
+            assert third_record["slot_cache_namespace"] == "fixture-chat-v2"
             server.shutdown()
             server.server_close()
     finally:
