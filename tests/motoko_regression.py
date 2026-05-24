@@ -6805,6 +6805,35 @@ def test_action_run_executes_approved_tool_and_records_private_result(m):
         rows = m.read_jsonl(m.action_ledger_path())
         assert any(row.get("status") == "running" for row in rows)
         assert any(row.get("status") == "completed" and row.get("tool_run_id") for row in rows)
+        ledger = m.format_action_ledger(limit=5)
+        assert "action ledger:" in ledger
+        assert "completed" in ledger
+        run_id = result_files[0].parent.name
+        public_result = m.format_tool_result(run_id)
+        assert "private content: hidden" in public_result
+        private_result = m.format_tool_result(run_id, private=True)
+        assert '"path": "notes.org"' in private_result
+
+
+def test_tool_catalog_and_action_plan_are_inspectable_without_running(m):
+    with isolated_state():
+        write_demo_tool(m)
+        catalog = m.format_tool_catalog()
+        assert "tool catalog:" in catalog
+        assert "tool-backed-skill/demo" in catalog
+        assert "external_process" in catalog
+
+        plan = m.format_action_plan("use demo for logbook.org")
+        assert "action plan:" in plan
+        assert "model calls: none" in plan
+        assert "tool-backed-skill/demo" in plan
+        assert "status=needs_approval" in plan
+        assert '"path": "logbook.org"' in plan
+
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        plan = m.format_action_plan("use demo for logbook.org")
+        assert "status=valid" in plan
+        assert "approval=persistent" in plan
 
 
 def test_action_run_keeps_project_write_tools_disabled(m):
@@ -6890,6 +6919,7 @@ def main() -> int:
         test_action_preview_requires_approval_then_validates,
         test_action_preview_rejects_shell_and_bad_tool_metadata,
         test_action_run_executes_approved_tool_and_records_private_result,
+        test_tool_catalog_and_action_plan_are_inspectable_without_running,
         test_action_run_keeps_project_write_tools_disabled,
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,

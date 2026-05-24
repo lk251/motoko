@@ -626,6 +626,44 @@ Runner checkpoint, 2026-05-24:
   result JSON stay in realm-local `tool-runs/` records owned by the current
   user.
 
+Tool machinery checkpoint, 2026-05-24:
+
+- Added a Motoko-shaped tool catalog rather than importing Hermes' broad tool
+  registry. `motoko tools` and `/tools` list all declared skill tools across
+  learned skills, including validation errors, approval state, effects, script
+  fingerprints, and metadata fingerprints.
+- Added the first deterministic planner bridge: `motoko action plan QUERY` and
+  `/action plan QUERY`. This performs no model call and no execution. It ranks
+  known approved-or-approvable tools by query overlap, infers only obvious
+  arguments such as named file/path mentions and small integer hints, and
+  prints candidate `motoko-action-v1` JSON records with validation status.
+- Added result inspection: `motoko action ledger`, `/action ledger`,
+  `motoko action result RUN_ID`, and `/action result RUN_ID`. Ledger reports
+  are content-safe. Private stdout/stderr and parsed JSON result content are
+  hidden unless the owning user explicitly passes `--private`.
+- Hermes' public design uses broad toolsets and terminal/code-execution
+  backends, with optional Docker/SSH/container-style containment and skill
+  scanning for externally sourced skills. Motoko should not import that broad
+  surface. The Motoko equivalent is a smaller catalog plus per-tool contracts,
+  fingerprint approvals, realm-local ledgers, and NixOS-owned stronger
+  containment if a future tool truly needs it.
+
+Approval gates still required:
+
+- `write_allowed_project`: not enabled for script tools yet. To enable it,
+  require explicit user approval of the effect tier, per-run preview, session
+  repeat only for the exact same scope, `.motokoignore` and allowlist checks,
+  interruption/rollback semantics where possible, and stronger tests.
+- `network`: not enabled. To enable it, require a NixOS-reviewed wrapper or
+  policy, explicit destination/purpose metadata, no ambient secrets, and
+  content-safe telemetry.
+- Goal loops: not enabled. To enable them, require an approved loop record
+  with objective, scope, allowed skills/tools, budgets, stop conditions,
+  checkpoints, pause/resume, cancellation, and final audit.
+- Stronger containment: not required for the current low-risk runner, but
+  needed before broad terminal-like tools, network tools, or project mutation.
+  This should be NixOS-owned, not a hidden Python-side privilege expansion.
+
 ## Goal Loops
 
 Goal loops should come after the planner/handler/tool boundary is solid. The

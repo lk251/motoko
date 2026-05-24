@@ -509,8 +509,12 @@ motoko skill tools NAME
 motoko skill approve-tool NAME TOOL --yes
 motoko skill delete NAME --yes
 motoko skill plan "query"
+motoko tools
+motoko action plan "query"
 motoko action preview ACTION.json
 motoko action run ACTION.json [--yes]
+motoko action ledger [--limit N]
+motoko action result RUN_ID [--private]
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -566,6 +570,16 @@ requires confirmation. Executable script tools are treated as having the
 `external_process` effect even when old metadata omits it, so approvals show
 the actual authority being granted; script tools cannot declare
 `prompt_only`.
+
+`motoko tools` lists all declared skill tools across learned skills, including
+approval state and effects. `motoko action plan "query"` is the first
+deterministic planner bridge: it matches the query against known skills/tools,
+infers only obvious arguments such as named file/path mentions, and prints
+typed action JSON candidates without running anything or calling a model.
+`motoko action ledger` shows content-safe action/tool rows. `motoko action
+result RUN_ID` shows metadata for a private tool run result; add `--private`
+only in the owning Unix account when you intentionally want stdout/stderr and
+parsed JSON output printed.
 
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
 days present in logbook.org". It declares the

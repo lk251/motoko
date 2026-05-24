@@ -25,6 +25,10 @@ not the easiest place to review what changed after a long work session.
   ledgers, and private realm-local tool-run results. Shell, network, service
   control, privileged actions, arbitrary executables, and project-file writes
   remain blocked.
+- Added the Motoko-shaped tool catalog and deterministic planner bridge:
+  `motoko tools` / `/tools`, `motoko action plan QUERY` /
+  `/action plan QUERY`, content-safe action ledger reports, and private
+  opt-in tool-result inspection.
 - Added per-request llama.cpp thinking controls for the main chat route, with
   `MOTOKO_REASONING=off|low|default|high|max` presets and live dimmed
   `reasoning_content` display under an active `Thinking` TUI phase without

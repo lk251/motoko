@@ -677,6 +677,33 @@ def tool_run_dir(state_root: pathlib.Path, run_id: str) -> pathlib.Path:
     return ensure_private_dir(tool_runs_dir(state_root) / safe_slug(run_id, limit=120))
 
 
+def find_tool_result_path(state_root: pathlib.Path, selector: str) -> pathlib.Path:
+    selector = str(selector or "").strip()
+    if not selector:
+        raise AgenticValidationError("tool run selector is empty")
+    root = tool_runs_dir(state_root)
+    candidates = []
+    exact = root / safe_slug(selector, limit=120) / "result.json"
+    if exact.exists():
+        candidates.append(exact)
+    for path in root.glob("*/result.json"):
+        run_id = path.parent.name
+        if run_id == selector or run_id.startswith(selector):
+            candidates.append(path)
+    unique = []
+    seen = set()
+    for path in candidates:
+        key = str(path.resolve(strict=False))
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    if not unique:
+        raise AgenticValidationError(f"tool result not found: {selector}")
+    if len(unique) > 1:
+        raise AgenticValidationError(f"ambiguous tool result selector: {selector}")
+    return unique[0]
+
+
 def safe_tool_environment(*, realm: str, state_root: pathlib.Path, run_dir: pathlib.Path) -> dict[str, str]:
     return {
         "HOME": str(run_dir),
@@ -689,6 +716,75 @@ def safe_tool_environment(*, realm: str, state_root: pathlib.Path, run_dir: path
         "MOTOKO_TOOL_RUN_DIR": str(run_dir),
         "MOTOKO_TOOL_MODE": "1",
     }
+
+
+def format_action_ledger_rows(rows: list[dict], *, limit: int = 20) -> str:
+    limit = max(1, min(200, int(limit or 20)))
+    rows = list(rows or [])[-limit:]
+    if not rows:
+        return "action ledger: empty"
+    lines = [f"action ledger: showing {len(rows)} row(s)"]
+    for row in reversed(rows):
+        parts = [
+            str(row.get("recorded_at") or row.get("created_at") or ""),
+            str(row.get("status") or ""),
+            str(row.get("kind") or ""),
+        ]
+        if row.get("skill"):
+            parts.append(f"skill={row.get('skill')}")
+        if row.get("tool"):
+            parts.append(f"tool={row.get('tool')}")
+        if row.get("tool_run_id"):
+            parts.append(f"run={row.get('tool_run_id')}")
+        if row.get("duration_ms") is not None:
+            parts.append(f"{row.get('duration_ms')}ms")
+        if row.get("error"):
+            parts.append(f"error={str(row.get('error'))[:160]}")
+        lines.append("- " + "  ".join(part for part in parts if part))
+    return "\n".join(lines)
+
+
+def _clip_result_text(text: str, *, limit: int = MAX_RESULT_PREVIEW_CHARS) -> str:
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    head = text[: max(0, limit // 2)].rstrip()
+    tail = text[-max(0, limit // 2) :].lstrip()
+    return f"{head}\n... truncated ...\n{tail}"
+
+
+def format_tool_private_result(result: dict, *, private: bool = False) -> str:
+    lines = [
+        "tool result:",
+        f"run: {result.get('tool_run_id', '')}",
+        f"action: {result.get('action_id', '')}",
+        f"status: {result.get('status', '')}",
+        f"realm: {result.get('realm', '')}",
+        f"skill: {result.get('skill', '')}",
+        f"tool: {result.get('tool', '')}",
+        f"exit code: {result.get('exit_code', '')}",
+        f"duration: {result.get('duration_ms', 0)} ms",
+        f"output json valid: {'yes' if result.get('output_json_valid') else 'no'}",
+        f"stdout bytes: {len(str(result.get('stdout') or '').encode('utf-8'))}",
+        f"stderr bytes: {len(str(result.get('stderr') or '').encode('utf-8'))}",
+    ]
+    if result.get("error"):
+        lines.append(f"error: {result.get('error', '')}")
+    if not private:
+        lines.append("private content: hidden (use --private in this user account to inspect)")
+        return "\n".join(lines)
+    lines.append("private content:")
+    output_json = result.get("output_json")
+    if output_json is not None:
+        lines.append("output_json:")
+        lines.append(_clip_result_text(json.dumps(output_json, ensure_ascii=False, indent=2)))
+    if result.get("stdout"):
+        lines.append("stdout:")
+        lines.append(_clip_result_text(result.get("stdout", "")))
+    if result.get("stderr"):
+        lines.append("stderr:")
+        lines.append(_clip_result_text(result.get("stderr", "")))
+    return "\n".join(lines)
 
 
 def _read_limited_binary(handle, limit: int) -> tuple[bytes, bool]:

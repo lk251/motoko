@@ -198,6 +198,9 @@ Current UI direction:
 - Skill planning should be inspectable without model calls. `/skill plan QUERY`
   should show prompt skill selection and deterministic handler activation
   before any future scripts or tools can affect behavior.
+- Tool planning should be inspectable without model calls. `/tools` should list
+  the current skill-tool catalog, and `/action plan QUERY` should propose typed
+  action records from known tools without running anything.
 - Skill-management actions should stay review-first and allowlisted. Motoko may
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to
@@ -208,6 +211,9 @@ Current UI direction:
   bounded time/output, scrubbed environment, and private realm-local results;
   arbitrary scripts, shell, network, service control, privileged actions, and
   project-file writes remain blocked.
+  `/action ledger` and `/action result` should make tool runs inspectable while
+  hiding private stdout/stderr/result content unless the owning user explicitly
+  asks for it.
   Support files should be inspectable with explicit commands and loaded into
   chat only by bounded progressive disclosure when they match the current
   prompt.

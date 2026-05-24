@@ -225,8 +225,11 @@ from motoko_core.agentic import (  # noqa: E402
     AgenticValidationError,
     approve_tool as core_approve_tool,
     execute_skill_tool_action as core_execute_skill_tool_action,
+    find_tool_result_path as core_find_tool_result_path,
     format_action_result as core_format_action_result,
     format_action_validation as core_format_action_validation,
+    format_action_ledger_rows as core_format_action_ledger_rows,
+    format_tool_private_result as core_format_tool_private_result,
     format_tool_rows as core_format_tool_rows,
     list_skill_tools as core_list_skill_tools,
     session_approval_key as core_session_approval_key,
@@ -833,8 +836,12 @@ SLASH_COMMANDS = [
     ("/skill support NAME [FILE]", "list or show confined skill support files"),
     ("/skill tools NAME", "list validated script tool metadata for a skill"),
     ("/skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
+    ("/tools", "list all declared skill tools and approval status"),
+    ("/action plan QUERY", "propose typed skill-tool actions without running them"),
     ("/action preview FILE", "validate a typed action JSON file without execution"),
     ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
+    ("/action ledger", "show content-safe action/tool ledger rows"),
+    ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -4377,6 +4384,193 @@ def format_skill_tools(name: str) -> str:
     rows = skill_tool_rows(name)
     header = f"skill: {core_load_skill(skills_dir(), name).get('slug', name)}"
     return header + "\n" + core_format_tool_rows(rows, approval_path=tool_approvals_path(), realm=identity_realm())
+
+
+def all_skill_tool_rows() -> list[dict]:
+    rows = []
+    for skill in list_skills():
+        for tool in core_list_skill_tools(skill):
+            item = dict(tool)
+            item.setdefault("skill", skill.get("slug") or skill.get("name", ""))
+            item.setdefault("skill_name", skill.get("name", ""))
+            rows.append(item)
+    return rows
+
+
+def format_tool_catalog() -> str:
+    rows = all_skill_tool_rows()
+    if not rows:
+        return "tool catalog: no skill tools declared"
+    lines = [f"tool catalog: {len(rows)} declared skill tool(s)"]
+    for row in rows:
+        if row.get("valid") is not True:
+            lines.append(f"- {row.get('skill', '')}/{row.get('name', '')}: invalid")
+            lines.append(f"  error: {row.get('error', '')}")
+            continue
+        approval = core_format_tool_rows([row], approval_path=tool_approvals_path(), realm=identity_realm()).splitlines()[1:]
+        lines.append(f"- {row.get('skill', '')}/{row.get('name', '')}")
+        for line in approval:
+            lines.append("  " + line.strip())
+    return "\n".join(lines)
+
+
+def _action_plan_terms(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9_.-]{3,}", str(text or "").lower()))
+
+
+def _query_integer_hint(query: str) -> int | None:
+    match = re.search(r"\b([1-9][0-9]{0,3})\b", str(query or ""))
+    if match:
+        return int(match.group(1))
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+    }
+    lowered = str(query or "").lower()
+    for word, value in words.items():
+        if re.search(rf"\b{re.escape(word)}\b", lowered):
+            return value
+    return None
+
+
+def infer_action_arguments(tool: dict, query: str) -> tuple[dict, list[str]]:
+    schema = tool.get("argument_schema") or {"type": "object", "properties": {}, "required": []}
+    props = schema.get("properties") if isinstance(schema, dict) else {}
+    required = schema.get("required") if isinstance(schema, dict) else []
+    props = props if isinstance(props, dict) else {}
+    required = required if isinstance(required, list) else []
+    path_mentions = query_path_mentions(query)
+    number_hint = _query_integer_hint(query)
+    arguments = {}
+    for key, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        key_l = str(key).lower()
+        value_type = spec.get("type", "string")
+        if value_type == "string" and any(marker in key_l for marker in ("path", "file", "dir")) and path_mentions:
+            arguments[key] = path_mentions[0]
+        elif value_type == "integer" and number_hint is not None and key_l in {"count", "limit", "n", "days"}:
+            arguments[key] = number_hint
+        elif value_type == "boolean" and key_l in {"dry_run", "preview"}:
+            arguments[key] = True
+    missing = [str(key) for key in required if key not in arguments]
+    return arguments, missing
+
+
+def format_action_plan(query: str, *, limit: int = 5) -> str:
+    query = str(query or "").strip()
+    if not query:
+        return "usage: /action plan QUERY"
+    query_terms = _action_plan_terms(query)
+    candidates = []
+    for skill in list_skills():
+        skill_text = "\n".join([skill.get("name", ""), skill.get("description", ""), skill.get("body", "")[:3000]])
+        skill_terms = _action_plan_terms(skill_text)
+        for tool in core_list_skill_tools(skill):
+            if tool.get("valid") is not True:
+                continue
+            tool_text = "\n".join(
+                [
+                    tool.get("name", ""),
+                    tool.get("description", ""),
+                    tool.get("metadata_relpath", ""),
+                    tool.get("script_relpath", ""),
+                    ", ".join(tool.get("allowed_effects", [])),
+                ]
+            )
+            terms = skill_terms | _action_plan_terms(tool_text)
+            overlap = query_terms & terms
+            if not overlap:
+                continue
+            score = len(overlap) * 10
+            if any(term in _action_plan_terms(tool.get("name", "")) for term in query_terms):
+                score += 20
+            if any(term in _action_plan_terms(skill.get("name", "")) for term in query_terms):
+                score += 10
+            arguments, missing = infer_action_arguments(tool, query)
+            action = {
+                "schema": "motoko-action-v1",
+                "kind": "skill_tool_run",
+                "skill": tool.get("skill", ""),
+                "tool": tool.get("name", ""),
+                "arguments": arguments,
+                "reason": f"Matched query terms: {', '.join(sorted(overlap)[:12])}",
+            }
+            validation = None
+            if not missing:
+                try:
+                    validation = core_validate_action_record(
+                        action,
+                        skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+                        approval_path=tool_approvals_path(),
+                        realm=identity_realm(),
+                        path_checker=action_path_checker,
+                        preview=True,
+                    )
+                except AgenticValidationError as exc:
+                    validation = {
+                        "status": "rejected",
+                        "approval": "not-applicable",
+                        "reason": str(exc),
+                    }
+            candidates.append(
+                {
+                    "score": score,
+                    "skill": tool.get("skill", ""),
+                    "tool": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "effects": tool.get("allowed_effects", []),
+                    "matched_terms": sorted(overlap),
+                    "missing": missing,
+                    "action": action,
+                    "validation": validation,
+                }
+            )
+    candidates.sort(key=lambda row: (row["score"], row["skill"], row["tool"]), reverse=True)
+    lines = [
+        f"action plan: {query}",
+        "model calls: none",
+        "candidate tools:",
+    ]
+    if not candidates:
+        lines.append("- none")
+        return "\n".join(lines)
+    for row in candidates[: max(1, min(20, int(limit or 5)))]:
+        status = "needs_arguments" if row["missing"] else (row["validation"] or {}).get("status", "unknown")
+        approval = "not-checked" if row["missing"] else (row["validation"] or {}).get("approval", "")
+        lines.append(f"- {row['skill']}/{row['tool']}  score={row['score']}  status={status}  approval={approval}")
+        lines.append(f"  effects: {', '.join(row['effects'])}")
+        lines.append(f"  matched: {', '.join(row['matched_terms'][:12])}")
+        if row["missing"]:
+            lines.append(f"  missing required args: {', '.join(row['missing'])}")
+        if row["description"]:
+            lines.append(f"  description: {row['description']}")
+        lines.append("  suggested action:")
+        for action_line in json.dumps(row["action"], ensure_ascii=False, indent=2).splitlines():
+            lines.append("    " + action_line)
+    return "\n".join(lines)
+
+
+def format_action_ledger(limit: int = 20) -> str:
+    return core_format_action_ledger_rows(read_jsonl(action_ledger_path()), limit=limit)
+
+
+def format_tool_result(selector: str, *, private: bool = False) -> str:
+    try:
+        path = core_find_tool_result_path(state_root(), selector)
+        data = safe_load_json(path)
+        if not isinstance(data, dict):
+            raise AgenticValidationError(f"tool result is not a JSON object: {path}")
+    except AgenticValidationError as exc:
+        return f"tool result: error\nerror: {exc}"
+    return core_format_tool_private_result(data, private=private)
 
 
 def approve_skill_tool_text(name: str, tool: str, *, yes: bool = False) -> str:
@@ -13237,8 +13431,12 @@ HELP_SECTIONS = [
             ("/skill upgrade", "deterministically upgrade learned skill files"),
             ("/skill accept ID", "accept a pending skill suggestion"),
             ("/skill reject ID", "reject a pending skill suggestion"),
+            ("/tools", "list all declared skill tools and approval status"),
+            ("/action plan QUERY", "propose typed skill-tool actions without running them"),
             ("/action preview FILE", "validate a typed action JSON file without execution"),
             ("/action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
+            ("/action ledger", "show content-safe action/tool ledger rows"),
+            ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -13310,8 +13508,12 @@ HELP_SECTIONS = [
             ("motoko skill upgrade", "deterministically upgrade learned skill files"),
             ("motoko skill accept ID", "accept a pending skill suggestion"),
             ("motoko skill reject ID", "reject a pending skill suggestion"),
+            ("motoko tools", "list all declared skill tools and approval status"),
+            ("motoko action plan QUERY", "propose typed skill-tool actions without running them"),
             ("motoko action preview FILE", "validate a typed action JSON file without execution"),
             ("motoko action run FILE [--yes]", "run an approved typed action through the narrow tool runner"),
+            ("motoko action ledger", "show content-safe action/tool ledger rows"),
+            ("motoko action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -13802,6 +14004,8 @@ def memory_profile_report_command_request(text: str):
         return "/memories", lambda: format_memories()
     if primary == "/skills" and not body:
         return "/skills", format_skills
+    if primary == "/tools" and not body:
+        return "/tools", format_tool_catalog
     if primary == "/memory":
         parts = body.split(maxsplit=1)
         subcommand = parts[0] if parts else ""
@@ -13835,6 +14039,8 @@ def memory_profile_report_command_request(text: str):
         parts = body.split(maxsplit=1)
         subcommand = parts[0] if parts else ""
         subbody = parts[1].strip() if len(parts) > 1 else ""
+        if subcommand == "plan" and subbody:
+            return "/action plan", lambda: format_action_plan(subbody)
         if subcommand in {"preview", "validate"} and subbody:
             return "/action preview", lambda: validate_action_text(subbody, preview=True)
         if subcommand == "run" and subbody:
@@ -13843,6 +14049,20 @@ def memory_profile_report_command_request(text: str):
             file_args = [arg for arg in args if arg != "--yes"]
             if file_args:
                 return "/action run", lambda: run_action_text(file_args[0], yes=yes)
+        if subcommand == "ledger":
+            limit = 20
+            if subbody:
+                try:
+                    limit = int(subbody)
+                except ValueError:
+                    limit = 20
+            return "/action ledger", lambda: format_action_ledger(limit=limit)
+        if subcommand == "result" and subbody:
+            args = subbody.split()
+            private = "--private" in args
+            selectors = [arg for arg in args if arg != "--private"]
+            if selectors:
+                return "/action result", lambda: format_tool_result(selectors[0], private=private)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -17301,12 +17521,22 @@ def command_skill(args) -> None:
 
 
 def command_action(args) -> None:
-    if args.action_command in {"preview", "validate"}:
+    if args.action_command == "plan":
+        print_report(format_action_plan(" ".join(args.query), limit=args.limit))
+    elif args.action_command in {"preview", "validate"}:
         print_report(validate_action_text(args.file, preview=True))
     elif args.action_command == "run":
         print_report(run_action_text(args.file, yes=args.yes))
+    elif args.action_command == "ledger":
+        print_report(format_action_ledger(limit=args.limit))
+    elif args.action_command == "result":
+        print_report(format_tool_result(args.run_id, private=args.private))
     else:
         raise SystemExit("unknown action command")
+
+
+def command_tools(_args) -> None:
+    print_report(format_tool_catalog())
 
 
 def command_personality(args) -> None:
@@ -17876,8 +18106,15 @@ def main(argv: list[str]) -> int:
     skill_reject.add_argument("id")
     skill_reject.set_defaults(func=command_skill)
 
-    action = sub.add_parser("action", help="preview and validate typed Motoko action records")
+    tools = sub.add_parser("tools", help="list all declared skill tools and approval status")
+    tools.set_defaults(func=command_tools)
+
+    action = sub.add_parser("action", help="plan, preview, run, and inspect typed Motoko action records")
     action_sub = action.add_subparsers(dest="action_command", required=True)
+    action_plan = action_sub.add_parser("plan", help="propose typed skill-tool actions without running them")
+    action_plan.add_argument("query", nargs="+")
+    action_plan.add_argument("--limit", type=int, default=5)
+    action_plan.set_defaults(func=command_action)
     action_preview = action_sub.add_parser("preview", help="validate an action JSON file and write a ledger row")
     action_preview.add_argument("file")
     action_preview.set_defaults(func=command_action)
@@ -17888,6 +18125,13 @@ def main(argv: list[str]) -> int:
     action_run.add_argument("file")
     action_run.add_argument("--yes", action="store_true", help="grant one-session confirmation for this run")
     action_run.set_defaults(func=command_action)
+    action_ledger = action_sub.add_parser("ledger", help="show content-safe action/tool ledger rows")
+    action_ledger.add_argument("--limit", type=int, default=20)
+    action_ledger.set_defaults(func=command_action)
+    action_result = action_sub.add_parser("result", help="show a tool run result")
+    action_result.add_argument("run_id")
+    action_result.add_argument("--private", action="store_true", help="show private stdout/stderr/output JSON in this user account")
+    action_result.set_defaults(func=command_action)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)
