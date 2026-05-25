@@ -16743,8 +16743,8 @@ def format_about_header(width: int | None = None) -> list[str]:
     rows.append("")
     rows.extend(
         [
-            assistant_label("Motoko")
-            + " - privacy- and security-conscious terminal assistant for local corpora, memory, and repo review.",
+            assistant_label("Motoko:")
+            + "a privacy- and security-conscious terminal assistant for local corpora, memory, and repo review.",
             "values: intelligence, competence, craft",
             f"version: {APP_VERSION}",
         ]
