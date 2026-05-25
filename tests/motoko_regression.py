@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import socketserver
+import sys
 import tempfile
 import threading
 import time
@@ -18,6 +19,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 SOURCE = pathlib.Path(os.environ.get("MOTOKO_SOURCE", "motoko"))
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from motoko_core import slot_cache as slot_cache_core
 
 
 def load_motoko():
@@ -2191,6 +2197,74 @@ def test_slot_cache_budget_gc_removes_old_records(m):
             os.environ.pop("MOTOKO_MODEL", None)
         else:
             os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_slot_cache_budget_reports_service_owned_gc(m):
+    with isolated_state() as tmp:
+        slot_root = tmp / "service-slots"
+        slot_root.mkdir()
+        route_info = {
+            "route": "chat",
+            "catalog_route": "qwen36-chat-default",
+            "endpoint": "unix:///tmp/motoko-slot-service.sock",
+            "model": "qwen-slot-test",
+            "cache": {
+                "prompt": True,
+                "persistentSlotCache": True,
+                "slotsEndpoint": True,
+                "slotSavePath": str(slot_root),
+                "slotCacheMaxBytes": 1000,
+            },
+        }
+        rows = []
+        for idx, conv_id in enumerate(("conv-a", "conv-b"), 1):
+            filename = f"motoko-slot-service-{idx}.bin"
+            (slot_root / filename).write_bytes(b"x" * 700)
+            rows.append(
+                {
+                    "schema": "slot-kv-cache-v1",
+                    "status": "saved",
+                    "created": f"2026-05-25T00:00:0{idx}Z",
+                    "updated": f"2026-05-25T00:00:0{idx}Z",
+                    "last_used": f"2026-05-25T00:00:0{idx}Z",
+                    "conversation_id": conv_id,
+                    "catalog_route": "qwen36-chat-default",
+                    "route": "chat",
+                    "route_fingerprint": "fingerprint",
+                    "filename": filename,
+                    "slot_save_path_declared": str(slot_root),
+                    "file_size_bytes": 700,
+                }
+            )
+        m.ensure_private_dir(m.slot_cache_manifest_path().parent)
+        m.atomic_write(
+            m.slot_cache_manifest_path(),
+            json.dumps(
+                {
+                    "schema": "slot-kv-cache-manifest-v1",
+                    "updated": "2026-05-25T00:00:03Z",
+                    "records": rows,
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+        )
+        old_access = slot_cache_core.os.access
+        try:
+            slot_cache_core.os.access = lambda path, mode: False if pathlib.Path(path) == slot_root else old_access(path, mode)
+            report = slot_cache_core.enforce_slot_cache_budget(route_info)
+            assert report["status"] == "needs-service-gc"
+            assert report["service_gc_required"] is True
+            assert report["service_owned_records"] >= 1
+            assert report["records_removed"] == 0
+            assert len(m.read_slot_cache_manifest()["records"]) == 2
+            cleared = m.clear_slot_cache_records(route_name="qwen36-chat-default", yes=True)
+            assert cleared["status"] == "needs-service-gc"
+            assert cleared["records_removed"] == 0
+            assert cleared["service_owned_records"] == 2
+            assert len(m.read_slot_cache_manifest()["records"]) == 2
+        finally:
+            slot_cache_core.os.access = old_access
 
 
 def test_cross_home_action_policy_is_config_driven(m):
@@ -9058,6 +9132,7 @@ def main() -> int:
         test_persistent_slot_cache_saves_and_restores_chat_slot,
         test_slot_cache_budget_profile_can_disable_saves,
         test_slot_cache_budget_gc_removes_old_records,
+        test_slot_cache_budget_reports_service_owned_gc,
         test_cross_home_action_policy_is_config_driven,
         test_slot_cache_failures_are_nonfatal_cache_misses,
         test_catalog_request_policy_shapes_chat_payload_and_telemetry,

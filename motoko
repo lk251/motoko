@@ -2880,6 +2880,8 @@ def write_last_model_call(record: dict) -> None:
             "slot_cache_budget_files_deleted",
             "slot_cache_budget_delete_failures",
             "slot_cache_budget_protected_evicted",
+            "slot_cache_budget_service_gc_required",
+            "slot_cache_budget_service_owned_records",
             "slot_cache_budget_error_type",
             "slot_cache_restore_error_type",
             "slot_cache_save_error_type",
@@ -2937,6 +2939,10 @@ def add_slot_cache_to_model_call_record(record: dict, context: dict | None) -> N
         record["slot_cache_budget_delete_failures"] = int(context.get("budget_delete_failures") or 0)
     if context.get("budget_protected_evicted") is not None:
         record["slot_cache_budget_protected_evicted"] = int(context.get("budget_protected_evicted") or 0)
+    if context.get("budget_service_gc_required") is not None:
+        record["slot_cache_budget_service_gc_required"] = bool(context.get("budget_service_gc_required"))
+    if context.get("budget_service_owned_records") is not None:
+        record["slot_cache_budget_service_owned_records"] = int(context.get("budget_service_owned_records") or 0)
     if context.get("budget_error_type"):
         record["slot_cache_budget_error_type"] = str(context.get("budget_error_type"))
     if context.get("restore_error_type"):
@@ -3054,6 +3060,8 @@ def format_last_model_call(record: dict | None = None) -> str:
             detail += f" budget={record.get('slot_cache_budget')}"
         if record.get("slot_cache_budget_profile"):
             detail += f"/{record.get('slot_cache_budget_profile')}"
+        if record.get("slot_cache_budget_service_gc_required"):
+            detail += " service-gc-required"
         policy_lines.append(f"slot-cache={detail}")
     if policy_lines:
         lines.append("request policy: " + ", ".join(policy_lines))
@@ -3371,6 +3379,7 @@ def slot_cache_clear_text(selector: str | None = None, *, conversation_id: str =
             f"status: {report.get('status', '')}",
             f"records removed: {report.get('records_removed', 0)}",
             f"files deleted: {report.get('files_deleted', 0)}",
+            f"service-owned records: {report.get('service_owned_records', 0)}",
             f"records remaining: {report.get('records_remaining', 0)}",
         ]
     )

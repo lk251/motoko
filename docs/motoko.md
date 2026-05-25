@@ -602,6 +602,16 @@ observed saved-file sizes and falls back to neutral estimates until a size is
 known. The application must not hard-code per-account budgets; NixOS decides
 which profile or byte cap each realm receives.
 
+If `slotSavePath` is service-owned, for example a `0700` systemd
+`StateDirectory` under `/var/lib` owned by the per-realm llama.cpp worker user,
+Motoko must not weaken that boundary or assume direct filesystem access. In
+that mode Motoko can track the content-free manifest and use `/slots` for
+restore/save/erase, but disk pruning must be service-owned too: either the
+model helper or a NixOS timer/tmpfiles rule must delete old Motoko slot files
+inside that private directory. Motoko reports `needs-service-gc` when the
+manifest says the cap is exceeded but the human realm process cannot delete the
+service-owned files.
+
 Per-realm path policy also belongs in config, not source conditionals. Motoko
 rejects action/tool paths that cross into another Unix home by default.
 NixOS-managed `~/.config/motoko/config.json` may set

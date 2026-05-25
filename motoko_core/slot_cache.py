@@ -309,6 +309,11 @@ def _unlink_slot_record_file(row: dict) -> bool:
     if path is None:
         return False
     try:
+        if not os.access(path.parent, os.W_OK | os.X_OK):
+            return False
+    except OSError:
+        return False
+    try:
         path.unlink()
         return True
     except FileNotFoundError:
@@ -331,6 +336,22 @@ def slot_cache_usage(records: list[dict] | None = None) -> dict:
     return {"bytes": total, "records": len([row for row in records if isinstance(row, dict)]), "unknown": unknown}
 
 
+def _slot_record_client_deletable(row: dict) -> bool:
+    path = _slot_record_file_path(row)
+    if path is None:
+        return False
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    try:
+        return os.access(path.parent, os.W_OK | os.X_OK)
+    except OSError:
+        return False
+
+
 def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = None) -> dict:
     manifest = read_slot_cache_manifest()
     records = [row for row in manifest.get("records", []) if isinstance(row, dict)]
@@ -347,6 +368,8 @@ def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = N
             "files_deleted": 0,
             "delete_failures": 0,
             "protected_evicted": 0,
+            "service_gc_required": False,
+            "service_owned_records": 0,
             "unknown_records": before["unknown"],
         }
 
@@ -359,11 +382,15 @@ def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = N
     removed = []
     files_deleted = 0
     delete_failures = 0
+    service_owned_records = 0
     current_bytes = before["bytes"]
     for row in candidates:
         if current_bytes <= budget:
             break
         size = _slot_record_size_bytes(row)
+        if not _slot_record_client_deletable(row):
+            service_owned_records += 1
+            continue
         deleted = _unlink_slot_record_file(row)
         if not deleted and size > 0:
             delete_failures += 1
@@ -379,6 +406,9 @@ def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = N
             if record_key(row) != protect_key:
                 continue
             size = _slot_record_size_bytes(row)
+            if not _slot_record_client_deletable(row):
+                service_owned_records += 1
+                continue
             deleted = _unlink_slot_record_file(row)
             if not deleted and size > 0:
                 delete_failures += 1
@@ -392,7 +422,8 @@ def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = N
     manifest["records"] = kept
     write_slot_cache_manifest(manifest)
     after = slot_cache_usage(kept)
-    status = "within-budget" if after["bytes"] <= budget else "over-budget"
+    service_gc_required = after["bytes"] > budget and service_owned_records > 0
+    status = "within-budget" if after["bytes"] <= budget else "needs-service-gc" if service_gc_required else "over-budget"
     return {
         "status": status,
         "budget_profile": slot_cache_budget_label(route_info),
@@ -403,6 +434,8 @@ def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = N
         "files_deleted": files_deleted,
         "delete_failures": delete_failures,
         "protected_evicted": protected_evicted,
+        "service_gc_required": service_gc_required,
+        "service_owned_records": service_owned_records,
         "unknown_records": after["unknown"],
     }
 
@@ -706,6 +739,12 @@ def save_slot_cache_after_request(
         context["save"] = "skipped-budget-full"
         context["budget_delete_failures"] = budget_before.get("delete_failures", 0)
         return context
+    if budget_before.get("status") == "needs-service-gc":
+        context["save"] = "skipped-service-gc-required"
+        context["budget_service_gc_required"] = True
+        context["budget_service_owned_records"] = budget_before.get("service_owned_records", 0)
+        context["budget_delete_failures"] = budget_before.get("delete_failures", 0)
+        return context
     slot_id = int(context.get("slot_id") or capability.get("slot_id") or 0)
     try:
         response = call_slot_action(
@@ -781,6 +820,8 @@ def save_slot_cache_after_request(
             context["budget_files_deleted"] = budget_after.get("files_deleted", 0)
             context["budget_delete_failures"] = budget_after.get("delete_failures", 0)
             context["budget_protected_evicted"] = budget_after.get("protected_evicted", 0)
+            context["budget_service_gc_required"] = bool(budget_after.get("service_gc_required"))
+            context["budget_service_owned_records"] = budget_after.get("service_owned_records", 0)
             if budget_after.get("protected_evicted"):
                 context["save"] = "evicted-budget"
     return context
@@ -813,12 +854,17 @@ def clear_slot_cache_records(
     manifest = read_slot_cache_manifest()
     kept = []
     removed = []
+    service_owned_records = 0
     for row in manifest.get("records", []):
         if not isinstance(row, dict):
             continue
         matches_route = not route_name or row.get("catalog_route") == route_name or row.get("route") == route_name
         matches_conv = not conversation_id or row.get("conversation_id") == conversation_id
         if matches_route and matches_conv:
+            if _slot_record_file_path(row) is not None and not _slot_record_client_deletable(row):
+                service_owned_records += 1
+                kept.append(row)
+                continue
             removed.append(row)
         else:
             kept.append(row)
@@ -841,9 +887,10 @@ def clear_slot_cache_records(
         except OSError:
             continue
     return {
-        "status": "cleared",
+        "status": "needs-service-gc" if service_owned_records else "cleared",
         "records_removed": len(removed),
         "files_deleted": deleted_files,
+        "service_owned_records": service_owned_records,
         "records_remaining": len(kept),
     }
 

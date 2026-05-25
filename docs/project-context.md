@@ -1590,6 +1590,15 @@ declare exact per-route file sizes with `slotCacheFileBytes` /
 fallback estimates until a size is known. Motoko must not hard-code per-account
 budgets.
 
+If the slot-save path is service-owned, such as a per-realm systemd
+`StateDirectory` under `/var/lib` owned `0700` by the llama.cpp worker user,
+Motoko must not assume direct filesystem access to the KV files. In that
+boundary, Motoko may track content-free manifest rows and use `/slots` for
+restore/save/erase, but disk pruning must be performed by service-owned
+machinery such as `motoko-model` or a NixOS-managed cleanup unit. Motoko should
+surface `needs-service-gc` instead of pretending to enforce caps by deleting
+files it cannot access.
+
 Per-realm filesystem policy also belongs in NixOS-managed Motoko config.
 Motoko rejects action/tool paths that cross into another Unix home by default,
 but a realm can be explicitly allowed to operate on a cross-home path with
