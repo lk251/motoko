@@ -285,6 +285,27 @@ def lines_at_cursor_sequence(lines: list[str]) -> str:
     return "".join(parts)
 
 
+def transcript_append_sequence(lines: list[str], *, height: int, reserved_rows: int) -> str:
+    """Append committed chat rows through the normal top scroll region.
+
+    The prompt/status frame is anchored at the bottom of the terminal.  New
+    transcript rows should still behave like ordinary terminal output, so they
+    are written at the bottom of the scrollable region above that frame instead
+    of at the prompt cursor position.
+    """
+
+    if not lines:
+        return ""
+    height = max(1, int(height or 1))
+    reserved_rows = max(1, min(height - 1, int(reserved_rows or 1))) if height > 1 else 0
+    scroll_bottom = max(1, height - reserved_rows)
+    parts = [f"\033[1;{scroll_bottom}r", f"\033[{scroll_bottom};1H"]
+    for line in lines:
+        parts.append(f"\r{line}\033[K\n")
+    parts.append("\033[r")
+    return "".join(parts)
+
+
 def bottom_area_absolute_sequence(
     lines: list[str],
     *,

@@ -70,6 +70,7 @@ from motoko_core.tui_render import (
     overlay_page_sequence,
     status_display_lines,
     study_status_label_core,
+    transcript_append_sequence,
 )
 
 
@@ -268,6 +269,9 @@ def main() -> int:
     assert overlay_page_sequence(["one"], 2) == "\033[Hone\033[K\n\033[K\033[J\033[?25h"
     assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
     assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
+    assert transcript_append_sequence(["one", "two"], height=10, reserved_rows=3) == (
+        "\033[1;7r\033[7;1H\rone\033[K\n\rtwo\033[K\n\033[r"
+    )
     anchored = bottom_area_absolute_sequence(
         ["> prompt", "status one", "status two"],
         cursor_row=0,

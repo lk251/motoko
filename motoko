@@ -116,6 +116,7 @@ from motoko_core.tui_render import (  # noqa: E402
     overlay_page_sequence as render_overlay_page_sequence,
     status_display_lines as render_status_display_lines,
     study_status_label_core,
+    transcript_append_sequence as render_transcript_append_sequence,
 )
 from motoko_core.model_io import (  # noqa: E402
     chat_completion_payload,
@@ -19376,8 +19377,9 @@ class MotokoTui:
         if self.overlay_lines is not None:
             self.render_overlay_page(content_width, height)
         else:
-            self.sync_transcript(content_width)
-            self.draw_bottom_area(content_width, height, force=force)
+            bottom_frame = self.bottom_area_frame(content_width, height)
+            self.sync_transcript(content_width, height, reserved_rows=len(bottom_frame[0]))
+            self.draw_bottom_area(content_width, height, force=force, frame=bottom_frame)
         self.last_render = time.monotonic()
         self.dirty = False
 
@@ -19431,7 +19433,7 @@ class MotokoTui:
         if sequence:
             self.write(sequence)
 
-    def draw_bottom_area(self, width: int, height: int, *, force: bool = False) -> None:
+    def bottom_area_frame(self, width: int, height: int) -> tuple[list[str], int, int]:
         options = self.dropdown_options()
         if options:
             self.dropdown_index = min(self.dropdown_index, len(options) - 1)
@@ -19441,7 +19443,7 @@ class MotokoTui:
         dropdown_lines = self.dropdown_display(width, options)
         status_lines = self.status_display(width)
         live_lines = self.live_answer_display(width)
-        lines, cursor_row, cursor_col = render_bottom_area_frame(
+        return render_bottom_area_frame(
             live_lines=live_lines,
             dropdown_lines=dropdown_lines,
             input_lines=input_lines,
@@ -19452,6 +19454,16 @@ class MotokoTui:
             height=height,
             truncation_marker="…",
         )
+
+    def draw_bottom_area(
+        self,
+        width: int,
+        height: int,
+        *,
+        force: bool = False,
+        frame: tuple[list[str], int, int] | None = None,
+    ) -> None:
+        lines, cursor_row, cursor_col = frame if frame is not None else self.bottom_area_frame(width, height)
         frame_key = (width, height, tuple(lines), cursor_row, cursor_col)
         if not force and frame_key == getattr(self, "bottom_frame_key", None):
             return
@@ -19468,7 +19480,7 @@ class MotokoTui:
         self.bottom_cursor_row_offset = cursor_row
         self.bottom_frame_key = frame_key
 
-    def sync_transcript(self, width: int) -> None:
+    def sync_transcript(self, width: int, height: int, *, reserved_rows: int = 1) -> None:
         if not hasattr(self, "rendered_message_ids"):
             self.rendered_message_ids = set()
         rows = []
@@ -19483,7 +19495,7 @@ class MotokoTui:
         if not rows:
             return
         self.clear_bottom_area()
-        self.write("".join(f"{row}\033[K\n" for row in rows))
+        self.write(render_transcript_append_sequence(rows, height=height, reserved_rows=reserved_rows))
 
     def live_answer_display(self, width: int) -> list[str]:
         if self.answer_entry is None or not self.generating:

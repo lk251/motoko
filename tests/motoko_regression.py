@@ -5134,8 +5134,11 @@ def test_tui_append_renderer_keeps_transcript_in_scrollback(m):
         ui.write = captured.append
 
         ui.render()
-        first = m.strip_ansi("".join(captured))
-        assert "\x1b[H" not in "".join(captured)
+        first_raw = "".join(captured)
+        first = m.strip_ansi(first_raw)
+        assert "\x1b[H" not in first_raw
+        assert "\033[1;10r\033[10;1H" in first_raw
+        assert "\033[r" in first_raw
         assert "first prompt" in first
         assert "first answer" in first
         assert "Scrollback Test" in first
