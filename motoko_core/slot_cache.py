@@ -740,11 +740,9 @@ def save_slot_cache_after_request(
         context["budget_delete_failures"] = budget_before.get("delete_failures", 0)
         return context
     if budget_before.get("status") == "needs-service-gc":
-        context["save"] = "skipped-service-gc-required"
         context["budget_service_gc_required"] = True
         context["budget_service_owned_records"] = budget_before.get("service_owned_records", 0)
         context["budget_delete_failures"] = budget_before.get("delete_failures", 0)
-        return context
     slot_id = int(context.get("slot_id") or capability.get("slot_id") or 0)
     try:
         response = call_slot_action(

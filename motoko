@@ -389,6 +389,7 @@ from motoko_core.goal_loops import (  # noqa: E402
 from motoko_core.slot_cache import (  # noqa: E402
     clear_slot_cache_records,
     erase_slot_cache,
+    enforce_slot_cache_budget,
     prepare_slot_cache_for_request,
     read_slot_cache_manifest,
     save_slot_cache_after_request,
@@ -513,6 +514,7 @@ DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
 LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
 SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
 LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
+SLOT_CACHE_HELPER_TIMEOUT_SECONDS = 60
 MODEL_LOADING_RETRY_SECONDS = 2.0
 MODEL_RESIDENCY_DEFAULT_CHAT_GRACE_SECONDS = 90
 CHAT_CONTEXT_MODE_ENV = "MOTOKO_CHAT_CONTEXT_MODE"
@@ -850,6 +852,7 @@ SLASH_COMMANDS = [
     ("/model-stop ROUTE", "stop a local model service through motoko-model"),
     ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
     ("/slot-cache [ROUTE]", "show persistent slot/KV cache capability"),
+    ("/slot-cache gc ROUTE", "ask motoko-model to prune service-owned slot files under cap"),
     ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
     ("/feedback-eval", "turn private feedback into eval fixtures"),
     ("/action-eval", "run deterministic agentic action safety checks"),
@@ -2882,6 +2885,8 @@ def write_last_model_call(record: dict) -> None:
             "slot_cache_budget_protected_evicted",
             "slot_cache_budget_service_gc_required",
             "slot_cache_budget_service_owned_records",
+            "slot_cache_budget_service_gc",
+            "slot_cache_budget_service_gc_error_type",
             "slot_cache_budget_error_type",
             "slot_cache_restore_error_type",
             "slot_cache_save_error_type",
@@ -2943,6 +2948,10 @@ def add_slot_cache_to_model_call_record(record: dict, context: dict | None) -> N
         record["slot_cache_budget_service_gc_required"] = bool(context.get("budget_service_gc_required"))
     if context.get("budget_service_owned_records") is not None:
         record["slot_cache_budget_service_owned_records"] = int(context.get("budget_service_owned_records") or 0)
+    if context.get("budget_service_gc"):
+        record["slot_cache_budget_service_gc"] = str(context.get("budget_service_gc"))
+    if context.get("budget_service_gc_error_type"):
+        record["slot_cache_budget_service_gc_error_type"] = str(context.get("budget_service_gc_error_type"))
     if context.get("budget_error_type"):
         record["slot_cache_budget_error_type"] = str(context.get("budget_error_type"))
     if context.get("restore_error_type"):
@@ -3062,6 +3071,8 @@ def format_last_model_call(record: dict | None = None) -> str:
             detail += f"/{record.get('slot_cache_budget_profile')}"
         if record.get("slot_cache_budget_service_gc_required"):
             detail += " service-gc-required"
+        if record.get("slot_cache_budget_service_gc"):
+            detail += f" service-gc={record.get('slot_cache_budget_service_gc')}"
         policy_lines.append(f"slot-cache={detail}")
     if policy_lines:
         lines.append("request policy: " + ", ".join(policy_lines))
@@ -3363,26 +3374,129 @@ def model_service_metrics(selector: str) -> str:
     )
 
 
+def slot_cache_service_helper(command: str, route_info: dict, *, timeout: float = SLOT_CACHE_HELPER_TIMEOUT_SECONDS) -> str:
+    return run_local_model_helper(command, route_info, timeout=timeout)
+
+
+def slot_cache_service_status_text(route_info: dict) -> str:
+    route_name = local_model_helper_route(route_info)
+    if not endpoint_is_unix(str(route_info.get("endpoint") or "")):
+        return "service status: not a NixOS Unix-socket route"
+    try:
+        output = slot_cache_service_helper("slot-cache-status", route_info, timeout=LOCAL_MODEL_HELPER_TIMEOUT_SECONDS)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        return f"service status: motoko-model slot-cache-status {route_name} failed: {exc}"
+    return "\n".join(
+        [
+            f"service status source: motoko-model slot-cache-status {route_name}",
+            (output.strip() or "no service slot-cache status reported")[:5000],
+        ]
+    )
+
+
+def update_slot_context_from_budget_report(context: dict, report: dict) -> None:
+    context["budget"] = report.get("status")
+    context["budget_profile"] = report.get("budget_profile")
+    context["budget_bytes"] = report.get("budget_bytes")
+    context["cache_bytes"] = report.get("bytes_after")
+    context["budget_records_removed"] = report.get("records_removed", 0)
+    context["budget_files_deleted"] = report.get("files_deleted", 0)
+    context["budget_delete_failures"] = report.get("delete_failures", 0)
+    context["budget_protected_evicted"] = report.get("protected_evicted", 0)
+    context["budget_service_gc_required"] = bool(report.get("service_gc_required"))
+    context["budget_service_owned_records"] = report.get("service_owned_records", 0)
+
+
+def slot_cache_record_protect_key(context: dict) -> tuple:
+    return (context.get("route_fingerprint"), context.get("conversation_id"), context.get("filename"))
+
+
+def maybe_run_slot_cache_service_gc(route_info: dict, context: dict) -> dict:
+    if not context.get("budget_service_gc_required"):
+        return context
+    route_name = local_model_helper_route(route_info)
+    try:
+        slot_cache_service_helper("slot-cache-gc", route_info)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        context["budget_service_gc"] = "failed"
+        context["budget_service_gc_error_type"] = type(exc).__name__
+        return context
+    context["budget_service_gc"] = "completed"
+    status_text = slot_cache_service_status_text(route_info)
+    status_values = parse_local_model_status(status_text)
+    needs_gc = str(status_values.get("slot_cache_needs_gc", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if status_values and not needs_gc:
+        context["budget"] = "within-budget"
+        context["cache_bytes"] = int(status_values.get("slot_cache_total_bytes") or 0)
+        context["budget_service_gc_required"] = False
+    else:
+        report = enforce_slot_cache_budget(route_info, protect_key=slot_cache_record_protect_key(context))
+        update_slot_context_from_budget_report(context, report)
+    context["budget_service_gc_route"] = route_name
+    return context
+
+
+def save_slot_cache_after_request_with_service_gc(route_info: dict, context: dict) -> dict:
+    context = save_slot_cache_after_request(route_info, context)
+    if context.get("budget_service_gc_required"):
+        context = maybe_run_slot_cache_service_gc(route_info, context)
+    return context
+
+
 def format_slot_cache(selector: str | None = None) -> str:
     route_info = resolve_model_service_route(selector) if selector else None
-    return slot_cache_report(route_info)
+    text = slot_cache_report(route_info)
+    if route_info is not None:
+        text += "\n\n" + slot_cache_service_status_text(route_info)
+    return text
+
+
+def slot_cache_gc_text(selector: str) -> str:
+    info = resolve_model_service_route(selector)
+    route_name = local_model_helper_route(info)
+    try:
+        output = slot_cache_service_helper("slot-cache-gc", info)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(f"motoko-model slot-cache-gc {route_name} failed: {exc}") from exc
+    report = enforce_slot_cache_budget(info)
+    return "\n".join(
+        [
+            f"slot/KV service GC: {route_name}",
+            "source: motoko-model slot-cache-gc ROUTE",
+            (output.strip() or "no service GC details reported")[:2000],
+            f"manifest status: {report.get('status', '')}",
+            f"manifest records removed: {report.get('records_removed', 0)}",
+            f"manifest bytes after: {report.get('bytes_after', 0)}",
+        ]
+    )
 
 
 def slot_cache_clear_text(selector: str | None = None, *, conversation_id: str = "", yes: bool = False) -> str:
     route_name = ""
+    service_status = "not-requested"
+    service_output = ""
     if selector:
-        route_name = local_model_helper_route(resolve_model_service_route(selector))
+        info = resolve_model_service_route(selector)
+        route_name = local_model_helper_route(info)
+        if yes and not conversation_id:
+            try:
+                service_output = slot_cache_service_helper("slot-cache-clear", info)
+                service_status = "completed"
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                service_status = f"failed: {type(exc).__name__}: {exc}"
     report = clear_slot_cache_records(route_name=route_name, conversation_id=conversation_id, yes=yes)
     return "\n".join(
         [
             "slot/KV cache clear:",
             f"status: {report.get('status', '')}",
+            f"service clear: {service_status}",
+            ((service_output.strip() or "")[:2000] if service_output else ""),
             f"records removed: {report.get('records_removed', 0)}",
             f"files deleted: {report.get('files_deleted', 0)}",
             f"service-owned records: {report.get('service_owned_records', 0)}",
             f"records remaining: {report.get('records_remaining', 0)}",
         ]
-    )
+    ).replace("\n\nrecords removed:", "\nrecords removed:")
 
 
 def slot_cache_erase_text(selector: str) -> str:
@@ -15317,14 +15431,14 @@ def call_model(
             if stream:
                 reply = read_streaming_response(resp, echo=echo, spinner=spinner)
                 if slot_context is not None:
-                    slot_context = save_slot_cache_after_request(route_info, slot_context)
+                    slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
                     add_slot_cache_to_model_call_record(record, slot_context)
                 finish_model_call_record(record, started=started, completion_text=reply)
                 return reply
             spinner.stop()
             reply = read_json_response(resp)
             if slot_context is not None:
-                slot_context = save_slot_cache_after_request(route_info, slot_context)
+                slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
                 add_slot_cache_to_model_call_record(record, slot_context)
             finish_model_call_record(record, started=started, completion_text=reply)
             return reply
@@ -15761,7 +15875,7 @@ def call_model_with_callback(
         raise
     reply = "".join(collected)
     if slot_context is not None:
-        slot_context = save_slot_cache_after_request(route_info, slot_context)
+        slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
         add_slot_cache_to_model_call_record(record, slot_context)
     finish_model_call_record(
         record,
@@ -15820,6 +15934,7 @@ HELP_SECTIONS = [
             ("/model-stop ROUTE", "stop a local model service through motoko-model"),
             ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
             ("/slot-cache [ROUTE]", "show persistent slot/KV cache capability and manifest records"),
+            ("/slot-cache gc ROUTE", "ask motoko-model to prune service-owned slot files under cap"),
             ("/slot-cache erase ROUTE", "erase a route's active slot through the declared slot endpoint"),
             ("/retrieval-eval", "run synthetic retrieval-grounding checks"),
             ("/feedback-eval", "turn private feedback into eval fixtures"),
@@ -15987,6 +16102,7 @@ HELP_SECTIONS = [
             ("motoko model-stop ROUTE", "stop a local model service through motoko-model"),
             ("motoko model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
             ("motoko slot-cache [ROUTE]", "show persistent slot/KV cache capability and manifest records"),
+            ("motoko slot-cache gc ROUTE", "ask motoko-model to prune service-owned slot files under cap"),
             ("motoko slot-cache clear [ROUTE] --yes", "remove content-free slot-cache manifest records"),
             ("motoko slot-cache erase ROUTE", "erase a route's active slot through the declared slot endpoint"),
             ("motoko model-eval", "evaluate configured worker routes on synthetic source-grounded fixtures"),
@@ -16512,6 +16628,10 @@ def model_command_request(text: str):
         return "/model-metrics", lambda: model_service_metrics(selector)
     if primary == "/slot-cache":
         parts = body.split()
+        if parts and parts[0] == "gc":
+            if len(parts) < 2:
+                return "/slot-cache gc", lambda: "usage: /slot-cache gc ROUTE"
+            return "/slot-cache gc", lambda: slot_cache_gc_text(" ".join(parts[1:]).strip())
         if parts and parts[0] == "erase":
             if len(parts) < 2:
                 return "/slot-cache erase", lambda: "usage: /slot-cache erase ROUTE"
@@ -20328,7 +20448,7 @@ def command_slot_cache(args) -> None:
     route = ""
     conversation_id = ""
     yes = False
-    if raw_args and raw_args[0] in {"status", "clear", "erase"}:
+    if raw_args and raw_args[0] in {"status", "gc", "clear", "erase"}:
         command = raw_args.pop(0)
     if command == "clear":
         idx = 0
@@ -20350,6 +20470,10 @@ def command_slot_cache(args) -> None:
         route = " ".join(raw_args).strip()
     if command == "status":
         print_report(format_slot_cache(route or None))
+    elif command == "gc":
+        if not route:
+            raise SystemExit("usage: motoko slot-cache gc ROUTE")
+        print_report(slot_cache_gc_text(route))
     elif command == "clear":
         print_report(slot_cache_clear_text(route or None, conversation_id=conversation_id, yes=yes))
     elif command == "erase":
@@ -20549,7 +20673,7 @@ def main(argv: list[str]) -> int:
     slot_cache_cmd.add_argument(
         "slot_cache_args",
         nargs="*",
-        help="optional: [status ROUTE], [clear ROUTE --conversation ID --yes], or [erase ROUTE]",
+        help="optional: [status ROUTE], [gc ROUTE], [clear ROUTE --conversation ID --yes], or [erase ROUTE]",
     )
     slot_cache_cmd.set_defaults(func=command_slot_cache)
 

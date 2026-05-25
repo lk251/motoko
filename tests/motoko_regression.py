@@ -3272,6 +3272,13 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "deep_synthesis"],
                         "maxParallel": 1,
+                        "cache": {
+                            "prompt": True,
+                            "persistentSlotCache": True,
+                            "slotsEndpoint": True,
+                            "slotSavePath": "/var/lib/motoko-llm-slots-mares-qwen36-chat",
+                            "slotCacheMaxMiB": 32768,
+                        },
                     },
                     "qwen35-2b-worker": {
                         "endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
@@ -3305,6 +3312,22 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                     return f"stopped {route}"
                 if command == "metrics":
                     return "llama_prompt_seconds_total 1.23\nllama_tokens_total 42"
+                if command == "slot-cache-status":
+                    return "\n".join(
+                        [
+                            "realm=mares",
+                            f"route={route}",
+                            "persistent_slot_cache=1",
+                            "slot_cache_total_bytes=1400",
+                            "slot_cache_file_count=2",
+                            "slot_cache_cap_bytes=1000",
+                            "slot_cache_needs_gc=1",
+                        ]
+                    )
+                if command == "slot-cache-gc":
+                    return "slot_cache_deleted_files=1\nslot_cache_total_bytes=700"
+                if command == "slot-cache-clear":
+                    return "slot_cache_deleted_files=2\nslot_cache_total_bytes=0"
                 raise AssertionError(f"unexpected helper command: {command}")
 
             try:
@@ -3326,6 +3349,21 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                 assert "model metrics: qwen36-chat" in metrics
                 assert "llama_tokens_total 42" in metrics
                 assert ("metrics", "qwen36-chat") in calls
+
+                slot_report = m.format_slot_cache("qwen36-chat")
+                assert "service status source: motoko-model slot-cache-status qwen36-chat" in slot_report
+                assert "slot_cache_needs_gc=1" in slot_report
+                assert ("slot-cache-status", "qwen36-chat") in calls
+
+                gc = m.slot_cache_gc_text("qwen36-chat")
+                assert "slot/KV service GC: qwen36-chat" in gc
+                assert "slot_cache_deleted_files=1" in gc
+                assert ("slot-cache-gc", "qwen36-chat") in calls
+
+                cleared = m.slot_cache_clear_text("qwen36-chat", yes=True)
+                assert "service clear: completed" in cleared
+                assert "slot_cache_deleted_files=2" in cleared
+                assert ("slot-cache-clear", "qwen36-chat") in calls
             finally:
                 m.run_local_model_helper = old_run_helper
     finally:

@@ -1595,9 +1595,11 @@ If the slot-save path is service-owned, such as a per-realm systemd
 Motoko must not assume direct filesystem access to the KV files. In that
 boundary, Motoko may track content-free manifest rows and use `/slots` for
 restore/save/erase, but disk pruning must be performed by service-owned
-machinery such as `motoko-model` or a NixOS-managed cleanup unit. Motoko should
-surface `needs-service-gc` instead of pretending to enforce caps by deleting
-files it cannot access.
+machinery such as `motoko-model slot-cache-status`, `motoko-model
+slot-cache-gc`, and `motoko-model slot-cache-clear`. Motoko should surface
+`needs-service-gc` instead of pretending to enforce caps by deleting files it
+cannot access, and may call the service-owned GC helper to bring the route back
+under its declared cap.
 
 Per-realm filesystem policy also belongs in NixOS-managed Motoko config.
 Motoko rejects action/tool paths that cross into another Unix home by default,
