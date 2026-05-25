@@ -393,6 +393,7 @@ from motoko_core.slot_cache import (  # noqa: E402
     read_slot_cache_manifest,
     save_slot_cache_after_request,
     slot_cache_capability,
+    slot_cache_usage,
     slot_cache_report,
 )
 from motoko_core.model_manager import (  # noqa: E402
@@ -1623,6 +1624,9 @@ def default_config() -> dict:
         "permissions": {
             "mode": DEFAULT_PERMISSION_MODE,
         },
+        "security": {
+            "allow_cross_home_paths": [],
+        },
         "index": {
             "max_derived_bytes": None,
             "max_files": None,
@@ -1661,6 +1665,16 @@ def merged_config(data: dict | None) -> dict:
         mode = permissions.get("mode")
         if isinstance(mode, str) and mode in PERMISSION_MODE_DESCRIPTIONS:
             merged["permissions"]["mode"] = mode
+    security = data.get("security")
+    if isinstance(security, dict):
+        allowed = security.get("allow_cross_home_paths")
+        if isinstance(allowed, list):
+            rows = []
+            for item in allowed[:64]:
+                value = str(item or "").strip()
+                if value and "\x00" not in value and value not in rows:
+                    rows.append(value[:2000])
+            merged["security"]["allow_cross_home_paths"] = rows
     index = data.get("index")
     if isinstance(index, dict):
         for key in ("max_derived_bytes", "max_files", "max_file_bytes"):
@@ -1738,6 +1752,51 @@ def identity_realm() -> str:
 
 def identity_description() -> str:
     return identity_config().get("description") or ""
+
+
+def security_config() -> dict:
+    return load_config().get("security", default_config()["security"])
+
+
+def configured_cross_home_paths() -> list[pathlib.Path]:
+    rows = security_config().get("allow_cross_home_paths", [])
+    paths = []
+    if not isinstance(rows, list):
+        return paths
+    for item in rows:
+        text = str(item or "").strip()
+        if not text or "\x00" in text:
+            continue
+        paths.append(pathlib.Path(text).expanduser().resolve(strict=False))
+    return paths
+
+
+def require_not_cross_home(path: pathlib.Path) -> None:
+    resolved = path.expanduser().resolve(strict=False)
+    home = pathlib.Path.home().resolve(strict=False)
+    try:
+        resolved.relative_to(home)
+    except ValueError:
+        pass
+    else:
+        return
+    if resolved == home:
+        return
+    text = resolved.as_posix()
+    if not text.startswith("/home/"):
+        return
+    for allowed in configured_cross_home_paths():
+        try:
+            resolved.relative_to(allowed)
+        except ValueError:
+            if resolved == allowed:
+                return
+            continue
+        else:
+            return
+    raise AgenticValidationError(
+        "path crosses into another Unix home; configure security.allow_cross_home_paths if this realm is allowed"
+    )
 
 
 def format_identity() -> str:
@@ -2813,6 +2872,15 @@ def write_last_model_call(record: dict) -> None:
             "slot_cache_namespace",
             "slot_cache_manifest",
             "slot_cache_manifest_error_type",
+            "slot_cache_budget",
+            "slot_cache_budget_profile",
+            "slot_cache_budget_bytes",
+            "slot_cache_bytes",
+            "slot_cache_budget_records_removed",
+            "slot_cache_budget_files_deleted",
+            "slot_cache_budget_delete_failures",
+            "slot_cache_budget_protected_evicted",
+            "slot_cache_budget_error_type",
             "slot_cache_restore_error_type",
             "slot_cache_save_error_type",
             "governor_reason",
@@ -2853,6 +2921,24 @@ def add_slot_cache_to_model_call_record(record: dict, context: dict | None) -> N
         record["slot_cache_manifest"] = str(context.get("manifest"))
     if context.get("manifest_error_type"):
         record["slot_cache_manifest_error_type"] = str(context.get("manifest_error_type"))
+    if context.get("budget"):
+        record["slot_cache_budget"] = str(context.get("budget"))
+    if context.get("budget_profile"):
+        record["slot_cache_budget_profile"] = str(context.get("budget_profile"))
+    if context.get("budget_bytes") is not None:
+        record["slot_cache_budget_bytes"] = int(context.get("budget_bytes") or 0)
+    if context.get("cache_bytes") is not None:
+        record["slot_cache_bytes"] = int(context.get("cache_bytes") or 0)
+    if context.get("budget_records_removed") is not None:
+        record["slot_cache_budget_records_removed"] = int(context.get("budget_records_removed") or 0)
+    if context.get("budget_files_deleted") is not None:
+        record["slot_cache_budget_files_deleted"] = int(context.get("budget_files_deleted") or 0)
+    if context.get("budget_delete_failures") is not None:
+        record["slot_cache_budget_delete_failures"] = int(context.get("budget_delete_failures") or 0)
+    if context.get("budget_protected_evicted") is not None:
+        record["slot_cache_budget_protected_evicted"] = int(context.get("budget_protected_evicted") or 0)
+    if context.get("budget_error_type"):
+        record["slot_cache_budget_error_type"] = str(context.get("budget_error_type"))
     if context.get("restore_error_type"):
         record["slot_cache_restore_error_type"] = str(context.get("restore_error_type"))
     if context.get("save_error_type"):
@@ -2964,6 +3050,10 @@ def format_last_model_call(record: dict | None = None) -> str:
             detail += f" namespace={record.get('slot_cache_namespace')}"
         if record.get("slot_cache_manifest"):
             detail += f" manifest={record.get('slot_cache_manifest')}"
+        if record.get("slot_cache_budget"):
+            detail += f" budget={record.get('slot_cache_budget')}"
+        if record.get("slot_cache_budget_profile"):
+            detail += f"/{record.get('slot_cache_budget_profile')}"
         policy_lines.append(f"slot-cache={detail}")
     if policy_lines:
         lines.append("request policy: " + ", ".join(policy_lines))
@@ -3349,7 +3439,7 @@ def worker_model_eval_fixtures() -> list[dict]:
                 {"name": "scheduled date", "any": ["2026-05-21", "May 21"]},
                 {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
                 {"name": "obligation", "any": ["countersigned packet", "signed packet"]},
-                {"name": "path", "any": ["/home/mares/repos/orgfiles/legal.org", "legal.org"]},
+                {"name": "path", "any": ["/workspace/orgfiles/legal.org", "legal.org"]},
                 {"name": "project", "any": ["violet harbor"]},
             ],
             "forbidden_facts": [
@@ -3363,7 +3453,7 @@ def worker_model_eval_fixtures() -> list[dict]:
                     "SCHEDULED: <2026-05-21 Thu 09:00>",
                     "DEADLINE: <2026-05-22 Fri>",
                     "Project: violet harbor",
-                    "File reference: /home/mares/repos/orgfiles/legal.org",
+                    "File reference: /workspace/orgfiles/legal.org",
                     "Obligation: Javier must email the countersigned packet to Ana Alvarez before noon.",
                 ]
             ),
@@ -3393,7 +3483,7 @@ def worker_model_eval_fixtures() -> list[dict]:
                 {"name": "deadline", "any": ["2026-05-22", "May 22"]},
                 {"name": "project", "any": ["violet harbor"]},
                 {"name": "support task", "any": ["Draft support note"]},
-                {"name": "path", "any": ["/home/mares/repos/orgfiles/tasks.org", "tasks.org"]},
+                {"name": "path", "any": ["/workspace/orgfiles/tasks.org", "tasks.org"]},
             ],
             "forbidden_facts": [
                 {"name": "wrong repo", "any": ["nixos-configs"]},
@@ -3401,7 +3491,7 @@ def worker_model_eval_fixtures() -> list[dict]:
             ],
             "text": "\n\n".join(
                 [
-                    "Path: /home/mares/repos/orgfiles/tasks.org",
+                    "Path: /workspace/orgfiles/tasks.org",
                     "Chunk 1 summary: TODO priority A Send signed Alvarez packet for project violet harbor. "
                     "Deadline 2026-05-22. Obligation to email Ana Alvarez before noon.",
                     "Chunk 2 summary: TODO priority B Draft support note, scheduled 2026-05-23, "
@@ -3438,7 +3528,7 @@ def worker_model_eval_fixtures() -> list[dict]:
             ],
             "text": "\n".join(
                 [
-                    "Path: /home/mares/repos/orgfiles/inbox.org",
+                    "Path: /workspace/orgfiles/inbox.org",
                     "* TODO [#A] Client legal packet :client:legal:",
                     "DEADLINE: <2026-05-22 Fri>",
                     "Short note: active inbox item, current item.",
@@ -3476,12 +3566,12 @@ def worker_model_eval_fixtures() -> list[dict]:
             ],
             "text": "\n\n".join(
                 [
-                    "File /home/mares/repos/orgfiles/tasks.org: active planning file. "
+                    "File /workspace/orgfiles/tasks.org: active planning file. "
                     "Priority A TODO Send signed Alvarez packet. Deadline 2026-05-22. "
                     "Scheduled 2026-05-21 morning. Obligation: email Ana Alvarez.",
-                    "File /home/mares/repos/orgfiles/nixos-configs.org: repo planning file. "
+                    "File /workspace/orgfiles/nixos-configs.org: repo planning file. "
                     "Priority B TODO prepare branch review notes after the legal packet.",
-                    "File /home/mares/repos/orgfiles/ideas.org: ideas backlog for project violet harbor.",
+                    "File /workspace/orgfiles/ideas.org: ideas backlog for project violet harbor.",
                 ]
             ),
             "max_output_chars": 3000,
@@ -6146,8 +6236,7 @@ def require_project_write_allowed(path: pathlib.Path) -> pathlib.Path:
         raise AgenticValidationError("project write path contains NUL")
     if any(part in {"", ".."} for part in pathlib.PurePosixPath(raw).parts):
         raise AgenticValidationError("project write path must not contain traversal")
-    if identity_realm() == "mares" and (raw == "/home/personal" or raw.startswith("/home/personal/")):
-        raise AgenticValidationError("mares actions may not access /home/personal")
+    require_not_cross_home(target)
     if target.name == MOTOKO_IGNORE_FILE:
         raise AgenticValidationError("project write actions may not modify .motokoignore")
     if any(part in SKIP_INDEX_DIR_NAMES for part in target.parts):
@@ -6183,6 +6272,7 @@ def action_path_checker(_key: str, value: str, *, write: bool = False) -> None:
     candidate = pathlib.Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = pathlib.Path.cwd() / candidate
+    require_not_cross_home(candidate)
     if write:
         require_project_write_allowed(candidate)
     else:

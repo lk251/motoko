@@ -268,8 +268,6 @@ def validate_path_argument_boundaries(arguments: dict, tool: dict, *, realm: str
             candidate = pathlib.PurePosixPath(raw)
             if any(part in {"..", ""} for part in candidate.parts):
                 raise AgenticValidationError(f"argument {key} must not contain traversal")
-            if realm == "mares" and (raw == "/home/personal" or raw.startswith("/home/personal/")):
-                raise AgenticValidationError("mares actions may not access /home/personal")
             if path_checker is not None:
                 path_checker(key, item)
 
@@ -293,8 +291,6 @@ def validate_project_file_write_action(
     raw_posix = path_text.replace("\\", "/")
     if any(part in {"", ".."} for part in pathlib.PurePosixPath(raw_posix).parts):
         raise AgenticValidationError("project_file_write path must not contain traversal")
-    if realm == "mares" and (raw_posix == "/home/personal" or raw_posix.startswith("/home/personal/")):
-        raise AgenticValidationError("mares actions may not access /home/personal")
     if path_checker is not None:
         path_checker("path", path_text, write=True)
     mode = str(action.get("mode") or "create").strip().lower()

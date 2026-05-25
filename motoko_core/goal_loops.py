@@ -147,8 +147,6 @@ def validate_scope_paths(scope: list[str], *, path_checker=None) -> None:
         path = pathlib.PurePosixPath(text.replace("\\", "/"))
         if any(part in {"", ".."} for part in path.parts):
             raise GoalLoopValidationError("scope paths must not contain traversal")
-        if text == "/home/personal" or text.startswith("/home/personal/"):
-            raise GoalLoopValidationError("mares goal loops may not access /home/personal")
         if path_checker is not None:
             path_checker("scope", text)
 

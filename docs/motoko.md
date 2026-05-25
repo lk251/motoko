@@ -581,13 +581,32 @@ motoko slot-cache erase ROUTE
 
 Motoko stores only a realm-local, content-free manifest under
 `~/.local/state/motoko/slot-cache/`. The llama.cpp worker owns the actual KV
-files behind its declared `--slot-save-path`; Motoko calls the declared
-`/slots/{id}?action=restore|save|erase` endpoint only when
+files behind its declared `--slot-save-path`. That path must be declared by the
+NixOS per-realm route catalog, should be private to the route's worker user and
+client realm, and should be treated as prompt-derived private state. Motoko
+calls the declared `/slots/{id}?action=restore|save|erase` endpoint only when
 `persistentSlotCache`, `slotsEndpoint`, and `slotSavePath` are enabled and the
 route safety policy does not disable those surfaces. Cache restore/save failure
 is treated as a cache miss. Motoko must remain correct with no persistent KV
 cache and must not write prompts, responses, filenames, summaries, memories,
 retrieved context, corpora, or reasoning text to admin-owned logs.
+
+Slot/KV disk budget policy belongs in the NixOS route catalog. Motoko enforces
+the declared route policy and supports neutral profiles: `off`, `tiny`,
+`small`, `standard`, and `large`, plus explicit `slotCacheMaxBytes` or
+`slotCacheMaxMiB` values. Profiles are record-count policies when the route
+declares or Motoko observes the slot file size: `tiny` keeps about 1 file,
+`small` 2, `standard` 4, and `large` 8. NixOS may declare exact slot-file
+sizes with `slotCacheFileBytes` / `slotCacheFileMiB`; otherwise Motoko uses
+observed saved-file sizes and falls back to neutral estimates until a size is
+known. The application must not hard-code per-account budgets; NixOS decides
+which profile or byte cap each realm receives.
+
+Per-realm path policy also belongs in config, not source conditionals. Motoko
+rejects action/tool paths that cross into another Unix home by default.
+NixOS-managed `~/.config/motoko/config.json` may set
+`security.allow_cross_home_paths` for a realm if that realm is explicitly
+allowed to operate on another home path.
 
 `motoko list` displays compact `created`, `updated`, `branch`, and
 `conversation` columns. Full timestamps remain stored in the conversation JSON.

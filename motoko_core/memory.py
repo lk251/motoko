@@ -97,7 +97,6 @@ def memory_tags(text: str) -> list[str]:
         "from",
         "have",
         "into",
-        "javier",
         "motoko",
         "should",
         "that",

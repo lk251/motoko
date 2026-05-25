@@ -28,6 +28,27 @@ SLOT_CACHE_ENV = "MOTOKO_SLOT_CACHE"
 SLOT_CACHE_TIMEOUT_SECONDS = 120.0
 SLOT_CACHE_SOCKET_ACTIVATION_SECONDS = 900.0
 SLOT_CACHE_MAX_RECORDS = 128
+SLOT_CACHE_GIB = 1024 * 1024 * 1024
+SLOT_CACHE_DEFAULT_PROFILE = "standard"
+SLOT_CACHE_DEFAULT_SLOT_FILE_BYTES = 16 * SLOT_CACHE_GIB
+SLOT_CACHE_DEFAULT_BUDGET_BYTES = 4 * SLOT_CACHE_DEFAULT_SLOT_FILE_BYTES
+SLOT_CACHE_MAX_BYTES_ENV = "MOTOKO_SLOT_CACHE_MAX_BYTES"
+SLOT_CACHE_PROFILE_FALLBACK_BYTES = {
+    "off": 0,
+    "disabled": 0,
+    "tiny": 1 * SLOT_CACHE_DEFAULT_SLOT_FILE_BYTES,
+    "small": 2 * SLOT_CACHE_DEFAULT_SLOT_FILE_BYTES,
+    "standard": 4 * SLOT_CACHE_DEFAULT_SLOT_FILE_BYTES,
+    "large": 8 * SLOT_CACHE_DEFAULT_SLOT_FILE_BYTES,
+}
+SLOT_CACHE_PROFILE_FILE_COUNTS = {
+    "off": 0,
+    "disabled": 0,
+    "tiny": 1,
+    "small": 2,
+    "standard": 4,
+    "large": 8,
+}
 
 SLOT_CACHE_DISABLED_SURFACES = {
     "slot",
@@ -50,6 +71,35 @@ def slot_cache_enabled() -> bool:
     return value not in {"0", "false", "no", "off", "disable", "disabled"}
 
 
+def _parse_byte_count(raw, *, default: int = 0) -> int:
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if not text:
+        return default
+    multiplier = 1
+    for suffix, value in (
+        ("gib", SLOT_CACHE_GIB),
+        ("gb", 1000 * 1000 * 1000),
+        ("mib", 1024 * 1024),
+        ("mb", 1000 * 1000),
+        ("kib", 1024),
+        ("kb", 1000),
+        ("b", 1),
+    ):
+        if text.endswith(suffix):
+            multiplier = value
+            text = text[: -len(suffix)].strip()
+            break
+    try:
+        amount = float(text)
+    except ValueError:
+        return default
+    if amount < 0:
+        return default
+    return int(amount * multiplier)
+
+
 def _safe_component(value: str, fallback: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value)).strip("-") or fallback
 
@@ -61,6 +111,137 @@ def _sha256_text(text: str) -> str:
 def _cache_policy(route_info: dict) -> dict:
     value = route_info.get("cache")
     return value if isinstance(value, dict) else {}
+
+
+def _explicit_slot_cache_budget_bytes(route_info: dict) -> int | None:
+    policy = _cache_policy(route_info)
+    for key in ("slotCacheMaxBytes", "slot_cache_max_bytes", "maxDiskBytes", "max_disk_bytes"):
+        if key not in policy:
+            continue
+        value = _parse_byte_count(policy.get(key), default=-1)
+        if value >= 0:
+            return value
+    for key in ("slotCacheMaxMiB", "slot_cache_max_mib", "maxDiskMiB", "max_disk_mib"):
+        if key not in policy:
+            continue
+        try:
+            value = int(policy.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            return value * 1024 * 1024
+    return None
+
+
+def route_slot_cache_declared_file_bytes(route_info: dict) -> int:
+    policy = _cache_policy(route_info)
+    for key in (
+        "slotCacheFileBytes",
+        "slot_cache_file_bytes",
+        "slotFileBytes",
+        "slot_file_bytes",
+        "slotCacheEntryBytes",
+        "slot_cache_entry_bytes",
+    ):
+        if key not in policy:
+            continue
+        value = _parse_byte_count(policy.get(key), default=-1)
+        if value > 0:
+            return value
+    for key in (
+        "slotCacheFileMiB",
+        "slot_cache_file_mib",
+        "slotFileMiB",
+        "slot_file_mib",
+        "slotCacheEntryMiB",
+        "slot_cache_entry_mib",
+    ):
+        if key not in policy:
+            continue
+        try:
+            value = int(policy.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value * 1024 * 1024
+    return 0
+
+
+def observed_slot_file_bytes(route_info: dict, records: list[dict] | None = None) -> int:
+    records = records if records is not None else read_slot_cache_manifest().get("records", [])
+    route_name = local_model_helper_route(route_info)
+    sizes = [
+        _slot_record_size_bytes(row)
+        for row in records
+        if isinstance(row, dict) and row.get("catalog_route") == route_name
+    ]
+    sizes = [size for size in sizes if size > 0]
+    return max(sizes) if sizes else 0
+
+
+def route_slot_cache_file_budget_bytes(route_info: dict, records: list[dict] | None = None) -> int:
+    return route_slot_cache_declared_file_bytes(route_info) or observed_slot_file_bytes(route_info, records=records)
+
+
+def route_slot_cache_budget_bytes(route_info: dict, records: list[dict] | None = None) -> int:
+    if SLOT_CACHE_MAX_BYTES_ENV in os.environ:
+        env_budget = _parse_byte_count(os.environ.get(SLOT_CACHE_MAX_BYTES_ENV), default=-1)
+        if env_budget >= 0:
+            return env_budget
+    profile = slot_cache_budget_profile(route_info) or SLOT_CACHE_DEFAULT_PROFILE
+    if profile in {"off", "disabled"}:
+        return 0
+    explicit_budget = _explicit_slot_cache_budget_bytes(route_info)
+    if explicit_budget is not None:
+        return explicit_budget
+    if profile in SLOT_CACHE_PROFILE_FILE_COUNTS:
+        count = SLOT_CACHE_PROFILE_FILE_COUNTS[profile]
+        if count <= 0:
+            return 0
+        file_bytes = route_slot_cache_file_budget_bytes(route_info, records=records)
+        if file_bytes > 0:
+            return count * file_bytes
+    if profile in SLOT_CACHE_PROFILE_FALLBACK_BYTES:
+        return SLOT_CACHE_PROFILE_FALLBACK_BYTES[profile]
+    return SLOT_CACHE_DEFAULT_BUDGET_BYTES
+
+
+def slot_cache_budget_profile(route_info: dict) -> str:
+    policy = _cache_policy(route_info)
+    for key in ("slotCacheBudgetProfile", "slot_cache_budget_profile", "slotCacheProfile", "slot_cache_profile"):
+        value = policy.get(key)
+        if isinstance(value, str) and value.strip():
+            return re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower()).strip("-")
+    return ""
+
+
+def slot_cache_budget_label(route_info: dict) -> str:
+    profile = slot_cache_budget_profile(route_info)
+    if profile:
+        return profile
+    env_budget = _parse_byte_count(os.environ.get(SLOT_CACHE_MAX_BYTES_ENV), default=-1)
+    if SLOT_CACHE_MAX_BYTES_ENV in os.environ and env_budget >= 0:
+        return "env"
+    policy = _cache_policy(route_info)
+    if _explicit_slot_cache_budget_bytes(route_info) is not None:
+        return "explicit"
+    if route_slot_cache_declared_file_bytes(route_info) > 0:
+        return SLOT_CACHE_DEFAULT_PROFILE
+    return SLOT_CACHE_DEFAULT_PROFILE
+
+
+def route_slot_cache_budget_detail(route_info: dict, records: list[dict] | None = None) -> dict:
+    profile = slot_cache_budget_label(route_info)
+    explicit_budget = _explicit_slot_cache_budget_bytes(route_info)
+    file_bytes = route_slot_cache_file_budget_bytes(route_info, records=records)
+    count = SLOT_CACHE_PROFILE_FILE_COUNTS.get(slot_cache_budget_profile(route_info) or SLOT_CACHE_DEFAULT_PROFILE, 0)
+    return {
+        "profile": profile,
+        "bytes": route_slot_cache_budget_bytes(route_info, records=records),
+        "file_bytes": file_bytes,
+        "file_count": count,
+        "explicit": explicit_budget is not None,
+    }
 
 
 def _safety_policy(route_info: dict) -> dict:
@@ -86,6 +267,144 @@ def route_slot_save_path(route_info: dict) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _managed_slot_file_path(save_root: str, filename: str) -> pathlib.Path | None:
+    if not save_root or not filename or pathlib.PurePath(filename).name != filename:
+        return None
+    path = pathlib.Path(save_root).expanduser() / filename
+    try:
+        resolved_root = pathlib.Path(save_root).expanduser().resolve(strict=False)
+        resolved_path = path.resolve(strict=False)
+    except OSError:
+        return None
+    if resolved_root not in [resolved_path] + list(resolved_path.parents):
+        return None
+    return path
+
+
+def _slot_record_file_path(row: dict) -> pathlib.Path | None:
+    return _managed_slot_file_path(str(row.get("slot_save_path_declared") or ""), str(row.get("filename") or ""))
+
+
+def _slot_record_size_bytes(row: dict) -> int:
+    path = _slot_record_file_path(row)
+    if path is not None:
+        try:
+            return max(0, int(path.stat().st_size))
+        except OSError:
+            pass
+    for key in ("file_size_bytes", "n_written"):
+        try:
+            value = int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _unlink_slot_record_file(row: dict) -> bool:
+    path = _slot_record_file_path(row)
+    if path is None:
+        return False
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def slot_cache_usage(records: list[dict] | None = None) -> dict:
+    records = records if records is not None else read_slot_cache_manifest().get("records", [])
+    total = 0
+    unknown = 0
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        size = _slot_record_size_bytes(row)
+        if size <= 0:
+            unknown += 1
+        total += size
+    return {"bytes": total, "records": len([row for row in records if isinstance(row, dict)]), "unknown": unknown}
+
+
+def enforce_slot_cache_budget(route_info: dict, *, protect_key: tuple | None = None) -> dict:
+    manifest = read_slot_cache_manifest()
+    records = [row for row in manifest.get("records", []) if isinstance(row, dict)]
+    budget = route_slot_cache_budget_bytes(route_info, records=records)
+    before = slot_cache_usage(records)
+    if before["bytes"] <= budget:
+        return {
+            "status": "within-budget",
+            "budget_profile": slot_cache_budget_label(route_info),
+            "budget_bytes": budget,
+            "bytes_before": before["bytes"],
+            "bytes_after": before["bytes"],
+            "records_removed": 0,
+            "files_deleted": 0,
+            "delete_failures": 0,
+            "protected_evicted": 0,
+            "unknown_records": before["unknown"],
+        }
+
+    def record_key(row: dict) -> tuple:
+        return (row.get("route_fingerprint"), row.get("conversation_id"), row.get("filename"))
+
+    candidates = [row for row in records if record_key(row) != protect_key]
+    candidates.sort(key=lambda row: str(row.get("last_used") or row.get("updated") or row.get("created") or ""))
+    kept = list(records)
+    removed = []
+    files_deleted = 0
+    delete_failures = 0
+    current_bytes = before["bytes"]
+    for row in candidates:
+        if current_bytes <= budget:
+            break
+        size = _slot_record_size_bytes(row)
+        deleted = _unlink_slot_record_file(row)
+        if not deleted and size > 0:
+            delete_failures += 1
+            continue
+        removed.append(row)
+        files_deleted += 1 if deleted else 0
+        current_bytes = max(0, current_bytes - size)
+        kept = [item for item in kept if record_key(item) != record_key(row)]
+
+    protected_evicted = 0
+    if current_bytes > budget and protect_key is not None:
+        for row in list(kept):
+            if record_key(row) != protect_key:
+                continue
+            size = _slot_record_size_bytes(row)
+            deleted = _unlink_slot_record_file(row)
+            if not deleted and size > 0:
+                delete_failures += 1
+                continue
+            removed.append(row)
+            protected_evicted += 1
+            files_deleted += 1 if deleted else 0
+            current_bytes = max(0, current_bytes - size)
+            kept = [item for item in kept if record_key(item) != record_key(row)]
+
+    manifest["records"] = kept
+    write_slot_cache_manifest(manifest)
+    after = slot_cache_usage(kept)
+    status = "within-budget" if after["bytes"] <= budget else "over-budget"
+    return {
+        "status": status,
+        "budget_profile": slot_cache_budget_label(route_info),
+        "budget_bytes": budget,
+        "bytes_before": before["bytes"],
+        "bytes_after": after["bytes"],
+        "records_removed": len(removed),
+        "files_deleted": files_deleted,
+        "delete_failures": delete_failures,
+        "protected_evicted": protected_evicted,
+        "unknown_records": after["unknown"],
+    }
 
 
 def route_slot_id(route_info: dict) -> tuple[int | None, str]:
@@ -375,6 +694,18 @@ def save_slot_cache_after_request(
     if not conversation_id or not filename:
         context["save"] = "skipped-no-conversation"
         return context
+    budget_before = enforce_slot_cache_budget(route_info)
+    context["budget"] = budget_before.get("status")
+    context["budget_profile"] = budget_before.get("budget_profile")
+    context["budget_bytes"] = budget_before.get("budget_bytes")
+    context["cache_bytes"] = budget_before.get("bytes_after")
+    if int(budget_before.get("budget_bytes") or 0) <= 0:
+        context["save"] = "skipped-budget-disabled"
+        return context
+    if budget_before.get("status") == "over-budget":
+        context["save"] = "skipped-budget-full"
+        context["budget_delete_failures"] = budget_before.get("delete_failures", 0)
+        return context
     slot_id = int(context.get("slot_id") or capability.get("slot_id") or 0)
     try:
         response = call_slot_action(
@@ -415,6 +746,7 @@ def save_slot_cache_after_request(
         "n_saved": int(response.get("n_saved") or 0) if isinstance(response, dict) else 0,
         "n_written": int(response.get("n_written") or 0) if isinstance(response, dict) else 0,
     }
+    record["file_size_bytes"] = _slot_record_size_bytes(record)
     previous = latest_slot_cache_record(
         route_info,
         conversation_id,
@@ -433,6 +765,24 @@ def save_slot_cache_after_request(
         context["manifest"] = "update-failed"
         context["manifest_error_type"] = type(exc).__name__
     context["save_n"] = record["n_saved"]
+    if context.get("manifest") == "updated":
+        protect_key = (record.get("route_fingerprint"), record.get("conversation_id"), record.get("filename"))
+        try:
+            budget_after = enforce_slot_cache_budget(route_info, protect_key=protect_key)
+        except Exception as exc:
+            context["budget"] = "cleanup-failed"
+            context["budget_error_type"] = type(exc).__name__
+        else:
+            context["budget"] = budget_after.get("status")
+            context["budget_profile"] = budget_after.get("budget_profile")
+            context["budget_bytes"] = budget_after.get("budget_bytes")
+            context["cache_bytes"] = budget_after.get("bytes_after")
+            context["budget_records_removed"] = budget_after.get("records_removed", 0)
+            context["budget_files_deleted"] = budget_after.get("files_deleted", 0)
+            context["budget_delete_failures"] = budget_after.get("delete_failures", 0)
+            context["budget_protected_evicted"] = budget_after.get("protected_evicted", 0)
+            if budget_after.get("protected_evicted"):
+                context["save"] = "evicted-budget"
     return context
 
 
@@ -480,13 +830,13 @@ def clear_slot_cache_records(
         filename = str(row.get("filename") or "")
         if not save_root or not filename or pathlib.PurePath(filename).name != filename:
             continue
-        path = pathlib.Path(save_root).expanduser() / filename
+        path = _managed_slot_file_path(save_root, filename)
+        if path is None:
+            continue
         try:
-            resolved_root = pathlib.Path(save_root).expanduser().resolve(strict=False)
-            resolved_path = path.resolve(strict=False)
-            if resolved_root not in [resolved_path] + list(resolved_path.parents):
-                continue
             path.unlink()
+            deleted_files += 1
+        except FileNotFoundError:
             deleted_files += 1
         except OSError:
             continue
@@ -507,9 +857,15 @@ def slot_cache_report(route_info: dict | None = None) -> str:
         f"state: {slot_cache_dir()}",
         "privacy: manifest is realm-local and content-free; llama.cpp owns cache files behind declared slot-save-path",
         f"records: {len(records)}",
+        f"estimated bytes: {slot_cache_usage(records).get('bytes', 0)}",
     ]
     if route_info is not None:
         capability = slot_cache_capability(route_info, automatic=False)
+        route_records = [row for row in records if row.get("catalog_route") == capability.get("catalog_route")]
+        budget_detail = route_slot_cache_budget_detail(route_info, records=route_records)
+        budget = int(budget_detail.get("bytes") or 0)
+        budget_label = str(budget_detail.get("profile") or "")
+        route_usage = slot_cache_usage(route_records)
         lines.extend(
             [
                 f"route: {capability.get('catalog_route', '')}",
@@ -517,11 +873,14 @@ def slot_cache_report(route_info: dict | None = None) -> str:
                 f"slots endpoint: {capability.get('slots_endpoint', '') or 'none'}",
                 f"slot id: {capability.get('slot_id') if capability.get('slot_id') is not None else 'none'} ({capability.get('slot_id_source', '')})",
                 f"slot save path: {capability.get('slot_save_path_declared', '') or 'not declared'}",
+                f"budget: {budget_label} ({budget} bytes)",
+                f"budget file size: {budget_detail.get('file_bytes', 0)} bytes",
+                f"budget file count: {budget_detail.get('file_count', 0)}",
+                f"route estimated bytes: {route_usage.get('bytes', 0)}",
             ]
         )
         for reason in capability.get("reasons", [])[:8]:
             lines.append(f"reason: {reason}")
-        route_records = [row for row in records if row.get("catalog_route") == capability.get("catalog_route")]
     else:
         route_records = records
     if route_records:

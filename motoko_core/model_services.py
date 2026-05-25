@@ -70,6 +70,50 @@ def format_route_cache_policy(route_info: dict) -> str:
     )
     if isinstance(slot_path, str) and slot_path.strip():
         pieces.append(f"slot-save-path={slot_path.strip()[:160]}")
+    slot_profile = (
+        policy.get("slotCacheBudgetProfile")
+        or policy.get("slot_cache_budget_profile")
+        or policy.get("slotCacheProfile")
+        or policy.get("slot_cache_profile")
+    )
+    if isinstance(slot_profile, str) and slot_profile.strip():
+        pieces.append(f"slot-cache-profile={slot_profile.strip()[:80]}")
+    slot_max_bytes = (
+        policy.get("slotCacheMaxBytes")
+        or policy.get("slot_cache_max_bytes")
+        or policy.get("maxDiskBytes")
+        or policy.get("max_disk_bytes")
+    )
+    slot_max_mib = (
+        policy.get("slotCacheMaxMiB")
+        or policy.get("slot_cache_max_mib")
+        or policy.get("maxDiskMiB")
+        or policy.get("max_disk_mib")
+    )
+    if slot_max_bytes is not None:
+        pieces.append(f"slot-cache-max={slot_max_bytes}B")
+    elif slot_max_mib is not None:
+        pieces.append(f"slot-cache-max={slot_max_mib}MiB")
+    slot_file_bytes = (
+        policy.get("slotCacheFileBytes")
+        or policy.get("slot_cache_file_bytes")
+        or policy.get("slotFileBytes")
+        or policy.get("slot_file_bytes")
+        or policy.get("slotCacheEntryBytes")
+        or policy.get("slot_cache_entry_bytes")
+    )
+    slot_file_mib = (
+        policy.get("slotCacheFileMiB")
+        or policy.get("slot_cache_file_mib")
+        or policy.get("slotFileMiB")
+        or policy.get("slot_file_mib")
+        or policy.get("slotCacheEntryMiB")
+        or policy.get("slot_cache_entry_mib")
+    )
+    if slot_file_bytes is not None:
+        pieces.append(f"slot-cache-file={slot_file_bytes}B")
+    elif slot_file_mib is not None:
+        pieces.append(f"slot-cache-file={slot_file_mib}MiB")
     if route_info.get("metrics_endpoint"):
         metrics_path = route_info.get("metrics_path") or "/metrics"
         pieces.append(f"metrics-endpoint={route_info.get('metrics_endpoint')} path={metrics_path}")

@@ -126,6 +126,36 @@ def normalize_route_cache_policy(raw) -> dict:
             continue
         if value >= 0:
             policy[key] = value
+    for key in (
+        "slotCacheMaxBytes",
+        "slot_cache_max_bytes",
+        "maxDiskBytes",
+        "max_disk_bytes",
+        "slotCacheMaxMiB",
+        "slot_cache_max_mib",
+        "maxDiskMiB",
+        "max_disk_mib",
+        "slotCacheFileBytes",
+        "slot_cache_file_bytes",
+        "slotFileBytes",
+        "slot_file_bytes",
+        "slotCacheEntryBytes",
+        "slot_cache_entry_bytes",
+        "slotCacheFileMiB",
+        "slot_cache_file_mib",
+        "slotFileMiB",
+        "slot_file_mib",
+        "slotCacheEntryMiB",
+        "slot_cache_entry_mib",
+    ):
+        if key not in raw:
+            continue
+        try:
+            value = int(raw.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value >= 0:
+            policy[key] = value
     if "slotPromptSimilarity" in raw:
         try:
             value = float(raw.get("slotPromptSimilarity"))
@@ -143,6 +173,10 @@ def normalize_route_cache_policy(raw) -> dict:
         "slot_save_path",
         "slotSaveRoot",
         "slot_save_root",
+        "slotCacheBudgetProfile",
+        "slot_cache_budget_profile",
+        "slotCacheProfile",
+        "slot_cache_profile",
         "note",
     ):
         value = raw.get(key)

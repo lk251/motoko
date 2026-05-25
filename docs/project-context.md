@@ -382,12 +382,14 @@ Current sequencing notes:
   = true`, a `slotsEndpoint`, and a `slotSavePath` for the route, while leaving
   the relevant slot surfaces enabled. Motoko stores only a realm-local,
   content-free manifest under `~/.local/state/motoko/slot-cache/`; llama.cpp
-  owns the actual KV files inside its declared `--slot-save-path`. Manifest
-  records are keyed by conversation id, route/model/context/slot fingerprint,
-  Motoko chat slot-cache namespace, and content-free cache filename. Bump
-  `CHAT_SLOT_CACHE_NAMESPACE_VERSION` when chat prompt assembly, context
-  packing, or template assumptions change enough that old slot files should not
-  be reused. Prompts, responses, retrieved context,
+  owns the actual KV files inside its declared `--slot-save-path`. The
+  slot-save path is NixOS policy and must be per-realm/private to the approved
+  worker boundary; Motoko must not infer per-account locations or budgets from
+  account names. Manifest records are keyed by conversation id,
+  route/model/context/slot fingerprint, Motoko chat slot-cache namespace, and
+  content-free cache filename. Bump `CHAT_SLOT_CACHE_NAMESPACE_VERSION` when
+  chat prompt assembly, context packing, or template assumptions change enough
+  that old slot files should not be reused. Prompts, responses, retrieved context,
   filenames, memories, summaries, corpora, and reasoning text must not be
   written to admin-owned logs or content-free telemetry. Cache restore/save
   failure is treated as a cache miss, never as an answer failure.
@@ -1578,6 +1580,21 @@ gates: the cache must be declared by NixOS, stored in a realm-local service path
 fingerprinted by route/model/context/slot details plus Motoko's chat slot-cache
 namespace, and tracked in Motoko only by a content-free private manifest.
 Restore/save/erase failures are cache misses, not answer failures.
+Disk budget policy belongs in the NixOS route catalog: NixOS may declare a
+neutral `slotCacheBudgetProfile` such as `off`, `tiny`, `small`, `standard`, or
+`large`, or an explicit `slotCacheMaxBytes` / `slotCacheMaxMiB` cap. Profiles
+are count-based when the route declares or Motoko observes slot-file size:
+`tiny` keeps about 1 file, `small` 2, `standard` 4, and `large` 8. NixOS can
+declare exact per-route file sizes with `slotCacheFileBytes` /
+`slotCacheFileMiB`; Motoko otherwise uses observed saved-file sizes and neutral
+fallback estimates until a size is known. Motoko must not hard-code per-account
+budgets.
+
+Per-realm filesystem policy also belongs in NixOS-managed Motoko config.
+Motoko rejects action/tool paths that cross into another Unix home by default,
+but a realm can be explicitly allowed to operate on a cross-home path with
+`security.allow_cross_home_paths`. Source code must not branch on account names
+to decide path authority.
 
 Background and maintenance worker routes must also respect model residency.
 Large chat routes may stay resident briefly after a foreground answer because
@@ -1648,4 +1665,5 @@ it records a private manifest and lets llama.cpp save/restore by opaque,
 content-free filename. The route fingerprint includes
 `CHAT_SLOT_CACHE_NAMESPACE_VERSION`, which is the Motoko-side invalidation knob
 for prompt/context-packing changes. The feature must remain optional and
-non-fatal.
+non-fatal. Disk caps are declared by NixOS route policy and enforced by Motoko;
+account-specific caps do not belong in Motoko code.

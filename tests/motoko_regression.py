@@ -1178,6 +1178,8 @@ class SlotCacheHandler(BaseHTTPRequestHandler):
     payloads = []
     paths = []
     slot_payloads = []
+    slot_root = None
+    slot_file_size = 0
 
     def do_POST(self):  # noqa: N802 - stdlib handler API
         self.__class__.paths.append(self.path)
@@ -1190,12 +1192,16 @@ class SlotCacheHandler(BaseHTTPRequestHandler):
         if self.path.startswith("/slots/"):
             self.__class__.slot_payloads.append((self.path, payload))
             action = self.path.split("action=", 1)[-1]
+            if action.startswith("save") and self.__class__.slot_root and payload.get("filename"):
+                slot_path = pathlib.Path(self.__class__.slot_root) / pathlib.PurePath(payload["filename"]).name
+                slot_path.parent.mkdir(parents=True, exist_ok=True)
+                slot_path.write_bytes(b"x" * int(self.__class__.slot_file_size or 0))
             response = {
                 "id_slot": 0,
                 "filename": payload.get("filename", ""),
                 "n_saved": 123 if action.startswith("save") else 0,
                 "n_restored": 123 if action.startswith("restore") else 0,
-                "n_written": 456,
+                "n_written": int(self.__class__.slot_file_size or 456),
                 "n_read": 456,
                 "n_erased": 123 if action.startswith("erase") else 0,
             }
@@ -1938,6 +1944,8 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
     SlotCacheHandler.payloads = []
     SlotCacheHandler.paths = []
     SlotCacheHandler.slot_payloads = []
+    SlotCacheHandler.slot_root = None
+    SlotCacheHandler.slot_file_size = 0
     try:
         os.environ.pop("MOTOKO_ENDPOINT", None)
         os.environ.pop("MOTOKO_MODEL", None)
@@ -2039,6 +2047,175 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
             os.environ.pop("MOTOKO_MODEL", None)
         else:
             os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_slot_cache_budget_profile_can_disable_saves(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    SlotCacheHandler.payloads = []
+    SlotCacheHandler.paths = []
+    SlotCacheHandler.slot_payloads = []
+    SlotCacheHandler.slot_root = None
+    SlotCacheHandler.slot_file_size = 0
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            socket_path = tmp / "chat-slot-budget-off.sock"
+            server = UnixHTTPServer(str(socket_path), SlotCacheHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "test",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat-default": {
+                        "endpoint": f"unix://{socket_path}",
+                        "model": "qwen-slot-test",
+                        "tasks": ["chat", "default_chat"],
+                        "selection": {"default": True},
+                        "cache": {
+                            "prompt": True,
+                            "persistentSlotCache": True,
+                            "slotsEndpoint": True,
+                            "slotSavePath": str(tmp / "slots"),
+                            "slotCacheBudgetProfile": "off",
+                        },
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            text = m.call_model_with_callback(
+                [{"role": "user", "content": "budget off"}],
+                on_token=lambda _token: None,
+                timeout=2,
+                slot_cache_context={"conversation_id": "conv-budget-off"},
+            )
+            assert text == "OK"
+            assert not any(path == "/slots/0?action=save" for path, _payload in SlotCacheHandler.slot_payloads)
+            record = m.read_last_model_call()
+            assert record["slot_cache_save"] == "skipped-budget-disabled"
+            assert record["slot_cache_budget_profile"] == "off"
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        SlotCacheHandler.slot_root = None
+        SlotCacheHandler.slot_file_size = 0
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_slot_cache_budget_gc_removes_old_records(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    socket_path = None
+    SlotCacheHandler.payloads = []
+    SlotCacheHandler.paths = []
+    SlotCacheHandler.slot_payloads = []
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        with isolated_state() as tmp:
+            slot_root = tmp / "slots"
+            SlotCacheHandler.slot_root = slot_root
+            SlotCacheHandler.slot_file_size = 700
+            socket_path = tmp / "chat-slot-budget.sock"
+            server = UnixHTTPServer(str(socket_path), SlotCacheHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "test",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen36-chat-default": {
+                        "endpoint": f"unix://{socket_path}",
+                        "model": "qwen-slot-test",
+                        "tasks": ["chat", "default_chat"],
+                        "selection": {"default": True},
+                        "cache": {
+                            "prompt": True,
+                            "persistentSlotCache": True,
+                            "slotsEndpoint": True,
+                            "slotSavePath": str(slot_root),
+                            "slotCacheBudgetProfile": "tiny",
+                        },
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            for conv_id in ("conv-a", "conv-b"):
+                assert (
+                    m.call_model_with_callback(
+                        [{"role": "user", "content": f"cache for {conv_id}"}],
+                        on_token=lambda _token: None,
+                        timeout=2,
+                        slot_cache_context={"conversation_id": conv_id},
+                    )
+                    == "OK"
+                )
+            manifest = m.read_slot_cache_manifest()
+            records = manifest["records"]
+            assert len(records) == 1
+            assert records[0]["conversation_id"] == "conv-b"
+            assert m.slot_cache_usage(records)["bytes"] <= 700
+            record = m.read_last_model_call()
+            assert record["slot_cache_budget"] == "within-budget"
+            assert record["slot_cache_budget_profile"] == "tiny"
+            assert record["slot_cache_budget_bytes"] == 700
+            assert record["slot_cache_budget_files_deleted"] == 1
+            server.shutdown()
+            server.server_close()
+    finally:
+        if socket_path is not None:
+            with contextlib.suppress(OSError):
+                pathlib.Path(socket_path).unlink()
+        SlotCacheHandler.slot_root = None
+        SlotCacheHandler.slot_file_size = 0
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
+def test_cross_home_action_policy_is_config_driven(m):
+    with isolated_state():
+        target = pathlib.Path("/home/motoko-other/private/file.org")
+        try:
+            m.require_not_cross_home(target)
+        except m.AgenticValidationError as exc:
+            assert "security.allow_cross_home_paths" in str(exc)
+        else:
+            raise AssertionError("cross-home path should be denied by default")
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(
+            m.config_path(),
+            json.dumps(
+                {
+                    "security": {
+                        "allow_cross_home_paths": ["/home/motoko-other/private"],
+                    }
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+        )
+        m.require_not_cross_home(target)
 
 
 def test_slot_cache_failures_are_nonfatal_cache_misses(m):
@@ -8879,6 +9056,9 @@ def main() -> int:
         test_local_model_catalog_task_routes,
         test_slot_cache_capability_respects_route_gates,
         test_persistent_slot_cache_saves_and_restores_chat_slot,
+        test_slot_cache_budget_profile_can_disable_saves,
+        test_slot_cache_budget_gc_removes_old_records,
+        test_cross_home_action_policy_is_config_driven,
         test_slot_cache_failures_are_nonfatal_cache_misses,
         test_catalog_request_policy_shapes_chat_payload_and_telemetry,
         test_chat_context_governor_selects_declared_route_profiles,
