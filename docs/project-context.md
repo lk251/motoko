@@ -1272,6 +1272,16 @@ efficiency. The likely shape is:
 - consider parser-backed artifacts for Org, Markdown, email, source code,
   configs, package manifests, and PDFs only after the dependency tradeoff is
   reviewed;
+- add a source-repo code intelligence layer for Motoko, Texere, and similar
+  codebases: deterministic extraction of functions, classes, imports, command
+  names, schemas, tests, and call/reference-like relationships; code-aware
+  chunks by function/class/module rather than only text size; and hybrid
+  lexical/vector/rerank retrieval over those code artifacts. When designing
+  this, explicitly consider whether a Hermes-agent-style tools/skills approach
+  could be the right way to package repeatable codebase procedures such as
+  "find command implementation", "trace function callers", or "map module
+  boundaries"; this is a design option to evaluate, not a commitment to adopt
+  Hermes' broader tool runtime.
 - improve deduplication and boilerplate handling through hashing,
   normalized-text comparison, simhash/minhash-style fingerprints, email
   quote/signature stripping, and later embedding similarity if an embedding
