@@ -509,6 +509,7 @@ except ImportError:  # pragma: no cover - readline is platform dependent.
 
 APP = "motoko"
 APP_VERSION = "0.1.0"
+PROJECT_SCOPE_SCHEMA_VERSION = "project-scope-v1"
 LIVE_JOB_SUPERVISOR = JobSupervisor()
 DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
 DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
@@ -1166,12 +1167,57 @@ def conversation_project_roots(conv: dict | None) -> set[str]:
     return roots
 
 
-def active_project_roots(conv: dict | None = None) -> set[str]:
+def project_scope_for_request(conv: dict | None = None, query: str = "", path: str | None = None) -> dict:
+    root_record = current_project_root_record(path)
+    root = str(root_record.get("root", "") or "").strip()
+    roots = [str(pathlib.Path(root).expanduser().resolve())] if root else []
+    return {
+        "schema": PROJECT_SCOPE_SCHEMA_VERSION,
+        "mode": "current-project",
+        "project": root_record,
+        "roots": roots,
+        "conversation_id": str(conv.get("id", "") if isinstance(conv, dict) else ""),
+        "query_sha256": sha256_hex(str(query or "").encode("utf-8")) if query else "",
+    }
+
+
+def project_scope_roots(project_scope: dict | None) -> set[str]:
+    if not isinstance(project_scope, dict):
+        return set()
     roots: set[str] = set()
-    current_root = current_project_root_record().get("root", "")
-    if current_root:
-        roots.add(str(pathlib.Path(current_root).expanduser().resolve()))
+    for root in project_scope.get("roots", []) or []:
+        root_text = str(root or "").strip()
+        if root_text:
+            roots.add(str(pathlib.Path(root_text).expanduser().resolve()))
+    project = project_scope.get("project") if isinstance(project_scope.get("project"), dict) else {}
+    root = str(project.get("root", "") or "").strip()
+    if root:
+        roots.add(str(pathlib.Path(root).expanduser().resolve()))
     return roots
+
+
+def project_scope_source(project_scope: dict, **extra) -> dict:
+    roots = sorted(project_scope_roots(project_scope))
+    source = {
+        "kind": "project-scope",
+        "schema": PROJECT_SCOPE_SCHEMA_VERSION,
+        "mode": project_scope.get("mode", "current-project"),
+        "roots": roots,
+        "root": roots[0] if roots else "",
+    }
+    source.update(extra)
+    return source
+
+
+def project_scope_note(project_scope: dict, lines: list[str]) -> str:
+    roots = sorted(project_scope_roots(project_scope))
+    text = [f"Project scope: current project root={roots[0] if roots else '(unknown)'}"]
+    text.extend(line for line in lines if line)
+    return "\n".join(text)
+
+
+def active_project_roots(conv: dict | None = None) -> set[str]:
+    return project_scope_roots(project_scope_for_request(conv))
 
 
 def topic_project_roots(topic: dict | None) -> set[str]:
@@ -1197,8 +1243,9 @@ def dossier_project_roots(dossier: dict | None) -> set[str]:
         conv_id = str(item.get("id", "") or "").strip()
         if not conv_id:
             continue
-        with contextlib.suppress(Exception):
-            roots.update(conversation_project_roots(load_conversation(conv_id)))
+        conv = load_conversation_if_exists(conv_id)
+        if conv is not None:
+            roots.update(conversation_project_roots(conv))
     return roots
 
 
@@ -2301,6 +2348,11 @@ def load_conversation(conversation_id: str | None = None) -> dict:
         label_func=conversation_label,
         selector=conversation_id,
     )
+
+
+def load_conversation_if_exists(conversation_id: str) -> dict | None:
+    data = safe_load_json(conversation_path(conversation_id))
+    return data if isinstance(data, dict) else None
 
 
 def format_conversation_banner(conv: dict) -> str:
@@ -4485,16 +4537,18 @@ def select_retrieval_debug_indexes(
     conv: dict | None = None,
     index_ids: list[str] | None = None,
     limit: int = 3,
+    project_scope: dict | None = None,
 ) -> list[dict]:
     if index_ids:
         return [load_index_exact(index_id) for index_id in index_ids]
-    project_roots = active_project_roots(conv)
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    project_roots = project_scope_roots(project_scope)
     attached = attached_index_ids(conv or {}, project_roots=project_roots) if conv else []
     if attached:
         return [load_index_exact(index_id) for index_id in attached[:limit]]
     ranked = [
         row
-        for row in ranked_indexes_for_query(query, project_roots=project_roots)
+        for row in ranked_indexes_for_query(query, project_scope=project_scope)
         if int(row.get("_score", 0) or 0) > 0
     ]
     if ranked:
@@ -4523,7 +4577,8 @@ def run_retrieval_debug(
         sync_attached_indexes_to_latest(conv)
     limit = max(1, min(int(limit or 8), 50))
     query_counts = token_counts(query)
-    indexes = select_retrieval_debug_indexes(query, conv=conv, index_ids=index_ids)
+    project_scope = project_scope_for_request(conv, query)
+    indexes = select_retrieval_debug_indexes(query, conv=conv, index_ids=index_ids, project_scope=project_scope)
     report = {
         "schema": RETRIEVAL_DEBUG_SCHEMA_VERSION,
         "id": _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
@@ -5043,8 +5098,24 @@ def ranked_memories(
     conv: dict | None = None,
     query: str = "",
     limit: int = MEMORY_RETRIEVAL_LIMIT,
+    project_scope: dict | None = None,
 ) -> list[dict]:
     rows = load_memories(limit=500)
+    if project_scope is not None:
+        project_roots = project_scope_roots(project_scope)
+        if project_roots:
+            scoped_rows = []
+            for row in rows:
+                conversation_id = str(row.get("conversation_id", "") or "").strip()
+                if not conversation_id:
+                    scoped_rows.append(row)
+                    continue
+                memory_conv = load_conversation_if_exists(conversation_id)
+                if memory_conv is not None:
+                    memory_roots = conversation_project_roots(memory_conv)
+                    if roots_match_project(memory_roots, project_roots):
+                        scoped_rows.append(row)
+            rows = scoped_rows
     return rank_memory_rows(
         rows,
         conv=conv,
@@ -5056,7 +5127,7 @@ def ranked_memories(
 
 
 def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT) -> list[dict]:
-    return ranked_memories(query=query, limit=limit)
+    return ranked_memories(query=query, limit=limit, project_scope=project_scope_for_request(query=query))
 
 
 def conversation_recall_text_with_config(conv: dict, recall: dict) -> str:
@@ -5125,10 +5196,11 @@ def attach_recent_conversation_snippets(rows: list[dict], query_counts, recall: 
     return enriched_rows
 
 
-def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
+def ranked_recent_conversations(conv: dict, query: str = "", *, project_scope: dict | None = None) -> list[dict]:
     recall = conversation_recall_config()
     current_id = conv.get("id", "")
-    project_roots = active_project_roots(conv)
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    project_roots = project_scope_roots(project_scope)
     rows = []
     for row in list_conversations():
         if row.get("id") == current_id:
@@ -5162,9 +5234,14 @@ def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
     return attach_recent_conversation_snippets(ranked, query_counts, recall)
 
 
-def render_recent_conversations_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
+def render_recent_conversations_with_sources(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+) -> tuple[str, list[dict]]:
     recall = conversation_recall_config()
-    conversations = ranked_recent_conversations(conv, query)
+    conversations = ranked_recent_conversations(conv, query, project_scope=project_scope)
     return render_recent_conversations_with_sources_core(
         conversations,
         relative_time_func=relative_time,
@@ -7538,6 +7615,29 @@ def load_profile_dossier() -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def profile_matches_project_scope(profile: dict | None, project_scope: dict | None) -> bool:
+    if not isinstance(profile, dict) or project_scope is None:
+        return True
+    project_roots = project_scope_roots(project_scope)
+    if not project_roots:
+        return True
+    conversation_ids = [
+        str(conversation_id or "").strip()
+        for conversation_id in profile.get("conversation_ids", []) or []
+        if str(conversation_id or "").strip()
+    ]
+    if not conversation_ids:
+        return True
+    for conversation_id in conversation_ids:
+        conv = load_conversation_if_exists(conversation_id)
+        if conv is None:
+            return False
+        roots = conversation_project_roots(conv)
+        if not roots_match_project(roots, project_roots):
+            return False
+    return True
+
+
 def profile_source_material() -> tuple[str, list[str], list[str]]:
     memories = load_memories(limit=PROFILE_SOURCE_MEMORIES)
     conversations = [
@@ -7628,8 +7728,11 @@ def refresh_profile_dossier() -> dict:
     return data
 
 
-def render_profile_with_sources() -> tuple[str, list[dict]]:
-    return render_profile_with_sources_core(load_profile_dossier())
+def render_profile_with_sources(*, project_scope: dict | None = None) -> tuple[str, list[dict]]:
+    profile = load_profile_dossier()
+    if profile is not None and not profile_matches_project_scope(profile, project_scope):
+        return "No profile dossier in the current project scope.", []
+    return render_profile_with_sources_core(profile)
 
 
 def print_profile() -> None:
@@ -8151,16 +8254,41 @@ def rank_items_by_query(items: list[dict], query: str, fields: list[str]) -> lis
     return ranked
 
 
-def ranked_dossiers_for_query(query: str) -> list[dict]:
-    return rank_items_by_query(list_dossiers(), query, ["name", "query", "summary"])
+def ranked_dossiers_for_query(query: str, *, project_scope: dict | None = None) -> list[dict]:
+    dossiers = list_dossiers()
+    if project_scope is not None:
+        project_roots = project_scope_roots(project_scope)
+        if project_roots:
+            dossiers = [
+                dossier
+                for dossier in dossiers
+                if roots_match_project(dossier_project_roots(dossier), project_roots)
+            ]
+    return rank_items_by_query(dossiers, query, ["name", "query", "summary"])
 
 
-def ranked_topics_for_query(query: str) -> list[dict]:
-    return rank_items_by_query(list_topics(), query, ["name", "query", "summary"])
+def ranked_topics_for_query(query: str, *, project_scope: dict | None = None) -> list[dict]:
+    topics = list_topics()
+    if project_scope is not None:
+        project_roots = project_scope_roots(project_scope)
+        if project_roots:
+            topics = [
+                topic
+                for topic in topics
+                if roots_match_project(topic_project_roots(topic), project_roots)
+            ]
+    return rank_items_by_query(topics, query, ["name", "query", "summary"])
 
 
-def ranked_indexes_for_query(query: str, *, project_roots: set[str] | None = None) -> list[dict]:
+def ranked_indexes_for_query(
+    query: str,
+    *,
+    project_roots: set[str] | None = None,
+    project_scope: dict | None = None,
+) -> list[dict]:
     indexes = latest_indexes_by_family()
+    if project_scope is not None:
+        project_roots = project_scope_roots(project_scope)
     if project_roots:
         indexes = [
             index
@@ -11574,10 +11702,11 @@ def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: di
     return rows
 
 
-def default_vector_index(conv: dict | None = None) -> dict:
-    project_roots = active_project_roots(conv)
+def default_vector_index(conv: dict | None = None, *, project_scope: dict | None = None) -> dict:
+    project_scope = project_scope or project_scope_for_request(conv)
+    project_roots = project_scope_roots(project_scope)
     if conv:
-        attached = attached_index_ids(conv, project_roots=project_roots)
+        attached = attached_index_ids(conv, project_scope=project_scope)
         if attached:
             return load_index_exact(attached[0])
     latest = latest_indexes_by_family()
@@ -14423,10 +14552,16 @@ def unfinished_work_notice(limit: int = 3) -> str:
     return "\n".join(lines)
 
 
-def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | None:
+def maybe_attach_relevant_existing_dossier(
+    conv: dict,
+    query: str,
+    *,
+    project_scope: dict | None = None,
+) -> dict | None:
     attached = attached_item_ids(conv, "dossier")
-    project_roots = active_project_roots(conv)
-    for dossier in ranked_dossiers_for_query(query):
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    project_roots = project_scope_roots(project_scope)
+    for dossier in ranked_dossiers_for_query(query, project_scope=project_scope):
         if dossier.get("id", "") in attached:
             continue
         if dossier.get("_score", 0) < STUDY_REUSE_MIN_SCORE:
@@ -14438,10 +14573,16 @@ def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | Non
     return None
 
 
-def maybe_attach_relevant_existing_topic(conv: dict, query: str) -> dict | None:
+def maybe_attach_relevant_existing_topic(
+    conv: dict,
+    query: str,
+    *,
+    project_scope: dict | None = None,
+) -> dict | None:
     attached = attached_item_ids(conv, "topic")
-    project_roots = active_project_roots(conv)
-    for topic in ranked_topics_for_query(query):
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    project_roots = project_scope_roots(project_scope)
+    for topic in ranked_topics_for_query(query, project_scope=project_scope):
         if topic.get("id", "") in attached:
             continue
         if topic.get("_score", 0) < STUDY_REUSE_MIN_SCORE:
@@ -14453,8 +14594,9 @@ def maybe_attach_relevant_existing_topic(conv: dict, query: str) -> dict | None:
     return None
 
 
-def best_relevant_index(query: str) -> dict | None:
-    for index in ranked_indexes_for_query(query, project_roots=active_project_roots()):
+def best_relevant_index(query: str, *, project_scope: dict | None = None) -> dict | None:
+    project_scope = project_scope or project_scope_for_request(query=query)
+    for index in ranked_indexes_for_query(query, project_scope=project_scope):
         if index.get("_score", 0) >= STUDY_INDEX_MIN_SCORE:
             return index
         break
@@ -14537,17 +14679,18 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
     if not query:
         raise SystemExit("usage: /study QUERY")
     retrieval_query = study_retrieval_query(query, focus)
+    project_scope = project_scope_for_request(conv, retrieval_query)
     topic_limit = min(TOPIC_DEFAULT_CHUNKS, 8) if focus == "recent" else TOPIC_DEFAULT_CHUNKS
 
-    topic = maybe_attach_relevant_existing_topic(conv, retrieval_query)
+    topic = maybe_attach_relevant_existing_topic(conv, retrieval_query, project_scope=project_scope)
     if topic:
         return f"attached existing topic dossier: {topic.get('id')} ({topic.get('name', '')})"
 
-    dossier = maybe_attach_relevant_existing_dossier(conv, retrieval_query)
+    dossier = maybe_attach_relevant_existing_dossier(conv, retrieval_query, project_scope=project_scope)
     if dossier:
         return f"attached existing memory dossier: {dossier.get('id')} ({dossier.get('name', '')})"
 
-    index_ids = attached_index_ids(conv)
+    index_ids = attached_index_ids(conv, project_scope=project_scope)
     if index_ids:
         topic = build_topic_dossier(
             index_ids,
@@ -14560,7 +14703,7 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from attached index(es): {topic.get('id')}"
 
-    index = best_relevant_index(retrieval_query)
+    index = best_relevant_index(retrieval_query, project_scope=project_scope)
     if index:
         topic = build_topic_dossier(
             [index["id"]],
@@ -14578,15 +14721,23 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
     return f"built memory dossier: {dossier.get('id')}"
 
 
-def context_sufficiency_note(conv: dict, query: str, sources: list[dict]) -> str:
+def context_sufficiency_note(
+    conv: dict,
+    query: str,
+    sources: list[dict],
+    *,
+    project_scope: dict | None = None,
+) -> str:
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    scoped_items = scoped_context_items(conv.get("context_items", []), project_scope_roots(project_scope))
     return context_sufficiency_note_core(
         sources,
         has_conversation_summary=bool(conv.get("summary", "").strip()),
-        ranked_topics=ranked_topics_for_query(query),
-        ranked_dossiers=ranked_dossiers_for_query(query),
-        best_index=best_relevant_index(query),
-        attached_topic_ids=set(attached_item_ids(conv, "topic")),
-        attached_dossier_ids=set(attached_item_ids(conv, "dossier")),
+        ranked_topics=ranked_topics_for_query(query, project_scope=project_scope),
+        ranked_dossiers=ranked_dossiers_for_query(query, project_scope=project_scope),
+        best_index=best_relevant_index(query, project_scope=project_scope),
+        attached_topic_ids={item.get("id", "") for item in scoped_items if item.get("kind") == "topic" and item.get("id")},
+        attached_dossier_ids={item.get("id", "") for item in scoped_items if item.get("kind") == "dossier" and item.get("id")},
         study_reuse_min_score=STUDY_REUSE_MIN_SCORE,
     )
 
@@ -14778,8 +14929,9 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     if conv.get("messages"):
         query = context_query_text(conv, conv.get("title", ""))
         if query.strip():
-            topic = next((row for row in ranked_topics_for_query(query) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
-            dossier = next((row for row in ranked_dossiers_for_query(query) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
+            project_scope = project_scope_for_request(conv, query)
+            topic = next((row for row in ranked_topics_for_query(query, project_scope=project_scope) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
+            dossier = next((row for row in ranked_dossiers_for_query(query, project_scope=project_scope) if row.get("_score", 0) >= STUDY_REUSE_MIN_SCORE), None)
             if topic and topic.get("id") not in attached_item_ids(conv, "topic"):
                 notes.append(f"existing topic dossier may fit this chat: {topic.get('id')}")
             if dossier and dossier.get("id") not in attached_item_ids(conv, "dossier"):
@@ -14960,8 +15112,13 @@ def retrieve_from_dossier(dossier: dict, query: str) -> tuple[str, list[dict]]:
     return retrieve_from_dossier_core(dossier, query, max_chars=MAX_RETRIEVAL_CHARS)
 
 
-def render_memories_with_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
-    memories = ranked_memories(conv=conv, query=query)
+def render_memories_with_sources(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+) -> tuple[str, list[dict]]:
+    memories = ranked_memories(conv=conv, query=query, project_scope=project_scope)
     return render_memories_with_sources_core(
         memories,
         has_any_memory=bool(load_memories(limit=1)),
@@ -15002,6 +15159,43 @@ def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str
     return result.text, result.sources
 
 
+def best_project_index_for_recovery(query: str, project_scope: dict) -> dict | None:
+    best = best_relevant_index(query, project_scope=project_scope)
+    if best is not None:
+        return best
+    ranked = ranked_indexes_for_query(query, project_scope=project_scope)
+    return ranked[0] if ranked else None
+
+
+def scoped_context_selection(conv: dict, query: str, project_scope: dict) -> dict:
+    raw_items = [item for item in conv.get("context_items", []) if isinstance(item, dict)]
+    scoped_items = scoped_context_items(raw_items, project_scope_roots(project_scope))
+    filtered_count = len(raw_items) - len(scoped_items)
+    fallback_index = None
+    fallback_added = False
+    fallback_reason = ""
+    scoped_index_ids = {
+        str(item.get("id", ""))
+        for item in scoped_items
+        if item.get("kind") == "index" and item.get("id")
+    }
+    scoped_starved = filtered_count > 0 and (not scoped_items or filtered_count >= len(scoped_items))
+    if scoped_starved:
+        fallback_index = best_project_index_for_recovery(query, project_scope)
+        if fallback_index and str(fallback_index.get("id", "")) not in scoped_index_ids:
+            scoped_items.append(context_item_from_index(fallback_index))
+            fallback_added = True
+            fallback_reason = "current-project index selected after out-of-scope context filtering"
+    return {
+        "raw_items": raw_items,
+        "scoped_items": scoped_items,
+        "filtered_count": filtered_count,
+        "fallback_index": fallback_index if fallback_added else None,
+        "fallback_reason": fallback_reason,
+        "scoped_starved": scoped_starved,
+    }
+
+
 def render_conversation_summary(conv: dict) -> str:
     summary = conv.get("summary", "").strip()
     if not summary:
@@ -15017,17 +15211,45 @@ def format_context_plan(plan: dict) -> str:
     return format_context_plan_core(plan, default_budget_chars=CONTEXT_PLAN_BUDGET_CHARS)
 
 
-def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, dict]:
+def build_prompt_context_package(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+) -> tuple[object, dict]:
     sync_attached_indexes_to_latest(conv)
-    project_roots = active_project_roots(conv)
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    project_roots = project_scope_roots(project_scope)
     identity = identity_config()
-    memory_text, memory_sources = render_memories_with_sources(conv, query)
-    recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
-    profile_text, profile_sources = render_profile_with_sources()
+    memory_text, memory_sources = render_memories_with_sources(conv, query, project_scope=project_scope)
+    recent_text, recent_sources = render_recent_conversations_with_sources(conv, query, project_scope=project_scope)
+    profile_text, profile_sources = render_profile_with_sources(project_scope=project_scope)
     skill_text, skill_sources = render_skills_with_sources(query)
     retrieval_query = context_query_text(conv, query)
-    context_items = scoped_context_items(conv.get("context_items", []), project_roots)
-    context_text, context_sources = render_context_with_sources(context_items, retrieval_query)
+    context_selection = scoped_context_selection(conv, retrieval_query, project_scope)
+    context_text, context_sources = render_context_with_sources(context_selection["scoped_items"], retrieval_query)
+    scope_lines = []
+    scope_sources = []
+    if context_selection["filtered_count"]:
+        scope_lines.append(
+            f"Filtered {context_selection['filtered_count']} out-of-scope attached context item(s) before retrieval."
+        )
+    if context_selection.get("fallback_index"):
+        fallback_index = context_selection["fallback_index"]
+        scope_lines.append(
+            "Scoped retrieval was starved after filtering, so Motoko retried with "
+            f"current-project index {fallback_index.get('id', '')}."
+        )
+    if scope_lines:
+        scope_sources.append(
+            project_scope_source(
+                project_scope,
+                filtered_context_items=context_selection["filtered_count"],
+                fallback_index_id=(context_selection.get("fallback_index") or {}).get("id", ""),
+                fallback_reason=context_selection.get("fallback_reason", ""),
+            )
+        )
+    scope_text = project_scope_note(project_scope, scope_lines) if scope_lines else ""
     catalog = read_context_catalog() or build_context_catalog()
     catalog_text = format_context_catalog(catalog, project_roots=project_roots)
     personality_text, personality_file, personality_exists = load_personality()
@@ -15064,6 +15286,7 @@ def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, d
             ContextLane("durable memories", memory_text, memory_sources, "ranked personal facts and preferences"),
             ContextLane("procedural skills", skill_text, skill_sources, "relevant learned procedures and debugging lessons"),
             ContextLane("recent conversations", recent_text, recent_sources, "bounded recency plus relevance recall"),
+            ContextLane("project scope", scope_text, scope_sources, "current-project retrieval boundary and recovery"),
             ContextLane(
                 "conversation summary",
                 summary_text,
@@ -15096,26 +15319,33 @@ def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, d
         "memory_text": memory_text,
         "skill_text": skill_text,
         "recent_text": recent_text,
+        "scope_text": scope_text,
         "summary_text": summary_text,
         "context_text": context_text,
         "catalog_text": catalog_text,
     }
 
 
-def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, list[dict]]:
-    context_package, context_values = build_prompt_context_package(conv, query)
+def build_system_prompt_and_sources(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+) -> tuple[str, list[dict]]:
+    context_package, context_values = build_prompt_context_package(conv, query, project_scope=project_scope)
     identity = context_values["identity"]
     personality_text = context_values["personality_text"]
     profile_text = context_values["profile_text"]
     memory_text = context_values["memory_text"]
     skill_text = context_values["skill_text"]
     recent_text = context_values["recent_text"]
+    scope_text = context_values["scope_text"]
     summary_text = context_values["summary_text"]
     context_text = context_values["context_text"]
     catalog_text = context_values["catalog_text"]
     sources = list(context_package.sources)
     context_plan = context_package.context_plan
-    sufficiency = context_sufficiency_note(conv, query, sources)
+    sufficiency = context_sufficiency_note(conv, query, sources, project_scope=project_scope)
     return textwrap.dedent(
         f"""
         You are {identity.get('name', 'Motoko')}, Javier's local assistant
@@ -15162,6 +15392,9 @@ def build_system_prompt_and_sources(conv: dict, query: str = "") -> tuple[str, l
         Recent saved conversations:
         {recent_text}
 
+        Current project retrieval scope:
+        {scope_text or 'No out-of-scope attached context was used.'}
+
         Compacted conversation summary:
         {summary_text}
 
@@ -15183,11 +15416,18 @@ def format_source_kind_counts(source_kinds: dict) -> str:
     return format_source_kind_counts_core(source_kinds)
 
 
-def format_retrieval_preview(conv: dict, query: str = "", *, max_chars: int = RETRIEVAL_PREVIEW_CHARS) -> str:
+def format_retrieval_preview(
+    conv: dict,
+    query: str = "",
+    *,
+    max_chars: int = RETRIEVAL_PREVIEW_CHARS,
+    project_scope: dict | None = None,
+) -> str:
     query = query.strip() or context_query_text(conv, conv.get("title", ""))
     if not query.strip():
         raise SystemExit("usage: /retrieval-preview QUERY")
-    context_package, _context_values = build_prompt_context_package(conv, query)
+    project_scope = project_scope or project_scope_for_request(conv, query)
+    context_package, _context_values = build_prompt_context_package(conv, query, project_scope=project_scope)
     sources = list(context_package.sources)
     audit = answer_grounding_audit(query, "", sources)
     context_plan = context_package.context_plan
@@ -15227,8 +15467,13 @@ def current_conversation_messages_for_model(conv: dict) -> list[dict]:
     return selected
 
 
-def build_messages(conv: dict, query: str = "") -> tuple[list[dict], list[dict]]:
-    prompt, sources = build_system_prompt_and_sources(conv, query)
+def build_messages(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+) -> tuple[list[dict], list[dict]]:
+    prompt, sources = build_system_prompt_and_sources(conv, query, project_scope=project_scope)
     messages = [{"role": "system", "content": prompt}]
     messages.extend(current_conversation_messages_for_model(conv))
     return messages, sources
@@ -16773,17 +17018,18 @@ def evidence_command_request(text: str, conv: dict):
         )
     if primary == "/evidence-query":
         query = body or context_query_text(conv, conv.get("title", ""))
+        project_scope = project_scope_for_request(conv, query)
 
         def run_query() -> str:
-            index_ids = attached_index_ids(conv)
+            index_ids = attached_index_ids(conv, project_scope=project_scope)
             if index_ids:
                 index = load_index_exact(index_ids[0])
-                store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(
-                    index,
-                    write=False,
-                )
             else:
-                store = latest_evidence_store()
+                index = default_vector_index(conv, project_scope=project_scope)
+            store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(
+                index,
+                write=False,
+            )
             return format_evidence_query_report(query_evidence_store(store, query))
 
         return "/evidence-query", run_query
@@ -17326,9 +17572,16 @@ def maybe_set_title(conv: dict, text: str) -> None:
         conv["title_kind"] = "provisional"
 
 
-def attached_index_ids(conv: dict, *, project_roots: set[str] | None = None) -> list[str]:
-    if project_roots is None:
-        project_roots = active_project_roots(conv)
+def attached_index_ids(
+    conv: dict,
+    *,
+    project_roots: set[str] | None = None,
+    project_scope: dict | None = None,
+) -> list[str]:
+    if project_scope is not None:
+        project_roots = project_scope_roots(project_scope)
+    elif project_roots is None:
+        project_roots = project_scope_roots(project_scope_for_request(conv))
     ids = []
     for item in conv.get("context_items", []):
         if item.get("kind") == "index" and item.get("id"):
@@ -17338,16 +17591,17 @@ def attached_index_ids(conv: dict, *, project_roots: set[str] | None = None) -> 
     return ids
 
 
-def format_task_candidates_from_chat(conv: dict, query: str = "") -> str:
+def format_task_candidates_from_chat(conv: dict, query: str = "", *, project_scope: dict | None = None) -> str:
     query = query.strip() or context_query_text(conv, conv.get("title", "")) or "priority tasks"
+    project_scope = project_scope or project_scope_for_request(conv, query)
     indexes = []
-    for index_id in attached_index_ids(conv):
+    for index_id in attached_index_ids(conv, project_scope=project_scope):
         try:
             indexes.append(load_index(index_id))
         except SystemExit:
             continue
     if not indexes:
-        best = best_relevant_index(query)
+        best = best_relevant_index(query, project_scope=project_scope)
         if best is not None:
             indexes.append(best)
     if not indexes:
@@ -17371,6 +17625,7 @@ def format_task_candidates_from_chat(conv: dict, query: str = "") -> str:
 def build_topic_from_chat(conv: dict, text: str) -> dict:
     owner = str(conv.get("id", ""))
     body = text.strip()
+    project_scope = project_scope_for_request(conv, body)
     if not body and sys.stdin.isatty():
         index = load_index(None)
         query = input(style("topic query> ", "turquoise")).strip()
@@ -17386,7 +17641,7 @@ def build_topic_from_chat(conv: dict, text: str) -> dict:
         else:
             return build_topic_dossier([parts[0]], parts[1], owner_conversation_id=owner)
 
-    index_ids = attached_index_ids(conv)
+    index_ids = attached_index_ids(conv, project_scope=project_scope)
     if not index_ids:
         raise SystemExit("attach an index first or use: /topic INDEX_ID QUERY")
     return build_topic_dossier(index_ids, body, owner_conversation_id=owner)
@@ -17395,6 +17650,7 @@ def build_topic_from_chat(conv: dict, text: str) -> dict:
 def deepen_topic_from_chat(conv: dict, text: str) -> dict:
     owner = str(conv.get("id", ""))
     body = text.strip()
+    project_scope = project_scope_for_request(conv, body)
     if not body:
         raise SystemExit("usage: /deepen [INDEX_ID] QUERY")
     parts = body.split(maxsplit=1)
@@ -17405,7 +17661,7 @@ def deepen_topic_from_chat(conv: dict, text: str) -> dict:
             pass
         else:
             return build_topic_dossier([parts[0]], parts[1], max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner)
-    index_ids = attached_index_ids(conv)
+    index_ids = attached_index_ids(conv, project_scope=project_scope)
     if not index_ids:
         raise SystemExit("attach an index first or use: /deepen INDEX_ID QUERY")
     return build_topic_dossier(index_ids, body, max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner)
@@ -18532,11 +18788,12 @@ class MotokoTui:
         self.generating = True
         self.cancel_event = threading.Event()
         cancel_event = self.cancel_event
+        project_scope = project_scope_for_request(self.conv, user_text)
 
         def worker() -> None:
             try:
                 raise_if_cancelled(cancel_event)
-                topic = maybe_attach_relevant_existing_topic(self.conv, user_text)
+                topic = maybe_attach_relevant_existing_topic(self.conv, user_text, project_scope=project_scope)
                 raise_if_cancelled(cancel_event)
                 if topic:
                     self.put_event(
@@ -18545,7 +18802,7 @@ class MotokoTui:
                             f"auto-attached topic dossier: {topic.get('id')} ({topic.get('name', '')})",
                         )
                     )
-                dossier = maybe_attach_relevant_existing_dossier(self.conv, user_text)
+                dossier = maybe_attach_relevant_existing_dossier(self.conv, user_text, project_scope=project_scope)
                 raise_if_cancelled(cancel_event)
                 if dossier:
                     self.put_event(
@@ -18554,7 +18811,7 @@ class MotokoTui:
                             f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})",
                         )
                     )
-                messages, sources = build_messages(self.conv, user_text)
+                messages, sources = build_messages(self.conv, user_text, project_scope=project_scope)
                 raise_if_cancelled(cancel_event)
                 selected_route, _governor = model_route_for_request(MODEL_ROUTE_CHAT, messages)
                 if route_kv_offload_disabled(selected_route):
@@ -19367,10 +19624,11 @@ def chat_loop(conv: dict) -> None:
             continue
 
         maybe_set_title(conv, user_text)
-        topic = maybe_attach_relevant_existing_topic(conv, user_text)
+        project_scope = project_scope_for_request(conv, user_text)
+        topic = maybe_attach_relevant_existing_topic(conv, user_text, project_scope=project_scope)
         if topic:
             print(f"sys auto-attached topic dossier: {topic.get('id')} ({topic.get('name', '')})")
-        dossier = maybe_attach_relevant_existing_dossier(conv, user_text)
+        dossier = maybe_attach_relevant_existing_dossier(conv, user_text, project_scope=project_scope)
         if dossier:
             print(f"sys auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
         conv.setdefault("messages", []).append({"role": "user", "content": user_text})
@@ -19378,7 +19636,7 @@ def chat_loop(conv: dict) -> None:
         if explicit_saved:
             print(f"sys memory saved from this prompt ({explicit_saved})")
         print("\n" + assistant_label("Motoko "), end="", flush=True)
-        messages, sources = build_messages(conv, user_text)
+        messages, sources = build_messages(conv, user_text, project_scope=project_scope)
         reply = call_model(
             messages,
             source_count=len(sources),
@@ -20742,7 +21000,7 @@ def conversation_for_retrieval_preview(query: str, *, conversation_id: str | Non
     for index_id in index_ids or []:
         conv.setdefault("context_items", []).append(context_item_from_index(load_index_exact(index_id)))
     if not conv.get("context_items"):
-        best = best_relevant_index(query)
+        best = best_relevant_index(query, project_scope=project_scope_for_request(conv, query))
         if best is not None:
             conv.setdefault("context_items", []).append(context_item_from_index(best))
     return conv

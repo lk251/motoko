@@ -844,6 +844,39 @@ def test_profile_dossier(m):
             m.quiet_model = old_quiet
 
 
+def test_project_scope_filters_memory_and_profile_context(m):
+    with isolated_state():
+        current = m.new_conversation("Current project")
+        current["id"] = "current-project"
+        write_conversation(m, current)
+        other = m.new_conversation("Other project")
+        other["id"] = "other-project"
+        other["project"] = {"kind": "git", "root": "/tmp/not-this-project"}
+        write_conversation(m, other)
+
+        m.add_memory("Current project craft note.", source="test", conversation_id=current["id"])
+        m.add_memory("Other project craft note.", source="test", conversation_id=other["id"])
+        m.add_memory("Global craft preference.", source="test")
+
+        scope = m.project_scope_for_request(current, "craft")
+        text, sources = m.render_memories_with_sources(current, "craft", project_scope=scope)
+        assert "Current project craft note" in text
+        assert "Global craft preference" in text
+        assert "Other project craft note" not in text
+        assert not any(source.get("conversation_id") == other["id"] for source in sources)
+
+        other_profile = {
+            "updated": m.now(),
+            "memory_ids": [],
+            "conversation_ids": [other["id"]],
+            "text": "Other project profile material.",
+        }
+        m.atomic_write(m.profile_path(), json.dumps(other_profile, ensure_ascii=False, indent=2) + "\n")
+        profile_text, profile_sources = m.render_profile_with_sources(project_scope=scope)
+        assert "Other project profile material" not in profile_text
+        assert profile_sources == []
+
+
 def test_core_profile_rendering_is_injectable(m):
     profile = {
         "updated": "2026-05-23T00:00:00+00:00",
@@ -4804,6 +4837,16 @@ def test_prompt_context_filters_attached_artifacts_to_current_project(m):
             assert other_text not in values["context_text"]
             assert any(source.get("root") == str(current.resolve()) for source in package.sources if source.get("kind") == "index")
             assert not any(source.get("root") == str(other.resolve()) for source in package.sources if source.get("kind") == "index")
+
+            starved = m.new_conversation("Scoped fallback")
+            starved["context_items"] = [m.context_item_from_index(other_index)]
+            fallback_package, fallback_values = m.build_prompt_context_package(starved, "alpha implementation")
+            scope_source = next(source for source in fallback_package.sources if source.get("kind") == "project-scope")
+            assert current_text in fallback_values["context_text"]
+            assert other_text not in fallback_values["context_text"]
+            assert scope_source["filtered_context_items"] == 1
+            assert scope_source["fallback_index_id"] == current_index["id"]
+            assert "retried with current-project index" in fallback_values["scope_text"]
     finally:
         os.chdir(old_cwd)
         if old_evidence is None:
@@ -4814,6 +4857,51 @@ def test_prompt_context_filters_attached_artifacts_to_current_project(m):
             os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
         else:
             os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
+def test_project_scope_filters_topic_reuse_before_attachment(m):
+    old_cwd = os.getcwd()
+    try:
+        with isolated_state() as tmp:
+            current = tmp / "current"
+            other = tmp / "other"
+            current.mkdir()
+            other.mkdir()
+            current_file = current / "notes.md"
+            other_file = other / "notes.md"
+            current_file.write_text("Alpha implementation current project.", encoding="utf-8")
+            other_file.write_text("Alpha implementation other project.", encoding="utf-8")
+            os.chdir(current)
+            current_topic = {
+                "id": "topic-current",
+                "name": "Alpha current implementation",
+                "query": "alpha implementation",
+                "summary": "Alpha implementation current project",
+                "source_indexes": [{"root": str(current.resolve())}],
+                "evidence": [{"path": str(current_file.resolve()), "chunk": 1}],
+            }
+            other_topic = {
+                "id": "topic-other",
+                "name": "Alpha other implementation",
+                "query": "alpha implementation",
+                "summary": "Alpha implementation other project alpha implementation",
+                "source_indexes": [{"root": str(other.resolve())}],
+                "evidence": [{"path": str(other_file.resolve()), "chunk": 1}],
+            }
+            m.atomic_write(m.topic_path(other_topic["id"]), json.dumps(other_topic, ensure_ascii=False, indent=2) + "\n")
+            m.atomic_write(m.topic_path(current_topic["id"]), json.dumps(current_topic, ensure_ascii=False, indent=2) + "\n")
+            conv = m.new_conversation("Topic reuse")
+            scope = m.project_scope_for_request(conv, "alpha implementation")
+            topic = m.maybe_attach_relevant_existing_topic(conv, "alpha implementation", project_scope=scope)
+
+            assert topic is not None
+            assert topic["id"] == current_topic["id"]
+            assert conv["context_items"] == [m.context_item_from_topic(current_topic)]
+            assert [row["id"] for row in m.ranked_topics_for_query("alpha implementation", project_scope=scope)] == [
+                current_topic["id"]
+            ]
+    finally:
+        os.chdir(old_cwd)
 
 
 def test_assistant_color_config(m):
@@ -5403,11 +5491,15 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         assert ui.overlay_lines == ["attached: /tmp/context.txt"]
         assert conv["context_items"][-1]["path"] == "/tmp/context.txt"
 
-        old_latest_evidence_store = m.latest_evidence_store
+        old_default_vector_index = m.default_vector_index
+        old_latest_evidence_store_for_index = m.latest_evidence_store_for_index
+        old_build_evidence_store_from_index = m.build_evidence_store_from_index
         old_query_evidence_store = m.query_evidence_store
         old_format_evidence_query_report = m.format_evidence_query_report
         try:
-            m.latest_evidence_store = lambda: {"id": "store"}
+            m.default_vector_index = lambda conv_arg, project_scope=None: {"id": "idx"}
+            m.latest_evidence_store_for_index = lambda index, fresh_only=True: {"id": "store", "index": index["id"]}
+            m.build_evidence_store_from_index = lambda index, write=False: {"id": "built-store", "index": index["id"]}
             m.query_evidence_store = lambda store, query: {"store": store, "query": query}
             m.format_evidence_query_report = lambda report: f"evidence query: {report['query']}"
             ui.handle_command("/evidence-query texere")
@@ -5417,7 +5509,9 @@ def test_tui_report_commands_do_not_persist_system_output(m):
                 time.sleep(0.01)
             ui.drain_events()
         finally:
-            m.latest_evidence_store = old_latest_evidence_store
+            m.default_vector_index = old_default_vector_index
+            m.latest_evidence_store_for_index = old_latest_evidence_store_for_index
+            m.build_evidence_store_from_index = old_build_evidence_store_from_index
             m.query_evidence_store = old_query_evidence_store
             m.format_evidence_query_report = old_format_evidence_query_report
 
@@ -5563,7 +5657,7 @@ def test_tui_prompt_is_saved_before_context_preparation(m):
         old_build_messages = m.build_messages
         old_call_model = m.call_model_with_callback
         try:
-            def slow_build_messages(conv_arg, query=""):
+            def slow_build_messages(conv_arg, query="", **_kwargs):
                 build_started.set()
                 assert release_build.wait(2)
                 return [{"role": "system", "content": "prompt"}] + conv_arg.get("messages", []), []
@@ -5628,7 +5722,7 @@ def test_tui_stop_during_preparing_cancels_before_model_call(m):
         old_build_messages = m.build_messages
         old_call_model = m.call_model_with_callback
         try:
-            def slow_build_messages(conv_arg, query=""):
+            def slow_build_messages(conv_arg, query="", **_kwargs):
                 build_started.set()
                 assert release_build.wait(2)
                 return [{"role": "system", "content": "prompt"}] + conv_arg.get("messages", []), []
@@ -9362,6 +9456,7 @@ def main() -> int:
         test_interrupted_maintenance_resume,
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,
+        test_project_scope_filters_memory_and_profile_context,
         test_memory_dossier,
         test_spinner_and_input_wrapping,
         test_phase_timer_key_ignores_progress_counters,
@@ -9429,6 +9524,7 @@ def main() -> int:
         test_context_package_builds_sources_and_plan,
         test_system_prompt_uses_context_package_for_plan,
         test_prompt_context_filters_attached_artifacts_to_current_project,
+        test_project_scope_filters_topic_reuse_before_attachment,
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
         test_report_highlighting_is_render_only,
