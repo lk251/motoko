@@ -283,3 +283,30 @@ def lines_at_cursor_sequence(lines: list[str]) -> str:
         if idx + 1 < len(lines):
             parts.append("\n")
     return "".join(parts)
+
+
+def bottom_area_absolute_sequence(
+    lines: list[str],
+    *,
+    cursor_row: int,
+    cursor_col: int,
+    height: int,
+    previous_rows: int = 0,
+) -> str:
+    """Render the bottom prompt/status frame without trusting cursor history."""
+    if not lines:
+        return ""
+    height = max(1, height)
+    visible_rows = lines[:height]
+    rows_to_clear = min(height, max(len(visible_rows), int(previous_rows or 0), 1))
+    clear_start = max(1, height - rows_to_clear + 1)
+    frame_start = max(1, height - len(visible_rows) + 1)
+    target_row = min(height, frame_start + max(0, min(cursor_row, len(visible_rows) - 1)))
+    target_col = max(1, int(cursor_col or 1))
+    parts = [f"\033[{clear_start};1H\033[J", f"\033[{frame_start};1H"]
+    for idx, line in enumerate(visible_rows):
+        parts.append(f"\r{line}\033[K")
+        if idx + 1 < len(visible_rows):
+            parts.append("\n")
+    parts.append(f"\033[{target_row};{target_col}H\033[?25h")
+    return "".join(parts)

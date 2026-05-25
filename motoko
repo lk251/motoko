@@ -104,6 +104,7 @@ from motoko_core.index_storage import (  # noqa: E402
     format_index_storage_audit,
 )
 from motoko_core.tui_render import (  # noqa: E402
+    bottom_area_absolute_sequence as render_bottom_area_absolute_sequence,
     bottom_clear_sequence as render_bottom_clear_sequence,
     bottom_area_frame as render_bottom_area_frame,
     dropdown_display_lines,
@@ -18944,18 +18945,18 @@ class MotokoTui:
             height=height,
             truncation_marker="…",
         )
-        rows_below_cursor = max(0, len(lines) - cursor_row - 1)
         frame_key = (width, height, tuple(lines), cursor_row, cursor_col)
         if not force and frame_key == getattr(self, "bottom_frame_key", None):
             return
-        movement = ""
-        if rows_below_cursor:
-            movement += f"\033[{rows_below_cursor}A"
-        movement += "\r"
-        if cursor_col > 1:
-            movement += f"\033[{cursor_col - 1}C"
-        movement += "\033[?25h"
-        self.write(self.bottom_clear_sequence() + self.lines_at_cursor_sequence(lines) + movement)
+        self.write(
+            render_bottom_area_absolute_sequence(
+                lines,
+                cursor_row=cursor_row,
+                cursor_col=cursor_col,
+                height=height,
+                previous_rows=int(getattr(self, "bottom_rows_rendered", 0) or 0),
+            )
+        )
         self.bottom_rows_rendered = len(lines)
         self.bottom_cursor_row_offset = cursor_row
         self.bottom_frame_key = frame_key

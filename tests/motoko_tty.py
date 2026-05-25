@@ -58,6 +58,7 @@ from motoko_core.retrieval_service import RetrievalService
 from motoko_core.runtime import RuntimePaths, make_runtime_context
 from motoko_core.terminal import strip_ansi
 from motoko_core.tui_render import (
+    bottom_area_absolute_sequence,
     bottom_area_frame,
     bottom_clear_sequence,
     dropdown_display_lines,
@@ -267,6 +268,15 @@ def main() -> int:
     assert overlay_page_sequence(["one"], 2) == "\033[Hone\033[K\n\033[K\033[J\033[?25h"
     assert bottom_clear_sequence(3, 1) == "\033[1A\r\033[J"
     assert lines_at_cursor_sequence(["one", "two"]) == "\rone\033[K\n\rtwo\033[K"
+    anchored = bottom_area_absolute_sequence(
+        ["> prompt", "status one", "status two"],
+        cursor_row=0,
+        cursor_col=4,
+        height=10,
+        previous_rows=2,
+    )
+    assert anchored.startswith("\033[8;1H\033[J\033[8;1H")
+    assert anchored.endswith("\033[8;4H\033[?25h")
     supervisor = JobSupervisor(clock=lambda: 10.0, id_factory=lambda: "job-1")
     job = supervisor.begin(kind="answer", lane="large-model", label="chat answer")
     supervisor.update(job.job_id, progress={"batch": 1}, checkpoint={"durable": True})
