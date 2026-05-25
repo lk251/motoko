@@ -1281,7 +1281,9 @@ efficiency. The likely shape is:
   could be the right way to package repeatable codebase procedures such as
   "find command implementation", "trace function callers", or "map module
   boundaries"; this is a design option to evaluate, not a commitment to adopt
-  Hermes' broader tool runtime.
+  Hermes' broader tool runtime. Specifically consider turning the
+  source-code locator retrieval path into a built-in skill/tool candidate once
+  the deterministic retrieval primitive has proven useful.
 - improve deduplication and boilerplate handling through hashing,
   normalized-text comparison, simhash/minhash-style fingerprints, email
   quote/signature stripping, and later embedding similarity if an embedding

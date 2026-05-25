@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -294,6 +295,264 @@ def _selected_candidates_with_required_temporal_dates(
     return selected
 
 
+CODE_FILE_SUFFIXES = {
+    ".py",
+    ".nix",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".rs",
+    ".go",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".hpp",
+    ".java",
+    ".kt",
+    ".swift",
+    ".rb",
+    ".lua",
+    ".el",
+    ".vim",
+    ".scm",
+    ".sql",
+    ".toml",
+    ".json",
+    ".yaml",
+    ".yml",
+}
+
+CODE_QUERY_HINTS = {
+    "code",
+    "source",
+    "repo",
+    "repository",
+    "implementation",
+    "implemented",
+    "implements",
+    "handler",
+    "handles",
+    "handled",
+    "function",
+    "class",
+    "module",
+    "method",
+    "command",
+    "cli",
+    "tui",
+    "parser",
+    "render",
+    "renderer",
+    "schema",
+    "route",
+    "endpoint",
+    "test",
+    "tests",
+    "defined",
+    "definition",
+    "called",
+    "calls",
+    "import",
+    "imports",
+}
+
+CODE_STOPWORDS = {
+    "about",
+    "which",
+    "what",
+    "where",
+    "when",
+    "file",
+    "files",
+    "repo",
+    "repository",
+    "takes",
+    "care",
+    "page",
+    "thing",
+    "this",
+    "that",
+    "does",
+    "with",
+    "from",
+    "into",
+    "there",
+    "have",
+    "motoko",
+}
+
+
+def query_wants_code_locator(query: str) -> bool:
+    lowered = query.lower()
+    query_words = set(re.findall(r"\b[a-z][a-z0-9_:-]*\b", lowered))
+    if re.search(r"(?<!\S)/[A-Za-z][\w-]*", query):
+        return True
+    if re.search(r"`[^`]{2,120}`", query):
+        return True
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\s*\(", query):
+        return True
+    if query_words & CODE_QUERY_HINTS:
+        return True
+    return any(phrase in lowered for phrase in ("which file", "where is", "where does", "takes care of"))
+
+
+def code_locator_terms(query: str) -> list[str]:
+    terms: list[str] = []
+
+    def add(term: str) -> None:
+        term = str(term or "").strip()
+        if not term or len(term) > 120:
+            return
+        if term not in terms:
+            terms.append(term)
+
+    for match in re.findall(r"(?<!\S)/[A-Za-z][\w-]*", query):
+        add(match)
+        name = match.lstrip("/")
+        add(name)
+        if name:
+            add(f"format_{name}")
+            add(f"command_{name}")
+            add(f"handle_{name}")
+    for match in re.findall(r"`([^`]{1,120})`", query):
+        add(match)
+    for left, right in re.findall(r'"([^"]{1,120})"|\'([^\']{1,120})\'', query):
+        add(left or right)
+    for match in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", query):
+        if match.lower() not in CODE_STOPWORDS:
+            add(match)
+    return terms
+
+
+def code_like_path_or_content(path: str, content: str) -> bool:
+    lower_path = path.lower()
+    suffix = ""
+    if "." in lower_path.rsplit("/", 1)[-1]:
+        suffix = "." + lower_path.rsplit(".", 1)[-1]
+    basename = lower_path.rsplit("/", 1)[-1]
+    if suffix in CODE_FILE_SUFFIXES or basename in {"motoko", "makefile", "flake.nix"}:
+        return True
+    sample = content[:4000]
+    return bool(
+        re.search(r"(?m)^\s*(def|class|import|from)\s+[A-Za-z_]", sample)
+        or re.search(r"(?m)^\s*(function|const|let|var|export)\s+[A-Za-z_]", sample)
+        or "add_parser(" in sample
+        or "SLASH_COMMANDS" in sample
+    )
+
+
+def code_locator_excerpt(content: str, terms: list[str], *, max_chars: int = 1600) -> tuple[str, int]:
+    lowered = content.lower()
+    positions = [
+        lowered.find(term.lower())
+        for term in terms
+        if term and lowered.find(term.lower()) >= 0
+    ]
+    if not positions:
+        return content[:max_chars], 0
+    pos = min(positions)
+    start = max(0, pos - max_chars // 3)
+    end = min(len(content), start + max_chars)
+    return content[start:end].strip(), pos
+
+
+def code_locator_score(path: str, content: str, summary: str, query: str, terms: list[str]) -> tuple[int, list[str]]:
+    lowered_content = content.lower()
+    lowered_path = path.lower()
+    lowered_summary = summary.lower()
+    score = 0
+    matched: list[str] = []
+    for term in terms:
+        lowered = term.lower()
+        if not lowered:
+            continue
+        count = lowered_content.count(lowered)
+        if count:
+            matched.append(term)
+            score += min(count, 8) * (900 if term.startswith("/") else 90)
+            if re.search(rf"(?m)^\s*(def|class)\s+{re.escape(term)}\b", content):
+                score += 1200
+            if re.search(rf"(?m)^\s*{re.escape(term)}\s*=", content):
+                score += 350
+        if lowered in lowered_path:
+            matched.append(term)
+            score += 250
+        if lowered in lowered_summary:
+            score += 25
+    for term in terms:
+        if term.startswith(("format_", "command_", "handle_")) and term.lower() in lowered_content:
+            score += 500
+    if any(term.startswith("/") for term in terms) and re.search(r"\(\s*[\"']/[A-Za-z][\w-]*[\"']", content):
+        score += 600
+    return score, list(dict.fromkeys(matched))[:12]
+
+
+def code_locator_rows(index: dict, query: str, env: HybridRetrievalEnvironment) -> list[dict]:
+    if not query_wants_code_locator(query):
+        return []
+    terms = code_locator_terms(query)
+    if not terms:
+        return []
+    rows = []
+    for file_item in index.get("files", []):
+        path = str(file_item.get("path", "") or "")
+        summary = str(file_item.get("summary", "") or "")
+        for chunk in file_item.get("chunks", []):
+            content = env.read_chunk_content(index, chunk)
+            if not code_like_path_or_content(path, content):
+                continue
+            score, matched = code_locator_score(path, content, summary, query, terms)
+            if score <= 0:
+                continue
+            excerpt, start = code_locator_excerpt(content, terms)
+            rows.append(
+                {
+                    "id": f"{path}#{chunk.get('chunk', '')}:code:{start}",
+                    "kind": "code_locator",
+                    "path": path,
+                    "chunk": chunk.get("chunk"),
+                    "title": "source-code locator",
+                    "start": start,
+                    "end": start + len(excerpt),
+                    "text": excerpt,
+                    "text_chars": len(excerpt),
+                    "matched_terms": matched,
+                    "path_boost": 2000 if any(term.lower() in path.lower() for term in terms) else 0,
+                    "structured": score,
+                    "total": score,
+                }
+            )
+    rows.sort(key=lambda row: (int(row.get("total", 0) or 0), int(row.get("path_boost", 0) or 0)), reverse=True)
+    return rows[:12]
+
+
+def _selected_candidates_with_required_keys(
+    candidates: list[dict],
+    selected: list[dict],
+    *,
+    required_keys: set[tuple[str, str]],
+) -> list[dict]:
+    if not required_keys:
+        return selected
+    selected_keys = {tuple(row.get("key", ())) for row in selected}
+    output = list(selected)
+    for row in candidates:
+        key = tuple(row.get("key", ()))
+        if key not in required_keys or key in selected_keys:
+            continue
+        output.append(row)
+        selected_keys.add(key)
+        if len([item for item in output if tuple(item.get("key", ())) in required_keys]) >= 3:
+            break
+    return output
+
+
 def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironment) -> RetrievalServiceResult:
     """Run Motoko's hybrid document retrieval for one index.
 
@@ -337,6 +596,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     selected_files = [row[1] for row in file_rows[:top_files] if row[0] > 0]
     candidates: dict[tuple[str, str], dict] = {}
     temporal_candidate_keys: set[tuple[str, str]] = set()
+    code_candidate_keys: set[tuple[str, str]] = set()
     lexical_candidates = [row for row in chunk_rows[: env.max_rerank_candidates] if row[0] > 0]
     if not lexical_candidates:
         lexical_candidates = chunk_rows[: min(2, len(chunk_rows))]
@@ -344,6 +604,14 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
     env.add_structured_task_candidates(index, query, candidates)
     lookup = _chunk_lookup(index)
+    code_rows = code_locator_rows(index, query, env)
+    for row in code_rows:
+        found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
+        if not found:
+            continue
+        file_item, chunk = found
+        add_hybrid_candidate(candidates, file_item, chunk, "code", row.get("total", 0), row)
+        code_candidate_keys.add((file_item.get("path", ""), str(chunk.get("chunk", ""))))
     temporal_rows = _temporal_evidence_rows(index, query, env, retrieval_plan=retrieval_plan)
     temporal_dates = sorted({str(row.get("date", "")) for row in temporal_rows if row.get("date")}, reverse=True)
     for row in temporal_rows:
@@ -409,6 +677,11 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         limit=top_chunks,
         temporal_dates=temporal_dates,
     )
+    selected_candidate_rows = _selected_candidates_with_required_keys(
+        selected_candidates,
+        selected_candidate_rows,
+        required_keys=code_candidate_keys,
+    )
     selected_chunks = [
         (
             candidate.get("hybrid_score", candidate.get("score", 0)),
@@ -468,6 +741,17 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             f"{', '.join(temporal_dates)}. "
             "Do not assume missing intervening calendar dates have entries."
         )
+    if code_rows:
+        top_code = ", ".join(
+            f"{row.get('path', '')} chunk {row.get('chunk', '')}"
+            for row in code_rows[:3]
+        )
+        parts.append(
+            "Source code locator:\n"
+            "The query appears to ask about implementation or source-code behavior. "
+            "Motoko ran deterministic literal/symbol matching over code-like files "
+            f"before context packing. Top implementation candidate(s): {top_code}."
+        )
     index_source = {
         "kind": "index",
         "id": index.get("id", ""),
@@ -489,6 +773,13 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         index_source["retrieval_plan_status"] = retrieval_plan.get("status", "")
     if temporal_dates:
         index_source["temporal_selected_dates"] = temporal_dates
+    if code_rows:
+        index_source["code_locator_hits"] = len(code_rows)
+        index_source["code_locator_top_paths"] = [
+            row.get("path", "")
+            for row in code_rows[:5]
+            if row.get("path")
+        ]
     if hybrid_report:
         index_source["retrieval"] = "hybrid-deep" if env.wants_deep_context(query) else "hybrid"
         index_source["hybrid_candidates"] = hybrid_report.get("candidate_count", 0)
@@ -633,6 +924,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         "hybrid_candidates": hybrid_report.get("candidate_count", 0) if hybrid_report else 0,
         "evidence_rows": len(evidence_report.get("rows", [])) if evidence_report else 0,
         "vector_rows": len(vector_report.get("rows", [])) if vector_report else 0,
+        "code_locator_rows": len(code_rows),
         "index_status": index_status,
         "retrieval_plan": retrieval_plan,
     }

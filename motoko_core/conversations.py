@@ -18,12 +18,14 @@ def make_conversation_record(
     branch: str,
     endpoint: str,
     model: str,
+    project: dict | None = None,
 ) -> dict:
     return {
         "id": conversation_id,
         "title": title or "Untitled",
         "title_kind": "manual" if title else "unset",
         "branch": branch,
+        "project": project or {},
         "created": created,
         "updated": created,
         "endpoint": endpoint,

@@ -84,12 +84,20 @@ def test_recent_conversation_lanes(m):
         relevant["messages"] = [{"role": "user", "content": "The codename is violet harbor."}]
         write_conversation(m, relevant)
 
+        other_project = m.new_conversation("Other project relevant")
+        other_project["id"] = "other-project"
+        other_project["project"] = {"kind": "git", "root": "/tmp/not-this-project"}
+        other_project["updated"] = "2026-05-17T09:58:00+00:00"
+        other_project["messages"] = [{"role": "user", "content": "The codename is violet harbor."}]
+        write_conversation(m, other_project)
+
         selected = m.ranked_recent_conversations(current, "violet harbor")
         by_id = {row["id"]: row for row in selected}
         assert "recent" in by_id
         assert "recent" in by_id["recent"]["_selection_reasons"]
         assert "relevant" in by_id
         assert "relevant" in by_id["relevant"]["_selection_reasons"]
+        assert "other-project" not in by_id
 
         text, sources = m.render_recent_conversations_with_sources(current, "violet harbor")
         assert "violet harbor" in text
@@ -3448,6 +3456,7 @@ def test_summary_reductions_fan_out_across_worker_routes(m):
 
 def test_sources_fallback_lists_attached_topic_context(m):
     with isolated_state():
+        topic_path = pathlib.Path.cwd() / "logbook.org"
         topic = {
             "id": "topic-test",
             "name": "Yesterday Tasks",
@@ -3456,7 +3465,7 @@ def test_sources_fallback_lists_attached_topic_context(m):
             "evidence": [
                 {
                     "index": "idx",
-                    "path": "/tmp/work/logbook.org",
+                    "path": str(topic_path),
                     "chunk": 3,
                 }
             ],
@@ -3467,7 +3476,7 @@ def test_sources_fallback_lists_attached_topic_context(m):
         text = m.format_conversation_sources(conv)
         assert "No recorded sources for the last answer yet" in text
         assert "topic topic-test" in text
-        assert "/tmp/work/logbook.org" in text
+        assert str(topic_path) in text
 
 
 def test_stale_attached_topic_is_skipped_in_chat_context(m):
@@ -3827,6 +3836,84 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert "selected newest dates present in source: 2026-05-19, 2026-05-18" in m.format_sources(sources)
         assert "retrieval plan" in m.format_sources(sources)
         assert "builtin:org_temporal_latest_entries" in m.format_sources(sources)
+
+
+def test_source_code_locator_prioritizes_implementation_chunks(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    old_rerank = os.environ.get("MOTOKO_VECTOR_RERANK")
+    os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+    os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+    os.environ["MOTOKO_VECTOR_RERANK"] = "0"
+    try:
+        root = "/tmp/motoko-code-locator"
+        code = '''
+SLASH_COMMANDS = [
+    ("/about", "show Motoko version and runtime details"),
+]
+
+def format_about():
+    return "Motoko about page"
+
+def command_about(_args):
+    print_report(format_about())
+'''
+        docs = "The /about page is documented here, but implementation lives elsewhere."
+        index = {
+            "id": "idx-code",
+            "name": "motoko",
+            "root": root,
+            "created": "2026-05-25T00:00:00+00:00",
+            "files": [
+                {
+                    "path": root + "/docs/motoko.md",
+                    "summary": "Documentation for /about.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Docs mention /about.",
+                            "content": docs,
+                            "content_sha256": m.sha256_hex(docs.encode("utf-8")),
+                        }
+                    ],
+                },
+                {
+                    "path": root + "/motoko",
+                    "summary": "Main executable and command handlers.",
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "Command table and about formatter.",
+                            "content": code,
+                            "content_sha256": m.sha256_hex(code.encode("utf-8")),
+                        }
+                    ],
+                },
+            ],
+        }
+        text, sources = m.retrieve_from_index(index, "which file in the repo takes care of the /about page?")
+        assert "Source code locator:" in text
+        assert "def format_about" in text
+        chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
+        assert any(
+            source.get("path", "").endswith("/motoko") and "code" in source.get("retrieval_methods", [])
+            for source in chunk_sources
+        )
+        index_source = next(source for source in sources if source.get("kind") == "index")
+        assert index_source.get("code_locator_hits", 0) >= 1
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+        if old_rerank is None:
+            os.environ.pop("MOTOKO_VECTOR_RERANK", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RERANK"] = old_rerank
 
 
 def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
@@ -4358,7 +4445,16 @@ def test_study_focus_recent_is_parsed_and_bounded(m):
 
     with isolated_state():
         conv = m.new_conversation("Study focus")
-        conv["context_items"] = [{"kind": "index", "id": "idx"}]
+        index = {
+            "id": "20260525-030000-cccccc",
+            "name": "study-focus",
+            "root": m.current_project_root_record()["root"],
+            "created": "2026-05-25T03:00:00+00:00",
+            "corpus_summary": "study focus",
+            "files": [],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False) + "\n")
+        conv["context_items"] = [m.context_item_from_index(index)]
         calls = []
         old_build_topic = m.build_topic_dossier
         try:
@@ -4629,6 +4725,95 @@ def test_system_prompt_uses_context_package_for_plan(m):
         assert lane_names[:2] == ["identity", "personality"]
         assert "attached context" in lane_names
         assert package.text_for("attached context") == values["context_text"]
+
+
+def test_prompt_context_filters_attached_artifacts_to_current_project(m):
+    old_cwd = os.getcwd()
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            current = tmp / "current"
+            other = tmp / "other"
+            current.mkdir()
+            other.mkdir()
+            current_file = current / "notes.md"
+            other_file = other / "notes.md"
+            current_text = "Alpha current project implementation note."
+            other_text = "Alpha other project private note."
+            current_file.write_text(current_text, encoding="utf-8")
+            other_file.write_text(other_text, encoding="utf-8")
+            os.chdir(current)
+
+            current_index = {
+                "id": "20260525-010000-aaaaaa",
+                "name": "current",
+                "root": str(current.resolve()),
+                "created": "2026-05-25T01:00:00+00:00",
+                "corpus_summary": "current project summary",
+                "files": [
+                    {
+                        "path": str(current_file.resolve()),
+                        "source_fingerprint": m.source_fingerprint(current_file),
+                        "summary": "current note",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "current chunk",
+                                "content": current_text,
+                                "content_sha256": m.sha256_hex(current_text.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+            other_index = {
+                "id": "20260525-020000-bbbbbb",
+                "name": "other",
+                "root": str(other.resolve()),
+                "created": "2026-05-25T02:00:00+00:00",
+                "corpus_summary": "other project summary",
+                "files": [
+                    {
+                        "path": str(other_file.resolve()),
+                        "source_fingerprint": m.source_fingerprint(other_file),
+                        "summary": "other note",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "other chunk",
+                                "content": other_text,
+                                "content_sha256": m.sha256_hex(other_text.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+            m.atomic_write(m.index_path(current_index["id"]), json.dumps(current_index, ensure_ascii=False, indent=2) + "\n")
+            m.atomic_write(m.index_path(other_index["id"]), json.dumps(other_index, ensure_ascii=False, indent=2) + "\n")
+            conv = m.new_conversation("Scoped context")
+            conv["context_items"] = [
+                m.context_item_from_index(current_index),
+                m.context_item_from_index(other_index),
+            ]
+            package, values = m.build_prompt_context_package(conv, "alpha implementation")
+
+            assert current_text in values["context_text"]
+            assert other_text not in values["context_text"]
+            assert any(source.get("root") == str(current.resolve()) for source in package.sources if source.get("kind") == "index")
+            assert not any(source.get("root") == str(other.resolve()) for source in package.sources if source.get("kind") == "index")
+    finally:
+        os.chdir(old_cwd)
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
 def test_assistant_color_config(m):
@@ -5707,11 +5892,12 @@ def test_retrieval_eval_replays_private_feedback_fixtures(m):
 
 def test_retrieval_preview_shows_context_without_model_call(m):
     with isolated_state():
+        task_path = pathlib.Path.cwd() / "tasks.org"
         conv = m.new_conversation("Preview")
         conv["context_items"] = [
             {
                 "kind": "file",
-                "path": "/tmp/tasks.org",
+                "path": str(task_path),
                 "content": "* TODO Prepare tomorrow plan\nDEADLINE: <2026-05-22 Fri>\n",
                 "bytes": 60,
             }
@@ -5721,7 +5907,7 @@ def test_retrieval_preview_shows_context_without_model_call(m):
         assert "source audit:" in report
         assert "attached context excerpt:" in report
         assert "Prepare tomorrow plan" in report
-        assert "/tmp/tasks.org" in report
+        assert str(task_path) in report
         assert "\033[" not in report
 
         ui = object.__new__(m.MotokoTui)
@@ -7214,11 +7400,34 @@ def test_context_catalog_prefers_latest_index_per_family(m):
         catalog_ids = [row["id"] for row in catalog["indexes"]]
         assert "new-index" in catalog_ids
         assert "old-index" not in catalog_ids
+        scoped = m.format_context_catalog(
+            {
+                **catalog,
+                "indexes": catalog["indexes"]
+                + [
+                    {
+                        "id": "other-index",
+                        "name": "other",
+                        "root": "/tmp/other-project",
+                        "status": "fresh",
+                        "summary": "other project",
+                    }
+                ],
+                "topics": [{"id": "topic-other", "name": "other", "query": "other"}],
+                "dossiers": [{"id": "dossier-other", "name": "other", "query": "other"}],
+            },
+            project_roots={str(docs.resolve())},
+        )
+        assert "new-index" in scoped
+        assert "other-index" not in scoped
+        assert "available topic dossiers" not in scoped
+        assert "available memory dossiers" not in scoped
         ranked = m.ranked_indexes_for_query("logbook")
         assert [row["id"] for row in ranked] == ["new-index"]
 
 
 def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
+    old_cwd = os.getcwd()
     old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
     old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
     try:
@@ -7231,6 +7440,7 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
             current_content = "* [2026-05-24 Sun 09:00]\n** log\nFresh in-session note.\n"
             source.write_text(current_content, encoding="utf-8")
             m.add_allowed_dir(str(docs))
+            os.chdir(docs)
             base = {
                 "name": "docs",
                 "root": str(docs.resolve()),
@@ -7295,6 +7505,7 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
             assert "Old attached note" not in values["context_text"]
             assert any(source.get("id") == new_index["id"] for source in package.sources if source.get("kind") == "index")
     finally:
+        os.chdir(old_cwd)
         if old_evidence is None:
             os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
         else:
@@ -7449,6 +7660,7 @@ def test_index_pause_resume_rescans_new_files_without_overwriting_chunks(m):
 
 
 def test_org_task_signals_drive_retrieval(m):
+    old_cwd = os.getcwd()
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
@@ -7467,6 +7679,7 @@ def test_org_task_signals_drive_retrieval(m):
         )
         (docs / "ideas.org").write_text("* Idea unrelated\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
+        os.chdir(docs)
 
         old_quiet_model = m.quiet_model
         try:
@@ -7519,6 +7732,7 @@ def test_org_task_signals_drive_retrieval(m):
                 m.command_index_quality(args)
             assert "index quality: pass" in m.strip_ansi(buf.getvalue())
         finally:
+            os.chdir(old_cwd)
             m.quiet_model = old_quiet_model
 
 
@@ -9198,6 +9412,7 @@ def main() -> int:
         test_named_file_query_boosts_matching_path,
         test_retrieval_debug_explains_scores,
         test_named_logbook_recent_query_uses_latest_org_sections,
+        test_source_code_locator_prioritizes_implementation_chunks,
         test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates,
         test_named_temporal_query_ignores_other_dated_org_files,
         test_live_index_retrieval_uses_service_boundary,
@@ -9213,6 +9428,7 @@ def main() -> int:
         test_identity_config,
         test_context_package_builds_sources_and_plan,
         test_system_prompt_uses_context_package_for_plan,
+        test_prompt_context_filters_attached_artifacts_to_current_project,
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
         test_report_highlighting_is_render_only,

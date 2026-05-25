@@ -1097,6 +1097,153 @@ def current_git_branch() -> str:
     return branch or "-"
 
 
+def current_project_root_record(path: str | None = None) -> dict:
+    base = pathlib.Path(path or os.getcwd()).expanduser().resolve()
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        result = None
+    if result is not None and result.returncode == 0 and result.stdout.strip():
+        return {"kind": "git", "root": str(pathlib.Path(result.stdout.strip()).resolve())}
+    return {"kind": "directory", "root": str(base)}
+
+
+def project_root_matches(root: str, project_roots: set[str]) -> bool:
+    root_text = str(root or "").strip()
+    if not root_text or not project_roots:
+        return False
+    try:
+        root_path = pathlib.Path(root_text).expanduser().resolve()
+    except OSError:
+        return root_text in project_roots
+    for project_root in project_roots:
+        try:
+            project_path = pathlib.Path(project_root).expanduser().resolve()
+        except OSError:
+            if root_text == project_root:
+                return True
+            continue
+        if root_path == project_path:
+            return True
+        with contextlib.suppress(ValueError):
+            root_path.relative_to(project_path)
+            return True
+        with contextlib.suppress(ValueError):
+            project_path.relative_to(root_path)
+            return True
+    return False
+
+
+def conversation_project_roots(conv: dict | None) -> set[str]:
+    roots: set[str] = set()
+    if not isinstance(conv, dict):
+        return roots
+    project = conv.get("project") if isinstance(conv.get("project"), dict) else {}
+    root = str(project.get("root", "") or "").strip()
+    if root:
+        roots.add(str(pathlib.Path(root).expanduser().resolve()))
+    for item in conv.get("context_items", []) or []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if kind == "index" and item.get("id"):
+            try:
+                index = load_index_exact(str(item.get("id", "")))
+            except Exception:
+                continue
+            index_root = str(index.get("root", "") or "").strip()
+            if index_root:
+                roots.add(str(pathlib.Path(index_root).expanduser().resolve()))
+        elif kind == "repo" and item.get("root"):
+            roots.add(str(pathlib.Path(str(item.get("root"))).expanduser().resolve()))
+    return roots
+
+
+def active_project_roots(conv: dict | None = None) -> set[str]:
+    roots: set[str] = set()
+    current_root = current_project_root_record().get("root", "")
+    if current_root:
+        roots.add(str(pathlib.Path(current_root).expanduser().resolve()))
+    return roots
+
+
+def topic_project_roots(topic: dict | None) -> set[str]:
+    roots: set[str] = set()
+    if not isinstance(topic, dict):
+        return roots
+    for source in topic.get("source_indexes", []) or []:
+        root = str(source.get("root", "") or "").strip()
+        if root:
+            roots.add(str(pathlib.Path(root).expanduser().resolve()))
+    for evidence in topic.get("evidence", []) or []:
+        path = str(evidence.get("path", "") or "").strip()
+        if path:
+            roots.add(str(pathlib.Path(path).expanduser().resolve().parent))
+    return roots
+
+
+def dossier_project_roots(dossier: dict | None) -> set[str]:
+    roots: set[str] = set()
+    if not isinstance(dossier, dict):
+        return roots
+    for item in dossier.get("source_conversations", []) or []:
+        conv_id = str(item.get("id", "") or "").strip()
+        if not conv_id:
+            continue
+        with contextlib.suppress(Exception):
+            roots.update(conversation_project_roots(load_conversation(conv_id)))
+    return roots
+
+
+def context_item_project_roots(item: dict) -> set[str]:
+    kind = item.get("kind")
+    roots: set[str] = set()
+    if kind == "index" and item.get("id"):
+        with contextlib.suppress(Exception):
+            index = load_index_exact(str(item.get("id", "")))
+            root = str(index.get("root", "") or "").strip()
+            if root:
+                roots.add(str(pathlib.Path(root).expanduser().resolve()))
+    elif kind == "file" and item.get("path"):
+        roots.add(str(pathlib.Path(str(item.get("path"))).expanduser().resolve().parent))
+    elif kind == "repo" and item.get("root"):
+        roots.add(str(pathlib.Path(str(item.get("root"))).expanduser().resolve()))
+    elif kind == "topic" and item.get("id"):
+        with contextlib.suppress(Exception):
+            roots.update(topic_project_roots(load_topic(str(item.get("id", "")))))
+    elif kind == "dossier" and item.get("id"):
+        with contextlib.suppress(Exception):
+            roots.update(dossier_project_roots(load_dossier(str(item.get("id", "")))))
+    return roots
+
+
+def roots_match_project(roots: set[str], project_roots: set[str]) -> bool:
+    return bool(roots) and any(project_root_matches(root, project_roots) for root in roots)
+
+
+def context_item_matches_project(item: dict, project_roots: set[str]) -> bool:
+    if not project_roots:
+        return True
+    return roots_match_project(context_item_project_roots(item), project_roots)
+
+
+def scoped_context_items(items: list[dict], project_roots: set[str]) -> list[dict]:
+    if not project_roots:
+        return items
+    return [
+        item
+        for item in items
+        if isinstance(item, dict) and context_item_matches_project(item, project_roots)
+    ]
+
+
 def app_revision() -> str:
     env_revision = os.environ.get("MOTOKO_REVISION", "").strip()
     if env_revision:
@@ -2019,6 +2166,7 @@ def new_conversation(title: str | None = None) -> dict:
         branch=current_git_branch(),
         endpoint=endpoint(),
         model=model_name(),
+        project=current_project_root_record(),
     )
 
 
@@ -4340,13 +4488,25 @@ def select_retrieval_debug_indexes(
 ) -> list[dict]:
     if index_ids:
         return [load_index_exact(index_id) for index_id in index_ids]
-    attached = attached_index_ids(conv or {}) if conv else []
+    project_roots = active_project_roots(conv)
+    attached = attached_index_ids(conv or {}, project_roots=project_roots) if conv else []
     if attached:
         return [load_index_exact(index_id) for index_id in attached[:limit]]
-    ranked = [row for row in ranked_indexes_for_query(query) if int(row.get("_score", 0) or 0) > 0]
+    ranked = [
+        row
+        for row in ranked_indexes_for_query(query, project_roots=project_roots)
+        if int(row.get("_score", 0) or 0) > 0
+    ]
     if ranked:
         return [load_index_exact(row.get("id", "")) for row in ranked[:limit]]
-    return latest_indexes_by_family()[:limit]
+    latest = latest_indexes_by_family()
+    if project_roots:
+        latest = [
+            row
+            for row in latest
+            if project_root_matches(str(row.get("root", "") or ""), project_roots)
+        ]
+    return latest[:limit]
 
 
 def run_retrieval_debug(
@@ -4968,11 +5128,19 @@ def attach_recent_conversation_snippets(rows: list[dict], query_counts, recall: 
 def ranked_recent_conversations(conv: dict, query: str = "") -> list[dict]:
     recall = conversation_recall_config()
     current_id = conv.get("id", "")
-    rows = [
-        row
-        for row in list_conversations()
-        if row.get("id") != current_id and conversation_recall_text_with_config(row, recall).strip()
-    ]
+    project_roots = active_project_roots(conv)
+    rows = []
+    for row in list_conversations():
+        if row.get("id") == current_id:
+            continue
+        if not conversation_recall_text_with_config(row, recall).strip():
+            continue
+        row_roots = conversation_project_roots(row)
+        if not row_roots:
+            continue
+        if not any(project_root_matches(root, project_roots) for root in row_roots):
+            continue
+        rows.append(row)
     if not rows:
         return []
     rows.sort(
@@ -7810,27 +7978,38 @@ def read_context_catalog() -> dict | None:
     return safe_load_json(context_catalog_path())
 
 
-def format_context_catalog(catalog: dict | None = None) -> str:
+def format_context_catalog(catalog: dict | None = None, *, project_roots: set[str] | None = None) -> str:
     catalog = catalog or read_context_catalog() or build_context_catalog()
+    project_roots = project_roots or set()
+    scoped = bool(project_roots)
+    indexes = list(catalog.get("indexes", []) or [])
+    if scoped:
+        indexes = [
+            item
+            for item in indexes
+            if project_root_matches(str(item.get("root", "") or ""), project_roots)
+        ]
     lines = [
         f"model={catalog.get('model', '')}",
         f"endpoint={catalog.get('endpoint', '')}",
         f"memories={catalog.get('memory_count', 0)} pinned={catalog.get('pinned_memory_count', 0)}",
         f"conversations={catalog.get('conversation_count', 0)}",
     ]
+    if scoped:
+        lines.append("scope=current project")
     if catalog.get("profile_updated"):
         lines.append(f"profile updated={catalog.get('profile_updated')}")
-    if catalog.get("dossiers"):
+    if catalog.get("dossiers") and not scoped:
         lines.append("available memory dossiers:")
         for item in catalog.get("dossiers", [])[:6]:
             lines.append(f"- dossier:{item.get('id')} {item.get('name')} query={item.get('query')} summary={item.get('summary')}")
-    if catalog.get("topics"):
+    if catalog.get("topics") and not scoped:
         lines.append("available topic dossiers:")
         for item in catalog.get("topics", [])[:6]:
             lines.append(f"- topic:{item.get('id')} {item.get('name')} query={item.get('query')} summary={item.get('summary')}")
-    if catalog.get("indexes"):
+    if indexes:
         lines.append("available document indexes:")
-        for item in catalog.get("indexes", [])[:6]:
+        for item in indexes[:6]:
             warning = f" warnings={'; '.join(item.get('warnings', []))}" if item.get("warnings") else ""
             lines.append(
                 f"- index:{item.get('id')} {item.get('name')} root={item.get('root')} "
@@ -7980,9 +8159,16 @@ def ranked_topics_for_query(query: str) -> list[dict]:
     return rank_items_by_query(list_topics(), query, ["name", "query", "summary"])
 
 
-def ranked_indexes_for_query(query: str) -> list[dict]:
+def ranked_indexes_for_query(query: str, *, project_roots: set[str] | None = None) -> list[dict]:
+    indexes = latest_indexes_by_family()
+    if project_roots:
+        indexes = [
+            index
+            for index in indexes
+            if project_root_matches(str(index.get("root", "") or ""), project_roots)
+        ]
     rows = rank_items_by_query(
-        latest_indexes_by_family(),
+        indexes,
         query,
         ["name", "root", "corpus_summary", "signal_summary", "corpus_profile_text"],
     )
@@ -11389,11 +11575,18 @@ def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: di
 
 
 def default_vector_index(conv: dict | None = None) -> dict:
+    project_roots = active_project_roots(conv)
     if conv:
-        attached = attached_index_ids(conv)
+        attached = attached_index_ids(conv, project_roots=project_roots)
         if attached:
             return load_index_exact(attached[0])
     latest = latest_indexes_by_family()
+    if project_roots:
+        latest = [
+            index
+            for index in latest
+            if project_root_matches(str(index.get("root", "") or ""), project_roots)
+        ]
     if latest:
         return latest[0]
     raise SystemExit("No document indexes yet. Run 'motoko index PATH' first.")
@@ -14232,11 +14425,14 @@ def unfinished_work_notice(limit: int = 3) -> str:
 
 def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | None:
     attached = attached_item_ids(conv, "dossier")
+    project_roots = active_project_roots(conv)
     for dossier in ranked_dossiers_for_query(query):
         if dossier.get("id", "") in attached:
             continue
         if dossier.get("_score", 0) < STUDY_REUSE_MIN_SCORE:
             break
+        if project_roots and not roots_match_project(dossier_project_roots(dossier), project_roots):
+            continue
         attach_context_item(conv, context_item_from_dossier(dossier))
         return dossier
     return None
@@ -14244,18 +14440,21 @@ def maybe_attach_relevant_existing_dossier(conv: dict, query: str) -> dict | Non
 
 def maybe_attach_relevant_existing_topic(conv: dict, query: str) -> dict | None:
     attached = attached_item_ids(conv, "topic")
+    project_roots = active_project_roots(conv)
     for topic in ranked_topics_for_query(query):
         if topic.get("id", "") in attached:
             continue
         if topic.get("_score", 0) < STUDY_REUSE_MIN_SCORE:
             break
+        if project_roots and not roots_match_project(topic_project_roots(topic), project_roots):
+            continue
         attach_context_item(conv, context_item_from_topic(topic))
         return topic
     return None
 
 
 def best_relevant_index(query: str) -> dict | None:
-    for index in ranked_indexes_for_query(query):
+    for index in ranked_indexes_for_query(query, project_roots=active_project_roots()):
         if index.get("_score", 0) >= STUDY_INDEX_MIN_SCORE:
             return index
         break
@@ -14820,15 +15019,17 @@ def format_context_plan(plan: dict) -> str:
 
 def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, dict]:
     sync_attached_indexes_to_latest(conv)
+    project_roots = active_project_roots(conv)
     identity = identity_config()
     memory_text, memory_sources = render_memories_with_sources(conv, query)
     recent_text, recent_sources = render_recent_conversations_with_sources(conv, query)
     profile_text, profile_sources = render_profile_with_sources()
     skill_text, skill_sources = render_skills_with_sources(query)
     retrieval_query = context_query_text(conv, query)
-    context_text, context_sources = render_context_with_sources(conv.get("context_items", []), retrieval_query)
+    context_items = scoped_context_items(conv.get("context_items", []), project_roots)
+    context_text, context_sources = render_context_with_sources(context_items, retrieval_query)
     catalog = read_context_catalog() or build_context_catalog()
-    catalog_text = format_context_catalog(catalog)
+    catalog_text = format_context_catalog(catalog, project_roots=project_roots)
     personality_text, personality_file, personality_exists = load_personality()
     identity_text = format_identity()
     summary_text = render_conversation_summary(conv)
@@ -14875,7 +15076,14 @@ def build_prompt_context_package(conv: dict, query: str = "") -> tuple[object, d
             ContextLane(
                 "catalog",
                 catalog_text,
-                [{"kind": "context-catalog", "updated": catalog.get("updated", "")}],
+                [
+                    {
+                        "kind": "context-catalog",
+                        "updated": catalog.get("updated", ""),
+                        "scope": "current-project",
+                        "project_roots": sorted(project_roots),
+                    }
+                ],
                 "available private context inventory",
             ),
         ],
@@ -16298,7 +16506,8 @@ def model_route_manager() -> ModelRouteManager:
 
 def attached_context_sources(conv: dict) -> list[dict]:
     sources = []
-    for item in conv.get("context_items", []):
+    project_roots = active_project_roots(conv)
+    for item in scoped_context_items(conv.get("context_items", []), project_roots):
         kind = item.get("kind")
         if kind == "index":
             try:
@@ -17117,10 +17326,14 @@ def maybe_set_title(conv: dict, text: str) -> None:
         conv["title_kind"] = "provisional"
 
 
-def attached_index_ids(conv: dict) -> list[str]:
+def attached_index_ids(conv: dict, *, project_roots: set[str] | None = None) -> list[str]:
+    if project_roots is None:
+        project_roots = active_project_roots(conv)
     ids = []
     for item in conv.get("context_items", []):
         if item.get("kind") == "index" and item.get("id"):
+            if project_roots and not context_item_matches_project(item, project_roots):
+                continue
             ids.append(item["id"])
     return ids
 

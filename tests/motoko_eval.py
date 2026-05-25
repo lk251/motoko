@@ -76,7 +76,7 @@ def test_study_reuses_existing_dossier(m):
         "query": "craftsmanship quality",
         "summary": "Javier wants Motoko to feel like careful swiss watchmaker craftsmanship.",
         "source_memories": [],
-        "source_conversations": [],
+        "source_conversations": [{"id": conv["id"]}],
     }
     write_json(m.dossier_path(dossier["id"]), dossier)
     result = m.study_query(conv, "craftsmanship quality")
