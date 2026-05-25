@@ -4847,6 +4847,16 @@ def test_prompt_context_filters_attached_artifacts_to_current_project(m):
             assert scope_source["filtered_context_items"] == 1
             assert scope_source["fallback_index_id"] == current_index["id"]
             assert "retried with current-project index" in fallback_values["scope_text"]
+
+            missing = m.new_conversation("Missing attached index")
+            missing["context_items"] = [{"kind": "index", "id": "20260525-030000-cccccc"}]
+            missing_package, missing_values = m.build_prompt_context_package(missing, "alpha implementation")
+            missing_scope_source = next(
+                source for source in missing_package.sources if source.get("kind") == "project-scope"
+            )
+            assert current_text in missing_values["context_text"]
+            assert missing_scope_source["filtered_context_items"] == 1
+            assert missing_scope_source["fallback_index_id"] == current_index["id"]
     finally:
         os.chdir(old_cwd)
         if old_evidence is None:

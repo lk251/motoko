@@ -1155,9 +1155,8 @@ def conversation_project_roots(conv: dict | None) -> set[str]:
             continue
         kind = item.get("kind")
         if kind == "index" and item.get("id"):
-            try:
-                index = load_index_exact(str(item.get("id", "")))
-            except Exception:
+            index = load_index_if_exists(str(item.get("id", "")))
+            if index is None:
                 continue
             index_root = str(index.get("root", "") or "").strip()
             if index_root:
@@ -1253,8 +1252,8 @@ def context_item_project_roots(item: dict) -> set[str]:
     kind = item.get("kind")
     roots: set[str] = set()
     if kind == "index" and item.get("id"):
-        with contextlib.suppress(Exception):
-            index = load_index_exact(str(item.get("id", "")))
+        index = load_index_if_exists(str(item.get("id", "")))
+        if index is not None:
             root = str(index.get("root", "") or "").strip()
             if root:
                 roots.add(str(pathlib.Path(root).expanduser().resolve()))
@@ -1263,11 +1262,13 @@ def context_item_project_roots(item: dict) -> set[str]:
     elif kind == "repo" and item.get("root"):
         roots.add(str(pathlib.Path(str(item.get("root"))).expanduser().resolve()))
     elif kind == "topic" and item.get("id"):
-        with contextlib.suppress(Exception):
-            roots.update(topic_project_roots(load_topic(str(item.get("id", "")))))
+        topic = load_topic_if_exists(str(item.get("id", "")))
+        if topic is not None:
+            roots.update(topic_project_roots(topic))
     elif kind == "dossier" and item.get("id"):
-        with contextlib.suppress(Exception):
-            roots.update(dossier_project_roots(load_dossier(str(item.get("id", "")))))
+        dossier = load_dossier_if_exists(str(item.get("id", "")))
+        if dossier is not None:
+            roots.update(dossier_project_roots(dossier))
     return roots
 
 
@@ -7913,6 +7914,22 @@ def load_index(index_id: str | None = None) -> dict:
     )
 
 
+def load_index_if_exists(index_id: str) -> dict | None:
+    index_id = str(index_id or "").strip()
+    if not index_id:
+        return None
+    if re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", index_id):
+        try:
+            data = json.loads(index_path(index_id).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+    for row in list_indexes():
+        if str(row.get("id", "")) == index_id:
+            return row
+    return None
+
+
 def load_index_exact(index_id: str) -> dict:
     if re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", index_id):
         path = index_path(index_id)
@@ -8001,6 +8018,16 @@ def load_topic(topic_id: str | None = None) -> dict:
     )
 
 
+def load_topic_if_exists(topic_id: str) -> dict | None:
+    topic_id = str(topic_id or "").strip()
+    if not topic_id:
+        return None
+    for row in list_topics():
+        if str(row.get("id", "")) == topic_id:
+            return row
+    return None
+
+
 def list_dossiers() -> list[dict]:
     rows = []
     for path in sorted(dossiers_dir().glob("*.json"), reverse=True):
@@ -8018,6 +8045,16 @@ def load_dossier(dossier_id: str | None = None) -> dict:
         label_func=dossier_label,
         selector=dossier_id,
     )
+
+
+def load_dossier_if_exists(dossier_id: str) -> dict | None:
+    dossier_id = str(dossier_id or "").strip()
+    if not dossier_id:
+        return None
+    for row in list_dossiers():
+        if str(row.get("id", "")) == dossier_id:
+            return row
+    return None
 
 
 def build_context_catalog() -> dict:
