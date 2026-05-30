@@ -363,6 +363,111 @@ def test_heavy_index_refresh_attaches_newer_completed_index(m):
     assert conv["context_items"][0]["id"] == "new-index"
 
 
+def test_manual_heavy_index_refresh_bypasses_cooldown(m):
+    docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
+    docs.mkdir()
+    source = docs / "tasks.org"
+    source.write_text("* TODO Old task\n", encoding="utf-8")
+    m.add_allowed_dir(str(docs))
+    old_index = {
+        "id": "old-index",
+        "name": "docs",
+        "root": str(docs),
+        "glob": "*.org",
+        "created": m.now(),
+        "files": [
+            {
+                "path": str(source),
+                "source_fingerprint": m.source_fingerprint(source),
+                "chunks": [],
+            }
+        ],
+    }
+    write_json(m.index_path(old_index["id"]), old_index)
+    source.write_text("* TODO Changed task\n", encoding="utf-8")
+    conv = m.new_conversation("Manual bg")
+    conv["id"] = "manual-bg"
+    conv["context_items"] = [m.context_item_from_index(old_index)]
+    state = m.read_heavy_study_state()
+    m.mark_heavy_index_attempt(old_index, state, result="recent failure")
+
+    new_index = dict(old_index)
+    new_index["id"] = "new-index"
+    calls = []
+    old_build = m.build_document_index
+    try:
+        def fake_build(*_args, **_kwargs):
+            calls.append("build")
+            return new_index
+
+        m.build_document_index = fake_build
+        automatic_notes = m.refresh_heavy_attached_indexes(conv)
+        assert calls == []
+        assert any("on cooldown" in note for note in automatic_notes)
+
+        manual_notes = m.refresh_heavy_attached_indexes(conv, ignore_cooldown=True)
+    finally:
+        m.build_document_index = old_build
+
+    assert calls == ["build"]
+    assert any("cooldown bypassed" in note for note in manual_notes)
+    assert any("heavy index refreshed old-index -> new-index" in note for note in manual_notes)
+    assert conv["context_items"][0]["id"] == "new-index"
+
+
+def test_bg_now_attaches_current_directory_index_and_runs_manual_step(m):
+    docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
+    docs.mkdir()
+    source = docs / "tasks.org"
+    source.write_text("* TODO Current task\n", encoding="utf-8")
+    m.add_allowed_dir(str(docs))
+    index = {
+        "id": "current-index",
+        "name": "docs",
+        "root": str(docs),
+        "glob": m.AUTO_INDEX_GLOB,
+        "created": m.now(),
+        "files": [
+            {
+                "path": str(source),
+                "source_fingerprint": m.source_fingerprint(source),
+                "chunks": [],
+            }
+        ],
+    }
+    write_json(m.index_path(index["id"]), index)
+    conv = m.new_conversation("Manual bg")
+    conv["id"] = "manual-bg-now"
+    seen = {}
+    old_background_step = m.background_study_step
+    old_cwd = pathlib.Path.cwd()
+    try:
+        def fake_background_step(conv_arg, phase_callback=None, *, manual=False):
+            seen["manual"] = manual
+            seen["context_items"] = list(conv_arg.get("context_items", []))
+            if phase_callback is not None:
+                phase_callback("study: manual-test")
+            return ["manual step ran"]
+
+        m.background_study_step = fake_background_step
+        os.chdir(docs)
+        phases = []
+        text = m.run_background_now_text(
+            conv,
+            phase_callback=phases.append,
+            save_result=False,
+        )
+    finally:
+        os.chdir(old_cwd)
+        m.background_study_step = old_background_step
+
+    assert seen["manual"] is True
+    assert seen["context_items"][0]["id"] == "current-index"
+    assert "attached current-directory index current-index" in text
+    assert "manual step ran" in text
+    assert "study: manual-test" in phases
+
+
 def test_routed_index_quality_gate_preserves_org_evidence(m):
     docs = pathlib.Path(tempfile.mkdtemp()) / "docs"
     docs.mkdir()
@@ -568,12 +673,16 @@ def main() -> int:
     with isolated_state():
         test_heavy_index_refresh_attaches_newer_completed_index(m)
     with isolated_state():
+        test_manual_heavy_index_refresh_bypasses_cooldown(m)
+    with isolated_state():
+        test_bg_now_attaches_current_directory_index_and_runs_manual_step(m)
+    with isolated_state():
         test_routed_index_quality_gate_preserves_org_evidence(m)
     with isolated_state():
         test_worker_model_eval_scores_routes_and_json_artifacts(m)
     with isolated_state():
         test_worker_model_eval_flags_missing_facts(m)
-    print("13 motoko evaluation checks passed")
+    print("15 motoko evaluation checks passed")
     return 0
 
 

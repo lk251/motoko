@@ -840,6 +840,7 @@ SLASH_COMMANDS = [
     ("/index PATH", "build and attach a mixed text document index"),
     ("/index-resume INDEX_ID", "resume and attach a partial document index"),
     ("/resume-work [INDEX_ID]", "resume unfinished Motoko work"),
+    ("/bg-now", "run background index/retrieval maintenance now"),
     ("/attach-index [ID]", "attach an existing document index"),
     ("/topic [INDEX_ID] QUERY", "build and attach a topic dossier"),
     ("/deepen [INDEX_ID] QUERY", "build a larger topic dossier"),
@@ -954,6 +955,7 @@ SHELL_COMMANDS = [
     "index",
     "index-resume",
     "resume-work",
+    "bg-now",
     "indexes",
     "corpus-profile",
     "index-quality",
@@ -1055,6 +1057,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/index-repair",
     "/index-storage",
     "/index-cleanup",
+    "/bg-now",
     "/tasks",
     "/topics",
     "/dossiers",
@@ -15388,7 +15391,12 @@ def heavy_index_refresh_reason(summary: dict) -> str | None:
     return None
 
 
-def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]:
+def refresh_heavy_attached_indexes(
+    conv: dict,
+    phase_callback=None,
+    *,
+    ignore_cooldown: bool = False,
+) -> list[str]:
     if not env_flag("MOTOKO_BACKGROUND_HEAVY_INDEX", True):
         return []
     if work_pause_requested():
@@ -15417,9 +15425,13 @@ def refresh_heavy_attached_indexes(conv: dict, phase_callback=None) -> list[str]
                 name = index.get("name", index.get("id"))
                 notes.append(f"{new_files} new file(s) below heavy index threshold for {name}")
             continue
-        if heavy_index_cooldown_active(index, state):
+        if heavy_index_cooldown_active(index, state) and not ignore_cooldown:
             notes.append(f"heavy index refresh on cooldown for {index.get('name', index.get('id'))}")
             continue
+        if ignore_cooldown and heavy_index_cooldown_active(index, state):
+            notes.append(
+                f"heavy index cooldown bypassed for {index.get('name', index.get('id'))}"
+            )
         mark_heavy_index_attempt(index, state, result=f"started: {reason}")
         if phase_callback is not None:
             phase_callback("bg-heavy: indexing(model)")
@@ -15829,15 +15841,22 @@ def sources_with_answer_audit(query: str, reply: str, sources: list[dict]) -> li
     )
 
 
-def background_study_step(conv: dict, phase_callback=None) -> list[str]:
+def background_study_step(
+    conv: dict,
+    phase_callback=None,
+    *,
+    manual: bool = False,
+) -> list[str]:
     job_id = study_job_id()
     previous_state = read_study_state()
     previous_job = previous_state.get("job_id") if study_state_incomplete(previous_state) else None
+    mode = "manual-background-catchup" if manual else "catalog-and-planning"
     append_study_job_event(
         job_id,
         "started",
-        mode="catalog-and-planning",
+        mode=mode,
         conversation_id=conv.get("id", ""),
+        manual=manual,
         resumed_from_job_id=previous_job or "",
         resumed_from_phase=previous_state.get("phase", "") if previous_job else "",
     )
@@ -15853,7 +15872,7 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
                 "updated": now(),
                 "phase": "study: paused",
                 "status": "paused",
-                "mode": "catalog-and-planning",
+                "mode": mode,
                 "job_id": job_id,
                 "notes": pause_notes[:8],
             }
@@ -15894,6 +15913,7 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
     heavy_notes = refresh_heavy_attached_indexes(
         conv,
         phase_callback=lambda phase: set_phase(phase, notes=notes),
+        ignore_cooldown=manual,
     )
     if heavy_notes:
         notes.extend(heavy_notes)
@@ -15993,14 +16013,14 @@ def background_study_step(conv: dict, phase_callback=None) -> list[str]:
         "updated": now(),
         "phase": "study: idle",
         "status": "completed",
-        "mode": "catalog-and-planning",
+        "mode": mode,
         "job_id": job_id,
         "notes": notes[:8],
         "catalog_updated": catalog.get("updated", ""),
     }
     write_study_state(state)
     append_study_job_event(job_id, "completed", notes=notes[:8], catalog_updated=catalog.get("updated", ""))
-    return notes[:3]
+    return notes[:12] if manual else notes[:3]
 
 
 def hybrid_candidate_document(index: dict, candidate: dict, query: str = "") -> str:
@@ -17466,6 +17486,7 @@ HELP_SECTIONS = [
             ("/index PATH", "build and attach a mixed text document index"),
             ("/index-resume INDEX_ID", "resume and attach a partial document index"),
             ("/resume-work [INDEX_ID]", "resume unfinished Motoko work"),
+            ("/bg-now", "run background index/retrieval maintenance now"),
             ("/attach-index [ID]", "attach an existing document index"),
             ("/corpus-profile [ID]", "show an index's corpus profile"),
             ("/index-quality [ID]", "show index artifact quality checks"),
@@ -18607,6 +18628,66 @@ def study_from_body_text(conv: dict, body: str) -> str:
     return study_query(conv, query, focus=focus)
 
 
+def current_project_index_already_attached(conv: dict, root: pathlib.Path, pattern: str) -> bool:
+    root_text = str(root.expanduser().resolve())
+    pattern = pattern or AUTO_INDEX_GLOB
+    for item in conv.get("context_items", []):
+        if not isinstance(item, dict) or item.get("kind") != "index":
+            continue
+        index = load_index_if_exists(str(item.get("id", "")))
+        if not index:
+            continue
+        if index.get("root") == root_text and (index.get("glob") or AUTO_INDEX_GLOB) == pattern:
+            return True
+    return False
+
+
+def attach_current_project_index_for_background(conv: dict) -> list[str]:
+    plan = cwd_learning_plan()
+    if plan is None:
+        return []
+    root = plan["root"]
+    pattern = plan["glob"]
+    if current_project_index_already_attached(conv, root, pattern):
+        return []
+    existing = attach_best_cwd_index(conv, plan)
+    if existing is None:
+        return [
+            "no current-directory index available for bg-now; run motoko index . first"
+        ]
+    status, _warnings = index_staleness(existing)
+    return [f"attached current-directory index {existing.get('id', '')} ({status})"]
+
+
+def format_background_now_report(notes: list[str]) -> str:
+    lines = ["background catch-up complete"]
+    if not notes:
+        lines.append("- no background work was due")
+        return "\n".join(lines)
+    lines.extend(f"- {note}" for note in notes)
+    return "\n".join(lines)
+
+
+def print_background_phase(phase: str) -> None:
+    print(str(phase), flush=True)
+
+
+def run_background_now_text(
+    conv: dict,
+    *,
+    attach_current_project: bool = True,
+    phase_callback=None,
+    save_result: bool = True,
+) -> str:
+    notes = []
+    if attach_current_project:
+        notes.extend(attach_current_project_index_for_background(conv))
+    notes.extend(background_study_step(conv, phase_callback=phase_callback, manual=True))
+    if save_result:
+        save_conversation(conv)
+    return format_background_now_report(notes)
+
+
 def compact_conversation_text(conv: dict) -> str:
     return "conversation compacted" if compact_conversation(conv, quiet=True) else "conversation is already compact enough"
 
@@ -18634,6 +18715,11 @@ def blocking_command_request(text: str, conv: dict):
         return foreground_command_request("Refreshing profile dossier...", refresh_profile_dossier_text)
     if primary == "/study":
         return foreground_command_request("Studying context...", lambda: study_from_body_text(conv, body))
+    if primary == "/bg-now" and not body:
+        return foreground_command_request(
+            "Running background catch-up...",
+            lambda: run_background_now_text(conv, phase_callback=print_background_phase),
+        )
     if primary == "/compact" and not body:
         return foreground_command_request("Compacting conversation...", lambda: compact_conversation_text(conv))
     if primary == "/memorize" and not body:
@@ -21566,6 +21652,23 @@ def command_index_cleanup(args) -> None:
         print_report(format_index_cleanup_report(report))
 
 
+def command_bg_now(args) -> None:
+    if args.conversation:
+        conv = load_conversation(args.conversation)
+        save_result = True
+    else:
+        conv = new_conversation("bg-now")
+        save_result = False
+    print_report(
+        run_background_now_text(
+            conv,
+            attach_current_project=not args.no_cwd,
+            phase_callback=print_background_phase,
+            save_result=save_result,
+        )
+    )
+
+
 def command_evidence_build(args) -> None:
     index = load_index(args.index) if args.index else default_vector_index()
     store = build_evidence_store_from_index(index, write=True)
@@ -22452,6 +22555,11 @@ def main(argv: list[str]) -> int:
     index_cleanup.add_argument("--yes", action="store_true", help="apply cleanup; without this Motoko prints a dry-run")
     index_cleanup.add_argument("--json", action="store_true", help="print JSON report")
     index_cleanup.set_defaults(func=command_index_cleanup)
+
+    bg_now = sub.add_parser("bg-now", help="run background index/retrieval maintenance now")
+    bg_now.add_argument("--conversation", help="saved conversation to update; defaults to an unsaved current-directory pass")
+    bg_now.add_argument("--no-cwd", action="store_true", help="do not attach the best current-directory index before running")
+    bg_now.set_defaults(func=command_bg_now)
 
     vector_plan_cmd = sub.add_parser("vector-plan", help="inspect vector/reranker storage readiness")
     vector_plan_cmd.add_argument("index", nargs="?", help="optional document index to size; defaults to latest indexes")

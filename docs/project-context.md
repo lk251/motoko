@@ -274,6 +274,11 @@ Current UI direction:
   opt-in, such as `MOTOKO_BACKGROUND_PROFILE=1` for idle profile refreshes, so
   the background loop does not compete with active chat. It must not silently
   crawl broad new directories or build large document indexes.
+- Manual `/bg-now` / `motoko bg-now` should be an explicit trigger for that same
+  background machinery, not a second maintenance pipeline. It may bypass normal
+  idle timers and heavy-index cooldowns because the user asked for work now, but
+  it must still honor allowlists, route scheduling, durable checkpoints, pause
+  requests, and configured per-pass limits.
 - Background study should leave a durable job trail in Motoko state. For the
   current cheap catalog/planning pass, recovery means detecting the interrupted
   job, recording that fact, and recomputing from current state. Future heavier

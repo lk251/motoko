@@ -901,6 +901,7 @@ Useful in-chat commands:
 /index PATH
 /index-resume INDEX_ID
 /resume-work [INDEX_ID]
+/bg-now
 /attach-index [INDEX_ID]
 /corpus-profile [INDEX_ID]
 /index-repair [INDEX_ID]
@@ -1121,6 +1122,13 @@ so the chat does not compete with the indexing pass. It is deliberately bounded:
 it only considers already attached indexes, waits for normal idle time, refreshes
 at most one index per pass, and uses a cooldown plus new-file thresholds so tiny
 repo edits do not immediately trigger a large rebuild.
+Use `/bg-now` or `motoko bg-now` when you explicitly want Motoko to run this
+same background catch-up path immediately. Manual bg-now runs refresh the
+catalog, deterministic index upgrades, attached-index freshness checks, cleanup,
+evidence stores, repairs, and vector stores through the existing bounded
+background machinery. They bypass the ordinary heavy-index cooldown because the
+user asked for work now, but they still respect allowlists, model-route
+scheduling, durable checkpoints, pause requests, and configured per-pass limits.
 Background study writes `study-state.json` and appends events to
 `study-jobs.jsonl` under Motoko state. If Motoko exits during the cheap
 catalog/planning pass, the next pass records the interrupted job and recomputes
@@ -1318,6 +1326,13 @@ MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES=5 motoko
 MOTOKO_BACKGROUND_HEAVY_INDEX_MIN_NEW_BYTES=131072 motoko
 MOTOKO_CWD_LEARN=0 motoko
 MOTOKO_CWD_LEARN_DECLINE_COOLDOWN=86400 motoko
+```
+
+For a deliberate catch-up pass without waiting for the idle loop or the
+heavy-index cooldown:
+
+```bash
+motoko bg-now
 ```
 
 `/profile-refresh` or `motoko profile refresh` builds a compact profile dossier

@@ -5,6 +5,12 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added explicit background catch-up: `/bg-now` and `motoko bg-now` run the
+  existing background index/retrieval maintenance path immediately, including
+  catalog refresh, deterministic upgrades, attached-index refresh, cleanup,
+  evidence refresh, repair, and vector refresh. Manual runs bypass the normal
+  heavy-index cooldown but keep allowlists, route scheduling, durable
+  checkpoints, pause behavior, and configured per-pass limits.
 - Added a report-first skill lifecycle layer. Motoko now tracks realm-local
   skill selection/patch metadata, shows lifecycle state in skill reports, and
   supports `motoko skill curator`, `pin`, `unpin`, `archive --yes`, and
