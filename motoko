@@ -574,6 +574,7 @@ INDEX_CLEANUP_SCHEMA_VERSION = "index-cleanup-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
 VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
+SAFE_DIAGNOSE_SCHEMA_VERSION = "diagnose-safe-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
 EVIDENCE_STORE_SCHEMA_VERSION = "evidence-store-v1"
 EVIDENCE_QUERY_SCHEMA_VERSION = "evidence-query-v1"
@@ -593,6 +594,7 @@ EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v2"
 EVIDENCE_INPUT_SCHEMA_VERSION = "evidence-input-v1"
 EMBEDDING_TASKS = {"embedding", "embed", "vector", "vector_embedding", "vector_index", "vector_query"}
 RERANKER_TASKS = {"reranker", "rerank", "vector_rerank"}
+SAFE_PROGRESS_STALE_SECONDS = 300
 ANSWER_GROUNDING_SCHEMA_VERSION = "answer-grounding-v1"
 MODEL_CACHEABLE_SUMMARY_ROUTES = {
     MODEL_ROUTE_INDEX_CHUNK,
@@ -867,6 +869,7 @@ SLASH_COMMANDS = [
     ("/feedback up|down|ok [TEXT]", "rate the last answer with an optional note"),
     ("/up [TEXT]", "shortcut for positive feedback on the last answer"),
     ("/down [TEXT]", "shortcut for negative feedback on the last answer"),
+    ("/diagnose", "show content-free job and background progress diagnostics"),
     ("/status", "show model, memory, and context state"),
     ("/model-routes", "show model worker routes"),
     ("/models [ROUTE]", "show local model service status"),
@@ -989,6 +992,7 @@ SHELL_COMMANDS = [
     "personality",
     "profile",
     "remember",
+    "diagnose",
     "status",
     "last-call",
     "context-bench",
@@ -1034,6 +1038,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/feedback",
     "/up",
     "/down",
+    "/diagnose",
     "/status",
     "/last-call",
     "/model-routes",
@@ -1846,6 +1851,271 @@ def format_index_progress_line(progress: dict) -> str:
         f"{format_index_progress_status(progress)}  elapsed {elapsed}  "
         f"updated {updated}  {progress.get('root', '')}"
     )
+
+
+def safe_ref(value: object, *, prefix: str = "ref") -> str:
+    text = str(value or "")
+    if not text:
+        return f"{prefix}:none"
+    return f"{prefix}:{sha256_hex(text.encode('utf-8'))[:12]}"
+
+
+def age_seconds_from_timestamp(value: object) -> int | None:
+    parsed = parse_timestamp(str(value or ""))
+    if parsed is None:
+        return None
+    delta = _dt.datetime.now(_dt.timezone.utc).astimezone() - parsed.astimezone()
+    return max(0, int(delta.total_seconds()))
+
+
+def safe_duration_field(seconds: object) -> str:
+    try:
+        return human_duration(int(seconds))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def safe_age_field(seconds: int | None) -> str:
+    if seconds is None:
+        return "unknown"
+    return human_duration(seconds)
+
+
+def safe_progress_state(updated_age_seconds: int | None, *, complete: bool = False) -> str:
+    if complete:
+        return "finalizing"
+    if updated_age_seconds is not None and updated_age_seconds >= SAFE_PROGRESS_STALE_SECONDS:
+        return "stale"
+    return "running"
+
+
+def sanitize_background_phase(phase: object) -> str:
+    text = str(phase or "").strip()
+    if not text:
+        return "idle"
+    if text.startswith("bg-heavy: vectorizing"):
+        if "finalizing" in text:
+            return "bg-heavy: vectorizing finalizing"
+        if "retry" in text:
+            return "bg-heavy: vectorizing retry"
+        return "bg-heavy: vectorizing(model)"
+    if text.startswith("bg-heavy: index"):
+        return phase_timer_key(text)
+    if text.startswith("study:"):
+        return text.split(":", 1)[0] + ":" + text.split(":", 1)[1].strip().split(" ", 1)[0]
+    if text.startswith("memory:") or text.startswith("mem:"):
+        return text.split(" ", 1)[0]
+    if text.startswith("bg-heavy:") or text.startswith("bg:"):
+        return text.split(" ", 1)[0]
+    return "active"
+
+
+def format_vector_progress_phase(
+    *,
+    completed_batches: int,
+    total_batches: int,
+    active_parallelism: int,
+    completed_rows: int,
+    total_rows: int,
+    eta_seconds: int | None = None,
+    state: str = "running",
+) -> str:
+    state = str(state or "running").strip()
+    if state == "finalizing":
+        return f"bg-heavy: vectorizing finalizing rows {completed_rows}/{total_rows}"
+    eta_text = f"eta {human_duration(eta_seconds)}" if eta_seconds is not None else "eta ?"
+    batch_text = f"batch {completed_batches}/{total_batches}" if total_batches else "batch 0/0"
+    return (
+        f"bg-heavy: vectorizing(model) {batch_text} parallel {max(1, int(active_parallelism or 1))} "
+        f"rows {completed_rows}/{total_rows} {eta_text}"
+    )
+
+
+def safe_model_route_state(route_name: str) -> str:
+    route_name = str(route_name or "").strip()
+    if not route_name:
+        return "route=unknown state=unavailable"
+    try:
+        try:
+            info = model_route(route_name)
+        except SystemExit:
+            info = resolve_model_service_route(route_name)
+        if not endpoint_is_unix(str(info.get("endpoint", ""))):
+            return f"route={route_name} state=not-unix-route"
+        raw = local_model_status_text(info)
+        values = parse_local_model_status(raw)
+    except SystemExit as exc:  # pragma: no cover - defensive around missing route declarations.
+        return f"route={route_name} state=unavailable error_type={type(exc).__name__}"
+    except Exception as exc:  # pragma: no cover - defensive around local helper failures.
+        return f"route={route_name} state=unavailable error_type={type(exc).__name__}"
+    pieces = [f"route={values.get('route') or local_model_helper_route(info)}"]
+    for key in ("socket", "proxy", "backend"):
+        if values.get(key):
+            pieces.append(f"{key}={values[key]}")
+    if len(pieces) == 1:
+        pieces.append("state=unknown")
+    return " ".join(pieces)
+
+
+def list_vector_progress() -> list[dict]:
+    rows = []
+    root = vector_progress_dir()
+    if not root.exists():
+        return rows
+    for path in sorted(root.glob("*.json"), reverse=True):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    rows.sort(key=lambda row: row.get("updated", row.get("created", "")), reverse=True)
+    return rows
+
+
+def format_safe_index_progress_row(progress: dict) -> str:
+    updated_age = age_seconds_from_timestamp(progress.get("updated"))
+    completed_calls = int(progress.get("completed_model_calls", 0) or 0)
+    estimated_calls = int(progress.get("estimated_model_calls", 0) or 0)
+    completed_files = int(progress.get("completed_files", 0) or 0)
+    total_files = int(progress.get("total_files", 0) or 0)
+    completed_chunks = int(progress.get("completed_chunks", 0) or 0)
+    estimated_chunks = int(progress.get("estimated_chunks", 0) or 0)
+    phase = sanitize_background_phase(progress.get("phase"))
+    status = str(progress.get("status") or "running")
+    complete = status == "completed" or (
+        estimated_calls > 0 and completed_calls >= estimated_calls
+    )
+    state = safe_progress_state(updated_age, complete=complete and status not in {"failed", "paused", "deferred"})
+    parts = [
+        f"- {safe_ref(progress.get('id'), prefix='job')}",
+        "kind=index",
+        f"state={state if status == 'running' else status}",
+        f"phase={phase}",
+        f"files={completed_files}/{total_files}",
+        f"chunks={completed_chunks}/{estimated_chunks}",
+        f"calls={completed_calls}/{estimated_calls}",
+    ]
+    if progress.get("percent") is not None:
+        parts.append(f"percent={progress.get('percent')}%")
+    if progress.get("eta_seconds") is not None:
+        parts.append(f"eta={safe_duration_field(progress.get('eta_seconds'))}")
+    if progress.get("elapsed_seconds") is not None:
+        parts.append(f"elapsed={safe_duration_field(progress.get('elapsed_seconds'))}")
+    parts.append(f"updated_age={safe_age_field(updated_age)}")
+    lane = str(progress.get("background_lane") or "")
+    route = str(progress.get("model_route") or "")
+    if lane:
+        parts.append(f"lane={lane}")
+    if route:
+        parts.append(f"route={route}")
+    return " ".join(parts)
+
+
+def format_safe_vector_progress_row(progress: dict) -> str:
+    updated_age = age_seconds_from_timestamp(progress.get("updated"))
+    expected_rows = int(progress.get("expected_rows", 0) or 0)
+    completed_rows = int(progress.get("completed_rows", 0) or 0)
+    batch_size = int(progress.get("embedding_batch_size", 0) or 0)
+    total_batches = (expected_rows + batch_size - 1) // batch_size if batch_size else 0
+    completed_batches = (completed_rows + batch_size - 1) // batch_size if batch_size else 0
+    state = safe_progress_state(updated_age, complete=expected_rows > 0 and completed_rows >= expected_rows)
+    route = progress.get("embedding_route") if isinstance(progress.get("embedding_route"), dict) else {}
+    route_name = str(route.get("catalog_route") or route.get("route") or "")
+    parts = [
+        f"- {safe_ref(progress.get('id'), prefix='job')}",
+        "kind=vector",
+        f"state={state}",
+        f"rows={completed_rows}/{expected_rows}",
+        f"batches={completed_batches}/{total_batches}",
+        f"batch_size={batch_size}",
+        f"parallel={int(progress.get('embedding_parallelism', 0) or 0)}",
+        f"requested={int(progress.get('embedding_requested_parallelism', 0) or 0)}",
+        f"fallbacks={len(progress.get('embedding_parallel_fallbacks') or [])}",
+    ]
+    if progress.get("eta_seconds") is not None:
+        parts.append(f"eta={safe_duration_field(progress.get('eta_seconds'))}")
+    parts.append(f"updated_age={safe_age_field(updated_age)}")
+    if route_name:
+        parts.append(f"route={route_name}")
+    return " ".join(parts)
+
+
+def format_safe_live_job_row(job: dict) -> str:
+    parts = [
+        f"- {safe_ref(job.get('job_id'), prefix='live')}",
+        f"kind={job.get('kind', '') or 'unknown'}",
+        f"lane={job.get('lane', '') or 'unknown'}",
+        f"status={job.get('status', '') or 'unknown'}",
+        f"age={safe_duration_field(job.get('age_seconds'))}",
+        f"updated_age={safe_duration_field(job.get('updated_seconds_ago'))}",
+    ]
+    progress = job.get("progress") if isinstance(job.get("progress"), dict) else {}
+    for key in ("completed", "total", "rows", "batches", "percent"):
+        if key in progress and isinstance(progress.get(key), (int, float)):
+            parts.append(f"{key}={progress.get(key)}")
+    if job.get("error_type"):
+        parts.append(f"error_type={job.get('error_type')}")
+    if job.get("stop_requested"):
+        parts.append("stop_requested=true")
+    if job.get("pause_requested"):
+        parts.append("pause_requested=true")
+    return " ".join(parts)
+
+
+def format_diagnose_safe(conv: dict | None = None) -> str:
+    lines = [
+        f"safe diagnose: {SAFE_DIAGNOSE_SCHEMA_VERSION}",
+        "privacy: content-free; no paths, filenames, prompts, responses, memories, summaries, or corpus names",
+        f"realm: {identity_realm()}",
+        f"permissions: {permission_mode()}",
+    ]
+    study_state = read_study_state()
+    if study_state:
+        updated_age = age_seconds_from_timestamp(study_state.get("updated"))
+        lines.append(
+            "study: "
+            f"status={study_state.get('status', 'unknown')} "
+            f"phase={sanitize_background_phase(study_state.get('phase'))} "
+            f"updated_age={safe_age_field(updated_age)}"
+        )
+    maintenance = read_maintenance_state()
+    if maintenance:
+        updated_age = age_seconds_from_timestamp(maintenance.get("updated"))
+        lines.append(
+            "maintenance: "
+            f"status={maintenance.get('status', 'unknown')} "
+            f"phase={sanitize_background_phase(maintenance.get('phase'))} "
+            f"updated_age={safe_age_field(updated_age)}"
+        )
+    live_jobs = LIVE_JOB_SUPERVISOR.snapshots(include_done=False)
+    lines.append(f"live jobs: {len(live_jobs)}")
+    lines.extend(format_safe_live_job_row(job) for job in live_jobs[:12])
+    index_jobs = active_index_progress()
+    lines.append(f"index progress: {len(index_jobs)}")
+    lines.extend(format_safe_index_progress_row(job) for job in index_jobs[:12])
+    vector_jobs = list_vector_progress()
+    lines.append(f"vector progress: {len(vector_jobs)}")
+    lines.extend(format_safe_vector_progress_row(job) for job in vector_jobs[:12])
+    route_names = {MODEL_ROUTE_CHAT}
+    for job in index_jobs:
+        if job.get("model_route"):
+            route_names.add(str(job.get("model_route")))
+    for job in vector_jobs:
+        route = job.get("embedding_route") if isinstance(job.get("embedding_route"), dict) else {}
+        route_name = str(route.get("catalog_route") or route.get("route") or "")
+        if route_name:
+            route_names.add(route_name)
+    lines.append("route states:")
+    for route_name in sorted(route_names):
+        lines.append(f"- {safe_model_route_state(route_name)}")
+    if conv is not None:
+        lines.append(
+            "conversation: "
+            f"messages={len(conv.get('messages', []))} "
+            f"context_items={len(conv.get('context_items', []))}"
+        )
+    return "\n".join(lines)
 
 
 def default_config() -> dict:
@@ -13733,7 +14003,7 @@ def refresh_vector_stores(
             report["items"].append(item)
             break
         if phase_callback is not None:
-            phase_callback(f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))}")
+            phase_callback("bg-heavy: vectorizing(model)")
         try:
             store = build_vector_store_from_index(
                 index,
@@ -13979,9 +14249,14 @@ def build_embedding_vector_store_from_index(
         write_progress()
         if progress_callback is not None:
             progress_callback(
-                f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))} "
-                f"batch {completed_batches}/{len(batches)} parallel {active_parallelism} "
-                f"rows {len(completed_rows_by_id)}/{len(candidates)} {vector_eta_text()}"
+                format_vector_progress_phase(
+                    completed_batches=completed_batches,
+                    total_batches=len(batches),
+                    active_parallelism=active_parallelism,
+                    completed_rows=len(completed_rows_by_id),
+                    total_rows=len(candidates),
+                    eta_seconds=vector_eta_seconds(),
+                )
             )
 
     def current_pending_batches() -> list[tuple[int, list[tuple[str, dict, dict, str, dict]]]]:
@@ -14060,8 +14335,7 @@ def build_embedding_vector_store_from_index(
                 write_progress()
                 if progress_callback is not None:
                     progress_callback(
-                        f"bg-heavy: vectorizing(model) {index.get('name', index.get('id', ''))} "
-                        f"retrying remaining rows at parallel {active_parallelism} after embedding error; "
+                        f"bg-heavy: vectorizing(model) retry parallel {active_parallelism} "
                         f"rows {len(completed_rows_by_id)}/{len(candidates)} {vector_eta_text()}"
                     )
                 continue
@@ -14074,6 +14348,18 @@ def build_embedding_vector_store_from_index(
         break
 
     rows = [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id]
+    write_progress()
+    if progress_callback is not None:
+        progress_callback(
+            format_vector_progress_phase(
+                completed_batches=len(batches),
+                total_batches=len(batches),
+                active_parallelism=active_parallelism,
+                completed_rows=len(completed_rows_by_id),
+                total_rows=len(candidates),
+                state="finalizing",
+            )
+        )
     store = {
         "schema": VECTOR_STORE_SCHEMA_VERSION,
         "id": store_id,
@@ -18222,6 +18508,7 @@ HELP_SECTIONS = [
             ("/resume [ID]", "switch to another saved conversation; picker if ID omitted"),
             ("/feedback up|down|ok [TEXT]", "rate the last answer with an optional note"),
             ("/up [TEXT] / /down [TEXT]", "shortcuts for feedback on the last answer"),
+            ("/diagnose", "show content-free job and background progress diagnostics"),
             ("/status", "show model, memory, and context state"),
             ("/last-call", "show content-free model-call route and timing telemetry"),
             ("/model-routes", "show chat and background worker model routes"),
@@ -18404,6 +18691,7 @@ HELP_SECTIONS = [
             ("motoko study QUERY [--focus recent]", "run a bounded study action in a new conversation"),
             ("motoko compact [ID]", "compact a saved conversation"),
             ("motoko feedback up|down|ok TEXT", "rate the last answer in a saved conversation"),
+            ("motoko diagnose --safe", "show content-free job and background progress diagnostics"),
             ("motoko status", "show model, memory, and state paths"),
             ("motoko model-routes", "show chat and background worker model routes"),
             ("motoko models [ROUTE]", "show local model service status from motoko-model"),
@@ -18833,6 +19121,8 @@ def report_command_request(text: str, conv: dict):
         return "/about", format_about
     if primary == "/sources" and not body:
         return "/sources", lambda: format_conversation_sources(conv)
+    if primary == "/diagnose" and not body:
+        return "/diagnose", lambda: format_diagnose_safe(conv)
     if primary == "/status" and not body:
         return "/status", lambda: format_status(conv)
     if primary == "/last-call" and not body:
@@ -20038,6 +20328,7 @@ class MotokoTui:
         self.study_status = "study: starting"
         self.study_last_note = ""
         self.study_phase_started = time.monotonic()
+        self.study_phase_updated = self.study_phase_started
         self.last_input_at = time.monotonic()
         self.cancel_event = threading.Event()
         self.pending_prompts: collections.deque[str] = collections.deque()
@@ -20633,6 +20924,7 @@ class MotokoTui:
         self.cwd_indexing = True
         self.study_status = "bg-heavy: indexing(model)"
         self.study_phase_started = time.monotonic()
+        self.study_phase_updated = self.study_phase_started
         self.index_progress = None
 
         def worker() -> None:
@@ -21017,6 +21309,7 @@ class MotokoTui:
                 new_phase = event[1]
                 if phase_timer_key(new_phase) != phase_timer_key(self.study_status):
                     self.study_phase_started = time.monotonic()
+                self.study_phase_updated = time.monotonic()
                 self.study_status = new_phase
                 changed = True
             elif kind == "study_done":
@@ -21042,6 +21335,7 @@ class MotokoTui:
                 self.study_running = True
                 self.cwd_indexing = True
                 self.study_status = format_index_progress_status(self.index_progress)
+                self.study_phase_updated = time.monotonic()
                 changed = True
             elif kind == "cwd_index_done":
                 self.cwd_indexing = False
@@ -21504,8 +21798,14 @@ class MotokoTui:
         self.write(render_overlay_page_sequence(rows, height))
 
     def study_status_label(self) -> str:
+        study_status = str(getattr(self, "study_status", "study: idle"))
+        updated_elapsed = int(time.monotonic() - getattr(self, "study_phase_updated", time.monotonic()))
+        if study_status.startswith("bg-heavy: vectorizing") and updated_elapsed >= SAFE_PROGRESS_STALE_SECONDS:
+            return f"bg-heavy: vectorizing stalled? last progress {human_duration(updated_elapsed)} ago"
+        if study_status.startswith("bg-heavy: vectorizing"):
+            return sanitize_background_phase(study_status)
         return study_status_label_core(
-            str(getattr(self, "study_status", "study: idle")),
+            study_status,
             getattr(self, "index_progress", None),
             progress_formatter=format_index_progress_status,
         )
@@ -22962,6 +23262,12 @@ def command_status(_args) -> None:
     print_status()
 
 
+def command_diagnose(args) -> None:
+    if not args.safe:
+        raise SystemExit("diagnose is privacy-sensitive; use: motoko diagnose --safe")
+    print_report(format_diagnose_safe())
+
+
 def command_last_call(_args) -> None:
     print_report(format_last_model_call())
 
@@ -23188,6 +23494,10 @@ def main(argv: list[str]) -> int:
 
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
+
+    diagnose = sub.add_parser("diagnose", help="show content-free job and background progress diagnostics")
+    diagnose.add_argument("--safe", action="store_true", help="required privacy-safe mode")
+    diagnose.set_defaults(func=command_diagnose)
 
     last_call = sub.add_parser("last-call", help="show content-free model-call route and timing telemetry")
     last_call.set_defaults(func=command_last_call)

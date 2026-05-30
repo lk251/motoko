@@ -1024,11 +1024,35 @@ def test_spinner_and_input_wrapping(m):
 
 
 def test_phase_timer_key_ignores_progress_counters(m):
-    left = "bg-heavy: vectorizing(model) orgfiles batch 29/129 parallel 32 rows 2700/10525 eta 1m50s"
-    right = "bg-heavy: vectorizing(model) orgfiles batch 30/129 parallel 32 rows 2780/10525 eta 1m45s"
+    left = "bg-heavy: vectorizing(model) batch 29/129 parallel 32 rows 2700/10525 eta 1m50s"
+    right = "bg-heavy: vectorizing(model) batch 30/129 parallel 32 rows 2780/10525 eta 1m45s"
     assert m.phase_timer_key(left) == m.phase_timer_key(right)
-    assert m.phase_timer_key(left) == "bg-heavy: vectorizing(model) orgfiles"
+    assert m.phase_timer_key(left) == "bg-heavy: vectorizing(model)"
     assert m.phase_timer_key("study: planning") != m.phase_timer_key(left)
+
+
+def test_vector_progress_phase_is_content_free_and_finalizing(m):
+    line = m.format_vector_progress_phase(
+        completed_batches=2,
+        total_batches=5,
+        active_parallelism=32,
+        completed_rows=64,
+        total_rows=160,
+        eta_seconds=120,
+    )
+    assert line == "bg-heavy: vectorizing(model) batch 2/5 parallel 32 rows 64/160 eta 2m00s"
+    assert "orgfiles" not in line
+    assert "logbook" not in line
+
+    finalizing = m.format_vector_progress_phase(
+        completed_batches=5,
+        total_batches=5,
+        active_parallelism=32,
+        completed_rows=160,
+        total_rows=160,
+        state="finalizing",
+    )
+    assert finalizing == "bg-heavy: vectorizing finalizing rows 160/160"
 
 
 def test_generated_title(m):
@@ -5061,6 +5085,30 @@ def test_tui_bottom_status_omits_chat_phase_and_spinner(m):
         assert "bg: idle" in status
 
 
+def test_tui_vector_status_reports_stale_progress(m):
+    with isolated_state():
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = {"title": "Vector Status"}
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.pending_prompts = m.collections.deque()
+        ui.study_running = True
+        ui.study_status = "bg-heavy: vectorizing(model) batch 1/9 rows 2/20 eta 2m"
+        now_value = m.time.monotonic()
+        ui.study_phase_started = now_value - 1200
+        ui.study_phase_updated = now_value - (m.SAFE_PROGRESS_STALE_SECONDS + 5)
+        ui.study_last_note = ""
+        ui.status = "ready"
+        ui.index_progress = None
+
+        status = m.strip_ansi(" ".join(ui.status_display(100)))
+        assert "vectorizing stalled?" in status
+        assert "last progress" in status
+        assert "ready" not in status
+
+
 def test_tui_bottom_renderer_skips_identical_frames(m):
     with isolated_state():
         captured = []
@@ -6974,6 +7022,108 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
 
 
+def test_diagnose_safe_redacts_private_progress_metadata(m):
+    with isolated_state():
+        m.ensure_private_dir(m.indexes_dir())
+        m.ensure_vector_progress_dir()
+        old_time = (
+            m._dt.datetime.now(m._dt.timezone.utc) - m._dt.timedelta(minutes=10)
+        ).astimezone().isoformat(timespec="seconds")
+        m.write_study_state(
+            {
+                "updated": old_time,
+                "status": "running",
+                "phase": "bg-heavy: vectorizing(model) orgfiles batch 1/9 rows 2/20 eta 2m",
+                "notes": ["private logbook.org note"],
+            }
+        )
+        index_progress = {
+            "id": "secret-index-logbook",
+            "kind": "index",
+            "status": "running",
+            "phase": "summarizing chunk",
+            "root": "/home/mares/repos/orgfiles",
+            "name": "orgfiles",
+            "current_file": "/home/mares/repos/orgfiles/logbook.org",
+            "last_model_label": "/home/mares/repos/orgfiles/logbook.org chunk 1",
+            "error": "private filename logbook.org",
+            "updated": old_time,
+            "elapsed_seconds": 30,
+            "eta_seconds": 120,
+            "total_files": 3,
+            "completed_files": 1,
+            "estimated_chunks": 8,
+            "completed_chunks": 2,
+            "estimated_model_calls": 12,
+            "completed_model_calls": 3,
+            "percent": 25,
+            "model_route": m.MODEL_ROUTE_INDEX_CHUNK,
+            "background_lane": "small-model",
+        }
+        m.atomic_write(
+            m.index_progress_path(index_progress["id"]),
+            json.dumps(index_progress, ensure_ascii=False) + "\n",
+        )
+        vector_progress = {
+            "schema": m.VECTOR_PROGRESS_SCHEMA_VERSION,
+            "id": "embedding-secret-logbook-orgfiles",
+            "updated": old_time,
+            "source_index": {
+                "id": "secret-index-logbook",
+                "name": "orgfiles",
+                "root": "/home/mares/repos/orgfiles",
+            },
+            "embedding_route": {
+                "catalog_route": "qwen3-embedding-0b6",
+                "model": "qwen3-embedding-0.6b",
+            },
+            "embedding_batch_size": 2,
+            "embedding_requested_parallelism": 4,
+            "embedding_parallelism": 4,
+            "embedding_parallel_fallbacks": [],
+            "expected_rows": 10,
+            "completed_rows": 4,
+            "eta_seconds": 90,
+            "rows": [
+                {
+                    "id": "private-row",
+                    "path": "/home/mares/repos/orgfiles/logbook.org",
+                    "summary": "private summary text",
+                    "evidence_excerpt": "private excerpt",
+                    "vector": [0.1, 0.2],
+                }
+            ],
+        }
+        m.atomic_write(
+            m.vector_progress_path(vector_progress["id"]),
+            json.dumps(vector_progress, ensure_ascii=False) + "\n",
+        )
+        old_route_state = m.safe_model_route_state
+        try:
+            m.safe_model_route_state = lambda route: f"route={route} socket=inactive backend=inactive"
+            report = m.format_diagnose_safe()
+        finally:
+            m.safe_model_route_state = old_route_state
+
+        assert "safe diagnose: diagnose-safe-v1" in report
+        assert "kind=index" in report
+        assert "kind=vector" in report
+        assert "state=stale" in report
+        assert "rows=4/10" in report
+        assert "files=1/3" in report
+        assert "route=qwen3-embedding-0b6" in report
+        for private_text in [
+            "secret",
+            "orgfiles",
+            "logbook",
+            "/home/mares",
+            "private summary",
+            "private excerpt",
+            "private filename",
+        ]:
+            assert private_text not in report
+
+
 def test_embedding_vector_store_falls_back_from_excess_parallelism(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -8476,6 +8626,17 @@ def test_live_command_request_metadata(m):
         label, run = report
         assert label == "/status"
         assert "runtime schema:" in run()
+
+        old_route_state = m.safe_model_route_state
+        try:
+            m.safe_model_route_state = lambda route: f"route={route} socket=inactive backend=inactive"
+            diagnose = m.shared_command_request("/diagnose", conv)
+            assert diagnose is not None
+            diagnose_label, diagnose_run = diagnose
+            assert diagnose_label == "/diagnose"
+            assert "safe diagnose:" in diagnose_run()
+        finally:
+            m.safe_model_route_state = old_route_state
 
         mutation = m.shared_command_request("/rename Better title", conv)
         assert mutation is not None
@@ -10141,6 +10302,8 @@ def main() -> int:
         test_tui_role_markers_working_and_worked_line,
         test_tui_alt_backspace_deletes_previous_word,
         test_tui_bottom_status_omits_chat_phase_and_spinner,
+        test_tui_vector_status_reports_stale_progress,
+        test_vector_progress_phase_is_content_free_and_finalizing,
         test_tui_append_renderer_keeps_transcript_in_scrollback,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
@@ -10169,6 +10332,7 @@ def main() -> int:
         test_retrieval_vector_query_uses_short_worker_timeouts,
         test_embedding_vector_store_stale_when_route_model_changes,
         test_embedding_vector_store_resumes_saved_progress,
+        test_diagnose_safe_redacts_private_progress_metadata,
         test_embedding_vector_store_falls_back_from_excess_parallelism,
         test_vector_query_can_use_catalog_reranker_route,
         test_normal_retrieval_uses_embedding_rerank_by_default,

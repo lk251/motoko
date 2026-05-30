@@ -317,10 +317,10 @@ model calls so long jobs are easier to anticipate. Multi-round file and corpus
 summaries can still make early estimates rough, so Motoko updates the model-call
 plan as larger reductions are discovered and bases ETA on completed model-call
 timing rather than only on raw file count. While the TUI is learning a corpus,
-the bottom status reports file/chunk/model-call progress, elapsed time, current
-model-call time, and ETA; `/indexes` and `/status` also show active durable
-index jobs from Motoko state. The same progress display is used later if an
-attached stale index needs a heavy background refresh.
+the bottom status reports file/chunk/model-call progress, elapsed time, and
+ETA; `/indexes` and `/status` also show active durable index jobs from Motoko
+state. The same progress display is used later if an attached stale index
+needs a heavy background refresh.
 
 Long corpus passes checkpoint after each completed file. If Motoko is paused,
 times out, crashes, or the machine loses power, completed file work remains in
@@ -951,6 +951,7 @@ Useful in-chat commands:
 /feedback up|down|ok [TEXT]
 /up [TEXT]
 /down [TEXT]
+/diagnose
 /status
 /model-routes
 /models [ROUTE]
@@ -1126,6 +1127,11 @@ knowledge.
 
 `/status` prints the current model endpoint, state paths, memory/index/topic
 counts, and the amount of context attached to the active conversation.
+`/diagnose` and `motoko diagnose --safe` are the privacy-preserving companion
+for job trouble: they show content-free lane/job state, row/batch counters,
+elapsed/ETA, stale/finalizing classifications, and route service state without
+printing paths, filenames, prompts, excerpts, summaries, memories, or corpus
+names.
 
 While the TUI is open, Motoko also runs a low-intensity background study loop
 only when she is idle. The loop refreshes a private context catalog, checks
@@ -1613,6 +1619,10 @@ route fails under the requested concurrency, Motoko checkpoints completed rows
 and retries the remaining work at half the parallelism until it reaches one
 request at a time or the work succeeds. Progress messages include a row-based
 ETA once the current run has enough completed rows to estimate throughput.
+Vector status labels are intentionally content-free. They show batch, row,
+parallelism, ETA, and finalizing/stalled state, but not corpus names or source
+paths. If no vector progress update arrives for several minutes, the TUI marks
+the work as possibly stalled instead of letting an old row count look active.
 Embedding inputs are bounded before they are sent to the route. Long source
 chunks are split into several source-linked subchunk rows rather than being
 compressed into one lossy truncated embedding; each row keeps the original

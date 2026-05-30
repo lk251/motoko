@@ -1070,7 +1070,11 @@ Live subsystem extraction status:
   foreground blocking commands can still improve after more APIs narrow.
 - Content-free observability: complete for this phase. `/status`,
   `/last-call`, model reports, and job/progress reports avoid request and
-  response bodies.
+  response bodies. `/diagnose` / `motoko diagnose --safe` now provide a
+  stricter troubleshooting surface for background jobs: content-free lane/job
+  state, route state, counters, elapsed/ETA, and stale/finalizing
+  classifications without paths, filenames, prompts, excerpts, summaries,
+  memories, or corpus names.
 - Soak/eval gate: complete for the committed milestone. Automated validation
   passed before commit, and deployment smoke checks confirmed the live runtime
   schema, fresh index quality, hybrid retrieval, vector/evidence freshness, and
@@ -1269,6 +1273,28 @@ Remaining follow-up items from this stretch:
   consolidation and support-file workflows, then connect richer feedback/eval
   rows to higher-quality patch proposals. Keep the path report-first until real
   usage shows that any automatic patch suggestion is trustworthy.
+
+Skill Curator v2 roadmap:
+
+- Improve curator decisions without increasing authority: given usage
+  metadata, loaded-skill history, support-file size, overlap between trigger
+  terms, and private feedback-derived eval rows, the curator should recommend
+  one of a small set of review-first actions: patch an existing skill, write or
+  reorganize a support file, consolidate overlapping umbrella skills, pin a
+  skill, archive a stale learned skill, or do nothing.
+- Keep suggestions content-safe by default. Reports may show skill names,
+  lifecycle states, counts, hashes, bounded non-private metadata, and
+  action-type rationale, but should not expose raw feedback text, private
+  conversation excerpts, prompts, memories, document paths, or support-file
+  contents unless the user asks to inspect a specific suggestion.
+- Connect richer feedback/eval rows to better patch proposals without letting
+  feedback directly mutate skill selection, ranking, prompts, or files.
+  Feedback should become evidence for reviewable `skill_manage` proposals and
+  eval fixtures, not an automatic learning channel.
+- Keep support-file consolidation inspectable. Motoko should be able to show
+  why a procedure belongs in `SKILL.md`, `references/`, `templates/`, or an
+  inert `scripts/` support file, and scripts must remain inactive unless they
+  pass the existing metadata, fingerprint, typed-action, and approval gates.
 
 ## Roadmap Candidates
 

@@ -72,7 +72,10 @@ def status_display_lines(
     if attention_notice:
         status_parts.append(style(attention_notice, "yellow"))
     if study_running:
-        status_parts.append(style(f"{study_status_label} {human_duration(study_elapsed)}".rstrip(), "turquoise"))
+        if "last progress" in study_status_label:
+            status_parts.append(style(study_status_label, "turquoise"))
+        else:
+            status_parts.append(style(f"{study_status_label} {human_duration(study_elapsed)}".rstrip(), "turquoise"))
     elif study_status == "study: off":
         status_parts.append(style("bg: off", "dim"))
     elif study_last_note:
