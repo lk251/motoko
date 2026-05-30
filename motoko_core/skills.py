@@ -22,7 +22,10 @@ SKILL_SCHEMA = "motoko-skill-v3"
 LEGACY_SKILL_SCHEMA = "motoko-skill-v1"
 PREVIOUS_SKILL_SCHEMA = "motoko-skill-v2"
 SKILL_MANAGE_SCHEMA = "motoko-skill-manage-v1"
+SKILL_LIFECYCLE_SCHEMA = "motoko-skill-lifecycle-v1"
 SKILL_MANAGE_ACTIONS = {"create", "patch", "write_file", "remove_file"}
+SKILL_STATE_ACTIVE = "active"
+SKILL_STATE_ARCHIVED = "archived"
 MAX_SKILL_NAME = 64
 MAX_SKILL_DESCRIPTION = 400
 MAX_SKILL_BODY = 12000
@@ -78,6 +81,142 @@ BUILTIN_SKILLS = [
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _empty_lifecycle_record(slug: str) -> dict:
+    return {
+        "slug": slug,
+        "state": SKILL_STATE_ACTIVE,
+        "pinned": False,
+        "selected_count": 0,
+        "patch_count": 0,
+        "support_file_change_count": 0,
+        "created_count": 0,
+        "last_selected_at": "",
+        "last_patched_at": "",
+        "last_restored_at": "",
+        "archived_at": "",
+        "updated_at": "",
+        "notes": [],
+    }
+
+
+def normalize_skill_lifecycle_state(data) -> dict:
+    state = dict(data) if isinstance(data, dict) else {}
+    records = state.get("skills")
+    if not isinstance(records, dict):
+        records = {}
+    normalized = {}
+    for raw_slug, raw_record in records.items():
+        slug = skill_slug(raw_slug)
+        if not slug:
+            continue
+        record = _empty_lifecycle_record(slug)
+        if isinstance(raw_record, dict):
+            record.update({key: value for key, value in raw_record.items() if key in record})
+        record["slug"] = slug
+        record["state"] = SKILL_STATE_ARCHIVED if record.get("state") == SKILL_STATE_ARCHIVED else SKILL_STATE_ACTIVE
+        record["pinned"] = bool(record.get("pinned"))
+        for key in ("selected_count", "patch_count", "support_file_change_count", "created_count"):
+            try:
+                record[key] = max(0, int(record.get(key, 0) or 0))
+            except (TypeError, ValueError):
+                record[key] = 0
+        notes = record.get("notes")
+        record["notes"] = [str(item)[:300] for item in notes[:20]] if isinstance(notes, list) else []
+        normalized[slug] = record
+    return {
+        "schema": SKILL_LIFECYCLE_SCHEMA,
+        "updated_at": str(state.get("updated_at") or ""),
+        "skills": normalized,
+    }
+
+
+def skill_lifecycle_record(state: dict, name: str) -> dict:
+    normalized = normalize_skill_lifecycle_state(state)
+    slug = skill_slug(name)
+    if not slug:
+        raise SystemExit("skill name is empty")
+    return dict(normalized["skills"].get(slug) or _empty_lifecycle_record(slug))
+
+
+def write_skill_lifecycle_record(state: dict, name: str, updates: dict) -> dict:
+    normalized = normalize_skill_lifecycle_state(state)
+    slug = skill_slug(name)
+    if not slug:
+        raise SystemExit("skill name is empty")
+    record = dict(normalized["skills"].get(slug) or _empty_lifecycle_record(slug))
+    for key, value in (updates or {}).items():
+        if key in record:
+            record[key] = value
+    record["slug"] = slug
+    record["state"] = SKILL_STATE_ARCHIVED if record.get("state") == SKILL_STATE_ARCHIVED else SKILL_STATE_ACTIVE
+    record["pinned"] = bool(record.get("pinned"))
+    stamp = _now()
+    record["updated_at"] = stamp
+    normalized["skills"][slug] = record
+    normalized["updated_at"] = stamp
+    return normalized
+
+
+def record_skill_lifecycle_event(state: dict, name: str, event: str, *, note: str = "") -> dict:
+    record = skill_lifecycle_record(state, name)
+    stamp = _now()
+    event = str(event or "").strip().lower()
+    updates = {}
+    if event == "selected":
+        updates["selected_count"] = int(record.get("selected_count", 0) or 0) + 1
+        updates["last_selected_at"] = stamp
+    elif event in {"patch", "write_file", "remove_file"}:
+        updates["patch_count"] = int(record.get("patch_count", 0) or 0) + 1
+        updates["last_patched_at"] = stamp
+        if event in {"write_file", "remove_file"}:
+            updates["support_file_change_count"] = int(record.get("support_file_change_count", 0) or 0) + 1
+    elif event == "create":
+        updates["created_count"] = int(record.get("created_count", 0) or 0) + 1
+        updates["last_patched_at"] = stamp
+    elif event == "restore":
+        updates["state"] = SKILL_STATE_ACTIVE
+        updates["archived_at"] = ""
+        updates["last_restored_at"] = stamp
+    elif event == "archive":
+        updates["state"] = SKILL_STATE_ARCHIVED
+        updates["archived_at"] = stamp
+    else:
+        return normalize_skill_lifecycle_state(state)
+    if note:
+        notes = list(record.get("notes", []) or [])
+        notes.append(f"{stamp} {event}: {str(note)[:240]}")
+        updates["notes"] = notes[-20:]
+    return write_skill_lifecycle_record(state, name, updates)
+
+
+def apply_skill_lifecycle(rows: list[dict], state: dict) -> list[dict]:
+    normalized = normalize_skill_lifecycle_state(state)
+    records = normalized.get("skills", {})
+    output = []
+    for row in rows:
+        item = dict(row)
+        record = records.get(item.get("slug", ""))
+        if record:
+            item["lifecycle"] = dict(record)
+            item["lifecycle_state"] = record.get("state", SKILL_STATE_ACTIVE)
+            item["pinned"] = bool(record.get("pinned"))
+            item["selected_count"] = int(record.get("selected_count", 0) or 0)
+            item["last_selected_at"] = record.get("last_selected_at", "")
+            item["patch_count"] = int(record.get("patch_count", 0) or 0)
+        else:
+            item["lifecycle_state"] = SKILL_STATE_ACTIVE
+            item["pinned"] = False
+            item["selected_count"] = 0
+            item["last_selected_at"] = ""
+            item["patch_count"] = 0
+        output.append(item)
+    return output
+
+
+def skill_is_archived(state: dict, name: str) -> bool:
+    return skill_lifecycle_record(state, name).get("state") == SKILL_STATE_ARCHIVED
 
 
 def skill_slug(value: str) -> str:
@@ -712,12 +851,21 @@ def skill_tokens(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9_.-]{3,}", str(text or "").lower()))
 
 
-def rank_skills(root: pathlib.Path, query: str, *, limit: int = DEFAULT_SKILL_CONTEXT_LIMIT) -> list[dict]:
+def rank_skills(
+    root: pathlib.Path,
+    query: str,
+    *,
+    limit: int = DEFAULT_SKILL_CONTEXT_LIMIT,
+    lifecycle_state: dict | None = None,
+) -> list[dict]:
     query_terms = skill_tokens(query)
     if not query_terms:
         return []
     ranked = []
-    for row in list_skills(root):
+    lifecycle_state = normalize_skill_lifecycle_state(lifecycle_state or {})
+    for row in apply_skill_lifecycle(list_skills(root), lifecycle_state):
+        if row.get("lifecycle_state") == SKILL_STATE_ARCHIVED:
+            continue
         haystack = "\n".join([row.get("name", ""), row.get("description", ""), row.get("body", "")[:3000]])
         terms = skill_tokens(haystack)
         overlap = query_terms & terms
@@ -740,8 +888,9 @@ def render_skills_with_sources(
     *,
     limit: int = DEFAULT_SKILL_CONTEXT_LIMIT,
     max_chars: int = DEFAULT_SKILL_CONTEXT_CHARS,
+    lifecycle_state: dict | None = None,
 ) -> tuple[str, list[dict]]:
-    rows = rank_skills(root, query, limit=limit)
+    rows = rank_skills(root, query, limit=limit, lifecycle_state=lifecycle_state)
     parts = []
     sources = []
     used = 0
@@ -782,6 +931,7 @@ def render_skills_with_sources(
                     "score": support.get("score", 0),
                     "matched_terms": support.get("matched_terms", [])[:12],
                     "updated_at": support.get("updated_at", ""),
+                    "lifecycle_state": row.get("lifecycle_state", SKILL_STATE_ACTIVE),
                 }
             )
         sources.append(
@@ -796,6 +946,10 @@ def render_skills_with_sources(
                 "score": row.get("score", 0),
                 "matched_terms": row.get("matched_terms", [])[:12],
                 "updated_at": row.get("updated_at", ""),
+                "lifecycle_state": row.get("lifecycle_state", SKILL_STATE_ACTIVE),
+                "pinned": bool(row.get("pinned")),
+                "selected_count": int(row.get("selected_count", 0) or 0),
+                "last_selected_at": row.get("last_selected_at", ""),
             }
         )
         sources.extend(support_sources)
@@ -835,14 +989,25 @@ def rank_skill_support_files(root: pathlib.Path, skill: dict, query: str, *, lim
     return ranked[: max(0, int(limit or 0))]
 
 
-def format_skills_list(rows: list[dict]) -> str:
+def format_skills_list(rows: list[dict], *, lifecycle_state: dict | None = None) -> str:
     if not rows:
         return "No Motoko skills yet."
+    rows = apply_skill_lifecycle(rows, lifecycle_state or {})
     lines = [f"Motoko skills: {len(rows)}"]
     for row in rows:
+        badges = []
+        if row.get("lifecycle_state") == SKILL_STATE_ARCHIVED:
+            badges.append("archived")
+        if row.get("pinned"):
+            badges.append("pinned")
+        selected = int(row.get("selected_count", 0) or 0)
+        if selected:
+            badges.append(f"selected {selected}x")
+        badge_text = f" {{{', '.join(badges)}}}" if badges else ""
         lines.append(
             f"- {row.get('slug', '')}: {row.get('description', '')}"
             f" [{row.get('kind', DEFAULT_SKILL_KIND)} -> {row.get('handler', DEFAULT_SKILL_HANDLER)}]"
+            f"{badge_text}"
             + (f" ({row.get('path', '')})" if row.get("path") else "")
         )
     return "\n".join(lines)

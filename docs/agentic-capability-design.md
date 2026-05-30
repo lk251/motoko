@@ -837,13 +837,28 @@ Interruption checkpoint, 2026-05-24:
   state, invalid actions staying rejected under cancellation, and goal
   interruption/resume without replaying completed work.
 
-Next long stretch after interruption:
+Skill lifecycle checkpoint, 2026-05-30:
 
-- Build the Motoko-shaped skill lifecycle layer. Track usage counts,
-  last-used timestamps, pinned/archived/restored state, and curator suggestions
-  as report-first records. Prefer patching loaded or umbrella skills before
-  creating new skills, keep support-file consolidation inspectable, and avoid
-  widening script/tool authority while improving procedural memory quality.
+- Added the first Motoko-shaped skill lifecycle layer. Selection and
+  patch/write events update a realm-local lifecycle store outside `SKILL.md`;
+  `motoko skills` and `motoko skill show` expose state, pins, usage counts, and
+  patch counts; `motoko skill curator` is report-first; and
+  `pin`/`unpin`/`archive --yes`/`restore` provide reversible library hygiene.
+- Archived learned skills are still inspectable, but they no longer enter
+  prompt context or action planning. Built-in skills cannot be archived.
+- This intentionally adapts Hermes Agent's curator direction without adopting
+  automatic mutation, broad deletion, or new execution authority.
+- The curator report also now flags large skills that may deserve support
+  files, possible consolidation groups, and recent non-positive feedback rows
+  whose terms match active skills. These remain report-only hints.
+
+Next long stretch after skill lifecycle:
+
+- Improve curator usefulness without auto-application: turn feedback/eval and
+  loaded-skill signals into concrete patch suggestions, and then improve
+  umbrella/consolidation workflows.
+- Keep support-file consolidation inspectable and avoid widening script/tool
+  authority while improving procedural memory quality.
 
 ## Goal Loops
 

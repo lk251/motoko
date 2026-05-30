@@ -5,6 +5,13 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added a report-first skill lifecycle layer. Motoko now tracks realm-local
+  skill selection/patch metadata, shows lifecycle state in skill reports, and
+  supports `motoko skill curator`, `pin`, `unpin`, `archive --yes`, and
+  `restore`. Archived learned skills remain inspectable but no longer enter
+  prompt context or action planning. The curator report also surfaces support
+  file opportunities, possible consolidation groups, and matching feedback
+  rows without applying changes automatically.
 - Open conversations now resync attached corpus-index references to newer
   completed same-family indexes before retrieval/debug context is built, so a
   live Motoko session can use a freshly rebuilt source index without requiring

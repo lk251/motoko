@@ -8551,6 +8551,82 @@ def test_procedural_skill_commands(m):
         assert "org-temporal-retrieval" in m.format_skills()
 
 
+def test_skill_lifecycle_records_usage_and_archive_restore(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "racefocus-response-style",
+            description="RaceFocus planning responses",
+            body="When discussing RaceFocus, preserve VR, 2D HUD, and OBS renderer boundaries.",
+        )
+        rendered, sources = m.render_skills_with_sources("RaceFocus OBS renderer plan")
+        assert "racefocus-response-style" in rendered
+        assert sources and sources[0]["kind"] == "skill"
+        listed = m.format_skills()
+        assert "selected 1x" in listed
+
+        assert "skill pinned: racefocus-response-style" in m.pin_skill_text("racefocus-response-style", True)
+        assert "pinned" in m.format_skills()
+        assert "cannot archive pinned skill" in m.archive_skill_text("racefocus-response-style", yes=True)
+        assert "skill unpinned: racefocus-response-style" in m.pin_skill_text("racefocus-response-style", False)
+        assert "refusing to archive skill without --yes" in m.archive_skill_text("racefocus-response-style")
+        assert "skill archived: racefocus-response-style" in m.archive_skill_text("racefocus-response-style", yes=True)
+
+        rendered, sources = m.render_skills_with_sources("RaceFocus OBS renderer plan")
+        assert "racefocus-response-style" not in rendered
+        assert not sources
+        report = m.skill_curator_report_text()
+        assert "skill curator report: report-only" in report
+        assert "archived skills:" in report
+        assert "motoko skill restore racefocus-response-style" in report
+
+        assert "skill restored: racefocus-response-style" in m.restore_skill_text("racefocus-response-style")
+        rendered, sources = m.render_skills_with_sources("RaceFocus OBS renderer plan")
+        assert "racefocus-response-style" in rendered
+        assert sources and sources[0]["name"] == "racefocus-response-style"
+
+
+def test_skill_lifecycle_commands_are_realm_local(m):
+    with isolated_state():
+        conv = m.new_conversation("Skill lifecycle commands")
+        conv["id"] = "skill-lifecycle-commands"
+        m.learn_skill_text(
+            "retrieval-debugging",
+            description="Retrieval debugging checklist",
+            body="Use retrieval-debug and sources before changing ranking.",
+        )
+        report = m.shared_command_request("/skill curator", conv)
+        assert report is not None
+        assert report.kind == m.COMMAND_KIND_REPORT
+        _label, run = report
+        assert "report-only" in run()
+
+        pinned = m.shared_command_request("/skill pin retrieval-debugging", conv)
+        assert pinned is not None
+        assert pinned.kind == m.COMMAND_KIND_MUTATION
+        _label, run = pinned
+        assert "skill pinned" in run()
+
+        archived = m.shared_command_request("/skill archive retrieval-debugging --yes", conv)
+        assert archived is not None
+        _label, run = archived
+        assert "cannot archive pinned skill" in run()
+
+        unpinned = m.shared_command_request("/skill unpin retrieval-debugging", conv)
+        assert unpinned is not None
+        _label, run = unpinned
+        assert "skill unpinned" in run()
+
+        archived = m.shared_command_request("/skill archive retrieval-debugging --yes", conv)
+        assert archived is not None
+        _label, run = archived
+        assert "skill archived" in run()
+
+        restored = m.shared_command_request("/skill restore retrieval-debugging", conv)
+        assert restored is not None
+        _label, run = restored
+        assert "skill restored" in run()
+
+
 def write_demo_tool(m, skill_name="tool-backed-skill"):
     m.learn_skill_text(
         skill_name,
@@ -9602,6 +9678,8 @@ def main() -> int:
         test_builtin_source_scoped_temporal_skill_is_available,
         test_procedural_skills_are_included_in_prompt_and_sources,
         test_procedural_skill_commands,
+        test_skill_lifecycle_records_usage_and_archive_restore,
+        test_skill_lifecycle_commands_are_realm_local,
     ]
     for test in tests:
         test(m)

@@ -1238,12 +1238,21 @@ Remaining follow-up items from this stretch:
   vector, and dossier work. Foreground work is now tracked by the job
   supervisor, but long-running functions still need narrower pause/stop
   boundaries before cancellation can feel as responsive as chat answering.
-- Next stretch after the interruption target: build the Motoko-shaped skill
-  lifecycle layer. Track skill/tool usage counts and last-used timestamps, add
-  pin/archive/restore commands, keep curator suggestions report-first rather
-  than auto-applying changes, prefer patching loaded or umbrella skills before
-  creating new skills, and improve support-file consolidation without granting
-  broader execution authority.
+- Skill lifecycle checkpoint: Motoko now stores realm-local lifecycle metadata
+  next to the skill library, records skill selection and patch/write events,
+  exposes report-first curation through `motoko skill curator`, and supports
+  `pin`, `unpin`, `archive --yes`, and `restore`. Archived learned skills stay
+  inspectable but are excluded from prompt-skill selection and action planning.
+  This adapts the current Hermes Agent curator direction without importing
+  automatic mutation or broader execution authority.
+- Curator usefulness checkpoint: the report also surfaces large skills that
+  may deserve support files, possible consolidation groups based on shared
+  trigger/description terms, and recent non-positive feedback rows that match
+  active skill topics. These are still suggestions only.
+- Next stretch after the lifecycle target: connect accepted feedback/eval rows
+  to concrete patch suggestions for recently loaded skills, then improve
+  umbrella-skill consolidation. Keep the path report-first until real usage
+  shows that any automatic patch suggestion is trustworthy.
 
 ## Roadmap Candidates
 

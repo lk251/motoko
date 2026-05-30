@@ -216,6 +216,9 @@ from motoko_core.skills import (  # noqa: E402
     DEFAULT_SKILL_EFFECTS,
     DEFAULT_SKILL_HANDLER,
     DEFAULT_SKILL_KIND,
+    SKILL_STATE_ACTIVE,
+    SKILL_STATE_ARCHIVED,
+    apply_skill_lifecycle as core_apply_skill_lifecycle,
     delete_skill as core_delete_skill,
     format_skill as core_format_skill,
     format_skills_list,
@@ -225,11 +228,15 @@ from motoko_core.skills import (  # noqa: E402
     manage_skill as core_manage_skill,
     normalize_skill_effects,
     normalize_skill_handler,
+    normalize_skill_lifecycle_state,
+    record_skill_lifecycle_event,
     read_skill_support_file as core_read_skill_support_file,
     render_skills_with_sources as core_render_skills_with_sources,
     save_skill as core_save_skill,
     normalize_skill_manage_action,
     skill_slug,
+    skill_lifecycle_record,
+    write_skill_lifecycle_record,
     upgrade_skill_files as core_upgrade_skill_files,
 )
 from motoko_core.agentic import (  # noqa: E402
@@ -473,6 +480,7 @@ from motoko_core.state import (  # noqa: E402
     retrieval_evals_dir,
     safe_load_json,
     skill_suggestions_path,
+    skill_lifecycle_path,
     skills_dir,
     slot_cache_manifest_path,
     state_root,
@@ -894,6 +902,11 @@ SLASH_COMMANDS = [
     ("/skill support NAME [FILE]", "list or show confined skill support files"),
     ("/skill tools NAME", "list validated script tool metadata for a skill"),
     ("/skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
+    ("/skill curator", "show report-first skill lifecycle curation"),
+    ("/skill pin NAME", "protect a learned skill from archival suggestions"),
+    ("/skill unpin NAME", "remove a skill lifecycle pin"),
+    ("/skill archive NAME --yes", "archive a learned skill without deleting it"),
+    ("/skill restore NAME", "restore an archived learned skill"),
     ("/tools", "list all declared skill tools and approval status"),
     ("/action plan QUERY", "propose typed skill-tool actions without running them"),
     ("/action preview FILE", "validate a typed action JSON file without execution"),
@@ -5343,16 +5356,246 @@ def format_personality() -> str:
     return "\n".join([f"path: {path}", f"status: {status}", "", text])
 
 
+def read_skill_lifecycle_state() -> dict:
+    return normalize_skill_lifecycle_state(safe_load_json(skill_lifecycle_path()))
+
+
+def write_skill_lifecycle_state(state: dict) -> None:
+    atomic_write(
+        skill_lifecycle_path(),
+        json.dumps(normalize_skill_lifecycle_state(state), ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def update_skill_lifecycle_state(name: str, updates: dict) -> dict:
+    row = core_load_skill(skills_dir(), name)
+    state = write_skill_lifecycle_record(read_skill_lifecycle_state(), row.get("slug") or name, updates)
+    write_skill_lifecycle_state(state)
+    return core_apply_skill_lifecycle([row], state)[0]
+
+
+def record_skill_lifecycle(name: str, event: str, *, note: str = "") -> dict:
+    state = record_skill_lifecycle_event(read_skill_lifecycle_state(), name, event, note=note)
+    write_skill_lifecycle_state(state)
+    return state
+
+
 def list_skills() -> list[dict]:
-    return core_list_skills(skills_dir())
+    return core_apply_skill_lifecycle(core_list_skills(skills_dir()), read_skill_lifecycle_state())
+
+
+def active_skills() -> list[dict]:
+    return [row for row in list_skills() if row.get("lifecycle_state") != SKILL_STATE_ARCHIVED]
 
 
 def format_skills() -> str:
-    return format_skills_list(list_skills())
+    return format_skills_list(core_list_skills(skills_dir()), lifecycle_state=read_skill_lifecycle_state())
 
 
 def format_skill(name: str) -> str:
-    return core_format_skill(core_load_skill(skills_dir(), name))
+    row = core_apply_skill_lifecycle(
+        [core_load_skill(skills_dir(), name)],
+        read_skill_lifecycle_state(),
+    )[0]
+    record = row.get("lifecycle", {}) if isinstance(row.get("lifecycle"), dict) else {}
+    lifecycle_lines = [
+        "Lifecycle:",
+        f"state: {row.get('lifecycle_state', SKILL_STATE_ACTIVE)}",
+        f"pinned: {'yes' if row.get('pinned') else 'no'}",
+        f"selected: {int(row.get('selected_count', 0) or 0)}",
+        f"last selected: {row.get('last_selected_at') or '-'}",
+        f"patches: {int(row.get('patch_count', 0) or 0)}",
+        f"last patched: {record.get('last_patched_at') or '-'}",
+        "",
+    ]
+    return "\n".join(lifecycle_lines) + core_format_skill(row)
+
+
+def pin_skill_text(name: str, pinned: bool) -> str:
+    row = update_skill_lifecycle_state(name, {"pinned": bool(pinned)})
+    return f"skill {'pinned' if pinned else 'unpinned'}: {row.get('slug', '')}"
+
+
+def archive_skill_text(name: str, *, yes: bool = False) -> str:
+    if not yes:
+        return "refusing to archive skill without --yes"
+    row = core_load_skill(skills_dir(), name)
+    if row.get("builtin"):
+        return f"cannot archive built-in skill: {row.get('slug', name)}"
+    record = skill_lifecycle_record(read_skill_lifecycle_state(), row.get("slug", name))
+    if record.get("pinned"):
+        return f"cannot archive pinned skill: {row.get('slug', name)}"
+    state = record_skill_lifecycle(row.get("slug", name), "archive", note="manual archive")
+    archived = core_apply_skill_lifecycle([row], state)[0]
+    return f"skill archived: {archived.get('slug', '')}\nrestore: motoko skill restore {archived.get('slug', '')}"
+
+
+def restore_skill_text(name: str) -> str:
+    row = core_load_skill(skills_dir(), name)
+    state = record_skill_lifecycle(row.get("slug", name), "restore", note="manual restore")
+    restored = core_apply_skill_lifecycle([row], state)[0]
+    return f"skill restored: {restored.get('slug', '')}"
+
+
+def skill_curator_report_text() -> str:
+    rows = list_skills()
+    learned = [row for row in rows if not row.get("builtin")]
+    archived = [row for row in learned if row.get("lifecycle_state") == SKILL_STATE_ARCHIVED]
+    active = [row for row in learned if row.get("lifecycle_state") != SKILL_STATE_ARCHIVED]
+    pinned = [row for row in learned if row.get("pinned")]
+    pending = list_skill_suggestions(status="pending")
+    unused = [
+        row
+        for row in active
+        if int(row.get("selected_count", 0) or 0) == 0 and not row.get("pinned")
+    ]
+    staleish = [
+        row
+        for row in active
+        if int(row.get("selected_count", 0) or 0) > 0
+        and int(row.get("patch_count", 0) or 0) == 0
+        and not row.get("pinned")
+    ]
+    staleish.sort(key=lambda row: row.get("last_selected_at", ""), reverse=True)
+    support_opportunities = [
+        row
+        for row in active
+        if len(str(row.get("body", ""))) > 2500 and not row.get("support_files")
+    ]
+    generic_terms = {
+        "skill",
+        "workflow",
+        "procedure",
+        "response",
+        "style",
+        "planning",
+        "debugging",
+        "motoko",
+        "project",
+        "file",
+        "files",
+        "with",
+        "when",
+        "this",
+        "that",
+        "use",
+        "using",
+        "context",
+    }
+    consolidation = []
+    for idx, row in enumerate(active):
+        row_terms = _action_plan_terms(
+            " ".join([row.get("slug", ""), row.get("description", ""), " ".join(row.get("triggers", []) or [])])
+        ) - generic_terms
+        if len(row_terms) < 2:
+            continue
+        matches = []
+        for other in active[idx + 1 :]:
+            other_terms = _action_plan_terms(
+                " ".join([other.get("slug", ""), other.get("description", ""), " ".join(other.get("triggers", []) or [])])
+            ) - generic_terms
+            overlap = sorted(row_terms & other_terms)
+            if len(overlap) >= 2:
+                matches.append((other, overlap))
+        if matches:
+            consolidation.append((row, matches))
+    feedback_links = []
+    for feedback in read_response_feedback_rows(limit=20):
+        if feedback.get("rating") == "up":
+            continue
+        text = " ".join([feedback.get("note", ""), feedback.get("user_prompt", "")])
+        terms = _action_plan_terms(text) - generic_terms
+        if not terms:
+            continue
+        matched = []
+        for row in active:
+            skill_terms = _action_plan_terms(
+                " ".join([row.get("slug", ""), row.get("description", ""), row.get("body", "")[:1000]])
+            ) - generic_terms
+            overlap = sorted(terms & skill_terms)
+            if overlap:
+                matched.append((row, overlap))
+        if matched:
+            feedback_links.append((feedback, matched[:3]))
+    lines = [
+        "skill curator report: report-only",
+        "automatic mutations: none",
+        f"skills: {len(rows)} total, {len(active)} learned active, {len(archived)} learned archived, {len(pinned)} pinned",
+        f"pending suggestions: {len(pending)}",
+        "",
+        "Suggested review queue:",
+    ]
+    if pending:
+        lines.append("pending skill suggestions:")
+        for row in pending[:8]:
+            lines.append(f"- {row.get('id', '')}  {row.get('action', '')}  {row.get('slug', '')}: {row.get('description', '')}")
+        if len(pending) > 8:
+            lines.append(f"- ... {len(pending) - 8} more")
+    else:
+        lines.append("pending skill suggestions: none")
+    if staleish:
+        lines.append("")
+        lines.append("recently used skills that may deserve consolidation or support files:")
+        for row in staleish[:8]:
+            lines.append(
+                f"- {row.get('slug', '')}  selected={row.get('selected_count', 0)}  "
+                f"last={relative_time(row.get('last_selected_at', ''))}  {row.get('description', '')}"
+            )
+    if unused:
+        lines.append("")
+        lines.append("learned active skills with no recorded selection yet:")
+        for row in unused[:8]:
+            lines.append(f"- {row.get('slug', '')}: {row.get('description', '')}")
+        if len(unused) > 8:
+            lines.append(f"- ... {len(unused) - 8} more")
+    if support_opportunities:
+        lines.append("")
+        lines.append("support-file opportunities:")
+        for row in support_opportunities[:8]:
+            lines.append(
+                f"- {row.get('slug', '')}  body={len(str(row.get('body', '')))} chars  "
+                "consider moving durable references/templates/checklists into support files"
+            )
+    if consolidation:
+        lines.append("")
+        lines.append("possible consolidation groups:")
+        for row, matches in consolidation[:6]:
+            joined = ", ".join(
+                f"{other.get('slug', '')} ({'/'.join(overlap[:3])})"
+                for other, overlap in matches[:4]
+            )
+            lines.append(f"- {row.get('slug', '')}: {joined}")
+    if feedback_links:
+        lines.append("")
+        lines.append("recent feedback that may point at skill updates:")
+        for feedback, matched in feedback_links[:6]:
+            skill_text = ", ".join(
+                f"{row.get('slug', '')} ({'/'.join(overlap[:3])})"
+                for row, overlap in matched
+            )
+            lines.append(
+                f"- {feedback.get('rating', '')} {feedback.get('id', '')}: {skill_text}; "
+                f"note={compact_text(feedback.get('note', ''), 120)}"
+            )
+    if archived:
+        lines.append("")
+        lines.append("archived skills:")
+        for row in archived[:8]:
+            lifecycle = row.get("lifecycle", {}) if isinstance(row.get("lifecycle"), dict) else {}
+            lines.append(
+                f"- {row.get('slug', '')}  archived={relative_time(lifecycle.get('archived_at', ''))}  "
+                f"restore: motoko skill restore {row.get('slug', '')}"
+            )
+    lines.extend(
+        [
+            "",
+            "Curator policy:",
+            "- report first; do not mutate skills automatically",
+            "- prefer patching recently loaded or umbrella skills before creating narrow duplicates",
+            "- archive is reversible and never applies to built-in or pinned skills",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def format_skill_supports(name: str) -> str:
@@ -5403,7 +5646,7 @@ def format_skill_tools(name: str) -> str:
 
 def all_skill_tool_rows() -> list[dict]:
     rows = []
-    for skill in list_skills():
+    for skill in active_skills():
         for tool in core_list_skill_tools(skill):
             item = dict(tool)
             item.setdefault("skill", skill.get("slug") or skill.get("name", ""))
@@ -5485,7 +5728,7 @@ def format_action_plan(query: str, *, limit: int = 5) -> str:
         return "usage: /action plan QUERY"
     query_terms = _action_plan_terms(query)
     candidates = []
-    for skill in list_skills():
+    for skill in active_skills():
         skill_text = "\n".join([skill.get("name", ""), skill.get("description", ""), skill.get("body", "")[:3000]])
         skill_terms = _action_plan_terms(skill_text)
         for tool in core_list_skill_tools(skill):
@@ -6888,6 +7131,7 @@ def learn_skill_text(
     replace: bool = False,
 ) -> str:
     row = learn_skill(name, description=description, body=body, source="manual", replace=replace)
+    record_skill_lifecycle(row.get("slug", name), "create" if not replace else "patch", note="manual learn")
     action = "updated" if replace else "saved"
     return f"skill {action}: {row.get('slug', '')}\npath: {row.get('path', '')}"
 
@@ -6964,6 +7208,9 @@ def manage_skill_text(
         source="manual-skill-manage",
         writer=atomic_write,
     )
+    skill = result.get("skill", {})
+    if skill.get("slug"):
+        record_skill_lifecycle(skill.get("slug", ""), result.get("action", action), note="manual skill manage")
     return manage_skill_result_text(result)
 
 
@@ -7264,6 +7511,12 @@ def accept_skill_suggestion_text(selector: str) -> str:
         writer=atomic_write,
     )
     skill = result.get("skill", {})
+    if skill.get("slug"):
+        record_skill_lifecycle(
+            skill.get("slug", ""),
+            result.get("action", row.get("action", "")),
+            note=f"accepted suggestion {row.get('id', '')}",
+        )
     row["status"] = "accepted"
     row["accepted_at"] = now()
     row["updated_at"] = row["accepted_at"]
@@ -7402,16 +7655,26 @@ def skill_review_triggers(conv: dict, *, message_count: int | None = None, last_
     return reasons
 
 
-def render_skills_with_sources(query: str) -> tuple[str, list[dict]]:
-    return core_render_skills_with_sources(skills_dir(), query)
+def render_skills_with_sources(query: str, *, record_usage: bool = True) -> tuple[str, list[dict]]:
+    state = read_skill_lifecycle_state()
+    text, sources = core_render_skills_with_sources(skills_dir(), query, lifecycle_state=state)
+    selected = []
+    for source in sources:
+        if source.get("kind") == "skill":
+            selected.append(source.get("name") or source.get("slug") or "")
+    for slug in sorted({item for item in selected if item}) if record_usage else []:
+        state = record_skill_lifecycle_event(state, slug, "selected", note=compact_text(query, 160))
+    if selected and record_usage:
+        write_skill_lifecycle_state(state)
+    return text, sources
 
 
 def format_skill_plan(query: str) -> str:
     query = str(query or "").strip()
     if not query:
         return "usage: /skill plan QUERY"
-    _skill_text, skill_sources = render_skills_with_sources(query)
-    retrieval_plan = build_retrieval_plan(query, skills=list_skills())
+    _skill_text, skill_sources = render_skills_with_sources(query, record_usage=False)
+    retrieval_plan = build_retrieval_plan(query, skills=active_skills())
     lines = [
         f"skill plan: {query}",
         f"retrieval plan: {retrieval_plan.get('schema', '')} ({retrieval_plan.get('status', '')})",
@@ -16530,6 +16793,11 @@ HELP_SECTIONS = [
             ("/skill support NAME [FILE]", "list or show confined skill support files"),
             ("/skill tools NAME", "list validated script tool metadata for a skill"),
             ("/skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
+            ("/skill curator", "show report-first skill lifecycle curation"),
+            ("/skill pin NAME", "protect a learned skill from archival suggestions"),
+            ("/skill unpin NAME", "remove a learned skill pin"),
+            ("/skill archive NAME --yes", "archive a learned skill without deleting it"),
+            ("/skill restore NAME", "restore an archived learned skill"),
             ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
             ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
             ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -16621,6 +16889,11 @@ HELP_SECTIONS = [
             ("motoko skill support NAME [FILE]", "list or show confined skill support files"),
             ("motoko skill tools NAME", "list validated script tool metadata for a skill"),
             ("motoko skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
+            ("motoko skill curator", "show report-first skill lifecycle curation"),
+            ("motoko skill pin NAME", "protect a learned skill from archival suggestions"),
+            ("motoko skill unpin NAME", "remove a learned skill pin"),
+            ("motoko skill archive NAME --yes", "archive a learned skill without deleting it"),
+            ("motoko skill restore NAME", "restore an archived learned skill"),
             ("motoko skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
             ("motoko skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
             ("motoko skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -17251,6 +17524,8 @@ def memory_profile_report_command_request(text: str):
             return "/skill support", lambda: format_skill_supports(support_name)
         if subcommand == "tools" and subbody:
             return "/skill tools", lambda: format_skill_tools(subbody)
+        if subcommand in {"curator", "lifecycle"} and not subbody:
+            return "/skill curator", skill_curator_report_text
         if subcommand in {"suggestion", "suggestion-show"} and subbody:
             return "/skill suggestion", lambda: format_skill_suggestion(subbody)
         if subcommand == "plan":
@@ -17378,6 +17653,25 @@ def skill_mutation_command_request(text: str, conv: dict):
         if not subbody:
             return "/skill delete", lambda: "usage: /skill delete NAME"
         return "/skill delete", lambda: delete_skill_text(subbody)
+    if subcommand == "pin":
+        if not subbody:
+            return "/skill pin", lambda: "usage: /skill pin NAME"
+        return "/skill pin", lambda: pin_skill_text(subbody, True)
+    if subcommand == "unpin":
+        if not subbody:
+            return "/skill unpin", lambda: "usage: /skill unpin NAME"
+        return "/skill unpin", lambda: pin_skill_text(subbody, False)
+    if subcommand == "archive":
+        if not subbody:
+            return "/skill archive", lambda: "usage: /skill archive NAME --yes"
+        parts = subbody.split()
+        yes = "--yes" in parts
+        name = " ".join(part for part in parts if part != "--yes").strip()
+        return "/skill archive", lambda: archive_skill_text(name, yes=yes)
+    if subcommand == "restore":
+        if not subbody:
+            return "/skill restore", lambda: "usage: /skill restore NAME"
+        return "/skill restore", lambda: restore_skill_text(subbody)
     if subcommand == "patch":
         if not subbody:
             return "/skill patch", lambda: "usage: /skill patch NAME --old OLD --new NEW [--file SKILL.md|references/x.md] [--all]"
@@ -19230,6 +19524,10 @@ class MotokoTui:
             "patch",
             "write-file",
             "remove-file",
+            "pin",
+            "unpin",
+            "archive",
+            "restore",
         }:
             return [
                 {
@@ -19933,7 +20231,7 @@ def propose_skill_suggestions(
     if not conv.get("messages"):
         return []
     catalog_lines = []
-    for row in list_skills()[:40]:
+    for row in active_skills()[:40]:
         triggers = ", ".join(row.get("triggers", [])[:4])
         catalog_lines.append(
             f"- {row.get('slug', '')}: {row.get('description', '')} "
@@ -20805,6 +21103,16 @@ def command_skill(args) -> None:
         print_report(format_skill_tools(args.name))
     elif args.skill_command == "approve-tool":
         print(approve_skill_tool_text(args.name, args.tool, yes=args.yes))
+    elif args.skill_command in {"curator", "lifecycle"}:
+        print_report(skill_curator_report_text())
+    elif args.skill_command == "pin":
+        print(pin_skill_text(args.name, True))
+    elif args.skill_command == "unpin":
+        print(pin_skill_text(args.name, False))
+    elif args.skill_command == "archive":
+        print(archive_skill_text(args.name, yes=args.yes))
+    elif args.skill_command == "restore":
+        print(restore_skill_text(args.name))
     elif args.skill_command == "patch":
         print(
             manage_skill_text(
@@ -21491,6 +21799,21 @@ def main(argv: list[str]) -> int:
     skill_approve_tool.add_argument("tool")
     skill_approve_tool.add_argument("--yes", action="store_true", help="confirm approval")
     skill_approve_tool.set_defaults(func=command_skill)
+    skill_curator = skill_sub.add_parser("curator", aliases=["lifecycle"], help="show report-first skill lifecycle curation")
+    skill_curator.set_defaults(func=command_skill)
+    skill_pin = skill_sub.add_parser("pin", help="pin a learned skill against archival suggestions")
+    skill_pin.add_argument("name")
+    skill_pin.set_defaults(func=command_skill)
+    skill_unpin = skill_sub.add_parser("unpin", help="remove a learned skill pin")
+    skill_unpin.add_argument("name")
+    skill_unpin.set_defaults(func=command_skill)
+    skill_archive = skill_sub.add_parser("archive", help="archive a learned skill without deleting it")
+    skill_archive.add_argument("name")
+    skill_archive.add_argument("--yes", action="store_true", help="confirm archival")
+    skill_archive.set_defaults(func=command_skill)
+    skill_restore = skill_sub.add_parser("restore", help="restore an archived learned skill")
+    skill_restore.add_argument("name")
+    skill_restore.set_defaults(func=command_skill)
     skill_patch = skill_sub.add_parser("patch", help="patch SKILL.md or a support file with exact text")
     skill_patch.add_argument("name")
     skill_patch.add_argument("--old", required=True)

@@ -657,6 +657,11 @@ motoko skill write-file NAME references/file.md --content "supporting detail"
 motoko skill remove-file NAME references/file.md --yes
 motoko skill tools NAME
 motoko skill approve-tool NAME TOOL --yes
+motoko skill curator
+motoko skill pin NAME
+motoko skill unpin NAME
+motoko skill archive NAME --yes
+motoko skill restore NAME
 motoko skill delete NAME --yes
 motoko skill plan "query"
 motoko tools
@@ -687,6 +692,27 @@ procedures, while learned user skills are stored under the current user's
 Motoko state as `SKILL.md` files. Motoko ranks skills against the current
 prompt, includes only relevant ones in chat context, and lists selected skills
 in `/sources`.
+
+Skill lifecycle metadata is stored separately under the current user's Motoko
+state, not inside `SKILL.md`. Motoko records when a skill is selected into chat
+context, can pin a skill against archival suggestions, and can archive or
+restore learned skills without deleting their files. Archived skills stay
+inspectable but are not selected into prompt context or action planning. The
+curator command is deliberately report-first:
+
+```bash
+motoko skill curator
+motoko skill pin NAME
+motoko skill unpin NAME
+motoko skill archive NAME --yes
+motoko skill restore NAME
+```
+
+This adapts the useful Hermes-style skill-library maintenance idea while
+keeping Motoko's version reversible, realm-local, and non-autonomous. The
+curator report can also point out large skills that may deserve support files,
+possible consolidation groups, and recent feedback rows that may indicate a
+skill should be patched; these remain suggestions until explicitly acted on.
 
 Current `motoko-skill-v3` skills can declare a kind, trigger hints, handler,
 allowed effects, support files, and inert script-tool metadata. Prompt-only

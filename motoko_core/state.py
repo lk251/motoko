@@ -185,6 +185,11 @@ def skill_suggestions_path() -> pathlib.Path:
     return root / "skill-suggestions.json"
 
 
+def skill_lifecycle_path() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return root / "skill-lifecycle.json"
+
+
 def tool_approvals_path() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return root / "tool-approvals.json"
