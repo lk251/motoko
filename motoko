@@ -4896,76 +4896,66 @@ def run_retrieval_debug(
         "indexes": [],
     }
     for index in indexes:
-        status, warnings = index_staleness(index)
-        file_rows = [retrieval_debug_file_row(index, query, query_counts, file_item) for file_item in index.get("files", [])]
-        chunk_rows = []
-        for file_item in index.get("files", []):
-            for chunk in file_item.get("chunks", []):
-                chunk_rows.append(retrieval_debug_chunk_row(index, query, query_counts, file_item, chunk))
-        file_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
-        chunk_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
-        index_report = {
-            "id": index.get("id", ""),
-            "name": index.get("name", ""),
-            "root": index.get("root", ""),
-            "freshness": status,
-            "production_retrieval": "hybrid lexical+structured+evidence+embedding -> rerank",
-            "warnings": warnings[:8],
-            "files_considered": len(file_rows),
-            "chunks_considered": len(chunk_rows),
-            "files": file_rows[:limit],
-            "chunks": chunk_rows[:limit],
-        }
         try:
             retrieval_result = retrieve_index_result(index, query)
         except SystemExit as exc:
+            status, warnings = index_staleness(index)
+            file_rows = [
+                retrieval_debug_file_row(index, query, query_counts, file_item)
+                for file_item in index.get("files", [])
+            ]
+            chunk_rows = []
+            for file_item in index.get("files", []):
+                for chunk in file_item.get("chunks", []):
+                    chunk_rows.append(retrieval_debug_chunk_row(index, query, query_counts, file_item, chunk))
+            file_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
+            chunk_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
+            index_report = {
+                "id": index.get("id", ""),
+                "name": index.get("name", ""),
+                "root": index.get("root", ""),
+                "freshness": status,
+                "production_retrieval": "hybrid lexical+structured+evidence+embedding -> rerank",
+                "warnings": warnings[:8],
+                "files_considered": len(file_rows),
+                "chunks_considered": len(chunk_rows),
+                "files": file_rows[:limit],
+                "chunks": chunk_rows[:limit],
+            }
             index_report["production_retrieval_error"] = str(exc).splitlines()[0][:240]
         else:
-            index_report["production_sources"] = retrieval_result.source_summary(limit=limit)
-            index_report["production_diagnostics"] = {
-                "schema": retrieval_result.diagnostics.get("schema", ""),
-                "source_count": retrieval_result.diagnostics.get("source_count", 0),
-                "hybrid_candidates": retrieval_result.diagnostics.get("hybrid_candidates", 0),
-                "evidence_rows": retrieval_result.diagnostics.get("evidence_rows", 0),
-                "vector_rows": retrieval_result.diagnostics.get("vector_rows", 0),
-                "index_status": retrieval_result.diagnostics.get("index_status", ""),
-            }
-        if env_flag("MOTOKO_EVIDENCE_RETRIEVAL", True):
-            try:
-                evidence_store = evidence_store_for_retrieval(index)
-                evidence_report = query_evidence_store(evidence_store, query, limit=limit)
-            except SystemExit as exc:
-                index_report["evidence_error"] = str(exc).splitlines()[0][:240]
+            debug_index = retrieval_result.diagnostics.get("debug_index")
+            if isinstance(debug_index, dict) and debug_index:
+                index_report = dict(debug_index)
+                index_report["warnings"] = list(index_report.get("warnings", [])[:8])
+                index_report["files"] = list(index_report.get("files", [])[:limit])
+                index_report["chunks"] = list(index_report.get("chunks", [])[:limit])
+                index_report["production_sources"] = list(
+                    index_report.get("production_sources") or retrieval_result.source_summary(limit=limit)
+                )[:limit]
+                if index_report.get("evidence_rows"):
+                    index_report["evidence_rows"] = list(index_report.get("evidence_rows", [])[:limit])
+                if index_report.get("vector_chunks"):
+                    index_report["vector_chunks"] = list(index_report.get("vector_chunks", [])[:limit])
             else:
-                index_report["evidence_store"] = {
-                    "id": evidence_report.get("store_id", ""),
-                    "freshness": evidence_report.get("freshness", ""),
+                status, warnings = index_staleness(index)
+                index_report = {
+                    "id": index.get("id", ""),
+                    "name": index.get("name", ""),
+                    "root": index.get("root", ""),
+                    "freshness": status,
+                    "production_retrieval": "retrieval service",
+                    "warnings": warnings[:8],
+                    "files_considered": 0,
+                    "chunks_considered": 0,
+                    "files": [],
+                    "chunks": [],
+                    "production_sources": retrieval_result.source_summary(limit=limit),
+                    "production_diagnostics": {
+                        "schema": retrieval_result.diagnostics.get("schema", ""),
+                        "source_count": retrieval_result.diagnostics.get("source_count", 0),
+                    },
                 }
-                if evidence_report.get("warnings"):
-                    index_report["evidence_warnings"] = evidence_report.get("warnings", [])[:4]
-                index_report["evidence_rows"] = evidence_report.get("rows", [])[:limit]
-        if env_flag("MOTOKO_VECTOR_RETRIEVAL", True):
-            vector_store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=True)
-            if vector_store is not None:
-                try:
-                    vector_report = query_vector_store_for_retrieval(
-                        vector_store,
-                        query,
-                        limit=limit,
-                        check_freshness=False,
-                    )
-                except SystemExit as exc:
-                    index_report["vector_error"] = str(exc).splitlines()[0][:240]
-                else:
-                    index_report["vector_store"] = {
-                        "id": vector_report.get("store_id", ""),
-                        "method": vector_report.get("method", ""),
-                        "rerank": vector_report.get("rerank", False),
-                        "rerank_fallback": vector_report.get("rerank_fallback", False),
-                    }
-                    if vector_report.get("warnings"):
-                        index_report["vector_warnings"] = vector_report.get("warnings", [])[:4]
-                    index_report["vector_chunks"] = vector_report.get("rows", [])[:limit]
         index_report["diagnosis"] = diagnose_retrieval_debug(index_report, query)
         report["indexes"].append(index_report)
     report["status"] = "empty" if not report["indexes"] else "ok"

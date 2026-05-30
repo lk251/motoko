@@ -9,6 +9,7 @@ from typing import Callable
 
 from motoko_core.retrieval import (
     add_hybrid_candidate,
+    compact_text,
     context_plan_from_lanes_core,
     file_context_text_and_source,
     hybrid_candidate_base_score,
@@ -19,6 +20,7 @@ from motoko_core.retrieval import (
     query_path_mentions,
     query_requested_recent_section_count,
     repo_context_text_and_source,
+    retrieval_haystack_terms,
     score_text,
     selected_evidence_excerpt,
     selected_temporal_evidence_excerpt,
@@ -197,6 +199,58 @@ def _chunk_lookup(index: dict) -> dict[tuple[str, str], tuple[dict, dict]]:
         for chunk in file_item.get("chunks", []):
             lookup[(file_item.get("path", ""), str(chunk.get("chunk", "")))] = (file_item, chunk)
     return lookup
+
+
+def _debug_file_row(
+    index: dict,
+    query: str,
+    query_counts,
+    file_item: dict,
+    env: HybridRetrievalEnvironment,
+) -> dict:
+    file_signal_text = env.format_signal_summary(file_item.get("signals") or {}, limit=12)
+    haystack = "\n".join([file_item.get("path", ""), file_item.get("summary", ""), file_signal_text])
+    status, warnings = env.file_staleness(file_item)
+    return {
+        "kind": "file",
+        "index": index.get("id", ""),
+        "path": file_item.get("path", ""),
+        "summary": compact_text(file_item.get("summary", ""), 280),
+        "freshness": status,
+        "warnings": warnings[:4],
+        **env.retrieval_score_parts(
+            query,
+            query_counts,
+            haystack,
+            path=file_item.get("path", ""),
+            file_signals=file_item.get("signals") or {},
+        ),
+    }
+
+
+def _debug_chunk_row(
+    index: dict,
+    query_counts,
+    file_item: dict,
+    chunk: dict,
+    content: str,
+    score_parts: dict,
+) -> dict:
+    return {
+        "kind": "chunk",
+        "index": index.get("id", ""),
+        "path": file_item.get("path", ""),
+        "chunk": chunk.get("chunk"),
+        "summary": compact_text(chunk.get("summary", ""), 280),
+        "content_chars": len(content),
+        "content_sha256": chunk.get("content_sha256", ""),
+        "summary_matched_terms": retrieval_haystack_terms(
+            query_counts,
+            "\n".join([file_item.get("summary", ""), chunk.get("summary", "")]),
+        )[:12],
+        "content_matched_terms": retrieval_haystack_terms(query_counts, content[:4000])[:12],
+        **score_parts,
+    }
 
 
 def _temporal_evidence_rows(
@@ -917,6 +971,66 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                     "temporal_selected_dates": temporal_dates if "temporal" in retrieval_details.get("retrieval_methods", []) else [],
                 }
             )
+    debug_row_limit = max(50, top_files * 8, top_chunks * 8, env.max_rerank_candidates)
+    debug_files = [
+        _debug_file_row(index, query, query_counts, file_item, env)
+        for _score, file_item in file_rows[:debug_row_limit]
+    ]
+    debug_chunks = [
+        _debug_chunk_row(
+            index,
+            query_counts,
+            file_item,
+            chunk,
+            env.read_chunk_content(index, chunk),
+            score_parts,
+        )
+        for _score, file_item, chunk, score_parts in chunk_rows[:debug_row_limit]
+    ]
+    debug_index = {
+        "id": index.get("id", ""),
+        "name": index.get("name", ""),
+        "root": index.get("root", ""),
+        "freshness": index_status,
+        "production_retrieval": "hybrid lexical+structured+evidence+embedding -> rerank",
+        "warnings": index_warnings[:8],
+        "files_considered": len(file_rows),
+        "chunks_considered": len(chunk_rows),
+        "files": debug_files,
+        "chunks": debug_chunks,
+        "production_sources": summarize_retrieval_sources(sources, limit=debug_row_limit),
+        "production_diagnostics": {
+            "schema": RETRIEVAL_SERVICE_SCHEMA,
+            "source_count": len(sources),
+            "hybrid_candidates": hybrid_report.get("candidate_count", 0) if hybrid_report else 0,
+            "evidence_rows": len(evidence_report.get("rows", [])) if evidence_report else 0,
+            "vector_rows": len(vector_report.get("rows", [])) if vector_report else 0,
+            "index_status": index_status,
+            "code_locator_rows": len(code_rows),
+        },
+    }
+    if evidence_report:
+        debug_index["evidence_store"] = {
+            "id": evidence_report.get("store_id", ""),
+            "freshness": evidence_report.get("freshness", ""),
+        }
+        if evidence_report.get("warnings"):
+            debug_index["evidence_warnings"] = evidence_report.get("warnings", [])[:4]
+        debug_index["evidence_rows"] = evidence_report.get("rows", [])[:debug_row_limit]
+    elif evidence_warning:
+        debug_index["evidence_error"] = evidence_warning
+    if vector_report:
+        debug_index["vector_store"] = {
+            "id": vector_report.get("store_id", ""),
+            "method": vector_report.get("method", ""),
+            "rerank": vector_report.get("rerank", False),
+            "rerank_fallback": vector_report.get("rerank_fallback", False),
+        }
+        if vector_report.get("warnings"):
+            debug_index["vector_warnings"] = vector_report.get("warnings", [])[:4]
+        debug_index["vector_chunks"] = vector_report.get("rows", [])[:debug_row_limit]
+    elif vector_warning:
+        debug_index["vector_error"] = vector_warning
     diagnostics = {
         "schema": RETRIEVAL_SERVICE_SCHEMA,
         "kind": "index",
@@ -927,6 +1041,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         "code_locator_rows": len(code_rows),
         "index_status": index_status,
         "retrieval_plan": retrieval_plan,
+        "debug_index": debug_index,
     }
     return RetrievalServiceResult(
         text="\n\n".join(part for part in parts if part),

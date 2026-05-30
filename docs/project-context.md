@@ -1055,8 +1055,11 @@ Live subsystem extraction status:
 - Retrieval service: in progress and now live. `motoko_core.retrieval_service`
   owns live index retrieval, lexical/path/task/evidence/vector candidate
   fusion, deterministic temporal Org evidence selection, and hybrid rerank
-  control through injected callbacks. Context packing, report formatting, and
-  some source-record construction still remain in the root facade.
+  control through injected callbacks. Retrieval debug rows for files, chunks,
+  evidence, vectors, and production source summaries now ride on the same
+  retrieval result shape used for chat context. Context packing, report
+  formatting, and some source-record construction still remain in the root
+  facade.
 - Artifact lifecycle service: partial. Lifecycle decision records exist, stale
   superseded index cleanup uses them, and index health now reports source
   lifecycle decisions for changed, deleted, or newly ignored indexed files.
@@ -1181,6 +1184,11 @@ Current progress on this stretch:
 - Complete: `retrieval-debug` now includes production selected-source summaries
   from the retrieval-service result, tying diagnostics to the context chat
   would actually receive.
+- Complete: `retrieval-debug` now gets its top file/chunk rows,
+  evidence-store rows, vector rows, and production diagnostics from the
+  retrieval-service result instead of running separate evidence/vector probes.
+  The report renderer is still a renderer, but its data now describes the same
+  production retrieval pass used for chat context.
 - Complete: feedback rows can be replayed as private retrieval-eval fixtures.
 - Complete: index health reports source lifecycle decisions for changed,
   deleted, and ignored indexed files.
@@ -1191,12 +1199,12 @@ Current progress on this stretch:
   narrower: final prompt wording, excerpt/snippet choice across non-index
   lanes, and some `/sources` source-record construction still live in the root
   facade.
-- Progress: `retrieval-debug` now reads its production selected-source summary
-  and content-free diagnostics from the same retrieval-service result object
-  used for chat context. Remaining report work is to turn preview/debug/vector
-  displays into thin renderers over one richer result shape. `/retrieval-preview`
-  now also reads attached context directly from the structured context package
-  instead of parsing it back out of the rendered prompt.
+- Progress: `retrieval-debug` now reads its displayed file/chunk rows,
+  evidence/vector rows, production selected-source summary, and content-free
+  diagnostics from the same retrieval-service result object used for chat
+  context. Remaining report work is narrower: keep `/retrieval-preview` and
+  `/vector-query` as thin renderers over the shared retrieval/context result
+  shapes instead of letting them grow parallel interpretation paths.
 - Progress: artifact lifecycle now owns the stale-superseded index cleanup
   decision/apply loop through injected callbacks, so the root facade supplies
   filesystem authority while lifecycle owns report shape and blocking logic.
@@ -1243,7 +1251,18 @@ Remaining follow-up items from this stretch:
   `/sources` source-record assembly.
 - Reduce retrieval preview/debug/vector reports into thin renderers over one
   richer retrieval result shape, so diagnostics, chat context, and `/sources`
-  cannot drift into parallel interpretations of the same query.
+  cannot drift into parallel interpretations of the same query. The
+  `/retrieval-debug` side of this is complete; `/retrieval-preview` and
+  `/vector-query` still need final convergence work.
+- Add incremental vector-store refresh. Current vector refresh resumes
+  interrupted work for the same source fingerprint, but a source-index
+  fingerprint change still marks the store stale and rebuilds the store. The
+  desired upgrade is a schema-versioned row-reuse path keyed by stable row ids,
+  embedding route/model/dimensions, input schema, input hash, and source
+  content hash: reuse unchanged vectors, delete rows for removed/ignored
+  sources, embed only new or changed rows, and write a new manifest. Full
+  re-vectorization should remain required when the embedding route/model,
+  dimensions, vector schema, or embedding input policy changes.
 - Add broader source-level lifecycle apply support after rebuilds materialize
   replacement state: vectors, evidence stores, dossiers, memories, feedback
   fixtures, profiles, and conversation-derived artifacts should have one clear

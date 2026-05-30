@@ -3823,6 +3823,118 @@ def test_retrieval_debug_explains_scores(m):
         assert "prompt-use check" in text
 
 
+def test_retrieval_debug_uses_service_debug_result_without_side_probes(m):
+    with isolated_state():
+        index = {
+            "id": "service-debug-index",
+            "name": "docs",
+            "root": "/tmp/docs",
+            "created": "2026-05-30T00:00:00+00:00",
+            "files": [],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+
+        class FakeResult:
+            diagnostics = {
+                "debug_index": {
+                    "id": "service-debug-index",
+                    "name": "docs",
+                    "root": "/tmp/docs",
+                    "freshness": "fresh",
+                    "production_retrieval": "shared result",
+                    "warnings": [],
+                    "files_considered": 1,
+                    "chunks_considered": 1,
+                    "files": [{"path": "/tmp/docs/a.org", "total": 9, "lexical": 9}],
+                    "chunks": [{"path": "/tmp/docs/a.org", "chunk": 1, "total": 8, "summary": "Alpha"}],
+                    "production_sources": [{"kind": "chunk", "path": "/tmp/docs/a.org", "chunk": 1}],
+                    "production_diagnostics": {"schema": "retrieval-service-v1", "source_count": 1},
+                    "evidence_store": {"id": "evidence-from-service", "freshness": "fresh"},
+                    "evidence_rows": [{"path": "/tmp/docs/a.org", "chunk": 1, "total": 7, "kind": "org_day"}],
+                    "vector_store": {
+                        "id": "vector-from-service",
+                        "method": "embedding-v1",
+                        "rerank": True,
+                        "rerank_fallback": False,
+                    },
+                    "vector_chunks": [{"path": "/tmp/docs/a.org", "chunk": 1, "score": 6}],
+                }
+            }
+
+            def source_summary(self, *, limit=8):
+                return self.diagnostics["debug_index"]["production_sources"][:limit]
+
+        old_retrieve = m.retrieve_index_result
+        old_evidence = m.query_evidence_store
+        old_vector = m.query_vector_store_for_retrieval
+        try:
+            m.retrieve_index_result = lambda _index, _query: FakeResult()
+            m.query_evidence_store = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("retrieval-debug should not run an evidence side probe")
+            )
+            m.query_vector_store_for_retrieval = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("retrieval-debug should not run a vector side probe")
+            )
+            report = m.run_retrieval_debug("alpha", index_ids=[index["id"]], limit=4)
+        finally:
+            m.retrieve_index_result = old_retrieve
+            m.query_evidence_store = old_evidence
+            m.query_vector_store_for_retrieval = old_vector
+
+        debug_index = report["indexes"][0]
+        assert debug_index["production_retrieval"] == "shared result"
+        assert debug_index["evidence_store"]["id"] == "evidence-from-service"
+        assert debug_index["vector_store"]["id"] == "vector-from-service"
+        assert debug_index["production_sources"][0]["kind"] == "chunk"
+
+
+def test_retrieval_service_result_includes_debug_index_shape(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state():
+            index = {
+                "id": "service-shape-index",
+                "name": "docs",
+                "root": "/tmp/docs",
+                "created": "2026-05-30T00:00:00+00:00",
+                "files": [
+                    {
+                        "path": "/tmp/docs/tasks.org",
+                        "summary": "Alpha planning tasks.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Alpha beta task chunk.",
+                                "content": "* TODO Alpha beta work\n",
+                                "content_sha256": m.sha256_hex(b"* TODO Alpha beta work\n"),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            result = m.retrieve_index_result(index, "alpha beta tasks")
+            debug_index = result.diagnostics.get("debug_index")
+            assert debug_index["id"] == "service-shape-index"
+            assert debug_index["files_considered"] == 1
+            assert debug_index["chunks_considered"] == 1
+            assert debug_index["production_sources"] == result.source_summary(limit=50)
+            assert debug_index["chunks"][0]["path"].endswith("tasks.org")
+            assert debug_index["production_diagnostics"]["schema"] == "retrieval-service-v1"
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_named_logbook_recent_query_uses_latest_org_sections(m):
     with isolated_state() as tmp:
         docs = tmp / "orgfiles"

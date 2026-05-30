@@ -1650,7 +1650,11 @@ selection. When a catalog-discovered
 if reranking is missing or fails, she falls back to the non-reranked hybrid
 set. Lexical scores, path boosts, Org/task signals, vector rows, rerank state,
 evidence rows, and source excerpts remain visible in `/retrieval-debug` and
-`/sources`. Set `MOTOKO_EVIDENCE_RETRIEVAL=0` to disable evidence-store
+`/sources`. `/retrieval-debug` gets its displayed file/chunk rows,
+evidence rows, vector rows, selected sources, and content-free diagnostics from
+the same retrieval-service result used for chat context, so it is a diagnosis
+of the production retrieval pass rather than a separate side search. Set
+`MOTOKO_EVIDENCE_RETRIEVAL=0` to disable evidence-store
 retrieval during diagnosis. Set `MOTOKO_VECTOR_RETRIEVAL=0` to disable
 semantic retrieval during diagnosis. Set `MOTOKO_VECTOR_RERANK=0` to disable
 reranking during diagnosis.

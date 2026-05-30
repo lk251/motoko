@@ -5,6 +5,11 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Unified retrieval-debug diagnostics with production retrieval. `/retrieval-debug`
+  now reads its displayed file/chunk rows, evidence rows, vector rows, selected
+  sources, and content-free diagnostics from the same retrieval-service result
+  used for chat context instead of issuing separate evidence/vector side
+  probes.
 - Resumed heavy index work now carries forward the saved elapsed timer from
   its progress checkpoint instead of restarting the visible bg-heavy elapsed
   time at zero.
