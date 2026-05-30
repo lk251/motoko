@@ -1828,12 +1828,10 @@ def format_index_progress_status(progress: dict) -> str:
     pct = f"{percent}%" if percent is not None else ""
     eta = progress.get("eta_seconds")
     eta_text = f"eta {human_duration(eta)}" if eta is not None else "eta ?"
-    current_call = progress.get("current_model_elapsed_seconds")
-    call_text = f"call {human_duration(current_call)}" if current_call is not None else ""
     lane = progress.get("background_lane", "")
     route = progress.get("model_route", "")
     worker = f"lane {lane}/{route}" if lane and route else ""
-    parts = ["bg-heavy:", phase, worker, files, chunks, pct, eta_text, call_text]
+    parts = ["bg-heavy:", phase, worker, files, chunks, pct, eta_text]
     return " ".join(part for part in parts if part)
 
 

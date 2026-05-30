@@ -7381,7 +7381,7 @@ def test_index_progress_eta_tracks_model_timing(m):
         progress["_current_model_started_monotonic"] = m.time.monotonic() - 12
         m.update_index_progress_estimates(progress)
         assert progress["current_model_elapsed_seconds"] >= 11
-        assert "call " in m.format_index_progress_status(progress)
+        assert "call " not in m.format_index_progress_status(progress)
 
         m.index_progress_finish_model(progress)
         assert progress["completed_model_calls"] == 1
