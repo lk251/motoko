@@ -5,6 +5,9 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Resumed heavy index work now carries forward the saved elapsed timer from
+  its progress checkpoint instead of restarting the visible bg-heavy elapsed
+  time at zero.
 - Added explicit background catch-up: `/bg-now` and `motoko bg-now` run the
   existing background index/retrieval maintenance path immediately, including
   catalog refresh, deterministic upgrades, attached-index refresh, cleanup,

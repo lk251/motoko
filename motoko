@@ -1691,7 +1691,10 @@ def begin_index_progress(
     name: str | None,
     candidates: list[pathlib.Path],
     callback=None,
+    *,
+    initial_elapsed_seconds: int = 0,
 ) -> dict:
+    initial_elapsed_seconds = max(0, int(initial_elapsed_seconds or 0))
     chunk_estimates = {str(path): estimate_file_chunks(path) for path in candidates}
     estimated_chunks = sum(chunk_estimates.values())
     file_summary_estimates = {
@@ -1708,7 +1711,7 @@ def begin_index_progress(
         "name": name or root.name or str(root),
         "started": now(),
         "updated": now(),
-        "elapsed_seconds": 0,
+        "elapsed_seconds": initial_elapsed_seconds,
         "eta_seconds": None,
         "percent": 0,
         "total_files": len(candidates),
@@ -1723,7 +1726,7 @@ def begin_index_progress(
         "estimated_model_calls": estimated_chunks + sum(file_summary_estimates.values()) + estimate_corpus_summary_calls(len(candidates)),
         "completed_model_calls": 0,
         "last_model_label": "",
-        "_started_monotonic": time.monotonic(),
+        "_started_monotonic": time.monotonic() - initial_elapsed_seconds,
         "_chunk_estimates": chunk_estimates,
         "_file_summary_estimates": file_summary_estimates,
     }
@@ -15363,6 +15366,8 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
     partial = load_partial_index(index_id)
     require_permission("index")
     clear_work_pause_request()
+    previous_progress = read_index_progress(index_id) or {}
+    previous_elapsed = int(previous_progress.get("elapsed_seconds", 0) or 0)
     root = pathlib.Path(partial.get("root", "")).expanduser().resolve()
     require_allowed(root)
     pattern = partial.get("glob") or AUTO_INDEX_GLOB
@@ -15399,7 +15404,15 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
         "max_bytes": int(partial.get("derived_content_budget_bytes") or DEFAULT_MAX_DERIVED_INDEX_BYTES),
         "used_bytes": sum(int(item.get("derived_content_bytes", 0) or 0) for item in files),
     }
-    progress = begin_index_progress(index_id, root, pattern, name, candidates, progress_callback)
+    progress = begin_index_progress(
+        index_id,
+        root,
+        pattern,
+        name,
+        candidates,
+        progress_callback,
+        initial_elapsed_seconds=previous_elapsed,
+    )
     completed_chunks = sum(len(item.get("chunks", [])) for item in files)
     completed_file_summary_calls = sum(
         estimate_summary_calls_for_block_count(len(item.get("chunks", [])))

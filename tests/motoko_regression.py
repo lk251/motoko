@@ -7666,11 +7666,24 @@ def test_index_resume_after_model_timeout(m):
             assert "partial" in listing
             assert f"motoko index-resume {partial['id']}" in listing
 
+            saved_progress = m.read_index_progress(partial["id"])
+            assert saved_progress is not None
+            saved_progress["elapsed_seconds"] = 185
+            m.atomic_write(
+                m.index_progress_path(partial["id"]),
+                json.dumps(saved_progress, ensure_ascii=False, indent=2) + "\n",
+            )
+
             m.quiet_model = lambda *args, **kwargs: "summary"
-            index = m.resume_document_index(partial["id"])
+            resume_events = []
+            index = m.resume_document_index(partial["id"], progress_callback=resume_events.append)
             assert index["id"] == partial["id"]
             assert len(index["files"]) == 2
             assert any(file_item["path"].endswith("b.org") for file_item in index["files"])
+            assert resume_events[0]["elapsed_seconds"] >= 185
+            final_progress = m.read_index_progress(index["id"])
+            assert final_progress is not None
+            assert final_progress["elapsed_seconds"] >= 185
             assert m.index_path(index["id"]).exists()
             assert not m.index_partial_path(index["id"]).exists()
         finally:
