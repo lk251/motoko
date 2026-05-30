@@ -56,6 +56,13 @@ not the easiest place to review what changed after a long work session.
   `.motokoignore` and VCS/cache paths, with overwrite hash checks, atomic
   writes, exact session confirmation, and content-safe action ledgers. Script
   tools still cannot write project files directly.
+- Added script-assisted project-change proposals. Approved tools may declare
+  `propose_project_changes` and return typed `project_file_write` records
+  under `proposed_actions`; Motoko validates those proposals immediately,
+  stores content-safe proposal summaries, and applies one only through
+  `motoko action apply-proposal RUN_ID INDEX --yes` /
+  `/action apply-proposal RUN_ID INDEX --yes`. Raw script project writes
+  remain blocked.
 - Added the first narrow goal-loop runner: `motoko goal run FILE --yes` and
   `/goal run FILE --yes` execute only explicit action lists already present in
   `motoko-goal-loop-v1` records, within budgets and allowed effects/tools.

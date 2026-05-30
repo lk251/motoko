@@ -244,6 +244,7 @@ from motoko_core.agentic import (  # noqa: E402
     apply_project_file_write_action as core_apply_project_file_write_action,
     approve_tool as core_approve_tool,
     execute_skill_tool_action as core_execute_skill_tool_action,
+    extract_tool_proposed_actions as core_extract_tool_proposed_actions,
     find_tool_result_path as core_find_tool_result_path,
     format_action_result as core_format_action_result,
     format_action_validation as core_format_action_validation,
@@ -252,6 +253,7 @@ from motoko_core.agentic import (  # noqa: E402
     format_tool_rows as core_format_tool_rows,
     list_skill_tools as core_list_skill_tools,
     session_approval_key as core_session_approval_key,
+    summarize_tool_proposed_actions as core_summarize_tool_proposed_actions,
     validate_action_record as core_validate_action_record,
     write_action_ledger as core_write_action_ledger,
 )
@@ -6008,6 +6010,80 @@ def format_tool_result(selector: str, *, private: bool = False) -> str:
     return core_format_tool_private_result(data, private=private)
 
 
+def _load_tool_result(selector: str) -> dict:
+    path = core_find_tool_result_path(state_root(), selector)
+    data = safe_load_json(path)
+    if not isinstance(data, dict):
+        raise AgenticValidationError(f"tool result is not a JSON object: {path}")
+    return data
+
+
+def _tool_proposed_actions(selector: str) -> tuple[dict, list[dict]]:
+    data = _load_tool_result(selector)
+    try:
+        actions = core_extract_tool_proposed_actions(data.get("output_json"))
+    except AgenticValidationError as exc:
+        raise AgenticValidationError(f"tool proposals invalid: {exc}") from exc
+    return data, actions
+
+
+def format_action_proposals(selector: str) -> str:
+    try:
+        data, actions = _tool_proposed_actions(selector)
+    except AgenticValidationError as exc:
+        return f"action proposals:\nstatus: rejected\nerror: {exc}"
+    validations = core_summarize_tool_proposed_actions(
+        data.get("output_json"),
+        skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+        approval_path=tool_approvals_path(),
+        realm=identity_realm(),
+        path_checker=action_path_checker,
+    )
+    lines = [
+        "action proposals:",
+        f"run: {data.get('tool_run_id', '')}",
+        f"skill: {data.get('skill', '')}",
+        f"tool: {data.get('tool', '')}",
+        f"count: {len(actions)}",
+    ]
+    if not actions:
+        lines.append("status: empty")
+        return "\n".join(lines)
+    for row in validations:
+        parts = [
+            f"[{row.get('index', '')}]",
+            str(row.get("kind", "")),
+            str(row.get("status", "")),
+            f"approval={row.get('approval', '')}",
+        ]
+        if row.get("mode"):
+            parts.append(f"mode={row.get('mode')}")
+        if row.get("content_bytes") is not None:
+            parts.append(f"bytes={row.get('content_bytes')}")
+        lines.append("- " + " ".join(part for part in parts if part))
+        if row.get("content_sha256"):
+            lines.append(f"  content sha256: {row.get('content_sha256')}")
+        if row.get("target_path_sha256"):
+            lines.append(f"  target path sha256: {row.get('target_path_sha256')}")
+        if row.get("reason"):
+            lines.append(f"  reason: {row.get('reason')}")
+    lines.append("apply: motoko action apply-proposal RUN_ID INDEX --yes")
+    return "\n".join(lines)
+
+
+def apply_action_proposal_text(selector: str, index: int, *, yes: bool = False, cancel_event=None) -> str:
+    try:
+        _data, actions = _tool_proposed_actions(selector)
+        if index < 1 or index > len(actions):
+            raise AgenticValidationError(f"proposal index must be 1..{len(actions)}")
+        action = actions[index - 1]
+        if action.get("kind") != "project_file_write":
+            raise AgenticValidationError("only project_file_write proposals can be applied")
+    except AgenticValidationError as exc:
+        return f"action apply-proposal:\nstatus: rejected\nerror: {exc}"
+    return run_action_text_from_record(action, yes=yes, cancel_event=cancel_event)
+
+
 def goal_loop_path_checker(_key: str, value: str) -> None:
     action_path_checker(_key, value)
 
@@ -6688,6 +6764,158 @@ def _agentic_eval_fixture_script_project_write_blocked(docs: pathlib.Path, tmp: 
     }
 
 
+def _agentic_eval_write_project_proposer_tool() -> None:
+    learn_skill_text(
+        "eval-project-proposer",
+        description="Eval project proposal tool",
+        body="This tool proposes project writes; Motoko applies them separately.",
+        replace=True,
+    )
+    scripts = skills_dir() / "eval-project-proposer" / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "propose.py").write_text(
+        "import json, sys\n"
+        "data = json.loads(sys.stdin.read() or '{}')\n"
+        "args = data.get('arguments') or {}\n"
+        "action = {\n"
+        "  'schema': 'motoko-action-v1',\n"
+        "  'kind': 'project_file_write',\n"
+        "  'path': args.get('target', ''),\n"
+        "  'mode': 'create',\n"
+        "  'content': args.get('content', ''),\n"
+        "  'reason': 'eval project proposal'\n"
+        "}\n"
+        "print(json.dumps({'ok': True, 'proposed_actions': [action]}))\n",
+        encoding="utf-8",
+    )
+    (scripts / "propose.tool.json").write_text(
+        json.dumps(
+            {
+                "schema": "motoko-tool-v1",
+                "name": "propose",
+                "description": "Prepare a project_file_write proposal.",
+                "script": "propose.py",
+                "interpreter": "python3",
+                "wrapper": "motoko-tool-python-stdlib",
+                "allowed_effects": ["write_motoko_state", "propose_project_changes"],
+                "argument_schema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["target", "content"],
+                    "additionalProperties": False,
+                },
+                "input_schema": {"type": "object"},
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "ok": {"type": "boolean"},
+                        "proposed_actions": {"type": "array"},
+                    },
+                    "required": ["ok", "proposed_actions"],
+                    "additionalProperties": False,
+                },
+                "timeout_seconds": 30,
+                "max_stdout_bytes": 65536,
+                "max_stderr_bytes": 16384,
+                "network": False,
+                "writes_project_files": False,
+                "requires_confirmation": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    approve_skill_tool_text("eval-project-proposer", "propose", yes=True)
+
+
+def _agentic_eval_fixture_project_write_proposal(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
+    _agentic_eval_write_project_proposer_tool()
+    target = docs / "proposal.org"
+    action_file = tmp / "project-proposal.json"
+    write_eval_action_file(
+        action_file,
+        {
+            "schema": "motoko-action-v1",
+            "kind": "skill_tool_run",
+            "skill": "eval-project-proposer",
+            "tool": "propose",
+            "arguments": {"target": str(target), "content": "* Proposal\nprivate fixture text\n"},
+        },
+    )
+    run = run_action_text(str(action_file), yes=True)
+    result_path = max((state_root() / "tool-runs").glob("*/result.json"), key=lambda path: path.stat().st_mtime_ns)
+    run_id = result_path.parent.name
+    proposals = format_action_proposals(run_id)
+    blocked = apply_action_proposal_text(run_id, 1, yes=False)
+    applied = apply_action_proposal_text(run_id, 1, yes=True)
+    ledger_text = "\n".join(json.dumps(row, ensure_ascii=False) for row in read_jsonl(action_ledger_path()))
+    ok = (
+        "status: completed" in run
+        and "proposed actions: 1" in run
+        and "project_file_write needs_confirmation" in proposals
+        and "status: blocked" in blocked
+        and "status: completed" in applied
+        and target.read_text(encoding="utf-8") == "* Proposal\nprivate fixture text\n"
+        and "private fixture text" not in ledger_text
+        and str(target) not in ledger_text
+    )
+    return {
+        "id": "script_project_write_proposal_applied_by_motoko",
+        "status": "pass" if ok else "fail",
+        "checks": {
+            "tool_completed": "status: completed" in run,
+            "proposal_recorded": "proposed actions: 1" in run,
+            "proposal_needs_confirmation": "project_file_write needs_confirmation" in proposals,
+            "unconfirmed_apply_blocked": "status: blocked" in blocked,
+            "confirmed_apply_completed": "status: completed" in applied,
+            "content_safe_ledger": "private fixture text" not in ledger_text and str(target) not in ledger_text,
+        },
+    }
+
+
+def _agentic_eval_fixture_project_write_proposal_ignored(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
+    _agentic_eval_write_project_proposer_tool()
+    target = docs / "archive" / "proposal.org"
+    action_file = tmp / "ignored-project-proposal.json"
+    write_eval_action_file(
+        action_file,
+        {
+            "schema": "motoko-action-v1",
+            "kind": "skill_tool_run",
+            "skill": "eval-project-proposer",
+            "tool": "propose",
+            "arguments": {"target": str(target), "content": "* Ignored\n"},
+        },
+    )
+    run = run_action_text(str(action_file), yes=True)
+    result_path = max((state_root() / "tool-runs").glob("*/result.json"), key=lambda path: path.stat().st_mtime_ns)
+    run_id = result_path.parent.name
+    proposals = format_action_proposals(run_id)
+    applied = apply_action_proposal_text(run_id, 1, yes=True)
+    ok = (
+        "status: completed" in run
+        and "project_file_write rejected" in proposals
+        and "ignored by .motokoignore" in proposals
+        and "status: rejected" in applied
+        and not target.exists()
+    )
+    return {
+        "id": "script_project_write_proposal_respects_motokoignore",
+        "status": "pass" if ok else "fail",
+        "checks": {
+            "tool_completed": "status: completed" in run,
+            "proposal_rejected": "project_file_write rejected" in proposals,
+            "motokoignore_reason": "ignored by .motokoignore" in proposals,
+            "apply_rejected": "status: rejected" in applied,
+            "no_file_written": not target.exists(),
+        },
+    }
+
+
 def _agentic_eval_fixture_goal_runner(docs: pathlib.Path, tmp: pathlib.Path) -> dict:
     target = docs / "goal-output.org"
     goal_file = tmp / "goal.json"
@@ -6915,6 +7143,8 @@ def run_action_eval() -> dict:
                 lambda: _agentic_eval_fixture_read_respects_ignore(docs, tmp),
                 lambda: _agentic_eval_fixture_session_confirmation_scopes_arguments(docs, tmp),
                 lambda: _agentic_eval_fixture_script_project_write_blocked(docs, tmp),
+                lambda: _agentic_eval_fixture_project_write_proposal(docs, tmp),
+                lambda: _agentic_eval_fixture_project_write_proposal_ignored(docs, tmp),
                 lambda: _agentic_eval_fixture_goal_runner(docs, tmp),
                 lambda: _agentic_eval_fixture_goal_budget(docs, tmp),
                 lambda: _agentic_eval_fixture_action_interruption(docs, tmp),
@@ -7256,6 +7486,10 @@ def execute_action_record(action: dict, *, yes: bool = False, cancel_event=None)
 
 def run_action_text(path_text: str, *, yes: bool = False, cancel_event=None) -> str:
     action = read_action_file(path_text)
+    return run_action_text_from_record(action, yes=yes, cancel_event=cancel_event)
+
+
+def run_action_text_from_record(action: dict, *, yes: bool = False, cancel_event=None) -> str:
     validation, result = execute_action_record(action, yes=yes, cancel_event=cancel_event)
     if result is None:
         return core_format_action_validation(validation) + "\nnot run"
@@ -17743,6 +17977,20 @@ def memory_profile_report_command_request(text: str):
             selectors = [arg for arg in args if arg != "--private"]
             if selectors:
                 return "/action result", lambda: format_tool_result(selectors[0], private=private)
+        if subcommand == "proposals" and subbody:
+            args = subbody.split()
+            if args:
+                return "/action proposals", lambda: format_action_proposals(args[0])
+        if subcommand == "apply-proposal" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            positional = [arg for arg in args if arg != "--yes"]
+            if len(positional) >= 2:
+                try:
+                    proposal_index = int(positional[1])
+                except ValueError:
+                    proposal_index = 0
+                return "/action apply-proposal", lambda: apply_action_proposal_text(positional[0], proposal_index, yes=yes)
     if primary == "/goal":
         parts = body.split(maxsplit=1)
         subcommand = parts[0] if parts else ""
@@ -21349,6 +21597,10 @@ def command_action(args) -> None:
         print_report(format_action_ledger(limit=args.limit))
     elif args.action_command == "result":
         print_report(format_tool_result(args.run_id, private=args.private))
+    elif args.action_command == "proposals":
+        print_report(format_action_proposals(args.run_id))
+    elif args.action_command == "apply-proposal":
+        print_report(apply_action_proposal_text(args.run_id, args.index, yes=args.yes))
     else:
         raise SystemExit("unknown action command")
 
@@ -22069,6 +22321,14 @@ def main(argv: list[str]) -> int:
     action_result.add_argument("run_id")
     action_result.add_argument("--private", action="store_true", help="show private stdout/stderr/output JSON in this user account")
     action_result.set_defaults(func=command_action)
+    action_proposals = action_sub.add_parser("proposals", help="show structured project-change proposals from a tool result")
+    action_proposals.add_argument("run_id")
+    action_proposals.set_defaults(func=command_action)
+    action_apply_proposal = action_sub.add_parser("apply-proposal", help="apply one proposed project-file write through Motoko validators")
+    action_apply_proposal.add_argument("run_id")
+    action_apply_proposal.add_argument("index", type=int)
+    action_apply_proposal.add_argument("--yes", action="store_true", help="confirm this proposed project-file write")
+    action_apply_proposal.set_defaults(func=command_action)
 
     goal = sub.add_parser("goal", help="preview, inspect, and run explicit durable goal-loop records")
     goal_sub = goal.add_subparsers(dest="goal_command", required=True)

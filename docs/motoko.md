@@ -672,6 +672,8 @@ motoko action run ACTION.json [--yes]
 motoko action apply ACTION.json --yes
 motoko action ledger [--limit N]
 motoko action result RUN_ID [--private]
+motoko action proposals RUN_ID
+motoko action apply-proposal RUN_ID INDEX --yes
 motoko action-eval [--write] [--json]
 motoko goal plan "objective" [--save]
 motoko goal list
@@ -771,6 +773,17 @@ Overwrite actions require the current `expected_sha256` of the target. Action
 ledgers store hashes, byte counts, effects, and statuses, not file content or
 raw target paths.
 
+Script-assisted project mutation is intentionally proposal-first. A tool may
+declare the `propose_project_changes` effect and return a bounded
+`proposed_actions` list containing typed `project_file_write` records. Motoko
+validates those proposals immediately and stores the validation summary in the
+private tool result, but the script still does not write project files.
+`motoko action proposals RUN_ID` shows the content-safe proposal summary, and
+`motoko action apply-proposal RUN_ID INDEX --yes` applies one proposal through
+the same allowlist, `.motokoignore`, expected-hash, atomic-write, confirmation,
+and ledger path as any other `project_file_write`. Tool output that contains
+`proposed_actions` without declaring `propose_project_changes` fails closed.
+
 `motoko tools` lists all declared skill tools across learned skills, including
 approval state and effects. `motoko action plan "query"` is the first
 deterministic planner bridge: it matches the query against known skills/tools,
@@ -785,6 +798,7 @@ parsed JSON output printed.
 surface without calling a model and without using real user corpora. It checks
 that confirmed code-owned project writes work, unconfirmed writes block,
 `.motokoignore` denials hold, script-owned project writes remain blocked,
+script-produced project-change proposals can only be applied by Motoko,
 explicit goal action lists run only with confirmation, and goal budgets stop
 over-broad action lists. Add `--write` to save the JSON report under the
 current user's Motoko state.

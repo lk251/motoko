@@ -1480,14 +1480,15 @@ Agentic roadmap gates not completed by design:
 
 Relative priority for increasing Motoko's intelligence and competence:
 
-1. Improve retrieval/memory/skills and script-assisted project mutation first:
-   these directly affect whether Motoko understands the local corpus, remembers
-   useful procedure, and can safely turn good analysis into useful changes.
+1. Continue improving retrieval/memory/skills first, and harden the newly added
+   script-assisted project-proposal lane: these directly affect whether Motoko
+   understands the local corpus, remembers useful procedure, and can safely
+   turn good analysis into useful changes.
 2. Add read-only autonomous goal loops next: planning, retrieval, audit, and
    proposal loops can make Motoko more persistent and competent without
    granting new mutation authority.
-3. Add user-confirmed mutating goal loops only after read-only loops and
-   script-assisted project mutation have strong evals and checkpoint behavior.
+3. Add user-confirmed mutating goal loops only after read-only loops and the
+   project-proposal lane have strong evals and checkpoint behavior.
 4. Consider Hermes-style background skill improvement continuously, but keep
    Motoko's stricter typed-action and approval boundary instead of importing a
    broad terminal/tool runtime.
@@ -1496,11 +1497,13 @@ Relative priority for increasing Motoko's intelligence and competence:
 
 Immediate next agentic implementation sequence, when development resumes:
 
-1. Build script-assisted project mutation as structured proposal generation.
-   Approved scripts may prepare `project_file_write` or patch-style action
-   records, but Motoko's code-owned validator remains the only component that
-   writes files. This should include previews, exact scope checks, no raw
-   script writes, pause/checkpoint behavior, and action-eval coverage.
+1. Script-assisted project mutation as structured proposal generation is now
+   implemented for `project_file_write` proposals. Approved scripts may declare
+   `propose_project_changes` and emit `proposed_actions`; Motoko validates
+   those actions, stores a content-safe proposal summary, and applies one only
+   through `motoko action apply-proposal RUN_ID INDEX --yes`. Raw script writes
+   remain blocked. Future work can add patch-style proposals on the same
+   boundary if real usage shows that full-file writes are too coarse.
 2. Build read-only autonomous goal loops. The first model-planned loop should
    plan, retrieve, inspect, audit, and propose typed actions inside a budget,
    then stop for user review. It should not mutate project files.

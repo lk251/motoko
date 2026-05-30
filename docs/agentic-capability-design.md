@@ -837,6 +837,26 @@ Interruption checkpoint, 2026-05-24:
   state, invalid actions staying rejected under cancellation, and goal
   interruption/resume without replaying completed work.
 
+Script-assisted project proposal checkpoint, 2026-05-30:
+
+- Added a narrow `propose_project_changes` tool effect. Approved scripts with
+  this effect may return `proposed_actions` containing typed
+  `project_file_write` records, but they still do not receive direct project
+  filesystem write authority.
+- Tool results now store content-safe proposal validation summaries alongside
+  private stdout/stderr/output JSON. Proposals are validated immediately
+  through the same allowlist, `.motokoignore`, expected-hash, confirmation,
+  atomic-write, and ledger boundary used by normal `project_file_write`
+  actions.
+- Added `motoko action proposals RUN_ID` / `/action proposals RUN_ID` to
+  inspect proposals and `motoko action apply-proposal RUN_ID INDEX --yes` /
+  `/action apply-proposal RUN_ID INDEX --yes` to apply one proposal through
+  Motoko-owned write machinery. Tool output that contains `proposed_actions`
+  without declaring `propose_project_changes` fails closed.
+- Added action-eval and regression coverage for successful proposal
+  application, `.motokoignore` rejection, undeclared proposal effects, and the
+  existing direct script project-write block.
+
 Skill lifecycle checkpoint, 2026-05-30:
 
 - Added the first Motoko-shaped skill lifecycle layer. Selection and
@@ -863,8 +883,11 @@ Next long stretch after skill lifecycle:
 - Improve curator usefulness without auto-application: improve
   umbrella/consolidation workflows and connect richer feedback/eval rows to
   higher-quality patch proposals.
-- Keep support-file consolidation inspectable and avoid widening script/tool
-  authority while improving procedural memory quality.
+- Use the structured proposal lane as the only enabled path for
+  script-assisted project mutation. Raw script writes, network, arbitrary
+  terminal, and service control remain future reviewed gates.
+- Keep support-file consolidation inspectable while improving procedural
+  memory quality.
 
 ## Goal Loops
 

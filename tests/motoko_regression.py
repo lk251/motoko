@@ -8731,6 +8731,75 @@ def write_demo_tool(m, skill_name="tool-backed-skill"):
     )
 
 
+def write_project_proposal_tool(m, skill_name="project-proposer", *, include_effect=True):
+    m.learn_skill_text(
+        skill_name,
+        description="Skill with a project-change proposal tool",
+        body="Use the tool to propose typed project_file_write actions; Motoko applies them.",
+    )
+    scripts = m.skills_dir() / skill_name / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "propose.py").write_text(
+        "import json, sys\n"
+        "data = json.loads(sys.stdin.read() or '{}')\n"
+        "args = data.get('arguments') or {}\n"
+        "action = {\n"
+        "  'schema': 'motoko-action-v1',\n"
+        "  'kind': 'project_file_write',\n"
+        "  'path': args.get('target', ''),\n"
+        "  'mode': 'create',\n"
+        "  'content': args.get('content', ''),\n"
+        "  'reason': 'tool proposed a bounded project write'\n"
+        "}\n"
+        "print(json.dumps({'ok': True, 'proposed_actions': [action]}))\n",
+        encoding="utf-8",
+    )
+    effects = ["write_motoko_state"]
+    if include_effect:
+        effects.append("propose_project_changes")
+    (scripts / "propose.tool.json").write_text(
+        json.dumps(
+            {
+                "schema": "motoko-tool-v1",
+                "name": "propose",
+                "description": "Prepare a project_file_write proposal without writing project files.",
+                "script": "propose.py",
+                "interpreter": "python3",
+                "wrapper": "motoko-tool-python-stdlib",
+                "allowed_effects": effects,
+                "argument_schema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "required": ["target", "content"],
+                    "additionalProperties": False,
+                },
+                "input_schema": {"type": "object"},
+                "output_schema": {
+                    "type": "object",
+                    "properties": {
+                        "ok": {"type": "boolean"},
+                        "proposed_actions": {"type": "array"},
+                    },
+                    "required": ["ok", "proposed_actions"],
+                    "additionalProperties": False,
+                },
+                "timeout_seconds": 30,
+                "max_stdout_bytes": 65536,
+                "max_stderr_bytes": 16384,
+                "network": False,
+                "writes_project_files": False,
+                "requires_confirmation": False,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def test_skill_tool_metadata_validation_and_approval(m):
     with isolated_state():
         write_demo_tool(m)
@@ -9162,6 +9231,120 @@ def test_action_run_keeps_project_write_tools_disabled(m):
         assert "project-writing skill tools are not enabled" in output
 
 
+def test_skill_tool_project_write_proposal_is_validated_and_applied(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / ".motokoignore").write_text("ignored.org\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        target = docs / "proposal.org"
+        write_project_proposal_tool(m)
+        m.approve_skill_tool_text("project-proposer", "propose", yes=True)
+        action_path = tmp / "proposal-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "project-proposer",
+                    "tool": "propose",
+                    "arguments": {"target": str(target), "content": "* Proposed\nprivate body\n"},
+                    "reason": "Prepare a bounded project write proposal.",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        output = m.run_action_text(str(action_path))
+        assert "status: completed" in output
+        assert "proposed actions: 1" in output
+        assert not target.exists()
+
+        result_path = next((m.state_root() / "tool-runs").glob("*/result.json"))
+        run_id = result_path.parent.name
+        proposals = m.format_action_proposals(run_id)
+        assert "count: 1" in proposals
+        assert "project_file_write needs_confirmation" in proposals
+        assert "private body" not in proposals
+
+        blocked = m.apply_action_proposal_text(run_id, 1, yes=False)
+        assert "status: blocked" in blocked
+        assert not target.exists()
+
+        applied = m.apply_action_proposal_text(run_id, 1, yes=True)
+        assert "status: completed" in applied
+        assert target.read_text(encoding="utf-8") == "* Proposed\nprivate body\n"
+
+        ledger_text = "\n".join(json.dumps(row, ensure_ascii=False) for row in m.read_jsonl(m.action_ledger_path()))
+        assert "private body" not in ledger_text
+        assert str(target) not in ledger_text
+
+
+def test_skill_tool_project_write_proposal_respects_motokoignore(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / ".motokoignore").write_text("ignored.org\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        write_project_proposal_tool(m)
+        m.approve_skill_tool_text("project-proposer", "propose", yes=True)
+        action_path = tmp / "ignored-proposal-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "project-proposer",
+                    "tool": "propose",
+                    "arguments": {"target": str(docs / "ignored.org"), "content": "* Ignored\n"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        output = m.run_action_text(str(action_path))
+        assert "status: completed" in output
+        result_path = next((m.state_root() / "tool-runs").glob("*/result.json"))
+        run_id = result_path.parent.name
+        proposals = m.format_action_proposals(run_id)
+        assert "project_file_write rejected" in proposals
+        assert "ignored by .motokoignore" in proposals
+        applied = m.apply_action_proposal_text(run_id, 1, yes=True)
+        assert "status: rejected" in applied
+        assert not (docs / "ignored.org").exists()
+
+
+def test_skill_tool_project_write_proposal_requires_declared_effect(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        write_project_proposal_tool(m, skill_name="undeclared-proposer", include_effect=False)
+        m.approve_skill_tool_text("undeclared-proposer", "propose", yes=True)
+        action_path = tmp / "undeclared-proposal-action.json"
+        action_path.write_text(
+            json.dumps(
+                {
+                    "schema": "motoko-action-v1",
+                    "kind": "skill_tool_run",
+                    "skill": "undeclared-proposer",
+                    "tool": "propose",
+                    "arguments": {"target": str(docs / "proposal.org"), "content": "* Proposed\n"},
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        output = m.run_action_text(str(action_path))
+        assert "status: failed" in output
+        assert "without propose_project_changes effect" in output
+
+
 def test_project_file_write_action_is_code_owned_and_confirmed(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -9550,6 +9733,8 @@ def test_action_eval_report_covers_agentic_safety_fixtures(m):
             "motokoignore_skill_read_denied",
             "session_confirmation_scopes_arguments",
             "script_project_write_blocked",
+            "script_project_write_proposal_applied_by_motoko",
+            "script_project_write_proposal_respects_motokoignore",
             "explicit_goal_run_confirmed",
             "goal_budget_refuses_extra_actions",
             "action_interruption_records_ledger",
@@ -9557,7 +9742,7 @@ def test_action_eval_report_covers_agentic_safety_fixtures(m):
         } <= fixture_ids
         text = m.format_action_eval_report(report)
         assert "action eval:" in text
-        assert "fixtures: 9/9 passed" in text
+        assert "fixtures: 11/11 passed" in text
 
 
 def main() -> int:
@@ -9592,6 +9777,9 @@ def main() -> int:
         test_skill_tool_session_confirmation_is_argument_scoped,
         test_tool_catalog_and_action_plan_are_inspectable_without_running,
         test_action_run_keeps_project_write_tools_disabled,
+        test_skill_tool_project_write_proposal_is_validated_and_applied,
+        test_skill_tool_project_write_proposal_respects_motokoignore,
+        test_skill_tool_project_write_proposal_requires_declared_effect,
         test_project_file_write_action_is_code_owned_and_confirmed,
         test_project_file_write_overwrite_requires_expected_hash,
         test_goal_loop_preview_save_and_list_without_execution,

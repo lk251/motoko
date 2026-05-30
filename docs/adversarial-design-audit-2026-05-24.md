@@ -284,13 +284,20 @@ Ideas not to copy directly:
    ledger states.
 2. Add a Motoko-shaped skill usage/lifecycle layer: usage counts, pinned,
    archived, restored, and report-first curator suggestions.
-3. Add read-only model-planned goal loops with budgets, checkpoints, and final
-   audit.
-4. Add script-assisted project mutation through structured proposals, not raw
+3. Add script-assisted project mutation through structured proposals, not raw
    script writes.
-5. Extend artifact lifecycle application across vectors, evidence, dossiers,
+
+The first three items are now implemented. Script-assisted mutation is enabled
+only as `propose_project_changes` plus typed `project_file_write` proposals;
+Motoko still owns validation, confirmation, atomic writes, and ledgers.
+
+Remaining:
+
+1. Add read-only model-planned goal loops with budgets, checkpoints, and final
+   audit.
+2. Extend artifact lifecycle application across vectors, evidence, dossiers,
    memories, feedback, profiles, and conversation-derived artifacts.
-6. Add static script/skill scanning before any external skill import path.
+3. Add static script/skill scanning before any external skill import path.
 
 ## Validation Added By This Audit
 
@@ -299,4 +306,3 @@ Ideas not to copy directly:
 - `test_skill_tool_session_confirmation_is_argument_scoped`
 - `motoko action-eval` fixture `motokoignore_skill_read_denied`
 - `motoko action-eval` fixture `session_confirmation_scopes_arguments`
-

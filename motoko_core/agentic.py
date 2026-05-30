@@ -35,6 +35,7 @@ EFFECT_PROMPT_ONLY = "prompt_only"
 EFFECT_READ_CONTEXT = "read_context"
 EFFECT_READ_ALLOWED_FILES = "read_allowed_files"
 EFFECT_WRITE_MOTOKO_STATE = "write_motoko_state"
+EFFECT_PROPOSE_PROJECT_CHANGES = "propose_project_changes"
 EFFECT_WRITE_ALLOWED_PROJECT = "write_allowed_project"
 EFFECT_NETWORK = "network"
 EFFECT_EXTERNAL_PROCESS = "external_process"
@@ -46,6 +47,7 @@ KNOWN_EFFECTS = {
     EFFECT_READ_CONTEXT,
     EFFECT_READ_ALLOWED_FILES,
     EFFECT_WRITE_MOTOKO_STATE,
+    EFFECT_PROPOSE_PROJECT_CHANGES,
     EFFECT_WRITE_ALLOWED_PROJECT,
     EFFECT_NETWORK,
     EFFECT_EXTERNAL_PROCESS,
@@ -79,6 +81,7 @@ MAX_STDOUT_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
 MAX_RESULT_PREVIEW_CHARS = 1200
 MAX_PROJECT_WRITE_BYTES = 1024 * 1024
+MAX_TOOL_PROPOSED_ACTIONS = 20
 
 
 class AgenticValidationError(ValueError):
@@ -270,6 +273,82 @@ def validate_path_argument_boundaries(arguments: dict, tool: dict, *, realm: str
                 raise AgenticValidationError(f"argument {key} must not contain traversal")
             if path_checker is not None:
                 path_checker(key, item)
+
+
+def extract_tool_proposed_actions(output_json) -> list[dict]:
+    """Return action records proposed by a skill tool result.
+
+    Script-backed skills may propose project changes, but they do not get direct
+    filesystem authority. The only accepted proposal envelope is explicit JSON
+    under ``proposed_actions`` or ``proposed_action``.
+    """
+    if not isinstance(output_json, dict):
+        return []
+    raw = output_json.get("proposed_actions")
+    if raw is None and isinstance(output_json.get("proposed_action"), dict):
+        raw = [output_json.get("proposed_action")]
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise AgenticValidationError("proposed_actions must be a list")
+    if len(raw) > MAX_TOOL_PROPOSED_ACTIONS:
+        raise AgenticValidationError(f"proposed_actions exceeds {MAX_TOOL_PROPOSED_ACTIONS} action(s)")
+    actions: list[dict] = []
+    for idx, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            raise AgenticValidationError(f"proposed_actions[{idx}] must be an object")
+        actions.append(item)
+    return actions
+
+
+def summarize_tool_proposed_actions(
+    output_json,
+    *,
+    skill_resolver,
+    approval_path: pathlib.Path,
+    realm: str | None = None,
+    path_checker=None,
+) -> list[dict]:
+    actions = extract_tool_proposed_actions(output_json)
+    rows: list[dict] = []
+    for idx, proposed in enumerate(actions, start=1):
+        try:
+            validation = validate_action_record(
+                proposed,
+                skill_resolver=skill_resolver,
+                approval_path=approval_path,
+                realm=realm,
+                path_checker=path_checker,
+                preview=True,
+            )
+        except AgenticValidationError as exc:
+            rows.append(
+                {
+                    "index": idx,
+                    "kind": str(proposed.get("kind", "")),
+                    "status": "rejected",
+                    "approval": "not-applicable",
+                    "reason": str(exc),
+                    "action_hash": sha256_text(stable_json(proposed)),
+                }
+            )
+            continue
+        rows.append(
+            {
+                "index": idx,
+                "kind": validation.get("kind", ""),
+                "status": validation.get("status", ""),
+                "approval": validation.get("approval", ""),
+                "reason": validation.get("reason", ""),
+                "action_hash": validation.get("action_hash", ""),
+                "target_path_sha256": validation.get("target_path_sha256", ""),
+                "mode": validation.get("mode", ""),
+                "content_bytes": validation.get("content_bytes", 0),
+                "content_sha256": validation.get("content_sha256", ""),
+                "expected_sha256": validation.get("expected_sha256", ""),
+            }
+        )
+    return rows
 
 
 def validate_project_file_write_action(
@@ -849,6 +928,8 @@ def ledger_record(validation: dict, *, status: str | None = None) -> dict:
         "stdout_sha256",
         "stderr_sha256",
         "output_json_valid",
+        "proposed_action_count",
+        "proposed_action_valid_count",
         "error",
     }
     row = {key: validation.get(key) for key in allowed if key in validation}
@@ -949,6 +1030,7 @@ def _clip_result_text(text: str, *, limit: int = MAX_RESULT_PREVIEW_CHARS) -> st
 
 
 def format_tool_private_result(result: dict, *, private: bool = False) -> str:
+    proposals = result.get("proposed_action_validations") or []
     lines = [
         "tool result:",
         f"run: {result.get('tool_run_id', '')}",
@@ -960,6 +1042,7 @@ def format_tool_private_result(result: dict, *, private: bool = False) -> str:
         f"exit code: {result.get('exit_code', '')}",
         f"duration: {result.get('duration_ms', 0)} ms",
         f"output json valid: {'yes' if result.get('output_json_valid') else 'no'}",
+        f"proposed actions: {len(proposals)}",
         f"stdout bytes: {len(str(result.get('stdout') or '').encode('utf-8'))}",
         f"stderr bytes: {len(str(result.get('stderr') or '').encode('utf-8'))}",
     ]
@@ -969,6 +1052,22 @@ def format_tool_private_result(result: dict, *, private: bool = False) -> str:
         lines.append("private content: hidden (use --private in this user account to inspect)")
         return "\n".join(lines)
     lines.append("private content:")
+    if proposals:
+        lines.append("proposed_actions:")
+        for row in proposals:
+            parts = [
+                f"[{row.get('index', '')}]",
+                str(row.get("kind", "")),
+                str(row.get("status", "")),
+                f"approval={row.get('approval', '')}",
+            ]
+            if row.get("mode"):
+                parts.append(f"mode={row.get('mode')}")
+            if row.get("content_bytes") is not None:
+                parts.append(f"bytes={row.get('content_bytes')}")
+            if row.get("reason"):
+                parts.append(f"reason={row.get('reason')}")
+            lines.append("- " + " ".join(part for part in parts if part))
     output_json = result.get("output_json")
     if output_json is not None:
         lines.append("output_json:")
@@ -1121,6 +1220,7 @@ def execute_skill_tool_action(
     exit_code = proc.returncode if proc is not None and proc.returncode is not None else -1
     output_json = None
     output_json_valid = False
+    proposed_action_validations: list[dict] = []
     error = ""
     status = "completed"
     if interrupted:
@@ -1148,6 +1248,23 @@ def execute_skill_tool_action(
         else:
             output_json = {}
             output_json_valid = True
+    if output_json_valid:
+        try:
+            proposed_actions = extract_tool_proposed_actions(output_json)
+            if proposed_actions and EFFECT_PROPOSE_PROJECT_CHANGES not in effects:
+                status = "failed"
+                error = "tool output included proposed_actions without propose_project_changes effect"
+            elif proposed_actions:
+                proposed_action_validations = summarize_tool_proposed_actions(
+                    output_json,
+                    skill_resolver=skill_resolver,
+                    approval_path=approval_path,
+                    realm=realm,
+                    path_checker=path_checker,
+                )
+        except AgenticValidationError as exc:
+            status = "failed"
+            error = f"tool proposed_actions invalid: {exc}"
     private_result = {
         "schema": TOOL_PRIVATE_RESULT_SCHEMA,
         "action_id": action_run_id,
@@ -1165,6 +1282,7 @@ def execute_skill_tool_action(
         "stderr_truncated": stderr_truncated,
         "output_json": output_json,
         "output_json_valid": output_json_valid,
+        "proposed_action_validations": proposed_action_validations,
         "error": error,
     }
     private_result_path = run_dir / "result.json"
@@ -1181,6 +1299,10 @@ def execute_skill_tool_action(
         "stdout_sha256": stdout_hash,
         "stderr_sha256": stderr_hash,
         "output_json_valid": output_json_valid,
+        "proposed_action_count": len(proposed_action_validations),
+        "proposed_action_valid_count": sum(
+            1 for row in proposed_action_validations if row.get("status") in {"valid", "needs_confirmation"}
+        ),
         "private_result_path": str(private_result_path),
         "error": error,
     }
@@ -1277,6 +1399,7 @@ def format_action_result(validation: dict, result: dict | None = None) -> str:
             f"stdout: {result.get('stdout_bytes', 0)} B sha256={result.get('stdout_sha256', '')}",
             f"stderr: {result.get('stderr_bytes', 0)} B sha256={result.get('stderr_sha256', '')}",
             f"output json valid: {'yes' if result.get('output_json_valid') else 'no'}",
+            f"proposed actions: {result.get('proposed_action_count', 0)}",
             f"private result: {result.get('private_result_path', '')}",
         ]
     )
