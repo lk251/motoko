@@ -903,6 +903,7 @@ SLASH_COMMANDS = [
     ("/skill tools NAME", "list validated script tool metadata for a skill"),
     ("/skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
     ("/skill curator", "show report-first skill lifecycle curation"),
+    ("/skill curator suggest", "queue review-first curator patch suggestions"),
     ("/skill pin NAME", "protect a learned skill from archival suggestions"),
     ("/skill unpin NAME", "remove a skill lifecycle pin"),
     ("/skill archive NAME --yes", "archive a learned skill without deleting it"),
@@ -5437,6 +5438,208 @@ def restore_skill_text(name: str) -> str:
     return f"skill restored: {restored.get('slug', '')}"
 
 
+def skill_curator_generic_terms() -> set[str]:
+    return {
+        "skill",
+        "workflow",
+        "procedure",
+        "response",
+        "style",
+        "planning",
+        "debugging",
+        "motoko",
+        "project",
+        "file",
+        "files",
+        "with",
+        "when",
+        "this",
+        "that",
+        "use",
+        "using",
+        "context",
+    }
+
+
+def skill_curator_terms(text: str) -> set[str]:
+    return _action_plan_terms(text) - skill_curator_generic_terms()
+
+
+def skill_curator_feedback_matches(active: list[dict], *, limit: int = 20) -> list[tuple[dict, list[tuple[dict, list[str]]]]]:
+    matches = []
+    for feedback in read_response_feedback_rows(limit=limit):
+        if feedback.get("rating") == "up":
+            continue
+        text = " ".join([feedback.get("note", ""), feedback.get("user_prompt", "")])
+        terms = skill_curator_terms(text)
+        if not terms:
+            continue
+        matched = []
+        for row in active:
+            skill_terms = skill_curator_terms(
+                " ".join([row.get("slug", ""), row.get("description", ""), row.get("body", "")[:1000]])
+            )
+            overlap = sorted(terms & skill_terms)
+            if overlap:
+                matched.append((row, overlap))
+        if matched:
+            matches.append((feedback, matched[:3]))
+    return matches
+
+
+def _append_patch_suggestion_for_skill(
+    row: dict,
+    *,
+    description: str,
+    heading: str,
+    bullet: str,
+    reason: str,
+    signals: list[str],
+) -> dict | None:
+    body = str(row.get("body", "")).strip()
+    if not body or len(body) > 2200:
+        return None
+    if heading in body and bullet in body:
+        return None
+    addition = f"\n\n{heading}\n- {bullet}"
+    if len(body) + len(addition) > SKILL_SUGGESTION_BODY_CHARS:
+        return None
+    return {
+        "action": "patch",
+        "name": row.get("slug", ""),
+        "target_skill": row.get("slug", ""),
+        "description": description,
+        "old_string": body,
+        "new_string": body + addition,
+        "reason": reason,
+        "signals": signals,
+    }
+
+
+def _support_file_suggestion_for_skill(
+    row: dict,
+    *,
+    description: str,
+    file_slug: str,
+    content: str,
+    reason: str,
+    signals: list[str],
+) -> dict | None:
+    file_slug = re.sub(r"[^a-z0-9_.-]+", "-", str(file_slug).strip().lower()).strip(".-")
+    if not file_slug:
+        return None
+    return {
+        "action": "write_file",
+        "name": f"{row.get('slug', '')}-{file_slug}",
+        "target_skill": row.get("slug", ""),
+        "description": description,
+        "file_path": f"references/{file_slug}.md",
+        "file_content": compact_text(content, SKILL_SUGGESTION_BODY_CHARS),
+        "reason": reason,
+        "signals": signals,
+    }
+
+
+def curator_skill_suggestion_candidates(*, limit: int = AUTO_SKILL_MAX_PROPOSALS) -> list[dict]:
+    rows = list_skills()
+    active = [
+        row
+        for row in rows
+        if not row.get("builtin") and row.get("lifecycle_state") != SKILL_STATE_ARCHIVED
+    ]
+    candidates = []
+    for feedback, matched in skill_curator_feedback_matches(active):
+        if not matched:
+            continue
+        row, overlap = matched[0]
+        note = compact_text(feedback.get("note", "") or feedback.get("user_prompt", ""), 220)
+        if not note:
+            continue
+        feedback_id = str(feedback.get("id", ""))[:80]
+        bullet = (
+            f"Feedback {feedback_id or '(unidentified)'} ({feedback.get('rating', '')}) matched "
+            f"{', '.join(overlap[:5])}: {note}"
+        )
+        candidate = _append_patch_suggestion_for_skill(
+            row,
+            description=f"Patch {row.get('slug', '')} with recent feedback signal.",
+            heading="Feedback-derived review notes:",
+            bullet=bullet,
+            reason="A recent non-positive feedback row matched this skill; patching the existing skill is safer than creating a duplicate.",
+            signals=[f"feedback:{feedback.get('rating', '')}", f"feedback_id:{feedback_id}", "curator-feedback-match"],
+        )
+        if candidate is None:
+            content = "\n".join(
+                [
+                    f"# Feedback signal for {row.get('slug', '')}",
+                    "",
+                    f"- feedback: {feedback_id}",
+                    f"- rating: {feedback.get('rating', '')}",
+                    f"- matched terms: {', '.join(overlap[:8])}",
+                    f"- note: {note}",
+                    "",
+                    "Use this as review material before patching the skill.",
+                ]
+            )
+            candidate = _support_file_suggestion_for_skill(
+                row,
+                description=f"Record recent feedback signal for {row.get('slug', '')}.",
+                file_slug=f"feedback-{feedback_id or hashlib.sha256(note.encode('utf-8')).hexdigest()[:8]}",
+                content=content,
+                reason="The skill body is too large for a safe exact patch, so the curator suggests a support file instead.",
+                signals=[f"feedback:{feedback.get('rating', '')}", f"feedback_id:{feedback_id}", "curator-feedback-match"],
+            )
+        if candidate is not None:
+            candidates.append(candidate)
+        if len(candidates) >= limit:
+            return candidates
+    for row in active:
+        if row.get("pinned") or int(row.get("selected_count", 0) or 0) < 3 or int(row.get("patch_count", 0) or 0) > 0:
+            continue
+        lifecycle = row.get("lifecycle", {}) if isinstance(row.get("lifecycle"), dict) else {}
+        notes = [
+            str(item)
+            for item in lifecycle.get("notes", [])[-5:]
+            if " selected:" in str(item)
+        ]
+        if not notes:
+            continue
+        bullet = (
+            f"This skill has been selected {row.get('selected_count', 0)} times. "
+            f"Recent selection signals: {'; '.join(compact_text(item, 120) for item in notes[-3:])}"
+        )
+        candidate = _append_patch_suggestion_for_skill(
+            row,
+            description=f"Patch {row.get('slug', '')} with curator usage signals.",
+            heading="Curator usage review notes:",
+            bullet=bullet,
+            reason="Repeated selection without any patch suggests this skill may need consolidation or clearer trigger guidance.",
+            signals=["curator-loaded-skill-signal", f"selected_count:{row.get('selected_count', 0)}"],
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates[:limit]
+
+
+def curator_skill_suggestions_text() -> str:
+    candidates = curator_skill_suggestion_candidates()
+    if not candidates:
+        return "skill curator: no concrete patch suggestions found"
+    added = add_skill_suggestions(candidates, conversation_id="skill-curator", source="skill-curator")
+    if not added:
+        return "skill curator: no new suggestions; candidates were duplicates or already pending"
+    lines = [f"skill curator: {len(added)} pending suggestion(s)"]
+    for row in added:
+        lines.append(
+            f"- {row.get('id', '')}  {row.get('action', '')}  "
+            f"{row.get('target_skill') or row.get('slug', '')}: {row.get('description', '')}"
+        )
+        lines.append(f"  show: motoko skill suggestion {row.get('id', '')}")
+    return "\n".join(lines)
+
+
 def skill_curator_report_text() -> str:
     rows = list_skills()
     learned = [row for row in rows if not row.get("builtin")]
@@ -5462,66 +5665,31 @@ def skill_curator_report_text() -> str:
         for row in active
         if len(str(row.get("body", ""))) > 2500 and not row.get("support_files")
     ]
-    generic_terms = {
-        "skill",
-        "workflow",
-        "procedure",
-        "response",
-        "style",
-        "planning",
-        "debugging",
-        "motoko",
-        "project",
-        "file",
-        "files",
-        "with",
-        "when",
-        "this",
-        "that",
-        "use",
-        "using",
-        "context",
-    }
     consolidation = []
     for idx, row in enumerate(active):
         row_terms = _action_plan_terms(
             " ".join([row.get("slug", ""), row.get("description", ""), " ".join(row.get("triggers", []) or [])])
-        ) - generic_terms
+        ) - skill_curator_generic_terms()
         if len(row_terms) < 2:
             continue
         matches = []
         for other in active[idx + 1 :]:
             other_terms = _action_plan_terms(
                 " ".join([other.get("slug", ""), other.get("description", ""), " ".join(other.get("triggers", []) or [])])
-            ) - generic_terms
+            ) - skill_curator_generic_terms()
             overlap = sorted(row_terms & other_terms)
             if len(overlap) >= 2:
                 matches.append((other, overlap))
         if matches:
             consolidation.append((row, matches))
-    feedback_links = []
-    for feedback in read_response_feedback_rows(limit=20):
-        if feedback.get("rating") == "up":
-            continue
-        text = " ".join([feedback.get("note", ""), feedback.get("user_prompt", "")])
-        terms = _action_plan_terms(text) - generic_terms
-        if not terms:
-            continue
-        matched = []
-        for row in active:
-            skill_terms = _action_plan_terms(
-                " ".join([row.get("slug", ""), row.get("description", ""), row.get("body", "")[:1000]])
-            ) - generic_terms
-            overlap = sorted(terms & skill_terms)
-            if overlap:
-                matched.append((row, overlap))
-        if matched:
-            feedback_links.append((feedback, matched[:3]))
+    feedback_links = skill_curator_feedback_matches(active)
+    pending_candidates = curator_skill_suggestion_candidates()
     lines = [
         "skill curator report: report-only",
         "automatic mutations: none",
         f"skills: {len(rows)} total, {len(active)} learned active, {len(archived)} learned archived, {len(pinned)} pinned",
         f"pending suggestions: {len(pending)}",
+        f"curator suggestion candidates: {len(pending_candidates)}",
         "",
         "Suggested review queue:",
     ]
@@ -5577,6 +5745,15 @@ def skill_curator_report_text() -> str:
                 f"- {feedback.get('rating', '')} {feedback.get('id', '')}: {skill_text}; "
                 f"note={compact_text(feedback.get('note', ''), 120)}"
             )
+    if pending_candidates:
+        lines.append("")
+        lines.append("concrete pending-suggestion candidates:")
+        for row in pending_candidates[:8]:
+            lines.append(
+                f"- {row.get('action', '')}  {row.get('target_skill') or row.get('slug', '')}: "
+                f"{row.get('description', '')}"
+            )
+        lines.append("  queue them with: motoko skill curator --suggest")
     if archived:
         lines.append("")
         lines.append("archived skills:")
@@ -16794,6 +16971,7 @@ HELP_SECTIONS = [
             ("/skill tools NAME", "list validated script tool metadata for a skill"),
             ("/skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
             ("/skill curator", "show report-first skill lifecycle curation"),
+            ("/skill curator suggest", "queue review-first curator patch suggestions"),
             ("/skill pin NAME", "protect a learned skill from archival suggestions"),
             ("/skill unpin NAME", "remove a learned skill pin"),
             ("/skill archive NAME --yes", "archive a learned skill without deleting it"),
@@ -16890,6 +17068,7 @@ HELP_SECTIONS = [
             ("motoko skill tools NAME", "list validated script tool metadata for a skill"),
             ("motoko skill approve-tool NAME TOOL --yes", "approve a fingerprinted skill tool contract"),
             ("motoko skill curator", "show report-first skill lifecycle curation"),
+            ("motoko skill curator --suggest", "queue review-first curator patch suggestions"),
             ("motoko skill pin NAME", "protect a learned skill from archival suggestions"),
             ("motoko skill unpin NAME", "remove a learned skill pin"),
             ("motoko skill archive NAME --yes", "archive a learned skill without deleting it"),
@@ -17653,6 +17832,8 @@ def skill_mutation_command_request(text: str, conv: dict):
         if not subbody:
             return "/skill delete", lambda: "usage: /skill delete NAME"
         return "/skill delete", lambda: delete_skill_text(subbody)
+    if subcommand in {"curator", "lifecycle"} and subbody == "suggest":
+        return "/skill curator suggest", curator_skill_suggestions_text
     if subcommand == "pin":
         if not subbody:
             return "/skill pin", lambda: "usage: /skill pin NAME"
@@ -21104,7 +21285,10 @@ def command_skill(args) -> None:
     elif args.skill_command == "approve-tool":
         print(approve_skill_tool_text(args.name, args.tool, yes=args.yes))
     elif args.skill_command in {"curator", "lifecycle"}:
-        print_report(skill_curator_report_text())
+        if getattr(args, "suggest", False):
+            print_report(curator_skill_suggestions_text())
+        else:
+            print_report(skill_curator_report_text())
     elif args.skill_command == "pin":
         print(pin_skill_text(args.name, True))
     elif args.skill_command == "unpin":
@@ -21800,6 +21984,7 @@ def main(argv: list[str]) -> int:
     skill_approve_tool.add_argument("--yes", action="store_true", help="confirm approval")
     skill_approve_tool.set_defaults(func=command_skill)
     skill_curator = skill_sub.add_parser("curator", aliases=["lifecycle"], help="show report-first skill lifecycle curation")
+    skill_curator.add_argument("--suggest", action="store_true", help="queue review-first curator patch suggestions")
     skill_curator.set_defaults(func=command_skill)
     skill_pin = skill_sub.add_parser("pin", help="pin a learned skill against archival suggestions")
     skill_pin.add_argument("name")

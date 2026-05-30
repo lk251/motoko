@@ -1249,10 +1249,15 @@ Remaining follow-up items from this stretch:
   may deserve support files, possible consolidation groups based on shared
   trigger/description terms, and recent non-positive feedback rows that match
   active skill topics. These are still suggestions only.
-- Next stretch after the lifecycle target: connect accepted feedback/eval rows
-  to concrete patch suggestions for recently loaded skills, then improve
-  umbrella-skill consolidation. Keep the path report-first until real usage
-  shows that any automatic patch suggestion is trustworthy.
+- Curator suggestion checkpoint: `motoko skill curator --suggest` can now
+  convert concrete curator candidates into pending review-first `skill_manage`
+  suggestions. Current candidates come from non-positive feedback rows that
+  match active skills, or from repeatedly selected skills that have never been
+  patched. Patches still require explicit inspection and acceptance.
+- Next stretch after the lifecycle target: improve umbrella-skill
+  consolidation and support-file workflows, then connect richer feedback/eval
+  rows to higher-quality patch proposals. Keep the path report-first until real
+  usage shows that any automatic patch suggestion is trustworthy.
 
 ## Roadmap Candidates
 

@@ -851,12 +851,18 @@ Skill lifecycle checkpoint, 2026-05-30:
 - The curator report also now flags large skills that may deserve support
   files, possible consolidation groups, and recent non-positive feedback rows
   whose terms match active skills. These remain report-only hints.
+- `motoko skill curator --suggest` can convert concrete curator candidates into
+  pending review-first `skill_manage` suggestions. Current deterministic
+  candidates come from non-positive feedback rows that match active skills, or
+  from repeatedly selected skills that have not yet been patched. The command
+  writes only pending suggestions; accepting a patch still goes through the
+  existing validators.
 
 Next long stretch after skill lifecycle:
 
-- Improve curator usefulness without auto-application: turn feedback/eval and
-  loaded-skill signals into concrete patch suggestions, and then improve
-  umbrella/consolidation workflows.
+- Improve curator usefulness without auto-application: improve
+  umbrella/consolidation workflows and connect richer feedback/eval rows to
+  higher-quality patch proposals.
 - Keep support-file consolidation inspectable and avoid widening script/tool
   authority while improving procedural memory quality.
 

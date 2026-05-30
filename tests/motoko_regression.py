@@ -8627,6 +8627,63 @@ def test_skill_lifecycle_commands_are_realm_local(m):
         assert "skill restored" in run()
 
 
+def test_skill_curator_creates_feedback_patch_suggestion(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "retrieval-debugging",
+            description="Retrieval debugging checklist",
+            body="Inspect sources first.",
+        )
+        conv = m.new_conversation("Curator feedback")
+        conv["id"] = "curator-feedback"
+        conv["messages"] = [
+            {"role": "user", "content": "retrieval debugging failed on a stale source"},
+            {"role": "assistant", "content": "I should have inspected ranking after sources."},
+        ]
+        m.record_response_feedback(conv, "down", "retrieval debugging needs ranking and stale-source checks")
+
+        report = m.skill_curator_report_text()
+        assert "curator suggestion candidates: 1" in report
+        assert "queue them with: motoko skill curator --suggest" in report
+
+        command = m.shared_command_request("/skill curator suggest", conv)
+        assert command is not None
+        assert command.kind == m.COMMAND_KIND_MUTATION
+        _label, run = command
+        queued = run()
+        assert "skill curator: 1 pending suggestion" in queued
+        suggestions = m.list_skill_suggestions(status="pending")
+        assert len(suggestions) == 1
+        assert suggestions[0]["action"] == "patch"
+        assert suggestions[0]["target_skill"] == "retrieval-debugging"
+        assert "Feedback-derived review notes" in suggestions[0]["new_string"]
+
+        duplicate = m.curator_skill_suggestions_text()
+        assert "no new suggestions" in duplicate
+        accepted = m.accept_skill_suggestion_text(suggestions[0]["id"])
+        assert "skill accepted: retrieval-debugging" in accepted
+        assert "Feedback-derived review notes" in m.format_skill("retrieval-debugging")
+
+
+def test_skill_curator_creates_loaded_skill_patch_suggestion(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "racefocus-response-style",
+            description="RaceFocus planning responses",
+            body="Preserve the VR, 2D HUD, and OBS renderer split.",
+        )
+        for _idx in range(3):
+            rendered, sources = m.render_skills_with_sources("RaceFocus OBS renderer planning")
+            assert "racefocus-response-style" in rendered
+            assert sources
+
+        candidates = m.curator_skill_suggestion_candidates()
+        assert candidates
+        assert candidates[0]["action"] == "patch"
+        assert candidates[0]["target_skill"] == "racefocus-response-style"
+        assert "Curator usage review notes" in candidates[0]["new_string"]
+
+
 def write_demo_tool(m, skill_name="tool-backed-skill"):
     m.learn_skill_text(
         skill_name,
@@ -9680,6 +9737,8 @@ def main() -> int:
         test_procedural_skill_commands,
         test_skill_lifecycle_records_usage_and_archive_restore,
         test_skill_lifecycle_commands_are_realm_local,
+        test_skill_curator_creates_feedback_patch_suggestion,
+        test_skill_curator_creates_loaded_skill_patch_suggestion,
     ]
     for test in tests:
         test(m)

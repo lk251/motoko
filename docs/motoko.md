@@ -658,6 +658,7 @@ motoko skill remove-file NAME references/file.md --yes
 motoko skill tools NAME
 motoko skill approve-tool NAME TOOL --yes
 motoko skill curator
+motoko skill curator --suggest
 motoko skill pin NAME
 motoko skill unpin NAME
 motoko skill archive NAME --yes
@@ -702,6 +703,7 @@ curator command is deliberately report-first:
 
 ```bash
 motoko skill curator
+motoko skill curator --suggest
 motoko skill pin NAME
 motoko skill unpin NAME
 motoko skill archive NAME --yes
@@ -712,7 +714,10 @@ This adapts the useful Hermes-style skill-library maintenance idea while
 keeping Motoko's version reversible, realm-local, and non-autonomous. The
 curator report can also point out large skills that may deserve support files,
 possible consolidation groups, and recent feedback rows that may indicate a
-skill should be patched; these remain suggestions until explicitly acted on.
+skill should be patched. `motoko skill curator --suggest` turns the concrete
+curator candidates into ordinary pending `skill_manage` suggestions. They are
+still review-first: inspect them with `motoko skill suggestion ID`, then accept
+or reject them explicitly.
 
 Current `motoko-skill-v3` skills can declare a kind, trigger hints, handler,
 allowed effects, support files, and inert script-tool metadata. Prompt-only

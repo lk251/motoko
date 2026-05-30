@@ -11,7 +11,9 @@ not the easiest place to review what changed after a long work session.
   `restore`. Archived learned skills remain inspectable but no longer enter
   prompt context or action planning. The curator report also surfaces support
   file opportunities, possible consolidation groups, and matching feedback
-  rows without applying changes automatically.
+  rows without applying changes automatically. `motoko skill curator --suggest`
+  can now queue concrete review-first patch/support-file suggestions from
+  feedback and repeated-selection signals.
 - Open conversations now resync attached corpus-index references to newer
   completed same-family indexes before retrieval/debug context is built, so a
   live Motoko session can use a freshly rebuilt source index without requiring
