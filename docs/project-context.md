@@ -1211,6 +1211,12 @@ Current progress on this stretch:
   Remaining lifecycle work is broader source-level apply support for vectors,
   evidence stores, dossiers, memories, feedback fixtures, profiles, and
   conversation-derived artifacts after rebuilds materialize replacement state.
+- Complete: embedding vector refresh now reuses compatible rows from the
+  latest same-family vector store when a newer source index changes only some
+  files or sections. Stable vector row ids and input hashes decide reuse,
+  removed/ignored rows are omitted from the new compact manifest, and full
+  source re-vectorization remains required for incompatible route/model,
+  dimension, schema, or embedding-input-policy changes.
 - Complete: `Ctrl+C` now takes the same safe stop path as `/stop` while an
   answer is active, preserving the idle `Ctrl+C` exit behavior.
 - Progress: foreground blocking commands now register with the content-free job
@@ -1254,15 +1260,11 @@ Remaining follow-up items from this stretch:
   cannot drift into parallel interpretations of the same query. The
   `/retrieval-debug` side of this is complete; `/retrieval-preview` and
   `/vector-query` still need final convergence work.
-- Add incremental vector-store refresh. Current vector refresh resumes
-  interrupted work for the same source fingerprint, but a source-index
-  fingerprint change still marks the store stale and rebuilds the store. The
-  desired upgrade is a schema-versioned row-reuse path keyed by stable row ids,
-  embedding route/model/dimensions, input schema, input hash, and source
-  content hash: reuse unchanged vectors, delete rows for removed/ignored
-  sources, embed only new or changed rows, and write a new manifest. Full
-  re-vectorization should remain required when the embedding route/model,
-  dimensions, vector schema, or embedding input policy changes.
+- Improve incremental vector-store compaction policy over time. The current
+  implementation writes a compact fresh manifest after each refresh and reports
+  reused, embedded, and superseded row counts. Future tuning should add corpus
+  health thresholds and eval/latency checks that decide when a rare full
+  re-vectorization is worth doing for quality rather than compatibility.
 - Add broader source-level lifecycle apply support after rebuilds materialize
   replacement state: vectors, evidence stores, dossiers, memories, feedback
   fixtures, profiles, and conversation-derived artifacts should have one clear

@@ -7134,6 +7134,156 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
 
 
+def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    EmbeddingHandler.payloads = []
+    EmbeddingHandler.paths = []
+    server = None
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = "1"
+        os.environ["MOTOKO_EMBEDDING_PARALLEL"] = "1"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            alpha_path = docs / "alpha.org"
+            beta_path = docs / "beta.org"
+            alpha_content = "* TODO Alpha vector task\nDEADLINE: <2026-05-30 Sat>\n"
+            beta_content = "* TODO Beta vector task\n"
+            alpha_path.write_text(alpha_content, encoding="utf-8")
+            beta_path.write_text(beta_content, encoding="utf-8")
+
+            def file_item(path: pathlib.Path, content: str, summary: str) -> dict:
+                return {
+                    "path": str(path),
+                    "source_fingerprint": m.source_fingerprint(path),
+                    "summary": summary,
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": summary,
+                            "content": content,
+                            "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                        }
+                    ],
+                }
+
+            index1 = {
+                "id": "incremental-vector-index-1",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-21T10:00:00+00:00",
+                "files": [
+                    file_item(alpha_path, alpha_content, "Alpha vector task."),
+                    file_item(beta_path, beta_content, "Beta vector task."),
+                ],
+            }
+            server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 4,
+                        "maxParallel": 1,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            m.atomic_write(m.index_path(index1["id"]), json.dumps(index1, ensure_ascii=False) + "\n")
+
+            store1 = m.build_vector_store(index1["id"], method=m.EMBEDDING_VECTOR_METHOD)
+            assert store1["row_count"] >= 4
+            assert store1["vector_row_id_schema"] == m.VECTOR_ROW_ID_SCHEMA_VERSION
+
+            beta_content_2 = "* TODO Beta vector task changed\nDEADLINE: <2026-06-01 Mon>\n"
+            beta_path.write_text(beta_content_2, encoding="utf-8")
+            index2 = {
+                "id": "incremental-vector-index-2",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-22T10:00:00+00:00",
+                "files": [
+                    file_item(alpha_path, alpha_content, "Alpha vector task."),
+                    file_item(beta_path, beta_content_2, "Beta vector task changed."),
+                ],
+            }
+            m.atomic_write(m.index_path(index2["id"]), json.dumps(index2, ensure_ascii=False) + "\n")
+            due, reason = m.vector_store_due(index2, method=m.EMBEDDING_VECTOR_METHOD)
+            assert due is True
+            assert "reusable family vector store" in reason
+
+            EmbeddingHandler.payloads = []
+            store2 = m.build_vector_store(index2["id"], method=m.EMBEDDING_VECTOR_METHOD)
+
+            model_inputs = []
+            for payload in EmbeddingHandler.payloads:
+                inputs = payload.get("input", [])
+                model_inputs.extend(inputs if isinstance(inputs, list) else [inputs])
+            assert store2["source_index"]["id"] == index2["id"]
+            assert store2["source_index"]["family_key"] == m.index_family_key(index2)
+            assert store2["embedding_reuse_store_id"] == store1["id"]
+            assert store2["embedding_previous_store_reused_rows"] >= 2
+            assert store2["embedding_superseded_rows"] >= 1
+            assert len(model_inputs) == store2["embedding_embedded_rows"]
+            assert store2["embedding_embedded_rows"] < store2["row_count"]
+            assert m.vector_store_freshness(store2)[0] == "fresh"
+
+            alpha_rows_1 = {
+                row["id"]: row
+                for row in store1["rows"]
+                if row.get("path") == str(alpha_path)
+            }
+            alpha_rows_2 = {
+                row["id"]: row
+                for row in store2["rows"]
+                if row.get("path") == str(alpha_path)
+            }
+            assert alpha_rows_1
+            assert alpha_rows_1.keys() <= alpha_rows_2.keys()
+            for row_id, row in alpha_rows_1.items():
+                assert alpha_rows_2[row_id]["vector"] == row["vector"]
+                assert alpha_rows_2[row_id]["index"] == index2["id"]
+            server.shutdown()
+            server.server_close()
+            server = None
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+
+
 def test_diagnose_safe_redacts_private_progress_metadata(m):
     with isolated_state():
         m.ensure_private_dir(m.indexes_dir())
@@ -10444,6 +10594,7 @@ def main() -> int:
         test_retrieval_vector_query_uses_short_worker_timeouts,
         test_embedding_vector_store_stale_when_route_model_changes,
         test_embedding_vector_store_resumes_saved_progress,
+        test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh,
         test_diagnose_safe_redacts_private_progress_metadata,
         test_embedding_vector_store_falls_back_from_excess_parallelism,
         test_vector_query_can_use_catalog_reranker_route,

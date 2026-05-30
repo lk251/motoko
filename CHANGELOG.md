@@ -5,6 +5,12 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added incremental embedding-vector refresh. A refreshed same-family source
+  index can now reuse compatible unchanged vector rows from the previous store,
+  embed only new or changed rows, omit removed/ignored rows from the new compact
+  manifest, and report reused/embedded/superseded row counts. Full
+  re-vectorization remains the path for incompatible model, dimension, schema,
+  or embedding-input-policy changes.
 - Unified retrieval-debug diagnostics with production retrieval. `/retrieval-debug`
   now reads its displayed file/chunk rows, evidence rows, vector rows, selected
   sources, and content-free diagnostics from the same retrieval-service result

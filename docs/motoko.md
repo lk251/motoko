@@ -1637,15 +1637,20 @@ command plus the catalog download URL/hash when available.
 Completed embedding batches are checkpointed under
 `~/.local/state/motoko/vector-progress/`, and a later `vector-refresh` for the
 same source fingerprint plus embedding route/model/dimensions resumes from
-those saved rows. Embedding stores are considered stale and rebuilt from the
-saved source index when the vector schema, embedding input schema/split
-policy, source fingerprint, embedding route, model, or dimensions change.
-Dense vector coordinates are not migrated across incompatible embedding
-models; source re-vectorization is the correct upgrade path. A fresh embedding
-store participates in true hybrid retrieval: lexical/path candidates,
-deterministic Org/task candidates, deterministic evidence rows, and fresh
-embedding candidates are unioned and deduplicated before final context
-selection. When a catalog-discovered
+those saved rows. When a newer same-family source index changes only some
+files or sections, `vector-refresh` now looks for the latest compatible
+embedding store, reuses rows whose stable row id and embedding input hash still
+match, omits rows for removed or ignored sources, and embeds only new or
+changed rows before writing a compact fresh manifest for the new index. The
+refresh report includes reused, embedded, and superseded row counts. Embedding
+stores still require source re-vectorization when the vector schema, vector
+row-id schema, embedding input schema/split policy, embedding route, model, or
+dimensions change. Dense vector coordinates are not migrated across
+incompatible embedding models; source re-vectorization is the correct upgrade
+path in that case. A fresh embedding store participates in true hybrid
+retrieval: lexical/path candidates, deterministic Org/task candidates,
+deterministic evidence rows, and fresh embedding candidates are unioned and
+deduplicated before final context selection. When a catalog-discovered
 `/v1/rerank` route is available, Motoko reranks that combined candidate set;
 if reranking is missing or fails, she falls back to the non-reranked hybrid
 set. Lexical scores, path boosts, Org/task signals, vector rows, rerank state,
