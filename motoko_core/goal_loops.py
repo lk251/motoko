@@ -37,6 +37,7 @@ GOAL_LOOP_STATUS_REJECTED = "rejected"
 GOAL_LOOP_PLANNER_DISABLED = "disabled"
 GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS = "explicit_actions"
 GOAL_LOOP_PLANNER_MODEL_READONLY = "model_readonly"
+GOAL_LOOP_PLANNER_MODEL_CONFIRMED = "model_confirmed"
 
 MAX_OBJECTIVE_CHARS = 1000
 MAX_SCOPE_ITEMS = 20
@@ -60,10 +61,18 @@ MODEL_READONLY_GOAL_EFFECTS = {
     EFFECT_WRITE_MOTOKO_STATE,
     EFFECT_PROPOSE_PROJECT_CHANGES,
 }
+MODEL_CONFIRMED_GOAL_EFFECTS = {
+    EFFECT_READ_CONTEXT,
+    EFFECT_READ_ALLOWED_FILES,
+    EFFECT_WRITE_MOTOKO_STATE,
+    EFFECT_PROPOSE_PROJECT_CHANGES,
+    EFFECT_WRITE_ALLOWED_PROJECT,
+}
 SUPPORTED_GOAL_PLANNERS = {
     GOAL_LOOP_PLANNER_DISABLED,
     GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS,
     GOAL_LOOP_PLANNER_MODEL_READONLY,
+    GOAL_LOOP_PLANNER_MODEL_CONFIRMED,
 }
 
 
@@ -193,9 +202,13 @@ def make_goal_loop_record(
         raise GoalLoopValidationError(f"unsupported goal planner: {planner}")
     if planner == GOAL_LOOP_PLANNER_MODEL_READONLY and normalized_actions:
         raise GoalLoopValidationError("model_readonly goal loops must not contain explicit actions")
+    if planner == GOAL_LOOP_PLANNER_MODEL_CONFIRMED and normalized_actions:
+        raise GoalLoopValidationError("model_confirmed goal loops must not contain explicit actions")
     phases = ["plan", "retrieve", "inspect", "audit", "propose", "checkpoint"]
     if planner == GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS:
         phases = ["plan", "retrieve", "act", "observe", "audit", "checkpoint"]
+    elif planner == GOAL_LOOP_PLANNER_MODEL_CONFIRMED:
+        phases = ["plan", "retrieve", "inspect", "propose", "review", "apply", "audit", "checkpoint"]
     return {
         "schema": GOAL_LOOP_SCHEMA,
         "id": safe_goal_id(loop_id),
@@ -215,7 +228,9 @@ def make_goal_loop_record(
         ),
         "phases": phases,
         "actions": normalized_actions,
-        "execution_enabled": bool(normalized_actions or planner == GOAL_LOOP_PLANNER_MODEL_READONLY),
+        "execution_enabled": bool(
+            normalized_actions or planner in {GOAL_LOOP_PLANNER_MODEL_READONLY, GOAL_LOOP_PLANNER_MODEL_CONFIRMED}
+        ),
     }
 
 
@@ -243,6 +258,13 @@ def validate_goal_loop_record(record: dict, *, path_checker=None) -> dict:
         normalized["error"] = (
             "model_readonly goal loops may use only read_context, read_allowed_files, "
             "write_motoko_state, and propose_project_changes"
+        )
+    elif normalized.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED and not requested_effects <= MODEL_CONFIRMED_GOAL_EFFECTS:
+        normalized["status"] = GOAL_LOOP_STATUS_REJECTED
+        normalized["approval"] = "not-applicable"
+        normalized["error"] = (
+            "model_confirmed goal loops may use only read_context, read_allowed_files, "
+            "write_motoko_state, propose_project_changes, and write_allowed_project"
         )
     elif requested_effects & APPROVAL_REQUIRED_EFFECTS:
         normalized["status"] = GOAL_LOOP_STATUS_NEEDS_APPROVAL
@@ -310,6 +332,8 @@ def format_goal_loop(record: dict) -> str:
         lines.append(f"error: {record.get('error')}")
     if record.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY:
         lines.append("runner: read-only model planner; run with motoko goal run FILE --yes")
+    elif record.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED:
+        lines.append("runner: model planner with explicit apply; run to propose, then motoko goal apply RUN_ID --yes")
     elif record.get("execution_enabled"):
         lines.append("runner: explicit action list; run with motoko goal run FILE --yes")
     else:

@@ -293,6 +293,11 @@ Motoko still owns validation, confirmation, atomic writes, and ledgers.
 Read-only model-planned goal loops are enabled as explicit
 `planner: model_readonly` records that retrieve, plan, audit, and propose
 without mutating files.
+User-confirmed model-planned goal loops are now enabled as explicit
+`planner: model_confirmed` records that retrieve and propose typed actions,
+then stop for `motoko goal apply RUN_ID --yes`. Managed Git worktree
+create/commit/fast-forward-merge/remove actions are typed and confirmed; they
+do not grant arbitrary shell authority.
 
 Remaining:
 

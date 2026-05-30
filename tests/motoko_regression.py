@@ -10,7 +10,9 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import socketserver
+import subprocess
 import sys
 import tempfile
 import threading
@@ -9618,6 +9620,156 @@ def test_goal_loop_model_readonly_rejects_mutating_effects(m):
         assert not list(m.goal_runs_dir().glob("*.json"))
 
 
+def test_goal_loop_model_confirmed_applies_reviewed_proposals(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        target = docs / "confirmed.org"
+        preview = m.format_goal_plan(
+            "Plan then apply a confirmed project note",
+            scope=[str(docs)],
+            model_confirmed=True,
+            save=True,
+        )
+        assert "planner: model_confirmed" in preview
+        assert "runner: model planner with explicit apply" in preview
+        assert "write_allowed_project" in preview
+        goal_path = next(m.goal_loops_dir().glob("*.json"))
+
+        original_call_model = m.call_model
+
+        def fake_call_model(messages, **kwargs):
+            assert kwargs["route"] == m.MODEL_ROUTE_AUDIT
+            prompt_text = "\n".join(str(message.get("content", "")) for message in messages)
+            assert "user-confirmed goal loop" in prompt_text
+            return json.dumps(
+                {
+                    "plan": ["Retrieve context", "Prepare confirmed write proposal"],
+                    "retrieval_assessment": "Enough context.",
+                    "observations": ["The docs scope is allowlisted."],
+                    "proposed_actions": [
+                        {
+                            "schema": "motoko-action-v1",
+                            "kind": "project_file_write",
+                            "path": str(target),
+                            "mode": "create",
+                            "content": "* Confirmed\nprivate confirmed body\n",
+                            "reason": "Model-confirmed proposal.",
+                        }
+                    ],
+                    "audit": "Proposal only; apply requires explicit confirmation.",
+                    "next_steps": ["Run goal apply after review."],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            m.call_model = fake_call_model
+            output = m.run_goal_text(str(goal_path), yes=True)
+        finally:
+            m.call_model = original_call_model
+
+        assert "planner: model_confirmed" in output
+        assert "status: awaiting_confirmation" in output
+        assert "proposed actions: 1" in output
+        assert not target.exists()
+
+        run_record = m.safe_load_json(next(m.goal_runs_dir().glob("*.json")))
+        proposals = m.format_goal_proposals(run_record["id"])
+        assert "project_file_write needs_confirmation" in proposals
+        assert "private confirmed body" not in proposals
+
+        refused = m.apply_goal_proposals_text(run_record["id"])
+        assert "status: refused" in refused
+        assert not target.exists()
+
+        applied = m.apply_goal_proposals_text(run_record["id"], yes=True)
+        assert "goal apply:" in applied
+        assert "status: completed" in applied
+        assert target.read_text(encoding="utf-8") == "* Confirmed\nprivate confirmed body\n"
+        final = m.find_goal_run_record(run_record["id"])
+        assert final["status"] == "completed"
+        assert final["apply_results"][0]["status"] == "completed"
+
+
+def test_git_worktree_actions_are_managed_confirmed_and_mergeable(m):
+    if not shutil.which("git"):
+        return
+    with isolated_state() as tmp:
+        repos = tmp / "repos"
+        repos.mkdir()
+        repo = repos / "repo"
+        subprocess.run(["git", "init", "-b", "master", str(repo)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Motoko Test"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "motoko-test@example.invalid"], check=True)
+        (repo / "README.md").write_text("# Test\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(repo), "add", "README.md"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "Initial commit"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        m.add_allowed_dir(str(repo))
+
+        branch = "motoko-test-worktree"
+        worktree = m.default_git_worktree_path(repo, branch)
+        create = {
+            "schema": "motoko-action-v1",
+            "kind": "git_worktree_create",
+            "repo": str(repo),
+            "path": str(worktree),
+            "branch": branch,
+            "base": "master",
+        }
+        blocked = m.run_action_text_from_record(create)
+        assert "status: needs_confirmation" in blocked or "status: blocked" in blocked
+        created = m.run_action_text_from_record(create, yes=True)
+        assert "status: completed" in created
+        assert worktree.exists()
+        assert m.managed_git_worktree_root_for_path(worktree / "note.txt") == worktree
+
+        target = worktree / "note.txt"
+        write = {
+            "schema": "motoko-action-v1",
+            "kind": "project_file_write",
+            "path": str(target),
+            "mode": "create",
+            "content": "worktree note\n",
+        }
+        written = m.run_action_text_from_record(write, yes=True)
+        assert "status: completed" in written
+        commit = {
+            "schema": "motoko-action-v1",
+            "kind": "git_commit",
+            "repo": str(worktree),
+            "paths": [str(target)],
+            "message": "Add worktree note",
+        }
+        committed = m.run_action_text_from_record(commit, yes=True)
+        assert "status: completed" in committed
+
+        merge = {
+            "schema": "motoko-action-v1",
+            "kind": "git_worktree_merge",
+            "repo": str(repo),
+            "path": str(worktree),
+            "branch": branch,
+            "target_branch": "master",
+        }
+        merged = m.run_action_text_from_record(merge, yes=True)
+        assert "status: completed" in merged
+        assert (repo / "note.txt").read_text(encoding="utf-8") == "worktree note\n"
+
+        remove = {
+            "schema": "motoko-action-v1",
+            "kind": "git_worktree_remove",
+            "path": str(worktree),
+        }
+        removed = m.run_action_text_from_record(remove, yes=True)
+        assert "status: completed" in removed
+        assert not worktree.exists()
+        listing = m.format_git_worktrees()
+        assert branch in listing
+        assert "removed" in listing
+
+
 def test_goal_loop_runs_explicit_confirmed_action_list(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -9892,6 +10044,8 @@ def main() -> int:
         test_goal_loop_preview_save_and_list_without_execution,
         test_goal_loop_model_readonly_runs_and_stores_reviewable_proposals,
         test_goal_loop_model_readonly_rejects_mutating_effects,
+        test_goal_loop_model_confirmed_applies_reviewed_proposals,
+        test_git_worktree_actions_are_managed_confirmed_and_mergeable,
         test_goal_loop_runs_explicit_confirmed_action_list,
         test_goal_run_pause_resume_preserves_completed_actions,
         test_goal_run_interruption_preserves_completed_actions,

@@ -720,12 +720,13 @@ Priority assessment for future intelligence and competence:
 
 Recommended next implementation sequence:
 
-1. Harden script-assisted project mutation and read-only model-planned loops
-   through real use, feedback-derived evals, and clearer proposal review.
-2. User-confirmed mutating loops. After the first two gates are stable and
-   eval-covered, allow loops to apply validated actions with explicit
-   confirmation, durable checkpoints, pause/resume, cancellation, and final
-   audit.
+1. Harden script-assisted project mutation, read-only model-planned loops,
+   model-confirmed apply, and managed worktree workflows through real use,
+   feedback-derived evals, and clearer proposal review.
+2. Keep broader autonomous act/observe loops disabled until the
+   review/apply path is stable. The next broadening step would be a richer
+   final-audit and resume UX around model-confirmed applies, not arbitrary
+   terminal execution.
 3. Hermes-style skill improvement as an ongoing parallel track. Keep improving
    prompted self-review, loaded-skill patching, support-file use, and
    feedback-derived eval fixtures so Motoko's procedural memory becomes more
@@ -868,6 +869,33 @@ Read-only model-planned goal-loop checkpoint, 2026-05-30:
   proposal validations, keeps proposed project writes unapplied, hides proposal
   content by default, and rejects mutating effects.
 
+User-confirmed model-planned and worktree checkpoint, 2026-05-30:
+
+- Added explicit `planner: model_confirmed` records, created with
+  `motoko goal plan --model-confirmed "objective" --save` or the
+  `--model-write` alias. The runner retrieves context and asks the audit route
+  for strict JSON action proposals, then stops in `awaiting_confirmation`.
+- Added `motoko goal apply RUN_ID --yes` / `/goal apply RUN_ID --yes`.
+  Applying a model-confirmed run executes the stored proposals in order,
+  checkpointing after every action. The model still never receives direct file
+  mutation authority; Motoko validators, confirmations, budgets, ledgers,
+  allowlists, `.motokoignore`, and clean-tree checks own the effect.
+- Added typed Git worktree actions: `git_worktree_create`, `git_commit`,
+  `git_worktree_merge`, and `git_worktree_remove`. These are code-owned
+  action kinds, not shell command strings. They require exact session
+  confirmation and are available through `motoko action run ACTION.json --yes`
+  or the convenience `motoko worktree create|merge|remove ... --yes`
+  commands.
+- New worktrees are Motoko-managed and live under the current user's Motoko
+  state by default. The registry lets later `project_file_write` actions target
+  those worktrees without broadening the global document allowlist. Merges are
+  fast-forward-only with clean-tree checks; removal is limited to managed
+  worktrees.
+- Regression coverage checks that model-confirmed plans stop for review before
+  mutation, `goal apply` performs the confirmed write, and managed worktrees
+  can be created, written, committed, fast-forward merged to `master`, and
+  removed.
+
 Skill lifecycle checkpoint, 2026-05-30:
 
 - Added the first Motoko-shaped skill lifecycle layer. Selection and
@@ -903,14 +931,16 @@ Next long stretch after skill lifecycle:
 ## Goal Loops
 
 Goal loops should remain staged. The enabled forms are now an explicit
-action-list runner and an opt-in read-only model planner. Explicit action-list
-records contain concrete typed actions and Motoko runs them through the normal
-validator, confirmation, budget, and ledger path. Read-only model-planned
-records retrieve context, call the audit route for strict JSON, store an
-inspectable checkpoint, and stop at proposals. Each confirmed run has a
+action-list runner, an opt-in read-only model planner, and an opt-in
+model-confirmed planner. Explicit action-list records contain concrete typed
+actions and Motoko runs them through the normal validator, confirmation,
+budget, and ledger path. Read-only model-planned records retrieve context,
+call the audit route for strict JSON, store an inspectable checkpoint, and stop
+at proposals. Model-confirmed records also stop at proposals, then require
+`motoko goal apply RUN_ID --yes` before any mutation. Each confirmed run has a
 `goal-run-v1` checkpoint so completed work or completed planning is not lost
-across interruption. A later mutating autonomous form should come only after
-these runners stay stable. The durable record contains:
+across interruption. A fully autonomous mutating form should come only after
+these review/apply runners stay stable. The durable record contains:
 
 - objective;
 - scope;

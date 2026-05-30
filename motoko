@@ -388,6 +388,7 @@ from motoko_core.jobs import (  # noqa: E402
     format_job_snapshots,
 )
 from motoko_core.goal_loops import (  # noqa: E402
+    GOAL_LOOP_PLANNER_MODEL_CONFIRMED,
     GOAL_LOOP_PLANNER_MODEL_READONLY,
     GOAL_LOOP_STATUS_REJECTED,
     GoalLoopValidationError,
@@ -581,6 +582,8 @@ RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 ACTION_EVAL_SCHEMA_VERSION = "action-eval-v1"
 GOAL_RUN_SCHEMA_VERSION = "goal-run-v1"
 GOAL_READONLY_RESULT_SCHEMA_VERSION = "goal-readonly-result-v1"
+GOAL_MODEL_RESULT_SCHEMA_VERSION = "goal-model-result-v1"
+GIT_WORKTREE_REGISTRY_SCHEMA_VERSION = "git-worktree-registry-v1"
 GOAL_READONLY_CONTEXT_CHARS = 28000
 GOAL_READONLY_MAX_MODEL_OUTPUT_TOKENS = 2048
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
@@ -923,13 +926,18 @@ SLASH_COMMANDS = [
     ("/action apply FILE --yes", "apply a confirmed project-file write action"),
     ("/action ledger", "show content-safe action/tool ledger rows"),
     ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
-    ("/goal plan [--model-readonly] OBJECTIVE", "preview a durable goal-loop record without execution"),
+    ("/goal plan [--model-readonly|--model-confirmed] OBJECTIVE", "preview a durable goal-loop record"),
     ("/goal list", "list saved goal-loop drafts"),
     ("/goal preview FILE", "validate a goal-loop JSON file"),
-    ("/goal run FILE --yes", "run an explicit action list or read-only model-planned loop"),
+    ("/goal run FILE --yes", "run an explicit action list or model-planned loop"),
     ("/goal runs", "list durable goal-run checkpoints"),
     ("/goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
-    ("/goal proposals RUN_ID [--private]", "show proposals from a read-only goal run"),
+    ("/goal proposals RUN_ID [--private]", "show proposals from a model-planned goal run"),
+    ("/goal apply RUN_ID --yes", "apply proposals from a model-confirmed goal run"),
+    ("/worktree list", "list Motoko-managed Git worktrees"),
+    ("/worktree create BRANCH --yes", "create an isolated branch/worktree under Motoko state"),
+    ("/worktree merge BRANCH --yes", "fast-forward merge a managed worktree branch"),
+    ("/worktree remove PATH --yes", "remove a managed worktree"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -6074,6 +6082,18 @@ def format_action_proposals(selector: str) -> str:
             lines.append(f"  content sha256: {row.get('content_sha256')}")
         if row.get("target_path_sha256"):
             lines.append(f"  target path sha256: {row.get('target_path_sha256')}")
+        if row.get("repo_path_sha256"):
+            lines.append(f"  repo path sha256: {row.get('repo_path_sha256')}")
+        if row.get("worktree_path_sha256"):
+            lines.append(f"  worktree path sha256: {row.get('worktree_path_sha256')}")
+        if row.get("branch"):
+            lines.append(f"  branch: {row.get('branch')}")
+        if row.get("base"):
+            lines.append(f"  base: {row.get('base')}")
+        if row.get("target_branch"):
+            lines.append(f"  target branch: {row.get('target_branch')}")
+        if row.get("path_count"):
+            lines.append(f"  path count: {row.get('path_count')}")
         if row.get("reason"):
             lines.append(f"  reason: {row.get('reason')}")
     lines.append("apply: motoko action apply-proposal RUN_ID INDEX --yes")
@@ -6104,6 +6124,7 @@ def format_goal_plan(
     allowed_tools: list[str] | None = None,
     allowed_effects: list[str] | None = None,
     model_readonly: bool = False,
+    model_confirmed: bool = False,
     max_steps: int = 3,
     max_model_calls: int = 6,
     max_tool_calls: int = 6,
@@ -6111,9 +6132,16 @@ def format_goal_plan(
     save: bool = False,
 ) -> str:
     try:
+        if model_readonly and model_confirmed:
+            raise GoalLoopValidationError("--model-readonly and --model-confirmed are mutually exclusive")
+        planner = None
+        if model_readonly:
+            planner = GOAL_LOOP_PLANNER_MODEL_READONLY
+        elif model_confirmed:
+            planner = GOAL_LOOP_PLANNER_MODEL_CONFIRMED
         record = make_goal_loop_record(
             objective,
-            planner=GOAL_LOOP_PLANNER_MODEL_READONLY if model_readonly else None,
+            planner=planner,
             scope=scope or [],
             allowed_tools=allowed_tools or [],
             allowed_effects=(
@@ -6122,6 +6150,14 @@ def format_goal_plan(
                 else (
                     ["read_context", "read_allowed_files", "write_motoko_state", "propose_project_changes"]
                     if model_readonly
+                    else [
+                        "read_context",
+                        "read_allowed_files",
+                        "write_motoko_state",
+                        "propose_project_changes",
+                        "write_allowed_project",
+                    ]
+                    if model_confirmed
                     else []
                 )
             ),
@@ -6321,25 +6357,65 @@ def build_goal_readonly_context(run: dict) -> tuple[str, list[dict], dict]:
 
 def goal_readonly_messages(run: dict, context_text: str) -> list[dict]:
     budgets = run.get("budgets") if isinstance(run.get("budgets"), dict) else {}
-    prompt = textwrap.dedent(
-        f"""
-        You are Motoko's read-only goal planner.
+    mutating = run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED
+    if mutating:
+        prompt = textwrap.dedent(
+            """
+            You are Motoko's model planner for a user-confirmed goal loop.
 
-        Plan toward the objective using only the context in this prompt. Do not
-        claim to have edited files, run tools, restarted services, pushed code,
-        or mutated state. You may propose typed Motoko actions for later human
-        review, but you must not ask for them to be applied inside this loop.
+            Plan toward the objective using only the context in this prompt.
+            You may propose typed motoko-action-v1 records for later explicit
+            user confirmation. Do not claim any action has already been applied.
+            Motoko code will validate every action and will stop for review
+            before mutation.
 
-        Return strict JSON with:
-        - plan: short ordered planning steps
-        - retrieval_assessment: whether the retrieved context is enough
-        - observations: source-grounded findings from the context
-        - proposed_actions: zero or more typed motoko-action-v1 records that a
-          later user could review; leave empty when no action is justified
-        - audit: self-check for grounding, uncertainty, and safety boundaries
-        - next_steps: concise user-review next steps
-        """
-    ).strip()
+            Supported mutating action kinds:
+            - project_file_write: absolute allowlisted path, mode create or
+              overwrite, content string, expected_sha256 required for overwrite.
+            - git_worktree_create: repo, path, branch, base. Use this when the
+              user asks to isolate work in a new worktree.
+            - git_commit: repo, paths, message. Use explicit paths only.
+            - git_worktree_merge: repo, branch, target_branch, optional path.
+              This is intended for explicit merge requests and uses safe Git
+              checks before applying.
+            - git_worktree_remove: path, optional repo, optional force.
+
+            If the objective requests work in a new branch/worktree, propose
+            git_worktree_create first, then target project_file_write and
+            git_commit actions at paths inside that worktree. Do not propose
+            merge or remove unless the objective explicitly asks for that.
+
+            Return strict JSON with:
+            - plan: short ordered planning steps
+            - retrieval_assessment: whether the retrieved context is enough
+            - observations: source-grounded findings from the context
+            - proposed_actions: zero or more typed motoko-action-v1 records
+            - audit: self-check for grounding, uncertainty, and safety
+            - next_steps: concise user-review next steps
+            """
+        ).strip()
+    else:
+        prompt = textwrap.dedent(
+            """
+            You are Motoko's read-only goal planner.
+
+            Plan toward the objective using only the context in this prompt. Do
+            not claim to have edited files, run tools, restarted services,
+            pushed code, or mutated state. You may propose typed Motoko actions
+            for later human review, but you must not ask for them to be applied
+            inside this loop.
+
+            Return strict JSON with:
+            - plan: short ordered planning steps
+            - retrieval_assessment: whether the retrieved context is enough
+            - observations: source-grounded findings from the context
+            - proposed_actions: zero or more typed motoko-action-v1 records
+              that a later user could review; leave empty when no action is
+              justified
+            - audit: self-check for grounding, uncertainty, and safety
+            - next_steps: concise user-review next steps
+            """
+        ).strip()
     user = textwrap.dedent(
         f"""
         Objective:
@@ -6359,16 +6435,71 @@ def goal_readonly_messages(run: dict, context_text: str) -> list[dict]:
     return [{"role": "system", "content": prompt}, {"role": "user", "content": user}]
 
 
+def planned_worktree_roots_from_actions(actions: list[dict]) -> list[pathlib.Path]:
+    roots: list[pathlib.Path] = []
+    base = managed_git_worktrees_root().resolve(strict=False)
+    for action in actions:
+        if not isinstance(action, dict) or action.get("kind") != "git_worktree_create":
+            continue
+        raw = str(action.get("path") or "").strip()
+        if not raw:
+            continue
+        path = pathlib.Path(raw).expanduser().resolve(strict=False)
+        try:
+            path.relative_to(base)
+        except ValueError:
+            continue
+        if path not in roots:
+            roots.append(path)
+    return roots
+
+
+def path_under_roots(path: pathlib.Path, roots: list[pathlib.Path]) -> pathlib.Path | None:
+    resolved = path.expanduser().resolve(strict=False)
+    for root in roots:
+        root_resolved = root.expanduser().resolve(strict=False)
+        if resolved == root_resolved or is_under(resolved, root_resolved):
+            return root_resolved
+    return None
+
+
+def goal_action_path_checker(planned_roots: list[pathlib.Path]):
+    def checker(_key: str, value: str, *, write: bool = False) -> None:
+        raw = str(value or "").strip()
+        if not raw:
+            return
+        candidate = pathlib.Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = pathlib.Path.cwd() / candidate
+        planned = path_under_roots(candidate, planned_roots)
+        if planned is not None:
+            require_not_cross_home(candidate)
+            text = str(candidate).replace("\\", "/")
+            if "\x00" in text or any(part in {"", ".."} for part in pathlib.PurePosixPath(text).parts):
+                raise AgenticValidationError("planned worktree path must not contain traversal")
+            if any(part in SKIP_INDEX_DIR_NAMES for part in candidate.parts):
+                raise AgenticValidationError("planned worktree action may not target cache/VCS directories")
+            if write and candidate.name == MOTOKO_IGNORE_FILE:
+                raise AgenticValidationError("planned worktree action may not modify .motokoignore")
+            return
+        action_path_checker(_key, value, write=write)
+
+    return checker
+
+
 def goal_proposed_action_validations(run: dict, parsed: dict) -> list[dict]:
     proposed = parsed.get("proposed_actions") if isinstance(parsed.get("proposed_actions"), list) else []
     if proposed and "propose_project_changes" not in set(run.get("allowed_effects", [])):
         raise AgenticValidationError("goal proposed_actions require propose_project_changes in allowed_effects")
+    path_checker = action_path_checker
+    if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED:
+        path_checker = goal_action_path_checker(planned_worktree_roots_from_actions(proposed))
     return core_summarize_tool_proposed_actions(
         {"proposed_actions": proposed},
         skill_resolver=lambda name: core_load_skill(skills_dir(), name),
         approval_path=tool_approvals_path(),
         realm=identity_realm(),
-        path_checker=action_path_checker,
+        path_checker=path_checker,
     )
 
 
@@ -6377,7 +6508,7 @@ def finish_goal_readonly_run(run: dict, *, status: str, error: str = "") -> None
     run["cursor"] = len(run.get("planner_steps", []) or [])
     if error:
         run["error"] = error
-    elif status == "completed":
+    elif status in {"completed", "awaiting_confirmation", "applied"}:
         run.pop("error", None)
     write_goal_run_record(run)
 
@@ -6387,36 +6518,39 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
         return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
     allowed_effects = set(run.get("allowed_effects", []))
     readonly_effects = {"read_context", "read_allowed_files", "write_motoko_state", "propose_project_changes"}
-    if not allowed_effects <= readonly_effects:
+    confirmed_effects = readonly_effects | {"write_allowed_project"}
+    is_confirmed = run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED
+    permitted_effects = confirmed_effects if is_confirmed else readonly_effects
+    if not allowed_effects <= permitted_effects:
         return (
             "goal run:\n"
             "status: refused\n"
-            "error: model_readonly goal loops may not request write_allowed_project, network, service_control, or privileged effects"
+            f"error: {run.get('planner')} goal loops requested unsupported effects"
         )
     budgets = run.get("budgets") if isinstance(run.get("budgets"), dict) else {}
     if int(budgets.get("max_model_calls") or 0) < 1 or int(budgets.get("max_steps") or 0) < 3:
         return "goal run:\nstatus: refused\nerror: model_readonly goal loops require at least 3 steps and 1 model call"
-    if run.get("status") == "completed":
+    if run.get("status") in {"completed", "awaiting_confirmation", "applied"}:
         return format_goal_run_result(run)
     lines = [
         "goal run:",
         f"id: {run.get('id', '')}",
-        "planner: model_readonly",
+        f"planner: {run.get('planner', '')}",
         f"objective: {run.get('objective', '')}",
     ]
     if work_pause_requested():
         run["status"] = "paused"
-        run["note"] = "paused before read-only planning"
+        run["note"] = "paused before model planning"
         write_goal_run_record(run)
         clear_work_pause_request()
-        lines.append("paused: before read-only planning")
+        lines.append("paused: before model planning")
         lines.append("status: paused")
         lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
         return "\n".join(lines)
     if cancellation_requested(cancel_event):
-        finish_goal_readonly_run(run, status="interrupted", error="interrupted before read-only planning")
+        finish_goal_readonly_run(run, status="interrupted", error="interrupted before model planning")
         lines.append("status: interrupted")
-        lines.append("error: interrupted before read-only planning")
+        lines.append("error: interrupted before model planning")
         lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
         return "\n".join(lines)
 
@@ -6464,8 +6598,9 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
                 "duration_ms": int((time.monotonic() - started) * 1000),
             }
         )
-        run["readonly_result"] = {
-            "schema": GOAL_READONLY_RESULT_SCHEMA_VERSION,
+        result_key = "model_result" if is_confirmed else "readonly_result"
+        run[result_key] = {
+            "schema": GOAL_MODEL_RESULT_SCHEMA_VERSION if is_confirmed else GOAL_READONLY_RESULT_SCHEMA_VERSION,
             "created": now(),
             "model_route": MODEL_ROUTE_AUDIT,
             "source_count": len(sources),
@@ -6479,7 +6614,10 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
             "proposed_action_validations": validations,
         }
         run["model_calls"] = int(run.get("model_calls", 0) or 0) + 1
-        finish_goal_readonly_run(run, status="completed")
+        finish_goal_readonly_run(
+            run,
+            status="awaiting_confirmation" if is_confirmed and parsed.get("proposed_actions") else "completed",
+        )
     except SystemExit as exc:
         finish_goal_readonly_run(run, status="stopped", error=str(exc))
     except AgenticValidationError as exc:
@@ -6487,7 +6625,8 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
     lines.append(f"status: {run.get('status', '')}")
     if run.get("error"):
         lines.append(f"error: {run.get('error')}")
-    result = run.get("readonly_result") if isinstance(run.get("readonly_result"), dict) else {}
+    result_key = "model_result" if is_confirmed else "readonly_result"
+    result = run.get(result_key) if isinstance(run.get(result_key), dict) else {}
     if result:
         lines.append(f"sources: {result.get('source_count', 0)}")
         lines.append(f"proposed actions: {len(result.get('proposed_actions', []) or [])}")
@@ -6533,7 +6672,7 @@ def interrupt_goal_run(
 
 
 def execute_goal_run_record(run: dict, *, yes: bool, cancel_event=None) -> str:
-    if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY:
+    if run.get("planner") in {GOAL_LOOP_PLANNER_MODEL_READONLY, GOAL_LOOP_PLANNER_MODEL_CONFIRMED}:
         return execute_goal_readonly_run_record(run, yes=yes, cancel_event=cancel_event)
     if not yes:
         return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
@@ -6711,13 +6850,14 @@ def execute_goal_run_record(run: dict, *, yes: bool, cancel_event=None) -> str:
 
 
 def format_goal_run_result(run: dict) -> str:
-    if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY:
-        result = run.get("readonly_result") if isinstance(run.get("readonly_result"), dict) else {}
+    if run.get("planner") in {GOAL_LOOP_PLANNER_MODEL_READONLY, GOAL_LOOP_PLANNER_MODEL_CONFIRMED}:
+        result_key = "model_result" if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED else "readonly_result"
+        result = run.get(result_key) if isinstance(run.get(result_key), dict) else {}
         lines = [
             "goal run:",
             f"id: {run.get('id', '')}",
             f"status: {run.get('status', '')}",
-            "planner: model_readonly",
+            f"planner: {run.get('planner', '')}",
             f"objective: {run.get('objective', '')}",
             f"sources: {result.get('source_count', 0) if result else 0}",
             f"proposed actions: {len(result.get('proposed_actions', []) or []) if result else 0}",
@@ -6749,6 +6889,14 @@ def format_goal_run_result(run: dict) -> str:
                 )
                 if row.get("reason"):
                     lines.append(f"  reason: {row.get('reason')}")
+        if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED and run.get("status") == "awaiting_confirmation":
+            lines.append(f"apply: motoko goal apply {run.get('id', '')} --yes")
+        if run.get("apply_results"):
+            lines.append("apply results:")
+            for row in run.get("apply_results", [])[:20]:
+                lines.append(f"- action {row.get('index')}: {row.get('kind', '')} {row.get('status', '')}")
+                if row.get("error"):
+                    lines.append(f"  error: {row.get('error')}")
         lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
         return "\n".join(lines)
     actions = run.get("actions") if isinstance(run.get("actions"), list) else []
@@ -6803,7 +6951,11 @@ def format_goal_proposals(selector: str, *, private: bool = False) -> str:
         run = find_goal_run_record(selector)
     except GoalLoopValidationError as exc:
         return f"goal proposals:\nstatus: rejected\nerror: {exc}"
-    result = run.get("readonly_result") if isinstance(run.get("readonly_result"), dict) else {}
+    result = {}
+    for key in ("model_result", "readonly_result"):
+        if isinstance(run.get(key), dict):
+            result = run.get(key)
+            break
     actions = result.get("proposed_actions") if isinstance(result.get("proposed_actions"), list) else []
     validations = result.get("proposed_action_validations") if isinstance(result.get("proposed_action_validations"), list) else []
     lines = [
@@ -6829,6 +6981,18 @@ def format_goal_proposals(selector: str, *, private: bool = False) -> str:
             lines.append(f"  content sha256: {row.get('content_sha256')}")
         if row.get("target_path_sha256"):
             lines.append(f"  target path sha256: {row.get('target_path_sha256')}")
+        if row.get("repo_path_sha256"):
+            lines.append(f"  repo path sha256: {row.get('repo_path_sha256')}")
+        if row.get("worktree_path_sha256"):
+            lines.append(f"  worktree path sha256: {row.get('worktree_path_sha256')}")
+        if row.get("branch"):
+            lines.append(f"  branch: {row.get('branch')}")
+        if row.get("base"):
+            lines.append(f"  base: {row.get('base')}")
+        if row.get("target_branch"):
+            lines.append(f"  target branch: {row.get('target_branch')}")
+        if row.get("path_count"):
+            lines.append(f"  path count: {row.get('path_count')}")
         if row.get("reason"):
             lines.append(f"  reason: {row.get('reason')}")
     if private:
@@ -6837,6 +7001,212 @@ def format_goal_proposals(selector: str, *, private: bool = False) -> str:
     else:
         lines.append("private content: hidden (use --private in this user account to inspect action JSON)")
     return "\n".join(lines)
+
+
+def goal_result_actions(run: dict) -> list[dict]:
+    for key in ("model_result", "readonly_result"):
+        result = run.get(key) if isinstance(run.get(key), dict) else {}
+        actions = result.get("proposed_actions") if isinstance(result.get("proposed_actions"), list) else []
+        if actions:
+            return actions
+    return []
+
+
+def apply_goal_proposals_text(selector: str, *, yes: bool = False, cancel_event=None) -> str:
+    if not yes:
+        return "goal apply:\nstatus: refused\nerror: refusing to apply goal proposals without --yes"
+    try:
+        run = find_goal_run_record(selector)
+    except GoalLoopValidationError as exc:
+        return f"goal apply:\nstatus: rejected\nerror: {exc}"
+    if run.get("planner") != GOAL_LOOP_PLANNER_MODEL_CONFIRMED:
+        return "goal apply:\nstatus: rejected\nerror: only model_confirmed goal runs can apply proposals"
+    if run.get("status") in {"completed", "applied"}:
+        return format_goal_run_result(run)
+    actions = goal_result_actions(run)
+    if not actions:
+        return "goal apply:\nstatus: rejected\nerror: goal run has no proposed actions"
+    budgets = run.get("budgets") if isinstance(run.get("budgets"), dict) else {}
+    max_steps = int(budgets.get("max_steps") or len(actions))
+    max_tool_calls = int(budgets.get("max_tool_calls") or len(actions))
+    if len(actions) > min(max_steps, max_tool_calls):
+        return (
+            "goal apply:\n"
+            "status: refused\n"
+            f"error: {len(actions)} proposed action(s) exceed step/tool budget "
+            f"({max_steps} steps, {max_tool_calls} tool calls)"
+        )
+    allowed_effects = set(run.get("allowed_effects", []))
+    if "write_allowed_project" not in allowed_effects:
+        return "goal apply:\nstatus: refused\nerror: goal does not allow write_allowed_project"
+    if not isinstance(run.get("apply_results"), list) or len(run.get("apply_results", [])) != len(actions):
+        run["apply_results"] = [
+            {"index": idx + 1, "status": "pending", "kind": str(action.get("kind", ""))}
+            for idx, action in enumerate(actions)
+        ]
+    cursor = max(0, min(len(actions), int(run.get("apply_cursor", 0) or 0)))
+    lines = [
+        "goal apply:",
+        f"id: {run.get('id', '')}",
+        f"objective: {run.get('objective', '')}",
+        f"actions: {len(actions)}",
+        f"cursor: {cursor}",
+    ]
+    if work_pause_requested():
+        run["status"] = "paused"
+        run["apply_cursor"] = cursor
+        run["note"] = "paused before next goal proposal"
+        write_goal_run_record(run)
+        clear_work_pause_request()
+        lines.append("paused: before next proposal")
+        lines.append("status: paused")
+        lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+        return "\n".join(lines)
+    run["status"] = "applying"
+    write_goal_run_record(run)
+    completed = sum(1 for row in run.get("apply_results", []) if row.get("status") == "completed")
+    for idx0 in range(cursor, len(actions)):
+        idx = idx0 + 1
+        action = actions[idx0]
+        if action.get("kind") not in {
+            "project_file_write",
+            "git_worktree_create",
+            "git_commit",
+            "git_worktree_merge",
+            "git_worktree_remove",
+        }:
+            run["status"] = "stopped"
+            run["apply_cursor"] = idx0
+            run["error"] = f"unsupported model-confirmed action kind: {action.get('kind', '')}"
+            write_goal_run_record(run)
+            lines.append(f"- action {idx}: refused")
+            lines.append(f"  error: {run['error']}")
+            break
+        try:
+            preview = preview_action_record(action)
+        except AgenticValidationError as exc:
+            run["status"] = "stopped"
+            run["apply_cursor"] = idx0
+            run["error"] = str(exc)
+            write_goal_run_record(run)
+            lines.append(f"- action {idx}: rejected before apply")
+            lines.append(f"  error: {exc}")
+            break
+        effects = set(preview.get("allowed_effects", []))
+        if not effects <= allowed_effects:
+            run["status"] = "stopped"
+            run["apply_cursor"] = idx0
+            run["error"] = (
+                f"effects {','.join(sorted(effects)) or 'none'} exceed goal allowed effects "
+                f"{','.join(sorted(allowed_effects)) or 'none'}"
+            )
+            write_goal_run_record(run)
+            lines.append(f"- action {idx}: refused")
+            lines.append(f"  error: {run['error']}")
+            break
+        if cancellation_requested(cancel_event):
+            run["status"] = "interrupted"
+            run["apply_cursor"] = idx0
+            run["error"] = "interrupted before goal proposal execution"
+            write_goal_run_record(run)
+            lines.append("status: interrupted")
+            lines.append("error: interrupted before goal proposal execution")
+            lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+            return "\n".join(lines)
+        validation, result = execute_action_record(action, yes=True, cancel_event=cancel_event)
+        status = result.get("status") if result else validation.get("status")
+        lines.append(f"- action {idx}: {validation.get('kind', '')} {status}")
+        if result and result.get("error"):
+            lines.append(f"  error: {result.get('error')}")
+        run["apply_results"][idx0] = {
+            "index": idx,
+            "kind": validation.get("kind", ""),
+            "status": status,
+            "validation_id": validation.get("id", ""),
+            "tool_run_id": result.get("tool_run_id", "") if result else "",
+            "error": result.get("error", "") if result else validation.get("reason", ""),
+        }
+        if status != "completed":
+            run["status"] = "stopped"
+            run["apply_cursor"] = idx0
+            run["error"] = result.get("error", "") if result else validation.get("reason", "")
+            write_goal_run_record(run)
+            break
+        completed += 1
+        run["apply_cursor"] = idx
+        write_goal_run_record(run)
+    if completed == len(actions):
+        run["status"] = "completed"
+        run["apply_cursor"] = len(actions)
+        run.pop("error", None)
+        run.pop("note", None)
+        write_goal_run_record(run)
+    lines.append(f"completed: {completed}/{len(actions)}")
+    lines.append(f"status: {run.get('status', '')}")
+    lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+    return "\n".join(lines)
+
+
+def format_git_worktrees(limit: int = 50) -> str:
+    rows = managed_git_worktree_records(include_removed=True)
+    rows.sort(key=lambda row: (row.get("updated", ""), row.get("id", "")), reverse=True)
+    if not rows:
+        return "git worktrees: none"
+    lines = [f"git worktrees: {min(len(rows), limit)} shown"]
+    for row in rows[: max(1, min(200, int(limit or 50)))]:
+        lines.append(
+            f"- {row.get('id', '')}  {row.get('status', '')}  "
+            f"branch={row.get('branch', '')}  path={row.get('path', '')}"
+        )
+    return "\n".join(lines)
+
+
+def git_worktree_action_from_command(command: str, args) -> dict:
+    if command == "create":
+        repo = pathlib.Path(args.repo or pathlib.Path.cwd()).expanduser()
+        if not repo.is_absolute():
+            repo = pathlib.Path.cwd() / repo
+        path = pathlib.Path(args.path).expanduser() if args.path else default_git_worktree_path(repo, args.branch)
+        return {
+            "schema": "motoko-action-v1",
+            "kind": "git_worktree_create",
+            "repo": str(repo),
+            "path": str(path),
+            "branch": args.branch,
+            "base": args.base,
+            "reason": "Create an isolated Motoko-managed Git worktree.",
+        }
+    if command == "merge":
+        repo = pathlib.Path(args.repo or pathlib.Path.cwd()).expanduser()
+        if not repo.is_absolute():
+            repo = pathlib.Path.cwd() / repo
+        return {
+            "schema": "motoko-action-v1",
+            "kind": "git_worktree_merge",
+            "repo": str(repo),
+            "path": args.path or "",
+            "branch": args.branch,
+            "target_branch": args.target,
+            "ff_only": True,
+            "reason": "Merge a Motoko-managed worktree branch into the target branch.",
+        }
+    if command == "remove":
+        return {
+            "schema": "motoko-action-v1",
+            "kind": "git_worktree_remove",
+            "repo": args.repo or "",
+            "path": args.path,
+            "force": bool(args.force),
+            "reason": "Remove an obsolete Motoko-managed Git worktree.",
+        }
+    raise AgenticValidationError(f"unknown worktree command: {command}")
+
+
+def run_git_worktree_command(command: str, args, *, yes: bool = False) -> str:
+    if command == "list":
+        return format_git_worktrees(limit=getattr(args, "limit", 50))
+    action = git_worktree_action_from_command(command, args)
+    return run_action_text_from_record(action, yes=yes)
 
 
 @contextlib.contextmanager
@@ -7590,6 +7960,117 @@ def allowed_root_for_path(path: pathlib.Path) -> pathlib.Path:
     )
 
 
+def git_worktree_registry_path() -> pathlib.Path:
+    return state_root() / "git-worktrees.json"
+
+
+def managed_git_worktrees_root() -> pathlib.Path:
+    return ensure_private_dir(state_root() / "git-worktrees")
+
+
+def read_git_worktree_registry() -> dict:
+    data = safe_load_json(git_worktree_registry_path())
+    if not isinstance(data, dict) or data.get("schema") != GIT_WORKTREE_REGISTRY_SCHEMA_VERSION:
+        return {"schema": GIT_WORKTREE_REGISTRY_SCHEMA_VERSION, "worktrees": []}
+    rows = data.get("worktrees")
+    if not isinstance(rows, list):
+        data["worktrees"] = []
+    return data
+
+
+def write_git_worktree_registry(data: dict) -> None:
+    data = dict(data)
+    data["schema"] = GIT_WORKTREE_REGISTRY_SCHEMA_VERSION
+    data["updated"] = now()
+    atomic_write(git_worktree_registry_path(), json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+
+def managed_git_worktree_records(*, include_removed: bool = False) -> list[dict]:
+    rows = []
+    for row in read_git_worktree_registry().get("worktrees", []):
+        if not isinstance(row, dict):
+            continue
+        if not include_removed and row.get("status") == "removed":
+            continue
+        rows.append(row)
+    return rows
+
+
+def find_managed_git_worktree_for_path(path: pathlib.Path, *, active_only: bool = True) -> dict | None:
+    resolved = path.expanduser().resolve(strict=False)
+    for row in managed_git_worktree_records(include_removed=not active_only):
+        if active_only and row.get("status") not in {"active", "merged"}:
+            continue
+        root_text = str(row.get("path") or "").strip()
+        if not root_text:
+            continue
+        root = pathlib.Path(root_text).expanduser().resolve(strict=False)
+        if resolved == root or is_under(resolved, root):
+            return row
+    return None
+
+
+def managed_git_worktree_root_for_path(path: pathlib.Path) -> pathlib.Path | None:
+    row = find_managed_git_worktree_for_path(path)
+    if not row:
+        return None
+    return pathlib.Path(str(row.get("path") or "")).expanduser().resolve(strict=False)
+
+
+def default_git_worktree_path(repo: pathlib.Path, branch: str) -> pathlib.Path:
+    repo_root = repo.expanduser().resolve(strict=False)
+    repo_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", repo_root.name).strip(".-") or "repo"
+    branch_slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(branch or "branch")).strip(".-") or "branch"
+    suffix = hashlib.sha256(str(repo_root).encode("utf-8")).hexdigest()[:12]
+    return managed_git_worktrees_root() / f"{repo_slug}-{suffix}" / branch_slug[:80]
+
+
+def register_managed_git_worktree(*, repo: pathlib.Path, path: pathlib.Path, branch: str, base: str, status: str) -> dict:
+    registry = read_git_worktree_registry()
+    rows = [row for row in registry.get("worktrees", []) if isinstance(row, dict)]
+    path_text = str(path.expanduser().resolve(strict=False))
+    repo_text = str(repo.expanduser().resolve(strict=False))
+    stamp = now()
+    record = None
+    for row in rows:
+        if str(row.get("path") or "") == path_text:
+            record = row
+            break
+    if record is None:
+        record = {"id": "wt-" + uuid.uuid4().hex[:16], "created": stamp}
+        rows.append(record)
+    record.update(
+        {
+            "updated": stamp,
+            "repo": repo_text,
+            "path": path_text,
+            "branch": branch,
+            "base": base,
+            "status": status,
+            "repo_path_sha256": hashlib.sha256(repo_text.encode("utf-8")).hexdigest(),
+            "worktree_path_sha256": hashlib.sha256(path_text.encode("utf-8")).hexdigest(),
+        }
+    )
+    registry["worktrees"] = rows
+    write_git_worktree_registry(registry)
+    return record
+
+
+def update_managed_git_worktree_status(path: pathlib.Path, *, status: str, **fields) -> dict:
+    registry = read_git_worktree_registry()
+    rows = [row for row in registry.get("worktrees", []) if isinstance(row, dict)]
+    path_text = str(path.expanduser().resolve(strict=False))
+    for row in rows:
+        if str(row.get("path") or "") == path_text:
+            row.update(fields)
+            row["status"] = status
+            row["updated"] = now()
+            registry["worktrees"] = rows
+            write_git_worktree_registry(registry)
+            return row
+    raise AgenticValidationError("git worktree is not managed by Motoko")
+
+
 def require_project_write_allowed(path: pathlib.Path) -> pathlib.Path:
     target = path.expanduser()
     if not target.is_absolute():
@@ -7614,7 +8095,9 @@ def require_project_write_allowed(path: pathlib.Path) -> pathlib.Path:
     if parent.is_symlink():
         raise AgenticValidationError("project write parent directory must not be a symlink")
     resolved_target = parent.resolve(strict=True) / target.name
-    root = allowed_root_for_path(resolved_target)
+    root = managed_git_worktree_root_for_path(resolved_target)
+    if root is None:
+        root = allowed_root_for_path(resolved_target)
     rel = rel_posix(resolved_target, root)
     try:
         rules, _info = parse_motoko_ignore(root)
@@ -7642,8 +8125,12 @@ def action_path_checker(_key: str, value: str, *, write: bool = False) -> None:
         try:
             require_allowed(candidate)
         except SystemExit as exc:
-            raise AgenticValidationError(str(exc)) from None
-        root = allowed_root_for_path(candidate)
+            managed_root = managed_git_worktree_root_for_path(candidate)
+            if managed_root is None:
+                raise AgenticValidationError(str(exc)) from None
+            root = managed_root
+        else:
+            root = allowed_root_for_path(candidate)
         resolved_candidate = candidate.expanduser().resolve(strict=False)
         rel = rel_posix(resolved_candidate, root)
         try:
@@ -7749,6 +8236,270 @@ def cancellation_requested(cancel_event) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
 
 
+def git_run(args: list[str], *, cwd: pathlib.Path, timeout: float = 300.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(cwd),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def git_checked(args: list[str], *, cwd: pathlib.Path, timeout: float = 300.0) -> subprocess.CompletedProcess:
+    proc = git_run(args, cwd=cwd, timeout=timeout)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if len(detail) > 500:
+            detail = detail[:500].rstrip() + "..."
+        raise AgenticValidationError(f"git {' '.join(args[:2])} failed: {detail or proc.returncode}")
+    return proc
+
+
+def git_repo_root_for_path(path: pathlib.Path) -> pathlib.Path:
+    target = path.expanduser()
+    if not target.exists():
+        raise AgenticValidationError(f"git repo path does not exist: {target}")
+    proc = git_checked(["rev-parse", "--show-toplevel"], cwd=target)
+    root = pathlib.Path(proc.stdout.strip()).expanduser().resolve(strict=False)
+    return root
+
+
+def git_current_branch(repo: pathlib.Path) -> str:
+    proc = git_checked(["branch", "--show-current"], cwd=repo)
+    return proc.stdout.strip()
+
+
+def git_status_porcelain(repo: pathlib.Path) -> str:
+    proc = git_checked(["status", "--porcelain=v1"], cwd=repo)
+    return proc.stdout.strip()
+
+
+def require_clean_git_tree(repo: pathlib.Path, *, label: str) -> None:
+    status = git_status_porcelain(repo)
+    if status:
+        raise AgenticValidationError(f"{label} has uncommitted changes; refusing git operation")
+
+
+def require_git_repo_allowed(repo: pathlib.Path) -> pathlib.Path:
+    try:
+        require_allowed(repo)
+    except SystemExit as exc:
+        raise AgenticValidationError(str(exc)) from None
+    root = git_repo_root_for_path(repo)
+    allowed_root_for_path(root)
+    require_not_cross_home(root)
+    return root
+
+
+def require_managed_git_worktree_path(path: pathlib.Path) -> pathlib.Path:
+    root = managed_git_worktrees_root().resolve(strict=False)
+    resolved = path.expanduser().resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise AgenticValidationError(f"git worktree path must be under Motoko state: {root}") from exc
+    return resolved
+
+
+def git_branch_exists(repo: pathlib.Path, branch: str) -> bool:
+    proc = git_run(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo)
+    return proc.returncode == 0
+
+
+def git_commit_sha(repo: pathlib.Path, ref: str = "HEAD") -> str:
+    proc = git_checked(["rev-parse", "--verify", ref], cwd=repo)
+    return proc.stdout.strip()
+
+
+def action_field_path(action: dict, key: str) -> pathlib.Path:
+    text = str(action.get(key) or "").strip()
+    if not text:
+        raise AgenticValidationError(f"{key} is required")
+    path = pathlib.Path(text).expanduser()
+    if not path.is_absolute():
+        raise AgenticValidationError(f"{key} must be absolute")
+    return path
+
+
+def git_action_result(validation: dict, *, status: str, start: float, error: str = "", **fields) -> dict:
+    result = {
+        "result_schema": "motoko-action-result-v1",
+        "action_id": validation.get("id", ""),
+        "tool_run_id": "",
+        "status": status,
+        "exit_code": "",
+        "duration_ms": int((time.monotonic() - start) * 1000),
+        "stdout_bytes": 0,
+        "stderr_bytes": 0,
+        "stdout_sha256": "",
+        "stderr_sha256": "",
+        "output_json_valid": False,
+        "private_result_path": "",
+        "target_path_sha256": "",
+        "mode": "",
+        "bytes_written": 0,
+        "previous_sha256": "",
+        "new_sha256": "",
+        "error": error,
+    }
+    result.update(fields)
+    return result
+
+
+def apply_git_worktree_create_action(action: dict, validation: dict, *, cancel_event=None) -> dict:
+    if validation.get("status") != "valid":
+        raise AgenticValidationError(f"cannot apply invalid action: {validation.get('status', '')}")
+    start = time.monotonic()
+    if cancellation_requested(cancel_event):
+        return git_action_result(validation, status="interrupted", start=start, error="action interrupted before git worktree create")
+    repo = require_git_repo_allowed(action_field_path(action, "repo"))
+    worktree = require_managed_git_worktree_path(action_field_path(action, "path"))
+    branch = str(action.get("branch") or "").strip()
+    base = str(action.get("base") or "master").strip()
+    if worktree.exists():
+        raise AgenticValidationError("git worktree create target already exists")
+    if git_branch_exists(repo, branch):
+        raise AgenticValidationError(f"git branch already exists: {branch}")
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    git_checked(["rev-parse", "--verify", f"{base}^{{commit}}"], cwd=repo)
+    git_checked(["worktree", "add", "-b", branch, str(worktree), base], cwd=repo, timeout=600.0)
+    register_managed_git_worktree(repo=repo, path=worktree, branch=branch, base=base, status="active")
+    return git_action_result(
+        validation,
+        status="completed",
+        start=start,
+        branch=branch,
+        base=base,
+        commit_sha=git_commit_sha(worktree),
+    )
+
+
+def commit_action_paths(repo: pathlib.Path, action: dict) -> list[str]:
+    paths = action.get("paths")
+    if not isinstance(paths, list) or not paths:
+        raise AgenticValidationError("git_commit paths must be a non-empty list")
+    rows: list[str] = []
+    for item in paths:
+        raw = str(item or "").strip()
+        if not raw:
+            continue
+        path = pathlib.Path(raw).expanduser()
+        candidate = path if path.is_absolute() else repo / raw
+        checked = require_project_write_allowed(candidate)
+        try:
+            rel = checked.resolve(strict=False).relative_to(repo.resolve(strict=False))
+        except ValueError as exc:
+            raise AgenticValidationError("git_commit path is outside the target repo") from exc
+        rel_text = rel.as_posix()
+        if rel_text not in rows:
+            rows.append(rel_text)
+    if not rows:
+        raise AgenticValidationError("git_commit paths resolved to no files")
+    return rows
+
+
+def apply_git_commit_action(action: dict, validation: dict, *, cancel_event=None) -> dict:
+    if validation.get("status") != "valid":
+        raise AgenticValidationError(f"cannot apply invalid action: {validation.get('status', '')}")
+    start = time.monotonic()
+    if cancellation_requested(cancel_event):
+        return git_action_result(validation, status="interrupted", start=start, error="action interrupted before git commit")
+    repo = git_repo_root_for_path(action_field_path(action, "repo"))
+    if managed_git_worktree_root_for_path(repo) is None:
+        repo = require_git_repo_allowed(repo)
+    paths = commit_action_paths(repo, action)
+    message = str(action.get("message") or "").strip()
+    git_checked(["add", "--", *paths], cwd=repo)
+    if cancellation_requested(cancel_event):
+        return git_action_result(validation, status="interrupted", start=start, error="action interrupted after git add")
+    git_checked(["commit", "-m", message, "--", *paths], cwd=repo, timeout=600.0)
+    return git_action_result(
+        validation,
+        status="completed",
+        start=start,
+        branch=git_current_branch(repo),
+        commit_sha=git_commit_sha(repo),
+    )
+
+
+def find_registered_worktree_for_action(action: dict, *, branch: str | None = None) -> dict:
+    path_text = str(action.get("path") or "").strip()
+    if path_text:
+        row = find_managed_git_worktree_for_path(pathlib.Path(path_text), active_only=False)
+        if row:
+            return row
+    branch_text = branch or str(action.get("branch") or "").strip()
+    matches = [
+        row
+        for row in managed_git_worktree_records(include_removed=True)
+        if str(row.get("branch") or "") == branch_text and row.get("status") != "removed"
+    ]
+    if not matches:
+        raise AgenticValidationError("git worktree is not managed by Motoko")
+    if len(matches) > 1:
+        raise AgenticValidationError("ambiguous managed git worktree branch; include path")
+    return matches[0]
+
+
+def apply_git_worktree_merge_action(action: dict, validation: dict, *, cancel_event=None) -> dict:
+    if validation.get("status") != "valid":
+        raise AgenticValidationError(f"cannot apply invalid action: {validation.get('status', '')}")
+    start = time.monotonic()
+    if cancellation_requested(cancel_event):
+        return git_action_result(validation, status="interrupted", start=start, error="action interrupted before git worktree merge")
+    repo = require_git_repo_allowed(action_field_path(action, "repo"))
+    branch = str(action.get("branch") or "").strip()
+    target = str(action.get("target_branch") or "master").strip()
+    row = find_registered_worktree_for_action(action, branch=branch)
+    worktree = pathlib.Path(str(row.get("path") or "")).expanduser()
+    if str(row.get("repo") or "") != str(repo):
+        raise AgenticValidationError("managed worktree belongs to a different repo")
+    require_clean_git_tree(repo, label="target repo")
+    require_clean_git_tree(worktree, label="worktree")
+    git_checked(["switch", target], cwd=repo)
+    git_checked(["merge", "--ff-only", branch], cwd=repo, timeout=600.0)
+    merge_sha = git_commit_sha(repo)
+    update_managed_git_worktree_status(worktree, status="merged", merged_at=now(), target_branch=target, merge_sha=merge_sha)
+    return git_action_result(
+        validation,
+        status="completed",
+        start=start,
+        branch=branch,
+        target_branch=target,
+        merge_sha=merge_sha,
+    )
+
+
+def apply_git_worktree_remove_action(action: dict, validation: dict, *, cancel_event=None) -> dict:
+    if validation.get("status") != "valid":
+        raise AgenticValidationError(f"cannot apply invalid action: {validation.get('status', '')}")
+    start = time.monotonic()
+    if cancellation_requested(cancel_event):
+        return git_action_result(validation, status="interrupted", start=start, error="action interrupted before git worktree remove")
+    row = find_registered_worktree_for_action(action)
+    repo = pathlib.Path(str(row.get("repo") or "")).expanduser()
+    worktree = pathlib.Path(str(row.get("path") or "")).expanduser()
+    force = bool(action.get("force", False))
+    if not force:
+        require_clean_git_tree(worktree, label="worktree")
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(worktree))
+    git_checked(args, cwd=repo, timeout=600.0)
+    update_managed_git_worktree_status(worktree, status="removed", removed_at=now(), force=force)
+    return git_action_result(
+        validation,
+        status="completed",
+        start=start,
+        branch=str(row.get("branch") or ""),
+        force=force,
+    )
+
+
 def execute_validated_action(
     action: dict,
     validation: dict,
@@ -7770,6 +8521,14 @@ def execute_validated_action(
         )
     if validation.get("kind") == "project_file_write":
         return core_apply_project_file_write_action(action, validation, cancel_event=cancel_event)
+    if validation.get("kind") == "git_worktree_create":
+        return apply_git_worktree_create_action(action, validation, cancel_event=cancel_event)
+    if validation.get("kind") == "git_commit":
+        return apply_git_commit_action(action, validation, cancel_event=cancel_event)
+    if validation.get("kind") == "git_worktree_merge":
+        return apply_git_worktree_merge_action(action, validation, cancel_event=cancel_event)
+    if validation.get("kind") == "git_worktree_remove":
+        return apply_git_worktree_remove_action(action, validation, cancel_event=cancel_event)
     raise AgenticValidationError(f"no runner for action kind: {validation.get('kind', '')}")
 
 
@@ -17588,13 +18347,18 @@ HELP_SECTIONS = [
             ("/action apply FILE --yes", "apply a confirmed project-file write action"),
             ("/action ledger", "show content-safe action/tool ledger rows"),
             ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
-            ("/goal plan [--model-readonly] OBJECTIVE", "preview a durable goal-loop record without execution"),
+            ("/goal plan [--model-readonly|--model-confirmed] OBJECTIVE", "preview a durable goal-loop record"),
             ("/goal list", "list saved goal-loop drafts"),
             ("/goal preview FILE", "validate a goal-loop JSON file"),
-            ("/goal run FILE --yes", "run an explicit action list or read-only model-planned loop"),
+            ("/goal run FILE --yes", "run an explicit action list or model-planned loop"),
             ("/goal runs", "list durable goal-run checkpoints"),
             ("/goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
-            ("/goal proposals RUN_ID [--private]", "show proposals from a read-only goal run"),
+            ("/goal proposals RUN_ID [--private]", "show proposals from a model-planned goal run"),
+            ("/goal apply RUN_ID --yes", "apply proposals from a model-confirmed goal run"),
+            ("/worktree list", "list Motoko-managed Git worktrees"),
+            ("/worktree create BRANCH --yes", "create an isolated branch/worktree under Motoko state"),
+            ("/worktree merge BRANCH --yes", "fast-forward merge a managed worktree branch"),
+            ("/worktree remove PATH --yes", "remove a managed worktree"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -17686,13 +18450,18 @@ HELP_SECTIONS = [
             ("motoko action apply FILE --yes", "apply a confirmed project-file write action"),
             ("motoko action ledger", "show content-safe action/tool ledger rows"),
             ("motoko action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
-            ("motoko goal plan [--model-readonly] OBJECTIVE", "preview a durable goal-loop record without execution"),
+            ("motoko worktree list", "list Motoko-managed Git worktrees"),
+            ("motoko worktree create BRANCH --yes", "create an isolated branch/worktree under Motoko state"),
+            ("motoko worktree merge BRANCH --yes", "fast-forward merge a managed worktree branch"),
+            ("motoko worktree remove PATH --yes", "remove a managed worktree"),
+            ("motoko goal plan [--model-readonly|--model-confirmed] OBJECTIVE", "preview a durable goal-loop record"),
             ("motoko goal list", "list saved goal-loop drafts"),
             ("motoko goal preview FILE", "validate a goal-loop JSON file"),
-            ("motoko goal run FILE --yes", "run an explicit action list or read-only model-planned loop"),
+            ("motoko goal run FILE --yes", "run an explicit action list or model-planned loop"),
             ("motoko goal runs", "list durable goal-run checkpoints"),
             ("motoko goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
-            ("motoko goal proposals RUN_ID [--private]", "show proposals from a read-only goal run"),
+            ("motoko goal proposals RUN_ID [--private]", "show proposals from a model-planned goal run"),
+            ("motoko goal apply RUN_ID --yes", "apply proposals from a model-confirmed goal run"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -17757,7 +18526,7 @@ def format_help() -> str:
             "  The background study loop refreshes catalogs and suggestions while idle.",
             "  Attached stale indexes can refresh in bg-heavy: indexing(model) while prompts queue.",
             "  Heavy idle profile refresh is opt-in with MOTOKO_BACKGROUND_PROFILE=1.",
-            "  Source documents are never modified.",
+            "  Source documents are modified only by typed confirmed actions.",
             "  Spinner modes: MOTOKO_SPINNER=auto|ascii|block|braille|off.",
         ]
     )
@@ -18360,8 +19129,15 @@ def memory_profile_report_command_request(text: str):
         if subcommand == "plan" and subbody:
             args = subbody.split()
             model_readonly = "--model-readonly" in args
-            objective = " ".join(arg for arg in args if arg != "--model-readonly").strip()
-            return "/goal plan", lambda: format_goal_plan(objective, model_readonly=model_readonly)
+            model_confirmed = "--model-confirmed" in args or "--model-write" in args
+            objective = " ".join(
+                arg for arg in args if arg not in {"--model-readonly", "--model-confirmed", "--model-write"}
+            ).strip()
+            return "/goal plan", lambda: format_goal_plan(
+                objective,
+                model_readonly=model_readonly,
+                model_confirmed=model_confirmed,
+            )
         if subcommand in {"list", "ls"}:
             return "/goal list", lambda: format_goal_loops()
         if subcommand == "preview" and subbody:
@@ -18392,6 +19168,40 @@ def memory_profile_report_command_request(text: str):
             selectors = [arg for arg in args if arg != "--private"]
             if selectors:
                 return "/goal proposals", lambda: format_goal_proposals(selectors[0], private=private)
+        if subcommand == "apply" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            selectors = [arg for arg in args if arg != "--yes"]
+            if selectors:
+                return "/goal apply", lambda: apply_goal_proposals_text(selectors[0], yes=yes)
+    if primary == "/worktree":
+        parts = body.split(maxsplit=1)
+        subcommand = parts[0] if parts else "list"
+        subbody = parts[1].strip() if len(parts) > 1 else ""
+        if subcommand in {"list", "ls"}:
+            return "/worktree list", lambda: format_git_worktrees()
+        if subcommand == "create" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            positional = [arg for arg in args if arg != "--yes"]
+            if positional:
+                worktree_args = argparse.Namespace(branch=positional[0], repo=None, path=None, base="master", yes=yes)
+                return "/worktree create", lambda: run_git_worktree_command("create", worktree_args, yes=yes)
+        if subcommand == "merge" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            positional = [arg for arg in args if arg != "--yes"]
+            if positional:
+                worktree_args = argparse.Namespace(branch=positional[0], repo=None, path="", target="master", yes=yes)
+                return "/worktree merge", lambda: run_git_worktree_command("merge", worktree_args, yes=yes)
+        if subcommand == "remove" and subbody:
+            args = subbody.split()
+            yes = "--yes" in args
+            force = "--force" in args
+            positional = [arg for arg in args if arg not in {"--yes", "--force"}]
+            if positional:
+                worktree_args = argparse.Namespace(path=positional[0], repo="", force=force, yes=yes)
+                return "/worktree remove", lambda: run_git_worktree_command("remove", worktree_args, yes=yes)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -22071,6 +22881,7 @@ def command_goal(args) -> None:
                 allowed_tools=args.tool,
                 allowed_effects=args.effect,
                 model_readonly=args.model_readonly,
+                model_confirmed=args.model_confirmed,
                 max_steps=args.max_steps,
                 max_model_calls=args.max_model_calls,
                 max_tool_calls=args.max_tool_calls,
@@ -22090,8 +22901,19 @@ def command_goal(args) -> None:
         print_report(resume_goal_run_text(args.run_id, yes=args.yes))
     elif args.goal_command == "proposals":
         print_report(format_goal_proposals(args.run_id, private=args.private))
+    elif args.goal_command == "apply":
+        print_report(apply_goal_proposals_text(args.run_id, yes=args.yes))
     else:
         raise SystemExit("unknown goal command")
+
+
+def command_worktree(args) -> None:
+    if args.worktree_command in {"list", "ls"}:
+        print_report(format_git_worktrees(limit=args.limit))
+    elif args.worktree_command in {"create", "merge", "remove"}:
+        print_report(run_git_worktree_command(args.worktree_command, args, yes=args.yes))
+    else:
+        raise SystemExit("unknown worktree command")
 
 
 def command_personality(args) -> None:
@@ -22791,6 +23613,32 @@ def main(argv: list[str]) -> int:
     action_apply_proposal.add_argument("--yes", action="store_true", help="confirm this proposed project-file write")
     action_apply_proposal.set_defaults(func=command_action)
 
+    worktree = sub.add_parser("worktree", help="create, merge, list, and remove Motoko-managed Git worktrees")
+    worktree_sub = worktree.add_subparsers(dest="worktree_command", required=True)
+    worktree_list = worktree_sub.add_parser("list", aliases=["ls"], help="list Motoko-managed Git worktrees")
+    worktree_list.add_argument("--limit", type=int, default=50)
+    worktree_list.set_defaults(func=command_worktree)
+    worktree_create = worktree_sub.add_parser("create", help="create an isolated branch/worktree")
+    worktree_create.add_argument("branch")
+    worktree_create.add_argument("--repo", help="source Git repo; defaults to the current directory")
+    worktree_create.add_argument("--path", help="worktree path; defaults under Motoko state")
+    worktree_create.add_argument("--base", default="master", help="base ref for the new branch")
+    worktree_create.add_argument("--yes", action="store_true", help="confirm creating the worktree")
+    worktree_create.set_defaults(func=command_worktree)
+    worktree_merge = worktree_sub.add_parser("merge", help="fast-forward merge a managed worktree branch")
+    worktree_merge.add_argument("branch")
+    worktree_merge.add_argument("--repo", help="target Git repo; defaults to the current directory")
+    worktree_merge.add_argument("--path", help="managed worktree path, useful when branch names are ambiguous")
+    worktree_merge.add_argument("--target", default="master", help="target branch to merge into")
+    worktree_merge.add_argument("--yes", action="store_true", help="confirm the merge")
+    worktree_merge.set_defaults(func=command_worktree)
+    worktree_remove = worktree_sub.add_parser("remove", help="remove a Motoko-managed Git worktree")
+    worktree_remove.add_argument("path")
+    worktree_remove.add_argument("--repo", help="source repo path")
+    worktree_remove.add_argument("--force", action="store_true", help="pass --force to git worktree remove")
+    worktree_remove.add_argument("--yes", action="store_true", help="confirm removing the worktree")
+    worktree_remove.set_defaults(func=command_worktree)
+
     goal = sub.add_parser("goal", help="preview, inspect, and run explicit durable goal-loop records")
     goal_sub = goal.add_subparsers(dest="goal_command", required=True)
     goal_plan = goal_sub.add_parser("plan", help="preview a durable goal-loop record without execution")
@@ -22803,6 +23651,7 @@ def main(argv: list[str]) -> int:
     goal_plan.add_argument("--max-tool-calls", type=int, default=6)
     goal_plan.add_argument("--max-minutes", type=int, default=30)
     goal_plan.add_argument("--model-readonly", action="store_true", help="enable the read-only model-planned runner")
+    goal_plan.add_argument("--model-confirmed", "--model-write", action="store_true", help="enable model-planned proposals with explicit apply")
     goal_plan.add_argument("--save", action="store_true", help="save the preview as a disabled goal-loop draft")
     goal_plan.set_defaults(func=command_goal)
     goal_list = goal_sub.add_parser("list", aliases=["ls"], help="list saved goal-loop drafts")
@@ -22826,6 +23675,10 @@ def main(argv: list[str]) -> int:
     goal_proposals.add_argument("run_id")
     goal_proposals.add_argument("--private", action="store_true", help="show private proposed action JSON in this user account")
     goal_proposals.set_defaults(func=command_goal)
+    goal_apply = goal_sub.add_parser("apply", help="apply proposals from a model-confirmed goal run")
+    goal_apply.add_argument("run_id")
+    goal_apply.add_argument("--yes", action="store_true", help="confirm applying the proposed actions")
+    goal_apply.set_defaults(func=command_goal)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

@@ -85,6 +85,17 @@ not the easiest place to review what changed after a long work session.
   reviewable typed action proposals. The runner refuses mutating, network,
   service-control, and privileged effects and does not apply proposals.
   `motoko goal proposals RUN_ID [--private]` is the proposal review surface.
+- Added user-confirmed model-planned goal loops:
+  `motoko goal plan --model-confirmed "objective" --save` (alias:
+  `--model-write`) can produce typed project-change proposals and stop in
+  `awaiting_confirmation`; `motoko goal apply RUN_ID --yes` applies them only
+  after explicit review through the normal validator, confirmation, budget,
+  checkpoint, and ledger path.
+- Added Motoko-managed Git worktree actions and commands. `motoko worktree
+  create BRANCH --yes` creates an isolated branch/worktree under the current
+  user's Motoko state; `git_commit`, `git_worktree_merge`, and
+  `git_worktree_remove` are typed confirmed actions, with fast-forward
+  clean-tree merges and managed-worktree removal.
 - Added `motoko action-eval` and `/action-eval`, a no-model deterministic
   safety gate for the agentic action surface covering confirmed project writes,
   unconfirmed write blocking, `.motokoignore` denial, blocked script-owned

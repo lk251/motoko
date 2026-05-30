@@ -231,12 +231,14 @@ Current UI direction:
   user's Motoko state.
 - Goal-loop planning and execution should stay explicit and inspectable.
   `/goal plan OBJECTIVE`, `/goal list`, and `/goal preview FILE` may create or
-  show `motoko-goal-loop-v1` records. `/goal run FILE --yes` may run only an
-  explicit action list already present in the record, within declared budgets,
-  and each action still passes through the same validator, confirmation, and
-  ledger path. Confirmed runs are checkpointed as `goal-run-v1` records and
-  can be listed or resumed with `/goal runs` and `/goal resume RUN_ID --yes`.
-  This is not an autonomous model-planning loop yet.
+  show `motoko-goal-loop-v1` records. `/goal run FILE --yes` may run an
+  explicit action list, a read-only model-planned loop, or a model-confirmed
+  proposal loop within declared budgets. Mutating model-planned work must stop
+  at reviewable proposals until `/goal apply RUN_ID --yes` is explicitly
+  invoked, and each applied proposal still passes through the same validator,
+  confirmation, and ledger path. Confirmed runs are checkpointed as
+  `goal-run-v1` records and can be listed or resumed with `/goal runs` and
+  `/goal resume RUN_ID --yes`.
 - Skill-management actions should stay review-first and allowlisted. Motoko may
   propose `create`, `patch`, and support-file updates, but accepting them must
   flow through code-owned validators. Support files are confined to
@@ -249,7 +251,11 @@ Current UI direction:
   script-owned project-file writes remain blocked. Project mutation is allowed
   only through Motoko's typed, code-owned `project_file_write` action, with an
   allowlisted path, `.motokoignore` enforcement, exact session confirmation,
-  overwrite hash checks, atomic writes, and content-safe ledgers.
+  overwrite hash checks, atomic writes, and content-safe ledgers. When the user
+  asks for isolated branch work, Motoko may use typed managed-Git-worktree
+  actions to create a branch/worktree under the user's Motoko state, commit
+  explicit paths, fast-forward merge into the target branch after clean-tree
+  checks, and remove managed worktrees on explicit confirmation.
   `/action ledger` and `/action result` should make tool runs inspectable while
   hiding private stdout/stderr/result content unless the owning user explicitly
   asks for it.
@@ -1467,12 +1473,16 @@ Agentic roadmap gates not completed by design:
   remain disabled.
 - Read-only model-planned loops: implemented as explicit `planner:
   model_readonly` goal loops. They plan, retrieve, inspect, audit, and propose
-  typed actions under budget, then stop for review. Mutating model-planned
-  loops remain disabled.
-- User-confirmed mutating model loops: not enabled. A future loop may apply
-  already validated actions with explicit confirmation, durable checkpoints,
-  visible progress, cancellation, and final audit after the read-only form is
-  stable.
+  typed actions under budget, then stop for review.
+- User-confirmed mutating model loops: implemented as explicit `planner:
+  model_confirmed` goal loops. They plan and propose typed actions under
+  budget, stop in `awaiting_confirmation`, and apply only after
+  `motoko goal apply RUN_ID --yes`. The apply phase is still bounded,
+  checkpointed, interruptible between actions, and validator-owned.
+- Managed Git worktrees: implemented as typed action kinds and convenience
+  `motoko worktree` commands. Worktree creation, commits, fast-forward merges,
+  and removals require explicit confirmation and stay in a realm-local
+  registry.
 - Network tools: not enabled. They require a NixOS-reviewed wrapper or policy,
   explicit destination/purpose metadata, no ambient secrets, and content-free
   telemetry.
@@ -1490,8 +1500,8 @@ Relative priority for increasing Motoko's intelligence and competence:
    These directly affect whether Motoko understands the local corpus,
    remembers useful procedure, and can safely turn good analysis into useful
    proposals.
-2. Add user-confirmed mutating goal loops only after read-only loops and the
-   project-proposal lane have strong evals and checkpoint behavior.
+2. Harden model-confirmed goal apply and managed worktree workflows through
+   real use, regression fixtures, and action-eval coverage.
 3. Consider Hermes-style background skill improvement continuously, but keep
    Motoko's stricter typed-action and approval boundary instead of importing a
    broad terminal/tool runtime.
@@ -1511,10 +1521,9 @@ Immediate next agentic implementation sequence, when development resumes:
    `model_readonly` records. The runner plans, retrieves, inspects, audits, and
    proposes typed actions inside a budget, then stops for user review without
    mutating project files.
-3. Only after the proposal and read-only gates are stable, build
-   user-confirmed mutating goal loops that can apply already validated actions
-   with explicit confirmation, durable checkpoints, visible progress,
-   cancellation, and final audit.
+3. User-confirmed mutating goal loops are now implemented through
+   `model_confirmed` proposals plus `goal apply`. Continue hardening them
+   before enabling any broader autonomous act/observe loop.
 4. Keep Hermes-style skill improvement running as a parallel craft track:
    prompted self-review, loaded-skill patching, support-file use, and
    feedback-derived evals should steadily improve Motoko's procedural memory.

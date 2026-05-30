@@ -69,6 +69,10 @@ SUPPORTED_ACTION_KINDS = {
     "artifact_lifecycle_plan",
     "artifact_lifecycle_apply",
     "project_file_write",
+    "git_worktree_create",
+    "git_commit",
+    "git_worktree_merge",
+    "git_worktree_remove",
     "goal_loop_step",
 }
 SUPPORTED_INTERPRETERS = {"python3"}
@@ -82,6 +86,9 @@ MAX_STDERR_BYTES = 1024 * 1024
 MAX_RESULT_PREVIEW_CHARS = 1200
 MAX_PROJECT_WRITE_BYTES = 1024 * 1024
 MAX_TOOL_PROPOSED_ACTIONS = 20
+MAX_GIT_REF_CHARS = 160
+MAX_GIT_COMMIT_MESSAGE_CHARS = 1000
+MAX_GIT_COMMIT_PATHS = 50
 
 
 class AgenticValidationError(ValueError):
@@ -342,6 +349,12 @@ def summarize_tool_proposed_actions(
                 "reason": validation.get("reason", ""),
                 "action_hash": validation.get("action_hash", ""),
                 "target_path_sha256": validation.get("target_path_sha256", ""),
+                "repo_path_sha256": validation.get("repo_path_sha256", ""),
+                "worktree_path_sha256": validation.get("worktree_path_sha256", ""),
+                "branch": validation.get("branch", ""),
+                "base": validation.get("base", ""),
+                "target_branch": validation.get("target_branch", ""),
+                "path_count": validation.get("path_count", ""),
                 "mode": validation.get("mode", ""),
                 "content_bytes": validation.get("content_bytes", 0),
                 "content_sha256": validation.get("content_sha256", ""),
@@ -690,6 +703,174 @@ def project_file_write_session_key(
     return sha256_text(stable_json(key))
 
 
+def git_action_session_key(action: dict, *, normalized: dict) -> str:
+    key = {
+        "schema": action.get("schema"),
+        "kind": action.get("kind"),
+        "normalized": normalized,
+    }
+    return sha256_text(stable_json(key))
+
+
+def _required_absolute_path(action: dict, key: str, *, label: str | None = None) -> pathlib.Path:
+    text = str(action.get(key) or "").strip()
+    label = label or key
+    if not text:
+        raise AgenticValidationError(f"{label} is required")
+    if "\x00" in text:
+        raise AgenticValidationError(f"{label} contains NUL")
+    path = pathlib.Path(text).expanduser()
+    if not path.is_absolute():
+        raise AgenticValidationError(f"{label} must be absolute")
+    raw = text.replace("\\", "/")
+    if any(part in {"", ".."} for part in pathlib.PurePosixPath(raw).parts):
+        raise AgenticValidationError(f"{label} must not contain traversal")
+    return path
+
+
+def validate_git_ref(value: str, *, label: str, default: str | None = None) -> str:
+    text = str(value or default or "").strip()
+    if not text:
+        raise AgenticValidationError(f"{label} is required")
+    if len(text) > MAX_GIT_REF_CHARS:
+        raise AgenticValidationError(f"{label} is too long")
+    if text.startswith("-"):
+        raise AgenticValidationError(f"{label} must not start with '-'")
+    if text.startswith("/") or text.endswith("/") or "//" in text:
+        raise AgenticValidationError(f"{label} has invalid slash placement")
+    if text.endswith(".") or text.endswith(".lock"):
+        raise AgenticValidationError(f"{label} has invalid suffix")
+    if ".." in text or "@{" in text:
+        raise AgenticValidationError(f"{label} contains forbidden git ref sequence")
+    if any(part.startswith(".") for part in text.split("/")):
+        raise AgenticValidationError(f"{label} must not contain hidden ref components")
+    forbidden = set("~^:?*[\\")
+    if any(ch in forbidden or ord(ch) < 32 or ch.isspace() for ch in text):
+        raise AgenticValidationError(f"{label} contains forbidden character")
+    return text
+
+
+def _validate_git_commit_paths(value) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise AgenticValidationError("git_commit paths must be a non-empty list")
+    if len(value) > MAX_GIT_COMMIT_PATHS:
+        raise AgenticValidationError(f"git_commit paths has too many entries (max {MAX_GIT_COMMIT_PATHS})")
+    rows: list[str] = []
+    for idx, item in enumerate(value, start=1):
+        text = str(item or "").strip()
+        if not text:
+            raise AgenticValidationError(f"git_commit paths[{idx}] is empty")
+        if "\x00" in text:
+            raise AgenticValidationError(f"git_commit paths[{idx}] contains NUL")
+        raw = text.replace("\\", "/")
+        if any(part in {"", ".."} for part in pathlib.PurePosixPath(raw).parts):
+            raise AgenticValidationError(f"git_commit paths[{idx}] must not contain traversal")
+        if text not in rows:
+            rows.append(text)
+    return rows
+
+
+def validate_git_action(
+    action: dict,
+    *,
+    kind: str,
+    realm: str,
+    path_checker=None,
+    preview: bool = False,
+    session_approvals: set[str] | None = None,
+) -> dict:
+    del realm
+    normalized: dict[str, object] = {"kind": kind}
+    if kind == "git_worktree_create":
+        repo = _required_absolute_path(action, "repo", label="git_worktree_create repo")
+        worktree = _required_absolute_path(action, "path", label="git_worktree_create path")
+        branch = validate_git_ref(str(action.get("branch") or ""), label="git_worktree_create branch")
+        base = validate_git_ref(str(action.get("base") or "master"), label="git_worktree_create base")
+        if path_checker is not None:
+            path_checker("repo", str(repo), write=False)
+        normalized.update(
+            {
+                "repo_path_sha256": sha256_text(str(repo)),
+                "worktree_path_sha256": sha256_text(str(worktree)),
+                "branch": branch,
+                "base": base,
+            }
+        )
+    elif kind == "git_commit":
+        repo = _required_absolute_path(action, "repo", label="git_commit repo")
+        message = str(action.get("message") or "").strip()
+        if not message:
+            raise AgenticValidationError("git_commit message is required")
+        if "\x00" in message:
+            raise AgenticValidationError("git_commit message contains NUL")
+        if len(message) > MAX_GIT_COMMIT_MESSAGE_CHARS:
+            raise AgenticValidationError(f"git_commit message exceeds {MAX_GIT_COMMIT_MESSAGE_CHARS} chars")
+        paths = _validate_git_commit_paths(action.get("paths"))
+        if path_checker is not None:
+            path_checker("repo", str(repo), write=False)
+        normalized.update(
+            {
+                "repo_path_sha256": sha256_text(str(repo)),
+                "message_sha256": sha256_text(message),
+                "path_count": len(paths),
+                "paths_sha256": sha256_text(stable_json(paths)),
+            }
+        )
+    elif kind == "git_worktree_merge":
+        repo = _required_absolute_path(action, "repo", label="git_worktree_merge repo")
+        branch = validate_git_ref(str(action.get("branch") or ""), label="git_worktree_merge branch")
+        target = validate_git_ref(str(action.get("target_branch") or "master"), label="git_worktree_merge target_branch")
+        worktree_text = str(action.get("path") or "").strip()
+        worktree_hash = ""
+        if worktree_text:
+            worktree = _required_absolute_path(action, "path", label="git_worktree_merge path")
+            worktree_hash = sha256_text(str(worktree))
+        if path_checker is not None:
+            path_checker("repo", str(repo), write=False)
+        normalized.update(
+            {
+                "repo_path_sha256": sha256_text(str(repo)),
+                "worktree_path_sha256": worktree_hash,
+                "branch": branch,
+                "target_branch": target,
+                "ff_only": bool(action.get("ff_only", True)),
+            }
+        )
+    elif kind == "git_worktree_remove":
+        worktree = _required_absolute_path(action, "path", label="git_worktree_remove path")
+        repo_text = str(action.get("repo") or "").strip()
+        repo_hash = ""
+        if repo_text:
+            repo = _required_absolute_path(action, "repo", label="git_worktree_remove repo")
+            repo_hash = sha256_text(str(repo))
+            if path_checker is not None:
+                path_checker("repo", str(repo), write=False)
+        normalized.update(
+            {
+                "repo_path_sha256": repo_hash,
+                "worktree_path_sha256": sha256_text(str(worktree)),
+                "force": bool(action.get("force", False)),
+            }
+        )
+    else:
+        raise AgenticValidationError(f"unsupported git action kind: {kind}")
+
+    repeat_key = git_action_session_key(action, normalized=normalized)
+    session_ok = repeat_key in (session_approvals or set())
+    status = "valid"
+    approval = "session-confirmed" if session_ok else "session-confirmation-required"
+    if not session_ok:
+        status = "needs_confirmation" if preview else "blocked"
+    return {
+        **normalized,
+        "status": status,
+        "approval": approval,
+        "allowed_effects": [EFFECT_WRITE_ALLOWED_PROJECT],
+        "session_repeat_key": repeat_key,
+        "session_repeat_eligible": True,
+    }
+
+
 def action_id(action: dict) -> str:
     return "act-" + uuid.uuid4().hex[:16]
 
@@ -775,6 +956,17 @@ def validate_action_record(
         )
         result.update(project)
         result["allowed_effects"] = [EFFECT_WRITE_ALLOWED_PROJECT]
+        return result
+    if kind in {"git_worktree_create", "git_commit", "git_worktree_merge", "git_worktree_remove"}:
+        git_action = validate_git_action(
+            action,
+            kind=kind,
+            realm=realm,
+            path_checker=path_checker,
+            preview=preview,
+            session_approvals=session_approvals,
+        )
+        result.update(git_action)
         return result
     if kind == "skill_handler_run":
         skill_name = str(action.get("skill") or "").strip()
@@ -915,6 +1107,18 @@ def ledger_record(validation: dict, *, status: str | None = None) -> dict:
         "content_bytes",
         "content_sha256",
         "expected_sha256",
+        "repo_path_sha256",
+        "worktree_path_sha256",
+        "branch",
+        "base",
+        "target_branch",
+        "ff_only",
+        "force",
+        "message_sha256",
+        "path_count",
+        "paths_sha256",
+        "commit_sha",
+        "merge_sha",
         "bytes_written",
         "previous_sha256",
         "new_sha256",
@@ -1353,6 +1557,21 @@ def format_action_validation(validation: dict) -> str:
         lines.append(f"content sha256: {validation.get('content_sha256', '')}")
         if validation.get("expected_sha256"):
             lines.append(f"expected sha256: {validation.get('expected_sha256', '')}")
+    if str(validation.get("kind", "")).startswith("git_"):
+        if validation.get("branch"):
+            lines.append(f"branch: {validation.get('branch')}")
+        if validation.get("base"):
+            lines.append(f"base: {validation.get('base')}")
+        if validation.get("target_branch"):
+            lines.append(f"target branch: {validation.get('target_branch')}")
+        if validation.get("repo_path_sha256"):
+            lines.append(f"repo path sha256: {validation.get('repo_path_sha256')}")
+        if validation.get("worktree_path_sha256"):
+            lines.append(f"worktree path sha256: {validation.get('worktree_path_sha256')}")
+        if validation.get("path_count") is not None:
+            lines.append(f"path count: {validation.get('path_count')}")
+        if validation.get("force") is not None and validation.get("kind") == "git_worktree_remove":
+            lines.append(f"force: {'yes' if validation.get('force') else 'no'}")
     if validation.get("session_repeat_eligible"):
         lines.append(f"session repeat key: {validation.get('session_repeat_key', '')}")
     if validation.get("reason"):
@@ -1390,6 +1609,25 @@ def format_action_result(validation: dict, result: dict | None = None) -> str:
         )
         if result.get("error"):
             lines.append(f"error: {result.get('error', '')}")
+        return "\n".join(lines)
+    if str(validation.get("kind", "")).startswith("git_"):
+        for key, label in (
+            ("branch", "branch"),
+            ("base", "base"),
+            ("target_branch", "target branch"),
+            ("commit_sha", "commit sha"),
+            ("merge_sha", "merge sha"),
+        ):
+            value = result.get(key, validation.get(key, ""))
+            if value:
+                lines.append(f"{label}: {value}")
+        if validation.get("repo_path_sha256"):
+            lines.append(f"repo path sha256: {validation.get('repo_path_sha256')}")
+        if validation.get("worktree_path_sha256"):
+            lines.append(f"worktree path sha256: {validation.get('worktree_path_sha256')}")
+        if result.get("error"):
+            lines.append(f"error: {result.get('error', '')}")
+        lines.append(f"duration: {result.get('duration_ms', 0)} ms")
         return "\n".join(lines)
     lines.extend(
         [
