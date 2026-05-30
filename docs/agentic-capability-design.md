@@ -686,11 +686,12 @@ Gated capabilities not completed by design:
 - `network`: not enabled. To enable it, require a NixOS-reviewed wrapper or
   policy, explicit destination/purpose metadata, no ambient secrets, and
   content-safe telemetry.
-- Autonomous model-planned goal loops: not enabled. The only enabled loop
-  runner is the explicit-action form documented below. To enable model-planned
-  loops, require an approved loop record with objective, scope, allowed
-  skills/tools, budgets, stop conditions, checkpoints, pause/resume,
-  cancellation, final audit, and a read-only soak phase before mutation.
+- Read-only model-planned goal loops: enabled only through explicit
+  `planner: model_readonly` records. They may plan, retrieve, inspect, audit,
+  and propose typed actions under budget, but they refuse project-write,
+  network, service-control, and privileged effects and do not apply mutations.
+  Mutating model-planned loops remain disabled until the read-only form has
+  enough usage and eval coverage.
 - Broader terminal-like tools and arbitrary executable control: not enabled.
   Shell commands, arbitrary executables, service control, and privileged
   actions remain outside Motoko's authority.
@@ -701,14 +702,13 @@ Gated capabilities not completed by design:
 
 Priority assessment for future intelligence and competence:
 
-1. Script-assisted project mutation is the highest-value next gate. It lets
-   Motoko turn understanding into useful local changes in the active project
-   while preserving the code-owned write boundary. This is more immediately
-   useful than giving scripts raw write access.
-2. Autonomous model-planned loops are potentially very valuable, but only after
-   read-only planning/retrieval/audit loops work well. The first production
-   form should plan, retrieve, inspect, and propose actions; mutation should
-   remain user-confirmed until evals prove reliability.
+1. Script-assisted project mutation and read-only model-planned loops now form
+   the first useful agentic layer: Motoko can turn understanding into
+   reviewable proposals and can run a bounded plan/retrieve/audit loop without
+   granting mutation authority.
+2. Mutating model-planned loops are potentially valuable, but only after the
+   read-only form works well. Mutation should remain user-confirmed until
+   evals and real usage prove reliability.
 3. Hermes-style skill improvement should continue incrementally: prompted
    self-review, loaded-skill patching, support files, and tool contracts are
    useful; broad terminal/code-execution toolsets should not be copied.
@@ -720,19 +720,13 @@ Priority assessment for future intelligence and competence:
 
 Recommended next implementation sequence:
 
-1. Script-assisted project mutation via structured proposals. Let approved
-   tools generate `project_file_write` or patch-style action records, then have
-   Motoko validate and apply them through the existing code-owned writer. Do
-   not grant raw script write authority in this step.
-2. Read-only autonomous model-planned loops. Let the model plan, retrieve,
-   inspect, audit, and propose typed actions inside an approved budget. The
-   loop stops before mutation and produces an inspectable checkpoint and final
-   audit.
-3. User-confirmed mutating loops. After the first two steps are stable and
+1. Harden script-assisted project mutation and read-only model-planned loops
+   through real use, feedback-derived evals, and clearer proposal review.
+2. User-confirmed mutating loops. After the first two gates are stable and
    eval-covered, allow loops to apply validated actions with explicit
    confirmation, durable checkpoints, pause/resume, cancellation, and final
    audit.
-4. Hermes-style skill improvement as an ongoing parallel track. Keep improving
+3. Hermes-style skill improvement as an ongoing parallel track. Keep improving
    prompted self-review, loaded-skill patching, support-file use, and
    feedback-derived eval fixtures so Motoko's procedural memory becomes more
    useful through real use. Preserve Motoko's typed-action and approval
@@ -857,6 +851,23 @@ Script-assisted project proposal checkpoint, 2026-05-30:
   application, `.motokoignore` rejection, undeclared proposal effects, and the
   existing direct script project-write block.
 
+Read-only model-planned goal-loop checkpoint, 2026-05-30:
+
+- Added an explicit `planner: model_readonly` mode for `motoko-goal-loop-v1`.
+  It is opt-in via `motoko goal plan --model-readonly "objective" --save`.
+- `motoko goal run GOAL.json --yes` can now run a bounded read-only loop that
+  retrieves current-project context, asks the audit route for strict JSON, and
+  writes a durable `goal-run-v1` checkpoint with plan, retrieval assessment,
+  observations, final audit, next steps, source records, and proposed action
+  validations.
+- The read-only runner refuses `write_allowed_project`, `network`,
+  `service_control`, and `privileged` effects. It may store proposals under
+  the user's Motoko state, but it does not apply them. `motoko goal proposals
+  RUN_ID [--private]` is the review surface for those proposed action records.
+- Regression coverage checks that the runner uses the audit route, stores
+  proposal validations, keeps proposed project writes unapplied, hides proposal
+  content by default, and rejects mutating effects.
+
 Skill lifecycle checkpoint, 2026-05-30:
 
 - Added the first Motoko-shaped skill lifecycle layer. Selection and
@@ -891,13 +902,15 @@ Next long stretch after skill lifecycle:
 
 ## Goal Loops
 
-Goal loops should remain staged. The current enabled form is an explicit
-action-list runner: the loop record contains concrete typed actions and Motoko
-runs them through the normal validator, confirmation, budget, and ledger path.
-Each confirmed run has a `goal-run-v1` checkpoint with a cursor and per-action
-results so completed work is not lost across interruption. The later
-autonomous form should come after this explicit runner stays stable. The
-intended autonomous durable record contains:
+Goal loops should remain staged. The enabled forms are now an explicit
+action-list runner and an opt-in read-only model planner. Explicit action-list
+records contain concrete typed actions and Motoko runs them through the normal
+validator, confirmation, budget, and ledger path. Read-only model-planned
+records retrieve context, call the audit route for strict JSON, store an
+inspectable checkpoint, and stop at proposals. Each confirmed run has a
+`goal-run-v1` checkpoint so completed work or completed planning is not lost
+across interruption. A later mutating autonomous form should come only after
+these runners stay stable. The durable record contains:
 
 - objective;
 - scope;
@@ -908,9 +921,9 @@ intended autonomous durable record contains:
 - checkpoint ledger;
 - final audit.
 
-A future autonomous loop should run explicit phases: plan, retrieve, act
-through approved handlers/tools, observe, reflect/audit, persist artifacts or
-feedback, and either continue or stop. Loops must be pauseable, resumable,
+Future mutating autonomous loops should run explicit phases: plan, retrieve,
+act through approved handlers/tools, observe, reflect/audit, persist artifacts
+or feedback, and either continue or stop. Loops must be pauseable, resumable,
 visible in job status, and conservative by default: explicit action lists
 first, then read-only model-planned loops, then user-confirmed local mutations,
 and only later broader automation after separate review.

@@ -72,6 +72,13 @@ not the easiest place to review what changed after a long work session.
   `/goal resume RUN_ID --yes`, so explicit action-list loops can resume from
   the next incomplete action instead of depending on scrollback. Goal runs now
   honor `motoko pause` and `/pause` between actions.
+- Added opt-in read-only model-planned goal loops:
+  `motoko goal plan --model-readonly "objective" --save` creates a loop that
+  can retrieve context, call the audit route for strict JSON planning, store a
+  durable checkpoint with plan/observations/audit/next steps, and produce
+  reviewable typed action proposals. The runner refuses mutating, network,
+  service-control, and privileged effects and does not apply proposals.
+  `motoko goal proposals RUN_ID [--private]` is the proposal review surface.
 - Added `motoko action-eval` and `/action-eval`, a no-model deterministic
   safety gate for the agentic action surface covering confirmed project writes,
   unconfirmed write blocking, `.motokoignore` denial, blocked script-owned

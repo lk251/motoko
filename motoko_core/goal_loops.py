@@ -18,6 +18,7 @@ from motoko_core.agentic import (
     ACTION_SCHEMA,
     EFFECT_NETWORK,
     EFFECT_PRIVILEGED,
+    EFFECT_PROPOSE_PROJECT_CHANGES,
     EFFECT_READ_ALLOWED_FILES,
     EFFECT_READ_CONTEXT,
     EFFECT_SERVICE_CONTROL,
@@ -33,6 +34,9 @@ GOAL_LOOP_SCHEMA = "motoko-goal-loop-v1"
 GOAL_LOOP_STATUS_DRAFT = "draft"
 GOAL_LOOP_STATUS_NEEDS_APPROVAL = "needs_approval"
 GOAL_LOOP_STATUS_REJECTED = "rejected"
+GOAL_LOOP_PLANNER_DISABLED = "disabled"
+GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS = "explicit_actions"
+GOAL_LOOP_PLANNER_MODEL_READONLY = "model_readonly"
 
 MAX_OBJECTIVE_CHARS = 1000
 MAX_SCOPE_ITEMS = 20
@@ -48,6 +52,18 @@ LOW_RISK_GOAL_EFFECTS = {
     EFFECT_READ_CONTEXT,
     EFFECT_READ_ALLOWED_FILES,
     EFFECT_WRITE_MOTOKO_STATE,
+    EFFECT_PROPOSE_PROJECT_CHANGES,
+}
+MODEL_READONLY_GOAL_EFFECTS = {
+    EFFECT_READ_CONTEXT,
+    EFFECT_READ_ALLOWED_FILES,
+    EFFECT_WRITE_MOTOKO_STATE,
+    EFFECT_PROPOSE_PROJECT_CHANGES,
+}
+SUPPORTED_GOAL_PLANNERS = {
+    GOAL_LOOP_PLANNER_DISABLED,
+    GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS,
+    GOAL_LOOP_PLANNER_MODEL_READONLY,
 }
 
 
@@ -155,6 +171,7 @@ def make_goal_loop_record(
     objective: str,
     *,
     loop_id: str | None = None,
+    planner: str | None = None,
     scope: list[str] | None = None,
     allowed_tools: list[str] | None = None,
     allowed_effects: list[str] | None = None,
@@ -169,6 +186,16 @@ def make_goal_loop_record(
         raise GoalLoopValidationError(f"objective is too long (max {MAX_OBJECTIVE_CHARS} chars)")
     stamp = utc_now()
     normalized_actions = normalize_actions(actions)
+    planner = str(planner or "").strip() or (
+        GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS if normalized_actions else GOAL_LOOP_PLANNER_DISABLED
+    )
+    if planner not in SUPPORTED_GOAL_PLANNERS:
+        raise GoalLoopValidationError(f"unsupported goal planner: {planner}")
+    if planner == GOAL_LOOP_PLANNER_MODEL_READONLY and normalized_actions:
+        raise GoalLoopValidationError("model_readonly goal loops must not contain explicit actions")
+    phases = ["plan", "retrieve", "inspect", "audit", "propose", "checkpoint"]
+    if planner == GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS:
+        phases = ["plan", "retrieve", "act", "observe", "audit", "checkpoint"]
     return {
         "schema": GOAL_LOOP_SCHEMA,
         "id": safe_goal_id(loop_id),
@@ -176,6 +203,7 @@ def make_goal_loop_record(
         "created_at": stamp,
         "updated_at": stamp,
         "objective": objective,
+        "planner": planner,
         "scope": normalize_string_list(scope or [], limit=MAX_SCOPE_ITEMS, label="scope"),
         "allowed_tools": normalize_string_list(allowed_tools or [], limit=MAX_ALLOWED_TOOLS, label="allowed_tools"),
         "allowed_effects": normalize_effects(allowed_effects or []),
@@ -185,9 +213,9 @@ def make_goal_loop_record(
             limit=20,
             label="stop_conditions",
         ),
-        "phases": ["plan", "retrieve", "act", "observe", "audit", "checkpoint"],
+        "phases": phases,
         "actions": normalized_actions,
-        "execution_enabled": bool(normalized_actions),
+        "execution_enabled": bool(normalized_actions or planner == GOAL_LOOP_PLANNER_MODEL_READONLY),
     }
 
 
@@ -199,6 +227,7 @@ def validate_goal_loop_record(record: dict, *, path_checker=None) -> dict:
     normalized = make_goal_loop_record(
         str(record.get("objective") or ""),
         loop_id=str(record.get("id") or ""),
+        planner=str(record.get("planner") or ""),
         scope=record.get("scope") if isinstance(record.get("scope"), list) else [],
         allowed_tools=record.get("allowed_tools") if isinstance(record.get("allowed_tools"), list) else [],
         allowed_effects=record.get("allowed_effects") if isinstance(record.get("allowed_effects"), list) else [],
@@ -208,7 +237,14 @@ def validate_goal_loop_record(record: dict, *, path_checker=None) -> dict:
     )
     validate_scope_paths(normalized["scope"], path_checker=path_checker)
     requested_effects = set(normalized["allowed_effects"])
-    if requested_effects & APPROVAL_REQUIRED_EFFECTS:
+    if normalized.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY and not requested_effects <= MODEL_READONLY_GOAL_EFFECTS:
+        normalized["status"] = GOAL_LOOP_STATUS_REJECTED
+        normalized["approval"] = "not-applicable"
+        normalized["error"] = (
+            "model_readonly goal loops may use only read_context, read_allowed_files, "
+            "write_motoko_state, and propose_project_changes"
+        )
+    elif requested_effects & APPROVAL_REQUIRED_EFFECTS:
         normalized["status"] = GOAL_LOOP_STATUS_NEEDS_APPROVAL
         normalized["approval"] = "required-for-" + ",".join(sorted(requested_effects & APPROVAL_REQUIRED_EFFECTS))
     elif requested_effects <= (LOW_RISK_GOAL_EFFECTS | LOW_RISK_REPEATABLE_EFFECTS):
@@ -253,6 +289,7 @@ def format_goal_loop(record: dict) -> str:
         f"status: {record.get('status', '')}",
         f"approval: {record.get('approval', '')}",
         f"execution enabled: {'yes' if record.get('execution_enabled') else 'no'}",
+        f"planner: {record.get('planner', '')}",
         f"objective: {record.get('objective', '')}",
         "scope: " + (", ".join(record.get("scope", [])) if record.get("scope") else "none"),
         "allowed tools: " + (", ".join(record.get("allowed_tools", [])) if record.get("allowed_tools") else "none"),
@@ -269,7 +306,11 @@ def format_goal_loop(record: dict) -> str:
     lines.append("stop conditions: " + ", ".join(record.get("stop_conditions", [])))
     lines.append("phases: " + ", ".join(record.get("phases", [])))
     lines.append(f"actions: {len(record.get('actions', []) or [])}")
-    if record.get("execution_enabled"):
+    if record.get("error"):
+        lines.append(f"error: {record.get('error')}")
+    if record.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY:
+        lines.append("runner: read-only model planner; run with motoko goal run FILE --yes")
+    elif record.get("execution_enabled"):
         lines.append("runner: explicit action list; run with motoko goal run FILE --yes")
     else:
         lines.append("runner: disabled until an explicit action list is attached")

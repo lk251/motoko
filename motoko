@@ -388,6 +388,8 @@ from motoko_core.jobs import (  # noqa: E402
     format_job_snapshots,
 )
 from motoko_core.goal_loops import (  # noqa: E402
+    GOAL_LOOP_PLANNER_MODEL_READONLY,
+    GOAL_LOOP_STATUS_REJECTED,
     GoalLoopValidationError,
     format_goal_loop as core_format_goal_loop,
     format_goal_loop_list as core_format_goal_loop_list,
@@ -578,6 +580,9 @@ FEEDBACK_EVAL_SCHEMA_VERSION = "feedback-eval-v1"
 RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
 ACTION_EVAL_SCHEMA_VERSION = "action-eval-v1"
 GOAL_RUN_SCHEMA_VERSION = "goal-run-v1"
+GOAL_READONLY_RESULT_SCHEMA_VERSION = "goal-readonly-result-v1"
+GOAL_READONLY_CONTEXT_CHARS = 28000
+GOAL_READONLY_MAX_MODEL_OUTPUT_TOKENS = 2048
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
@@ -917,12 +922,13 @@ SLASH_COMMANDS = [
     ("/action apply FILE --yes", "apply a confirmed project-file write action"),
     ("/action ledger", "show content-safe action/tool ledger rows"),
     ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
-    ("/goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
+    ("/goal plan [--model-readonly] OBJECTIVE", "preview a durable goal-loop record without execution"),
     ("/goal list", "list saved goal-loop drafts"),
     ("/goal preview FILE", "validate a goal-loop JSON file"),
-    ("/goal run FILE --yes", "run an explicit approved goal action list"),
+    ("/goal run FILE --yes", "run an explicit action list or read-only model-planned loop"),
     ("/goal runs", "list durable goal-run checkpoints"),
     ("/goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
+    ("/goal proposals RUN_ID [--private]", "show proposals from a read-only goal run"),
     ("/skill patch NAME --old OLD --new NEW", "patch a learned skill or support file"),
     ("/skill write-file NAME FILE --content TEXT", "write a confined skill support file"),
     ("/skill remove-file NAME FILE --yes", "remove a confined skill support file"),
@@ -6094,6 +6100,7 @@ def format_goal_plan(
     scope: list[str] | None = None,
     allowed_tools: list[str] | None = None,
     allowed_effects: list[str] | None = None,
+    model_readonly: bool = False,
     max_steps: int = 3,
     max_model_calls: int = 6,
     max_tool_calls: int = 6,
@@ -6103,9 +6110,18 @@ def format_goal_plan(
     try:
         record = make_goal_loop_record(
             objective,
+            planner=GOAL_LOOP_PLANNER_MODEL_READONLY if model_readonly else None,
             scope=scope or [],
             allowed_tools=allowed_tools or [],
-            allowed_effects=allowed_effects or [],
+            allowed_effects=(
+                allowed_effects
+                if allowed_effects is not None
+                else (
+                    ["read_context", "read_allowed_files", "write_motoko_state", "propose_project_changes"]
+                    if model_readonly
+                    else []
+                )
+            ),
             budgets={
                 "max_steps": max_steps,
                 "max_model_calls": max_model_calls,
@@ -6164,6 +6180,8 @@ def make_goal_run_record(goal: dict, *, source_path: pathlib.Path | None = None)
         "cursor": 0,
         "source_path": str(source_path or ""),
         "objective": goal.get("objective", ""),
+        "planner": goal.get("planner", "explicit_actions" if actions else "disabled"),
+        "scope": goal.get("scope", []),
         "allowed_effects": goal.get("allowed_effects", []),
         "allowed_tools": goal.get("allowed_tools", []),
         "budgets": goal.get("budgets", {}),
@@ -6242,6 +6260,242 @@ def format_goal_runs(limit: int = 20) -> str:
     return "\n".join(lines)
 
 
+GOAL_READONLY_OUTPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "plan": {"type": "array", "items": {"type": "string"}},
+        "retrieval_assessment": {"type": "string"},
+        "observations": {"type": "array", "items": {"type": "string"}},
+        "proposed_actions": {"type": "array", "items": {"type": "object"}},
+        "audit": {"type": "string"},
+        "next_steps": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["plan", "retrieval_assessment", "observations", "proposed_actions", "audit", "next_steps"],
+}
+
+
+def goal_readonly_project_scope(run: dict) -> dict:
+    scope = run.get("scope") if isinstance(run.get("scope"), list) else []
+    scope_path = str(scope[0]) if scope else None
+    return project_scope_for_request(query=str(run.get("objective", "")), path=scope_path)
+
+
+def build_goal_readonly_context(run: dict) -> tuple[str, list[dict], dict]:
+    objective = str(run.get("objective", "") or "")
+    project_scope = goal_readonly_project_scope(run)
+    conv = {
+        "id": str(run.get("id", "")),
+        "title": objective[:80] or "Goal loop",
+        "messages": [],
+        "context_items": [],
+        "project": project_scope.get("project", {}),
+    }
+    try:
+        indexes = select_retrieval_debug_indexes(objective, conv=None, limit=2, project_scope=project_scope)
+    except SystemExit:
+        indexes = []
+    for index in indexes[:2]:
+        with contextlib.suppress(Exception):
+            conv.setdefault("context_items", []).append(context_item_from_index(index))
+    context_package, _context_values = build_prompt_context_package(conv, objective, project_scope=project_scope)
+    parts = []
+    used = 0
+    for lane in context_package.lanes:
+        if not str(lane.text or "").strip():
+            continue
+        header = f"## {lane.lane}\n"
+        remaining = GOAL_READONLY_CONTEXT_CHARS - used - len(header)
+        if remaining <= 0:
+            break
+        body = str(lane.text or "")[:remaining].rstrip()
+        if body:
+            parts.append(header + body)
+            used += len(header) + len(body)
+    context_text = "\n\n".join(parts)
+    return context_text, list(context_package.sources), project_scope
+
+
+def goal_readonly_messages(run: dict, context_text: str) -> list[dict]:
+    budgets = run.get("budgets") if isinstance(run.get("budgets"), dict) else {}
+    prompt = textwrap.dedent(
+        f"""
+        You are Motoko's read-only goal planner.
+
+        Plan toward the objective using only the context in this prompt. Do not
+        claim to have edited files, run tools, restarted services, pushed code,
+        or mutated state. You may propose typed Motoko actions for later human
+        review, but you must not ask for them to be applied inside this loop.
+
+        Return strict JSON with:
+        - plan: short ordered planning steps
+        - retrieval_assessment: whether the retrieved context is enough
+        - observations: source-grounded findings from the context
+        - proposed_actions: zero or more typed motoko-action-v1 records that a
+          later user could review; leave empty when no action is justified
+        - audit: self-check for grounding, uncertainty, and safety boundaries
+        - next_steps: concise user-review next steps
+        """
+    ).strip()
+    user = textwrap.dedent(
+        f"""
+        Objective:
+        {run.get('objective', '')}
+
+        Scope:
+        {', '.join(run.get('scope', []) or []) or 'current project'}
+
+        Budgets:
+        steps={budgets.get('max_steps')} model_calls={budgets.get('max_model_calls')}
+        tool_calls={budgets.get('max_tool_calls')} minutes={budgets.get('max_minutes')}
+
+        Retrieved context:
+        {context_text or 'No context was retrieved.'}
+        """
+    ).strip()
+    return [{"role": "system", "content": prompt}, {"role": "user", "content": user}]
+
+
+def goal_proposed_action_validations(run: dict, parsed: dict) -> list[dict]:
+    proposed = parsed.get("proposed_actions") if isinstance(parsed.get("proposed_actions"), list) else []
+    if proposed and "propose_project_changes" not in set(run.get("allowed_effects", [])):
+        raise AgenticValidationError("goal proposed_actions require propose_project_changes in allowed_effects")
+    return core_summarize_tool_proposed_actions(
+        {"proposed_actions": proposed},
+        skill_resolver=lambda name: core_load_skill(skills_dir(), name),
+        approval_path=tool_approvals_path(),
+        realm=identity_realm(),
+        path_checker=action_path_checker,
+    )
+
+
+def finish_goal_readonly_run(run: dict, *, status: str, error: str = "") -> None:
+    run["status"] = status
+    run["cursor"] = len(run.get("planner_steps", []) or [])
+    if error:
+        run["error"] = error
+    elif status == "completed":
+        run.pop("error", None)
+    write_goal_run_record(run)
+
+
+def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None) -> str:
+    if not yes:
+        return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
+    allowed_effects = set(run.get("allowed_effects", []))
+    readonly_effects = {"read_context", "read_allowed_files", "write_motoko_state", "propose_project_changes"}
+    if not allowed_effects <= readonly_effects:
+        return (
+            "goal run:\n"
+            "status: refused\n"
+            "error: model_readonly goal loops may not request write_allowed_project, network, service_control, or privileged effects"
+        )
+    budgets = run.get("budgets") if isinstance(run.get("budgets"), dict) else {}
+    if int(budgets.get("max_model_calls") or 0) < 1 or int(budgets.get("max_steps") or 0) < 3:
+        return "goal run:\nstatus: refused\nerror: model_readonly goal loops require at least 3 steps and 1 model call"
+    if run.get("status") == "completed":
+        return format_goal_run_result(run)
+    lines = [
+        "goal run:",
+        f"id: {run.get('id', '')}",
+        "planner: model_readonly",
+        f"objective: {run.get('objective', '')}",
+    ]
+    if work_pause_requested():
+        run["status"] = "paused"
+        run["note"] = "paused before read-only planning"
+        write_goal_run_record(run)
+        clear_work_pause_request()
+        lines.append("paused: before read-only planning")
+        lines.append("status: paused")
+        lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+        return "\n".join(lines)
+    if cancellation_requested(cancel_event):
+        finish_goal_readonly_run(run, status="interrupted", error="interrupted before read-only planning")
+        lines.append("status: interrupted")
+        lines.append("error: interrupted before read-only planning")
+        lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+        return "\n".join(lines)
+
+    run["status"] = "running"
+    run["planner_steps"] = []
+    write_goal_run_record(run)
+    started = time.monotonic()
+    try:
+        context_text, sources, project_scope = build_goal_readonly_context(run)
+        run["planner_steps"].append(
+            {
+                "phase": "retrieve",
+                "status": "completed",
+                "source_count": len(sources),
+                "project_roots": sorted(project_scope_roots(project_scope)),
+            }
+        )
+        write_goal_run_record(run)
+        if cancellation_requested(cancel_event):
+            finish_goal_readonly_run(run, status="interrupted", error="interrupted after retrieval")
+            lines.append("status: interrupted")
+            lines.append("error: interrupted after retrieval")
+            lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+            return "\n".join(lines)
+        reply = call_model(
+            goal_readonly_messages(run, context_text),
+            temperature=0.2,
+            stream=False,
+            echo=False,
+            route=MODEL_ROUTE_AUDIT,
+            source_count=len(sources),
+            sampling_preset="deterministic",
+            json_schema=GOAL_READONLY_OUTPUT_SCHEMA,
+            max_tokens=GOAL_READONLY_MAX_MODEL_OUTPUT_TOKENS,
+        ).strip()
+        parsed, json_error = extract_json_object(reply)
+        if parsed is None:
+            raise AgenticValidationError(json_error or "read-only planner returned invalid JSON")
+        validations = goal_proposed_action_validations(run, parsed)
+        run["planner_steps"].append(
+            {
+                "phase": "plan_audit",
+                "status": "completed",
+                "model_route": MODEL_ROUTE_AUDIT,
+                "duration_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+        run["readonly_result"] = {
+            "schema": GOAL_READONLY_RESULT_SCHEMA_VERSION,
+            "created": now(),
+            "model_route": MODEL_ROUTE_AUDIT,
+            "source_count": len(sources),
+            "sources": sources[:40],
+            "plan": [str(item) for item in parsed.get("plan", [])[:20]],
+            "retrieval_assessment": str(parsed.get("retrieval_assessment", "")),
+            "observations": [str(item) for item in parsed.get("observations", [])[:40]],
+            "audit": str(parsed.get("audit", "")),
+            "next_steps": [str(item) for item in parsed.get("next_steps", [])[:20]],
+            "proposed_actions": parsed.get("proposed_actions", [])[:20],
+            "proposed_action_validations": validations,
+        }
+        run["model_calls"] = int(run.get("model_calls", 0) or 0) + 1
+        finish_goal_readonly_run(run, status="completed")
+    except SystemExit as exc:
+        finish_goal_readonly_run(run, status="stopped", error=str(exc))
+    except AgenticValidationError as exc:
+        finish_goal_readonly_run(run, status="stopped", error=str(exc))
+    lines.append(f"status: {run.get('status', '')}")
+    if run.get("error"):
+        lines.append(f"error: {run.get('error')}")
+    result = run.get("readonly_result") if isinstance(run.get("readonly_result"), dict) else {}
+    if result:
+        lines.append(f"sources: {result.get('source_count', 0)}")
+        lines.append(f"proposed actions: {len(result.get('proposed_actions', []) or [])}")
+        if result.get("retrieval_assessment"):
+            lines.append(f"retrieval: {compact_text(str(result.get('retrieval_assessment', '')), 240)}")
+        if result.get("audit"):
+            lines.append(f"audit: {compact_text(str(result.get('audit', '')), 240)}")
+    lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+    return "\n".join(lines)
+
+
 def interrupt_goal_run(
     run: dict,
     *,
@@ -6276,6 +6530,8 @@ def interrupt_goal_run(
 
 
 def execute_goal_run_record(run: dict, *, yes: bool, cancel_event=None) -> str:
+    if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY:
+        return execute_goal_readonly_run_record(run, yes=yes, cancel_event=cancel_event)
     if not yes:
         return "goal run:\nstatus: refused\nerror: refusing to run a goal loop without --yes"
     actions = run.get("actions") if isinstance(run.get("actions"), list) else []
@@ -6452,6 +6708,46 @@ def execute_goal_run_record(run: dict, *, yes: bool, cancel_event=None) -> str:
 
 
 def format_goal_run_result(run: dict) -> str:
+    if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_READONLY:
+        result = run.get("readonly_result") if isinstance(run.get("readonly_result"), dict) else {}
+        lines = [
+            "goal run:",
+            f"id: {run.get('id', '')}",
+            f"status: {run.get('status', '')}",
+            "planner: model_readonly",
+            f"objective: {run.get('objective', '')}",
+            f"sources: {result.get('source_count', 0) if result else 0}",
+            f"proposed actions: {len(result.get('proposed_actions', []) or []) if result else 0}",
+        ]
+        if run.get("error"):
+            lines.append(f"error: {run.get('error')}")
+        if result.get("retrieval_assessment"):
+            lines.append(f"retrieval: {compact_text(str(result.get('retrieval_assessment', '')), 360)}")
+        if result.get("plan"):
+            lines.append("plan:")
+            for item in result.get("plan", [])[:8]:
+                lines.append(f"- {item}")
+        if result.get("observations"):
+            lines.append("observations:")
+            for item in result.get("observations", [])[:8]:
+                lines.append(f"- {item}")
+        if result.get("audit"):
+            lines.append(f"audit: {compact_text(str(result.get('audit', '')), 360)}")
+        if result.get("next_steps"):
+            lines.append("next steps:")
+            for item in result.get("next_steps", [])[:8]:
+                lines.append(f"- {item}")
+        if result.get("proposed_action_validations"):
+            lines.append("proposal validations:")
+            for row in result.get("proposed_action_validations", [])[:12]:
+                lines.append(
+                    f"- [{row.get('index')}] {row.get('kind', '')} {row.get('status', '')} "
+                    f"approval={row.get('approval', '')}"
+                )
+                if row.get("reason"):
+                    lines.append(f"  reason: {row.get('reason')}")
+        lines.append(f"record: {goal_run_path(str(run.get('id', '')))}")
+        return "\n".join(lines)
     actions = run.get("actions") if isinstance(run.get("actions"), list) else []
     completed = sum(1 for row in run.get("action_results", []) if row.get("status") == "completed")
     lines = [
@@ -6484,6 +6780,8 @@ def run_goal_text(path_text: str, *, yes: bool = False, cancel_event=None) -> st
         record = core_read_goal_loop(source_path, path_checker=goal_loop_path_checker)
     except (OSError, GoalLoopValidationError) as exc:
         return f"goal run:\nstatus: rejected\nerror: {exc}"
+    if record.get("status") == GOAL_LOOP_STATUS_REJECTED:
+        return f"goal run:\nstatus: rejected\nerror: {record.get('error', 'goal loop rejected')}"
     run = make_goal_run_record(record, source_path=source_path)
     write_goal_run_record(run)
     return execute_goal_run_record(run, yes=yes, cancel_event=cancel_event)
@@ -6495,6 +6793,47 @@ def resume_goal_run_text(selector: str, *, yes: bool = False, cancel_event=None)
     except GoalLoopValidationError as exc:
         return f"goal run:\nstatus: rejected\nerror: {exc}"
     return execute_goal_run_record(run, yes=yes, cancel_event=cancel_event)
+
+
+def format_goal_proposals(selector: str, *, private: bool = False) -> str:
+    try:
+        run = find_goal_run_record(selector)
+    except GoalLoopValidationError as exc:
+        return f"goal proposals:\nstatus: rejected\nerror: {exc}"
+    result = run.get("readonly_result") if isinstance(run.get("readonly_result"), dict) else {}
+    actions = result.get("proposed_actions") if isinstance(result.get("proposed_actions"), list) else []
+    validations = result.get("proposed_action_validations") if isinstance(result.get("proposed_action_validations"), list) else []
+    lines = [
+        "goal proposals:",
+        f"run: {run.get('id', '')}",
+        f"status: {run.get('status', '')}",
+        f"objective: {run.get('objective', '')}",
+        f"count: {len(actions)}",
+    ]
+    if not actions:
+        lines.append("status: empty")
+        return "\n".join(lines)
+    for row in validations:
+        lines.append(
+            f"- [{row.get('index')}] {row.get('kind', '')} {row.get('status', '')} "
+            f"approval={row.get('approval', '')}"
+        )
+        if row.get("mode"):
+            lines.append(f"  mode: {row.get('mode')}")
+        if row.get("content_bytes") is not None:
+            lines.append(f"  content bytes: {row.get('content_bytes')}")
+        if row.get("content_sha256"):
+            lines.append(f"  content sha256: {row.get('content_sha256')}")
+        if row.get("target_path_sha256"):
+            lines.append(f"  target path sha256: {row.get('target_path_sha256')}")
+        if row.get("reason"):
+            lines.append(f"  reason: {row.get('reason')}")
+    if private:
+        lines.append("private proposed action JSON:")
+        lines.append(json.dumps(actions, ensure_ascii=False, indent=2))
+    else:
+        lines.append("private content: hidden (use --private in this user account to inspect action JSON)")
+    return "\n".join(lines)
 
 
 @contextlib.contextmanager
@@ -17228,12 +17567,13 @@ HELP_SECTIONS = [
             ("/action apply FILE --yes", "apply a confirmed project-file write action"),
             ("/action ledger", "show content-safe action/tool ledger rows"),
             ("/action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
-            ("/goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
+            ("/goal plan [--model-readonly] OBJECTIVE", "preview a durable goal-loop record without execution"),
             ("/goal list", "list saved goal-loop drafts"),
             ("/goal preview FILE", "validate a goal-loop JSON file"),
-            ("/goal run FILE --yes", "run an explicit approved goal action list"),
+            ("/goal run FILE --yes", "run an explicit action list or read-only model-planned loop"),
             ("/goal runs", "list durable goal-run checkpoints"),
             ("/goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
+            ("/goal proposals RUN_ID [--private]", "show proposals from a read-only goal run"),
             ("/memorize", "ask Motoko to propose memories from this chat"),
         ],
     ),
@@ -17325,12 +17665,13 @@ HELP_SECTIONS = [
             ("motoko action apply FILE --yes", "apply a confirmed project-file write action"),
             ("motoko action ledger", "show content-safe action/tool ledger rows"),
             ("motoko action result RUN_ID [--private]", "show a tool run result; private content is opt-in"),
-            ("motoko goal plan OBJECTIVE", "preview a durable goal-loop record without execution"),
+            ("motoko goal plan [--model-readonly] OBJECTIVE", "preview a durable goal-loop record without execution"),
             ("motoko goal list", "list saved goal-loop drafts"),
             ("motoko goal preview FILE", "validate a goal-loop JSON file"),
-            ("motoko goal run FILE --yes", "run an explicit approved goal action list"),
+            ("motoko goal run FILE --yes", "run an explicit action list or read-only model-planned loop"),
             ("motoko goal runs", "list durable goal-run checkpoints"),
             ("motoko goal resume RUN_ID --yes", "resume a durable goal-run checkpoint"),
+            ("motoko goal proposals RUN_ID [--private]", "show proposals from a read-only goal run"),
             ("motoko allow-dir DIR", "allow document reads under a directory"),
         ],
     ),
@@ -17996,7 +18337,10 @@ def memory_profile_report_command_request(text: str):
         subcommand = parts[0] if parts else ""
         subbody = parts[1].strip() if len(parts) > 1 else ""
         if subcommand == "plan" and subbody:
-            return "/goal plan", lambda: format_goal_plan(subbody)
+            args = subbody.split()
+            model_readonly = "--model-readonly" in args
+            objective = " ".join(arg for arg in args if arg != "--model-readonly").strip()
+            return "/goal plan", lambda: format_goal_plan(objective, model_readonly=model_readonly)
         if subcommand in {"list", "ls"}:
             return "/goal list", lambda: format_goal_loops()
         if subcommand == "preview" and subbody:
@@ -18021,6 +18365,12 @@ def memory_profile_report_command_request(text: str):
             selectors = [arg for arg in args if arg != "--yes"]
             if selectors:
                 return "/goal resume", lambda: resume_goal_run_text(selectors[0], yes=yes)
+        if subcommand == "proposals" and subbody:
+            args = subbody.split()
+            private = "--private" in args
+            selectors = [arg for arg in args if arg != "--private"]
+            if selectors:
+                return "/goal proposals", lambda: format_goal_proposals(selectors[0], private=private)
     if primary == "/personality" and not body:
         return "/personality", format_personality
     if primary == "/profile" and not body:
@@ -21617,6 +21967,7 @@ def command_goal(args) -> None:
                 scope=args.scope,
                 allowed_tools=args.tool,
                 allowed_effects=args.effect,
+                model_readonly=args.model_readonly,
                 max_steps=args.max_steps,
                 max_model_calls=args.max_model_calls,
                 max_tool_calls=args.max_tool_calls,
@@ -21634,6 +21985,8 @@ def command_goal(args) -> None:
         print_report(format_goal_runs(limit=args.limit))
     elif args.goal_command == "resume":
         print_report(resume_goal_run_text(args.run_id, yes=args.yes))
+    elif args.goal_command == "proposals":
+        print_report(format_goal_proposals(args.run_id, private=args.private))
     else:
         raise SystemExit("unknown goal command")
 
@@ -22336,11 +22689,12 @@ def main(argv: list[str]) -> int:
     goal_plan.add_argument("objective", nargs="+")
     goal_plan.add_argument("--scope", action="append", default=[], help="allowlisted scope path or label")
     goal_plan.add_argument("--tool", action="append", default=[], help="allowed skill/tool selector")
-    goal_plan.add_argument("--effect", action="append", default=[], help="allowed effect tier")
+    goal_plan.add_argument("--effect", action="append", default=None, help="allowed effect tier")
     goal_plan.add_argument("--max-steps", type=int, default=3)
     goal_plan.add_argument("--max-model-calls", type=int, default=6)
     goal_plan.add_argument("--max-tool-calls", type=int, default=6)
     goal_plan.add_argument("--max-minutes", type=int, default=30)
+    goal_plan.add_argument("--model-readonly", action="store_true", help="enable the read-only model-planned runner")
     goal_plan.add_argument("--save", action="store_true", help="save the preview as a disabled goal-loop draft")
     goal_plan.set_defaults(func=command_goal)
     goal_list = goal_sub.add_parser("list", aliases=["ls"], help="list saved goal-loop drafts")
@@ -22360,6 +22714,10 @@ def main(argv: list[str]) -> int:
     goal_resume.add_argument("run_id")
     goal_resume.add_argument("--yes", action="store_true", help="confirm this goal resume")
     goal_resume.set_defaults(func=command_goal)
+    goal_proposals = goal_sub.add_parser("proposals", help="show proposals from a read-only model-planned goal run")
+    goal_proposals.add_argument("run_id")
+    goal_proposals.add_argument("--private", action="store_true", help="show private proposed action JSON in this user account")
+    goal_proposals.set_defaults(func=command_goal)
 
     memory = sub.add_parser("memory", help="review or edit memory provenance")
     memory_sub = memory.add_subparsers(dest="memory_command", required=True)

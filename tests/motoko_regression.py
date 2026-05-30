@@ -9511,6 +9511,113 @@ def test_goal_loop_preview_save_and_list_without_execution(m):
         assert "forbidden effect" in rejected
 
 
+def test_goal_loop_model_readonly_runs_and_stores_reviewable_proposals(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        target = docs / "planned.org"
+        preview = m.format_goal_plan(
+            "Review context and propose a project note",
+            scope=[str(docs)],
+            model_readonly=True,
+            save=True,
+        )
+        assert "planner: model_readonly" in preview
+        assert "runner: read-only model planner" in preview
+        assert "propose_project_changes" in preview
+        goal_path = next(m.goal_loops_dir().glob("*.json"))
+
+        original_call_model = m.call_model
+
+        def fake_call_model(messages, **kwargs):
+            assert kwargs["route"] == m.MODEL_ROUTE_AUDIT
+            assert kwargs["stream"] is False
+            assert kwargs["json_schema"]["required"] == [
+                "plan",
+                "retrieval_assessment",
+                "observations",
+                "proposed_actions",
+                "audit",
+                "next_steps",
+            ]
+            prompt_text = "\n".join(str(message.get("content", "")) for message in messages)
+            assert "Review context and propose a project note" in prompt_text
+            return json.dumps(
+                {
+                    "plan": ["Inspect retrieved context", "Prepare a reviewable proposal"],
+                    "retrieval_assessment": "Enough context for a safe proposal.",
+                    "observations": ["The scope is allowlisted."],
+                    "proposed_actions": [
+                        {
+                            "schema": "motoko-action-v1",
+                            "kind": "project_file_write",
+                            "path": str(target),
+                            "mode": "create",
+                            "content": "* Planned\nprivate planned body\n",
+                            "reason": "Model-planned read-only proposal.",
+                        }
+                    ],
+                    "audit": "No mutation was performed; proposal requires review.",
+                    "next_steps": ["Review the proposed action before applying it elsewhere."],
+                },
+                ensure_ascii=False,
+            )
+
+        try:
+            m.call_model = fake_call_model
+            output = m.run_goal_text(str(goal_path), yes=True)
+        finally:
+            m.call_model = original_call_model
+
+        assert "planner: model_readonly" in output
+        assert "status: completed" in output
+        assert "proposed actions: 1" in output
+        assert not target.exists()
+
+        run = next(iter(m.goal_runs_dir().glob("*.json")))
+        run_record = m.safe_load_json(run)
+        assert run_record["status"] == "completed"
+        assert run_record["planner"] == "model_readonly"
+        assert run_record["readonly_result"]["schema"] == "goal-readonly-result-v1"
+        assert run_record["readonly_result"]["proposed_action_validations"][0]["status"] == "needs_confirmation"
+        assert run_record["readonly_result"]["proposed_action_validations"][0]["kind"] == "project_file_write"
+
+        proposals = m.format_goal_proposals(run_record["id"])
+        assert "goal proposals:" in proposals
+        assert "project_file_write needs_confirmation" in proposals
+        assert "private planned body" not in proposals
+        assert "private content: hidden" in proposals
+
+        private = m.format_goal_proposals(run_record["id"], private=True)
+        assert "private planned body" in private
+
+        resumed = m.resume_goal_run_text(run_record["id"], yes=True)
+        assert "status: completed" in resumed
+        assert not target.exists()
+
+
+def test_goal_loop_model_readonly_rejects_mutating_effects(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        preview = m.format_goal_plan(
+            "Do not allow mutation in read-only planner",
+            scope=[str(docs)],
+            allowed_effects=["write_allowed_project"],
+            model_readonly=True,
+            save=True,
+        )
+        assert "status: rejected" in preview
+        assert "model_readonly goal loops may use only" in preview
+        goal_path = next(m.goal_loops_dir().glob("*.json"))
+        output = m.run_goal_text(str(goal_path), yes=True)
+        assert "status: rejected" in output
+        assert "model_readonly goal loops may use only" in output
+        assert not list(m.goal_runs_dir().glob("*.json"))
+
+
 def test_goal_loop_runs_explicit_confirmed_action_list(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -9783,6 +9890,8 @@ def main() -> int:
         test_project_file_write_action_is_code_owned_and_confirmed,
         test_project_file_write_overwrite_requires_expected_hash,
         test_goal_loop_preview_save_and_list_without_execution,
+        test_goal_loop_model_readonly_runs_and_stores_reviewable_proposals,
+        test_goal_loop_model_readonly_rejects_mutating_effects,
         test_goal_loop_runs_explicit_confirmed_action_list,
         test_goal_run_pause_resume_preserves_completed_actions,
         test_goal_run_interruption_preserves_completed_actions,

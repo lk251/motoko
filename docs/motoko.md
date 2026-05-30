@@ -675,12 +675,13 @@ motoko action result RUN_ID [--private]
 motoko action proposals RUN_ID
 motoko action apply-proposal RUN_ID INDEX --yes
 motoko action-eval [--write] [--json]
-motoko goal plan "objective" [--save]
+motoko goal plan "objective" [--model-readonly] [--save]
 motoko goal list
 motoko goal preview GOAL.json
 motoko goal run GOAL.json --yes
 motoko goal runs
 motoko goal resume RUN_ID --yes
+motoko goal proposals RUN_ID [--private]
 motoko skill review [CONVERSATION_ID]
 motoko skill upgrade
 motoko skill suggestions
@@ -807,17 +808,26 @@ Goal loops are still deliberately narrow. `motoko goal plan "objective"` builds
 a `motoko-goal-loop-v1` record with objective, scope, allowed tools/effects,
 budgets, stop conditions, and phases. `--save` stores the draft under the
 current user's Motoko state; `motoko goal list` and `motoko goal preview
-GOAL.json` inspect saved or external loop records. `motoko goal run GOAL.json
---yes` only runs an explicit action list already present in the loop record,
-and each action still passes through the same action validator, effect checks,
-budgets, confirmations, and ledger path. There is no autonomous model loop yet.
+GOAL.json` inspect saved or external loop records.
+
+There are two enabled runners. The explicit runner uses an action list already
+present in the loop record; each action still passes through the same action
+validator, effect checks, budgets, confirmations, and ledger path. The
+read-only model-planned runner is opt-in with `motoko goal plan
+--model-readonly "objective" --save`. It may plan, retrieve context, inspect,
+audit, and produce reviewable typed action proposals, but it refuses
+`write_allowed_project`, `network`, `service_control`, and `privileged`
+effects, and it does not apply mutations. Use `motoko goal proposals RUN_ID`
+to inspect the content-safe proposal summary; add `--private` only in the
+owning Unix account when intentionally printing the proposed action JSON.
+
 Confirmed runs create `goal-run-v1` checkpoints under the current user's Motoko
 state. `motoko goal runs` lists those checkpoints, and `motoko goal resume
 RUN_ID --yes` resumes from the next incomplete action or reports an already
-completed run. Checkpoints contain content needed to validate and replay the
-typed actions, but not model-planned hidden state. `motoko pause` and `/pause`
-are honored between actions, so a paused goal run keeps completed action
-results and resumes at the next pending action.
+completed run. Explicit action-list runs honor `motoko pause` and `/pause`
+between actions, so a paused goal run keeps completed action results and
+resumes at the next pending action. Mutating autonomous model-planned loops
+remain disabled.
 `network` loops require future approval; `service_control` and `privileged`
 are rejected.
 

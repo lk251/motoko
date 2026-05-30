@@ -1455,19 +1455,19 @@ automation after separate review.
 
 Agentic roadmap gates not completed by design:
 
-- Script-assisted project mutation: Motoko can already apply code-owned
-  `project_file_write` actions, but script tools cannot directly write project
-  files. The attractive next step is not raw write authority; it is letting
-  approved scripts produce structured patch/write proposals that Motoko applies
-  through the existing allowlist, `.motokoignore`, expected-hash, confirmation,
-  atomic-write, ledger, pause, and checkpoint path. This is likely the
-  highest-value next agentic gate because it turns Motoko's understanding into
-  useful local project changes while keeping authority inspectable.
-- Autonomous model-planned loops: only explicit action-list loops are enabled.
-  A future loop may let the model plan, retrieve, act through approved
-  handlers/tools, observe, audit, checkpoint, and continue within a budget, but
-  the first safe production form should be read-only planning/retrieval/audit
-  plus user-confirmed actions.
+- Script-assisted project mutation: implemented as structured proposals.
+  Approved scripts may produce `project_file_write` proposals, but Motoko
+  still owns validation, `.motokoignore`, expected-hash, confirmation,
+  atomic-write, ledger, pause, and checkpoint boundaries. Raw script writes
+  remain disabled.
+- Read-only model-planned loops: implemented as explicit `planner:
+  model_readonly` goal loops. They plan, retrieve, inspect, audit, and propose
+  typed actions under budget, then stop for review. Mutating model-planned
+  loops remain disabled.
+- User-confirmed mutating model loops: not enabled. A future loop may apply
+  already validated actions with explicit confirmation, durable checkpoints,
+  visible progress, cancellation, and final audit after the read-only form is
+  stable.
 - Network tools: not enabled. They require a NixOS-reviewed wrapper or policy,
   explicit destination/purpose metadata, no ambient secrets, and content-free
   telemetry.
@@ -1480,19 +1480,17 @@ Agentic roadmap gates not completed by design:
 
 Relative priority for increasing Motoko's intelligence and competence:
 
-1. Continue improving retrieval/memory/skills first, and harden the newly added
-   script-assisted project-proposal lane: these directly affect whether Motoko
-   understands the local corpus, remembers useful procedure, and can safely
-   turn good analysis into useful changes.
-2. Add read-only autonomous goal loops next: planning, retrieval, audit, and
-   proposal loops can make Motoko more persistent and competent without
-   granting new mutation authority.
-3. Add user-confirmed mutating goal loops only after read-only loops and the
+1. Continue improving retrieval/memory/skills, and harden the project-proposal
+   lane plus read-only model-planned goal loops through real use and evals.
+   These directly affect whether Motoko understands the local corpus,
+   remembers useful procedure, and can safely turn good analysis into useful
+   proposals.
+2. Add user-confirmed mutating goal loops only after read-only loops and the
    project-proposal lane have strong evals and checkpoint behavior.
-4. Consider Hermes-style background skill improvement continuously, but keep
+3. Consider Hermes-style background skill improvement continuously, but keep
    Motoko's stricter typed-action and approval boundary instead of importing a
    broad terminal/tool runtime.
-5. Treat network tools and stronger sandboxing as enabling infrastructure for
+4. Treat network tools and stronger sandboxing as enabling infrastructure for
    specific future tools, not as primary intelligence work by themselves.
 
 Immediate next agentic implementation sequence, when development resumes:
@@ -1504,12 +1502,14 @@ Immediate next agentic implementation sequence, when development resumes:
    through `motoko action apply-proposal RUN_ID INDEX --yes`. Raw script writes
    remain blocked. Future work can add patch-style proposals on the same
    boundary if real usage shows that full-file writes are too coarse.
-2. Build read-only autonomous goal loops. The first model-planned loop should
-   plan, retrieve, inspect, audit, and propose typed actions inside a budget,
-   then stop for user review. It should not mutate project files.
-3. Only after the first two are stable, build user-confirmed mutating goal
-   loops that can apply already validated actions with explicit confirmation,
-   durable checkpoints, visible progress, cancellation, and final audit.
+2. Read-only autonomous goal loops are now implemented as opt-in
+   `model_readonly` records. The runner plans, retrieves, inspects, audits, and
+   proposes typed actions inside a budget, then stops for user review without
+   mutating project files.
+3. Only after the proposal and read-only gates are stable, build
+   user-confirmed mutating goal loops that can apply already validated actions
+   with explicit confirmation, durable checkpoints, visible progress,
+   cancellation, and final audit.
 4. Keep Hermes-style skill improvement running as a parallel craft track:
    prompted self-review, loaded-skill patching, support-file use, and
    feedback-derived evals should steadily improve Motoko's procedural memory.

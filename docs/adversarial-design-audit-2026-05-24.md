@@ -287,17 +287,18 @@ Ideas not to copy directly:
 3. Add script-assisted project mutation through structured proposals, not raw
    script writes.
 
-The first three items are now implemented. Script-assisted mutation is enabled
+The first four items are now implemented. Script-assisted mutation is enabled
 only as `propose_project_changes` plus typed `project_file_write` proposals;
 Motoko still owns validation, confirmation, atomic writes, and ledgers.
+Read-only model-planned goal loops are enabled as explicit
+`planner: model_readonly` records that retrieve, plan, audit, and propose
+without mutating files.
 
 Remaining:
 
-1. Add read-only model-planned goal loops with budgets, checkpoints, and final
-   audit.
-2. Extend artifact lifecycle application across vectors, evidence, dossiers,
+1. Extend artifact lifecycle application across vectors, evidence, dossiers,
    memories, feedback, profiles, and conversation-derived artifacts.
-3. Add static script/skill scanning before any external skill import path.
+2. Add static script/skill scanning before any external skill import path.
 
 ## Validation Added By This Audit
 
