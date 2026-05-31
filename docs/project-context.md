@@ -1260,6 +1260,11 @@ Current progress on this stretch:
   index-reference detection, affected-source expansion, and normalized
   artifact-record shape used by the root facade's family-specific state
   scanner.
+- Progress: lifecycle ownership has moved further into the service:
+  `motoko_core.artifact_lifecycle` now collects source-lifecycle artifact
+  records from JSON artifact directories, JSONL ledgers, and single JSON state
+  files through injected load/size callbacks. The root facade supplies only
+  explicit state-family paths, cleanup policies, and deletion callbacks.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import json
 import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
@@ -183,6 +184,197 @@ def source_artifact_record(
         "row_count": row_count,
         "bytes_estimate": int(bytes_estimate or 0),
     }
+
+
+def _path_size(path: pathlib.Path, path_size: Callable[[pathlib.Path], int] | None) -> int:
+    if path_size is None:
+        return 0
+    try:
+        return int(path_size(path) or 0)
+    except OSError:
+        return 0
+
+
+def json_artifact_records_for_source_lifecycle(
+    directory: str | pathlib.Path,
+    *,
+    artifact_kind: str,
+    cleanup_policy: str,
+    index_id: str,
+    source_paths: set[str],
+    load_json: Callable[[pathlib.Path], object | None],
+    path_size: Callable[[pathlib.Path], int] | None = None,
+) -> list[dict]:
+    """Collect lifecycle records from JSON artifacts in one state directory."""
+
+    root = pathlib.Path(directory)
+    records: list[dict] = []
+    if not root.exists():
+        return records
+    for path in sorted(root.glob("*.json")):
+        data = load_json(path)
+        if data is None:
+            continue
+        references_index = json_references_index(data, index_id)
+        matched_paths = sorted(json_matching_source_paths(data, source_paths))
+        if not references_index and not matched_paths:
+            continue
+        records.append(
+            source_artifact_record(
+                artifact_id=str(data.get("id", path.stem)) if isinstance(data, dict) else path.stem,
+                artifact_kind=artifact_kind,
+                state_path=path,
+                cleanup_policy=cleanup_policy,
+                source_index_ids=[index_id] if references_index else [],
+                source_paths=matched_paths,
+                bytes_estimate=_path_size(path, path_size),
+            )
+        )
+    return records
+
+
+def json_file_artifact_record_for_source_lifecycle(
+    path: str | pathlib.Path,
+    *,
+    artifact_id: str,
+    artifact_kind: str,
+    cleanup_policy: str,
+    index_id: str,
+    source_paths: set[str],
+    load_json: Callable[[pathlib.Path], object | None],
+    path_size: Callable[[pathlib.Path], int] | None = None,
+) -> dict | None:
+    """Collect one lifecycle record from a single JSON state file."""
+
+    state_path = pathlib.Path(path)
+    if not state_path.exists():
+        return None
+    data = load_json(state_path)
+    if data is None:
+        return None
+    references_index = json_references_index(data, index_id)
+    matched_paths = sorted(json_matching_source_paths(data, source_paths))
+    if not references_index and not matched_paths:
+        return None
+    return source_artifact_record(
+        artifact_id=artifact_id,
+        artifact_kind=artifact_kind,
+        state_path=state_path,
+        cleanup_policy=cleanup_policy,
+        source_index_ids=[index_id] if references_index else [],
+        source_paths=matched_paths,
+        bytes_estimate=_path_size(state_path, path_size),
+    )
+
+
+def jsonl_artifact_record_for_source_lifecycle(
+    path: str | pathlib.Path,
+    *,
+    artifact_kind: str,
+    cleanup_policy: str,
+    index_id: str,
+    source_paths: set[str],
+    path_size: Callable[[pathlib.Path], int] | None = None,
+) -> dict | None:
+    """Collect one lifecycle record from a JSONL artifact ledger."""
+
+    state_path = pathlib.Path(path)
+    if not state_path.exists():
+        return None
+    row_count = 0
+    references_index = False
+    matched_paths: set[str] = set()
+    try:
+        with state_path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                row_index = json_references_index(row, index_id)
+                row_paths = json_matching_source_paths(row, source_paths)
+                if row_index or row_paths:
+                    row_count += 1
+                    references_index = references_index or row_index
+                    matched_paths.update(row_paths)
+    except OSError:
+        return None
+    if not row_count:
+        return None
+    return source_artifact_record(
+        artifact_id=state_path.stem,
+        artifact_kind=artifact_kind,
+        state_path=state_path,
+        cleanup_policy=cleanup_policy,
+        source_index_ids=[index_id] if references_index else [],
+        source_paths=sorted(matched_paths),
+        row_count=row_count,
+        bytes_estimate=_path_size(state_path, path_size),
+    )
+
+
+def collect_source_lifecycle_artifact_records(
+    *,
+    index_id: str,
+    source_paths: set[str],
+    load_json: Callable[[pathlib.Path], object | None],
+    path_size: Callable[[pathlib.Path], int] | None = None,
+    json_dirs: list[dict] | None = None,
+    jsonl_files: list[dict] | None = None,
+    json_files: list[dict] | None = None,
+) -> list[dict]:
+    """Collect normalized lifecycle records from known artifact families.
+
+    The Motoko facade supplies explicit state paths and filesystem callbacks;
+    this service owns the matching, policy normalization, and stable sorting.
+    """
+
+    records: list[dict] = []
+    for target in json_dirs or []:
+        records.extend(
+            json_artifact_records_for_source_lifecycle(
+                target.get("path", ""),
+                artifact_kind=str(target.get("artifact_kind", "")),
+                cleanup_policy=str(target.get("cleanup_policy", "manual-review")),
+                index_id=index_id,
+                source_paths=source_paths,
+                load_json=load_json,
+                path_size=path_size,
+            )
+        )
+    for target in jsonl_files or []:
+        record = jsonl_artifact_record_for_source_lifecycle(
+            target.get("path", ""),
+            artifact_kind=str(target.get("artifact_kind", "")),
+            cleanup_policy=str(target.get("cleanup_policy", "manual-review")),
+            index_id=index_id,
+            source_paths=source_paths,
+            path_size=path_size,
+        )
+        if record is not None:
+            records.append(record)
+    for target in json_files or []:
+        artifact_kind = str(target.get("artifact_kind", ""))
+        record = json_file_artifact_record_for_source_lifecycle(
+            target.get("path", ""),
+            artifact_id=str(target.get("artifact_id") or artifact_kind),
+            artifact_kind=artifact_kind,
+            cleanup_policy=str(target.get("cleanup_policy", "manual-review")),
+            index_id=index_id,
+            source_paths=source_paths,
+            load_json=load_json,
+            path_size=path_size,
+        )
+        if record is not None:
+            records.append(record)
+    records.sort(
+        key=lambda item: (
+            item.get("cleanup_policy", ""),
+            item.get("artifact_kind", ""),
+            item.get("artifact_id", ""),
+        )
+    )
+    return records
 
 
 def source_lifecycle_artifact_plan(

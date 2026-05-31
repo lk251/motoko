@@ -450,10 +450,9 @@ from motoko_core.runtime import (  # noqa: E402
 )
 from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
+    collect_source_lifecycle_artifact_records,
     format_source_lifecycle_report,
-    json_matching_source_paths,
     json_references_index,
-    source_artifact_record,
     source_lifecycle_affected_paths,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
@@ -12320,193 +12319,59 @@ def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
     }
 
 
-def json_artifact_records_for_source_lifecycle(
-    directory: pathlib.Path,
-    *,
-    artifact_kind: str,
-    cleanup_policy: str,
-    index_id: str,
-    source_paths: set[str],
-) -> list[dict]:
-    records = []
-    if not directory.exists():
-        return records
-    for path in sorted(directory.glob("*.json")):
-        data = safe_load_json(path)
-        if data is None:
-            continue
-        references_index = json_references_index(data, index_id)
-        matched_paths = sorted(json_matching_source_paths(data, source_paths))
-        if not references_index and not matched_paths:
-            continue
-        records.append(
-            source_artifact_record(
-                artifact_id=str(data.get("id", path.stem)) if isinstance(data, dict) else path.stem,
-                artifact_kind=artifact_kind,
-                state_path=path,
-                cleanup_policy=cleanup_policy,
-                source_index_ids=[index_id] if references_index else [],
-                source_paths=matched_paths,
-                bytes_estimate=path_size(path),
-            )
-        )
-    return records
-
-
-def jsonl_artifact_record_for_source_lifecycle(
-    path: pathlib.Path,
-    *,
-    artifact_kind: str,
-    cleanup_policy: str,
-    index_id: str,
-    source_paths: set[str],
-) -> dict | None:
-    if not path.exists():
-        return None
-    row_count = 0
-    references_index = False
-    matched_paths: set[str] = set()
-    try:
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                row_index = json_references_index(row, index_id)
-                row_paths = json_matching_source_paths(row, source_paths)
-                if row_index or row_paths:
-                    row_count += 1
-                    references_index = references_index or row_index
-                    matched_paths.update(row_paths)
-    except OSError:
-        return None
-    if not row_count:
-        return None
-    return source_artifact_record(
-        artifact_id=path.stem,
-        artifact_kind=artifact_kind,
-        state_path=path,
-        cleanup_policy=cleanup_policy,
-        source_index_ids=[index_id] if references_index else [],
-        source_paths=sorted(matched_paths),
-        row_count=row_count,
-        bytes_estimate=path_size(path),
-    )
-
-
-def conversation_artifact_records_for_source_lifecycle(
-    *,
-    index_id: str,
-    source_paths: set[str],
-) -> list[dict]:
-    records = []
-    if not conversations_dir().exists():
-        return records
-    for path in sorted(conversations_dir().glob("*.json")):
-        data = safe_load_json(path)
-        if data is None:
-            continue
-        references_index = json_references_index(data, index_id)
-        matched_paths = sorted(json_matching_source_paths(data, source_paths))
-        if not references_index and not matched_paths:
-            continue
-        records.append(
-            source_artifact_record(
-                artifact_id=str(data.get("id", path.stem)) if isinstance(data, dict) else path.stem,
-                artifact_kind="conversation",
-                state_path=path,
-                cleanup_policy="manual-review",
-                source_index_ids=[index_id] if references_index else [],
-                source_paths=matched_paths,
-                bytes_estimate=path_size(path),
-            )
-        )
-    return records
-
-
 def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> list[dict]:
-    records = []
-    for directory, artifact_kind, cleanup_policy in [
-        (vector_stores_dir(), "vector_store", "delete-derived"),
-        (evidence_stores_dir(), "evidence_store", "delete-derived"),
-        (vector_progress_dir(), "vector_progress", "delete-derived"),
-        (topics_dir(), "topic_dossier", "delete-derived"),
-        (dossiers_dir(), "memory_dossier", "delete-derived"),
-        (retrieval_debug_dir(), "retrieval_debug", "delete-derived"),
-        (retrieval_evals_dir(), "retrieval_eval", "delete-derived"),
-        (feedback_evals_dir(), "feedback_eval", "delete-derived"),
-        (action_evals_dir(), "action_eval", "delete-derived"),
-        (model_evals_dir(), "model_eval", "delete-derived"),
-        (goal_loops_dir(), "goal_loop", "manual-review"),
-        (goal_runs_dir(), "goal_run", "manual-review"),
-    ]:
-        records.extend(
-            json_artifact_records_for_source_lifecycle(
-                directory,
-                artifact_kind=artifact_kind,
-                cleanup_policy=cleanup_policy,
-                index_id=index_id,
-                source_paths=source_paths,
-            )
-        )
-    for path, artifact_kind in [
-        (response_feedback_path(), "response_feedback"),
-        (action_ledger_path(), "action_ledger"),
-        (memories_path(), "memory"),
-        (memory_proposal_queue_path(), "memory_proposal"),
-        (study_jobs_path(), "study_job"),
-    ]:
-        record = jsonl_artifact_record_for_source_lifecycle(
-            path,
-            artifact_kind=artifact_kind,
-            cleanup_policy="manual-review",
-            index_id=index_id,
-            source_paths=source_paths,
-        )
-        if record is not None:
-            records.append(record)
-    for path, artifact_kind in [
-        (skill_suggestions_path(), "skill_suggestion"),
-        (skill_lifecycle_path(), "skill_lifecycle"),
-    ]:
-        data = safe_load_json(path)
-        if data is None:
-            continue
-        references_index = json_references_index(data, index_id)
-        matched_paths = sorted(json_matching_source_paths(data, source_paths))
-        if not references_index and not matched_paths:
-            continue
-        records.append(
-            source_artifact_record(
-                artifact_id=artifact_kind,
-                artifact_kind=artifact_kind,
-                state_path=path,
-                cleanup_policy="manual-review",
-                source_index_ids=[index_id] if references_index else [],
-                source_paths=matched_paths,
-                bytes_estimate=path_size(path),
-            )
-        )
-    profile = safe_load_json(profile_path())
-    if profile is not None:
-        references_index = json_references_index(profile, index_id)
-        matched_paths = sorted(json_matching_source_paths(profile, source_paths))
-        if references_index or matched_paths:
-            records.append(
-                source_artifact_record(
-                    artifact_id="profile",
-                    artifact_kind="profile_dossier",
-                    state_path=profile_path(),
-                    cleanup_policy="manual-review",
-                    source_index_ids=[index_id] if references_index else [],
-                    source_paths=matched_paths,
-                    bytes_estimate=path_size(profile_path()),
-                )
-            )
-    records.extend(conversation_artifact_records_for_source_lifecycle(index_id=index_id, source_paths=source_paths))
-    records.sort(key=lambda item: (item.get("cleanup_policy", ""), item.get("artifact_kind", ""), item.get("artifact_id", "")))
-    return records
+    return collect_source_lifecycle_artifact_records(
+        index_id=index_id,
+        source_paths=source_paths,
+        load_json=safe_load_json,
+        path_size=path_size,
+        json_dirs=[
+            {"path": vector_stores_dir(), "artifact_kind": "vector_store", "cleanup_policy": "delete-derived"},
+            {"path": evidence_stores_dir(), "artifact_kind": "evidence_store", "cleanup_policy": "delete-derived"},
+            {"path": vector_progress_dir(), "artifact_kind": "vector_progress", "cleanup_policy": "delete-derived"},
+            {"path": topics_dir(), "artifact_kind": "topic_dossier", "cleanup_policy": "delete-derived"},
+            {"path": dossiers_dir(), "artifact_kind": "memory_dossier", "cleanup_policy": "delete-derived"},
+            {"path": retrieval_debug_dir(), "artifact_kind": "retrieval_debug", "cleanup_policy": "delete-derived"},
+            {"path": retrieval_evals_dir(), "artifact_kind": "retrieval_eval", "cleanup_policy": "delete-derived"},
+            {"path": feedback_evals_dir(), "artifact_kind": "feedback_eval", "cleanup_policy": "delete-derived"},
+            {"path": action_evals_dir(), "artifact_kind": "action_eval", "cleanup_policy": "delete-derived"},
+            {"path": model_evals_dir(), "artifact_kind": "model_eval", "cleanup_policy": "delete-derived"},
+            {"path": goal_loops_dir(), "artifact_kind": "goal_loop", "cleanup_policy": "manual-review"},
+            {"path": goal_runs_dir(), "artifact_kind": "goal_run", "cleanup_policy": "manual-review"},
+            {"path": conversations_dir(), "artifact_kind": "conversation", "cleanup_policy": "manual-review"},
+        ],
+        jsonl_files=[
+            {"path": response_feedback_path(), "artifact_kind": "response_feedback", "cleanup_policy": "manual-review"},
+            {"path": action_ledger_path(), "artifact_kind": "action_ledger", "cleanup_policy": "manual-review"},
+            {"path": memories_path(), "artifact_kind": "memory", "cleanup_policy": "manual-review"},
+            {
+                "path": memory_proposal_queue_path(),
+                "artifact_kind": "memory_proposal",
+                "cleanup_policy": "manual-review",
+            },
+            {"path": study_jobs_path(), "artifact_kind": "study_job", "cleanup_policy": "manual-review"},
+        ],
+        json_files=[
+            {
+                "path": skill_suggestions_path(),
+                "artifact_id": "skill_suggestion",
+                "artifact_kind": "skill_suggestion",
+                "cleanup_policy": "manual-review",
+            },
+            {
+                "path": skill_lifecycle_path(),
+                "artifact_id": "skill_lifecycle",
+                "artifact_kind": "skill_lifecycle",
+                "cleanup_policy": "manual-review",
+            },
+            {
+                "path": profile_path(),
+                "artifact_id": "profile",
+                "artifact_kind": "profile_dossier",
+                "cleanup_policy": "manual-review",
+            },
+        ],
+    )
 
 
 def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:

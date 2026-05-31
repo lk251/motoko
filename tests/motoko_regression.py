@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
+    collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
     format_source_lifecycle_report as format_source_lifecycle_report_core,
     json_matching_source_paths as json_matching_source_paths_core,
     json_references_index as json_references_index_core,
@@ -9150,6 +9151,84 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     )
     assert record["bytes_estimate"] == 42
     assert record["cleanup_policy"] == "delete-derived"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        json_dir = root / "json"
+        json_dir.mkdir()
+        json_path = json_dir / "vector.json"
+        json_path.write_text(
+            json.dumps(
+                {
+                    "id": "vector-store",
+                    "source_index": "old-index",
+                    "sources": [{"path": "/tmp/docs/a.org"}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        jsonl_path = root / "feedback.jsonl"
+        jsonl_path.write_text(
+            json.dumps({"source": "/tmp/docs/a.org"}) + "\n"
+            + "{not-json}\n"
+            + json.dumps({"source_index": "other-index"}) + "\n",
+            encoding="utf-8",
+        )
+        single_path = root / "profile.json"
+        single_path.write_text(
+            json.dumps({"source_indexes": ["old-index"], "note": "manual durable state"}) + "\n",
+            encoding="utf-8",
+        )
+
+        def load_json(path):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+
+        records = collect_source_lifecycle_artifact_records_core(
+            index_id="old-index",
+            source_paths={"/tmp/docs/a.org"},
+            load_json=load_json,
+            path_size=lambda path: path.stat().st_size,
+            json_dirs=[
+                {
+                    "path": json_dir,
+                    "artifact_kind": "vector_store",
+                    "cleanup_policy": "delete-derived",
+                }
+            ],
+            jsonl_files=[
+                {
+                    "path": jsonl_path,
+                    "artifact_kind": "response_feedback",
+                    "cleanup_policy": "manual-review",
+                }
+            ],
+            json_files=[
+                {
+                    "path": single_path,
+                    "artifact_id": "profile",
+                    "artifact_kind": "profile_dossier",
+                    "cleanup_policy": "manual-review",
+                }
+            ],
+        )
+    assert [item["artifact_kind"] for item in records] == [
+        "vector_store",
+        "profile_dossier",
+        "response_feedback",
+    ]
+    assert records[0]["artifact_id"] == "vector-store"
+    assert records[0]["cleanup_policy"] == "delete-derived"
+    assert records[0]["source_index_ids"] == ["old-index"]
+    assert records[0]["source_paths"] == ["/tmp/docs/a.org"]
+    assert records[1]["artifact_id"] == "profile"
+    assert records[1]["source_index_ids"] == ["old-index"]
+    assert records[2]["artifact_id"] == "feedback"
+    assert records[2]["row_count"] == 1
+    assert records[2]["source_paths"] == ["/tmp/docs/a.org"]
+    assert all(item["bytes_estimate"] > 0 for item in records)
 
     index = {
         "id": "old-index",
