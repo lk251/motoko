@@ -315,6 +315,17 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
     review. Mutating autonomous loops remain out of scope until the review loop
     is boringly reliable.
 
+Current progress on this backlog:
+
+- Always-fresh context behavior now refreshes attached index references at
+  prompt/retrieval time and after background study completion. The next
+  improvement is doing the same explicitly for evidence, vector, dossier, and
+  memory attachment summaries wherever a long-lived TUI view caches them.
+- Vector refresh diagnostics now expose content-free mode/cause labels such as
+  `full missing`, `resumed checkpoint`, `incremental source-change`, and
+  `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh should
+  get the same treatment if its status becomes ambiguous in practice.
+
 Skill work that should usually happen before new code:
 
 - Patch `motoko-codebase-maintainer` when code-map/code-query learns a better

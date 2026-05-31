@@ -1286,6 +1286,15 @@ Current progress on this stretch:
   that long operations can observe at durable checkpoints. TUI blocking work
   already used this shape; this extends the same cancellation path to direct
   CLI commands.
+- Progress: vector refresh status now reports a content-free refresh mode and
+  cause (`full missing`, `resumed checkpoint`, `incremental source-change`,
+  `reuse-only`, `rebuild schema/route`) plus reuse/new row counts before the
+  first model batch starts. Reports also persist the mode/cause so incremental
+  vectorization is inspectable after completion.
+- Progress: long-lived TUI sessions now refresh attached index references after
+  background study completion, complementing the existing prompt-time resync.
+  Fresh evidence/vector/dossier attachment summaries are still candidates for
+  the next always-fresh context pass.
 
 Completion criteria for this next stretch:
 

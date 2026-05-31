@@ -103,11 +103,12 @@ Design constraints:
   instead of being squeezed into one oversized or heavily truncated request;
   each subrow still maps back to the original file/chunk for provenance and
   hybrid retrieval deduplication.
-  Progress messages include an ETA once completed rows provide enough
-  throughput data. If the route cannot sustain the requested parallelism,
-  Motoko saves completed rows and retries remaining batches at lower
-  parallelism. Dense vectors are rebuilt from the saved source index when the
-  vector schema, embedding input schema/split policy, source fingerprint,
+  Progress messages report whether the refresh is full, resumed, incremental,
+  reuse-only, or a schema/route rebuild, and include an ETA once completed rows
+  provide enough throughput data. If the route cannot sustain the requested
+  parallelism, Motoko saves completed rows and retries remaining batches at
+  lower parallelism. Dense vectors are rebuilt from the saved source index when
+  the vector schema, embedding input schema/split policy, source fingerprint,
   embedding route, model, or dimensions change; Motoko does not pretend old
   embedding coordinates can be migrated across incompatible embedding models.
 - `motoko vector-eval` runs the synthetic retrieval fixtures through the

@@ -1192,6 +1192,10 @@ def test_phase_timer_key_ignores_progress_counters(m):
     assert m.phase_timer_key(left) == "bg-heavy: vectorizing(model)"
     incremental = "bg-heavy: vectorizing(model) incremental reuse 9000 new 25 batch 1/2 parallel 32 rows 9012/9025 eta 2s"
     assert m.phase_timer_key(incremental) == "bg-heavy: vectorizing(model)"
+    full = "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+    assert m.phase_timer_key(full) == "bg-heavy: vectorizing(model)"
+    resumed = "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 eta 2m00s"
+    assert m.phase_timer_key(resumed) == "bg-heavy: vectorizing(model)"
     assert m.phase_timer_key("study: planning") != m.phase_timer_key(left)
 
 
@@ -1220,6 +1224,32 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert incremental == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
 
+    full = m.format_vector_progress_phase(
+        completed_batches=0,
+        total_batches=5,
+        active_parallelism=32,
+        completed_rows=0,
+        total_rows=160,
+        eta_seconds=None,
+        refresh_mode="full",
+        refresh_cause="missing",
+    )
+    assert full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+
+    resumed = m.format_vector_progress_phase(
+        completed_batches=2,
+        total_batches=5,
+        active_parallelism=32,
+        completed_rows=80,
+        total_rows=160,
+        eta_seconds=120,
+        reused_rows=80,
+        pending_rows=80,
+        refresh_mode="resumed",
+        refresh_cause="checkpoint",
+    )
+    assert resumed == "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 eta 2m00s"
+
     finalizing = m.format_vector_progress_phase(
         completed_batches=5,
         total_batches=5,
@@ -1234,6 +1264,10 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert sanitized == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
     assert "orgfiles" not in sanitized
+    sanitized_full = m.sanitize_background_phase(
+        "bg-heavy: vectorizing(model) orgfiles full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+    )
+    assert sanitized_full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
 
 
 def test_generated_title(m):
@@ -7383,6 +7417,39 @@ def test_vector_refresh_model_residency_defer_is_retryable(m):
         assert "note: embedding request deferred" in text
 
 
+def test_vector_refresh_report_shows_refresh_mode_and_cause(m):
+    report = {
+        "status": "built",
+        "built": 1,
+        "method": "embedding-v1",
+        "created": "2026-05-31T00:00:00+00:00",
+        "items": [
+            {
+                "status": "built",
+                "index_id": "idx1",
+                "name": "docs",
+                "reason": "source index fingerprint changed",
+                "store_id": "store1",
+                "rows": 12,
+                "batches": 2,
+                "parallelism": 4,
+                "requested_parallelism": 8,
+                "fallbacks": 1,
+                "refresh_mode": "incremental",
+                "refresh_cause": "source-change",
+                "reused_rows": 10,
+                "embedded_rows": 2,
+                "superseded_rows": 3,
+            }
+        ],
+    }
+
+    text = m.format_vector_refresh_report(report)
+
+    assert "refresh: mode=incremental cause=source-change" in text
+    assert "incremental: reused=10 embedded=2 superseded=3" in text
+
+
 def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -7919,7 +7986,7 @@ def test_embedding_vector_store_resumes_saved_progress(m):
 
             def pause_after_first_batch(message: str) -> None:
                 progress_messages.append(message)
-                if not paused["requested"]:
+                if not paused["requested"] and "rows 0/" not in message:
                     paused["requested"] = True
                     m.request_work_pause("test")
 
@@ -8077,6 +8144,7 @@ def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
             assert store2["source_index"]["id"] == index2["id"]
             assert store2["source_index"]["family_key"] == m.index_family_key(index2)
             assert store2["embedding_reuse_store_id"] == store1["id"]
+            assert store2["embedding_refresh_mode"] == "incremental"
             assert store2["embedding_previous_store_reused_rows"] >= 2
             assert store2["embedding_superseded_rows"] >= 1
             assert len(model_inputs) == store2["embedding_embedded_rows"]

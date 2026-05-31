@@ -260,6 +260,11 @@ def format_vector_refresh_report(report: dict) -> str:
                 f"requested={item.get('requested_parallelism', item.get('parallelism', 1))} "
                 f"fallbacks={item.get('fallbacks', 0)}"
             )
+            if item.get("refresh_mode") or item.get("refresh_cause"):
+                lines.append(
+                    f"  refresh: mode={item.get('refresh_mode', '') or 'unknown'} "
+                    f"cause={item.get('refresh_cause', '') or 'unknown'}"
+                )
             if item.get("reused_rows") or item.get("embedded_rows") is not None or item.get("superseded_rows"):
                 lines.append(
                     f"  incremental: reused={item.get('reused_rows', 0)} "

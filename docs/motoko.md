@@ -1728,7 +1728,14 @@ route fails under the requested concurrency, Motoko checkpoints completed rows
 and retries the remaining work at half the parallelism until it reaches one
 request at a time or the work succeeds. Progress messages include a row-based
 ETA once the current run has enough completed rows to estimate throughput.
-Vector status labels are intentionally content-free. They show batch, row,
+Before the first model batch starts, Motoko reports the safe refresh shape it
+has already determined: `full`, `resumed`, `incremental`, `reuse-only`, or
+`rebuild`, plus a content-free cause such as `missing`, `source-change`,
+`schema`, `route`, `forced`, or `checkpoint`. For example, a one-file edit
+should look like `incremental source-change reuse N new M ...`; an interrupted
+refresh should look like `resumed checkpoint reuse N new M ...`; and a first
+store should look like `full missing new N ...`. Vector status labels are
+intentionally content-free. They show refresh mode/cause, batch, row,
 parallelism, ETA, and finalizing/stalled state, but not corpus names or source
 paths. If no vector progress update arrives for several minutes, the TUI marks
 the work as possibly stalled instead of letting an old row count look active.
@@ -1758,9 +1765,10 @@ files or sections, `vector-refresh` now looks for the latest compatible
 embedding store, reuses rows whose stable row id and embedding input hash still
 match, omits rows for removed or ignored sources, and embeds only new or
 changed rows before writing a compact fresh manifest for the new index. The
-refresh report includes reused, embedded, and superseded row counts. Live
-status is also content-free but should show `incremental reuse N new M` once
-the reusable rows have been identified. Embedding stores still require source
+refresh report includes refresh mode/cause plus reused, embedded, and
+superseded row counts. Live status is also content-free but should show the
+same mode/cause and `reuse N new M` once the reusable rows have been
+identified. Embedding stores still require source
 re-vectorization when the vector schema, vector row-id schema, embedding input
 schema/split policy, embedding route, model, or dimensions change. Dense vector
 coordinates are not migrated across
