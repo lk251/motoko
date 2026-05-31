@@ -73,6 +73,46 @@ future repo work:
   adapt only ideas that preserve Motoko's realm-local, stdlib-first,
   typed-action, review-first boundary.
 
+## Prepared Self-Improvement Worklist
+
+When Motoko is asked to improve her own repository, start from this worklist and
+use `motoko code-query`, `/sources`, and the relevant umbrella skill before
+proposing code changes:
+
+1. Strengthen retrieval quality first. Add or improve fixtures whenever a real
+   answer failure shows weak recall, stale artifacts, bad span selection,
+   missing structured evidence, poor context packing, or final prompt misuse.
+2. Improve `motoko-retrieval-maintainer` when a retrieval repair becomes a
+   reusable procedure. Prefer a support file for examples and diagnostics over a
+   long skill body.
+3. Improve `motoko-refactor-craft` when a refactor reveals a better boundary
+   pattern, migration rule, validation sequence, or deployment soak checklist.
+4. Improve `motoko-agentic-boundary-review` when tools, scripts, project writes,
+   goal loops, route scheduling, or approvals reveal a reusable safety check.
+5. Keep extracting live subsystems only when the new module has clear
+   ownership, focused tests, and less orchestration in the root facade. Good
+   future candidates are command formatting, artifact lifecycle fanout,
+   foreground cancellation, model-route scheduling diagnostics, and TUI status
+   surfaces.
+6. Make artifact lifecycle behavior coherent across every derived family:
+   indexes, repairs, evidence rows, vector stores, dossiers, retrieval/debug
+   reports, feedback evals, memories, and skill-support artifacts.
+7. Treat user feedback as private eval seed material. Feedback should suggest
+   tests, skill patches, support files, or retrieval fixtures; it must not
+   silently rewrite retrieval policy or prompts.
+8. Keep Hermes-inspired features narrow and inspectable: progressive disclosure,
+   support files, skill curator reports, loaded-skill patch preference, and
+   typed `skill_manage` suggestions are useful; broad terminal tools,
+   cross-realm skill stores, hidden agents, and dependency-heavy runtimes are
+   not part of Motoko's current shape.
+9. For codebase self-improvement, build or update skills only when they encode a
+   repeated, actionable procedure that would save tokens, reduce errors, improve
+   reliability, or preserve project-specific craft. Prefer patching an existing
+   umbrella skill before creating a narrow new skill.
+10. Every self-improvement change should leave a gate behind: a regression test,
+    `self-eval`, `action-eval`, retrieval/vector eval, or a documented manual
+    soak check that would catch the same failure next time.
+
 ## Refactor Craft
 
 - Characterize behavior with tests before moving live orchestration.
