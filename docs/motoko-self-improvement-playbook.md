@@ -356,6 +356,12 @@ Current progress on this backlog:
   query/note/source text until the user explicitly inspects the private eval
   artifact. `motoko self-eval` now checks that the code-query path can find
   this curator/eval implementation and its regression coverage.
+- Conversation persistence trust has focused coverage for empty-chat pruning,
+  queued prompt durability/history seeding, report-output non-persistence,
+  rename/delete helpers, and owned derived-artifact cleanup. Feedback targeting
+  now pairs the rated assistant answer with the nearest prior user prompt, so
+  `/up` or `/down` used while a newer prompt is preparing does not attach the
+  wrong query to the private feedback fixture.
 
 Skill work that should usually happen before new code:
 

@@ -46,6 +46,16 @@ def last_message_content(conv: dict, role: str) -> tuple[int, str]:
     return -1, ""
 
 
+def nearest_previous_message_content(conv: dict, role: str, before_index: int) -> tuple[int, str]:
+    messages = conv.get("messages", []) if isinstance(conv.get("messages"), list) else []
+    end = min(max(int(before_index or 0), 0), len(messages))
+    for index in range(end - 1, -1, -1):
+        msg = messages[index]
+        if isinstance(msg, dict) and msg.get("role") == role:
+            return index, str(msg.get("content", ""))
+    return -1, ""
+
+
 def compact_feedback_sources(sources: list[dict], *, limit: int = 16) -> list[dict]:
     rows = []
     for source in sources[:limit]:
@@ -98,7 +108,7 @@ def make_response_feedback_row(
     assistant_index, assistant_text = last_message_content(conv, "assistant")
     if assistant_index < 0 or not assistant_text.strip():
         raise SystemExit("No assistant answer is available to rate yet.")
-    user_index, user_text = last_message_content(conv, "user")
+    user_index, user_text = nearest_previous_message_content(conv, "user", assistant_index)
     return {
         "schema": schema,
         "id": feedback_id,

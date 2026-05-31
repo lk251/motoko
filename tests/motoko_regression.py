@@ -10965,6 +10965,23 @@ def test_feedback_command_request_records_private_feedback(m):
         assert rows[1]["note"] == "excellent answer"
 
 
+def test_feedback_targets_last_assistant_and_prior_user_when_new_prompt_is_pending(m):
+    with isolated_state():
+        conv = m.new_conversation("Feedback target")
+        conv["messages"] = [
+            {"role": "user", "content": "original question"},
+            {"role": "assistant", "content": "excellent grounded answer"},
+            {"role": "user", "content": "new prompt still preparing"},
+        ]
+
+        row = m.record_response_feedback(conv, "up", "good answer")
+
+        assert row["assistant_message_index"] == 1
+        assert row["assistant_reply"] == "excellent grounded answer"
+        assert row["user_message_index"] == 0
+        assert row["user_prompt"] == "original question"
+
+
 def test_tui_feedback_plain_command_is_not_queued_during_active_work(m):
     with isolated_state():
         conv = m.new_conversation("Feedback plain command")
@@ -13000,6 +13017,7 @@ def main() -> int:
         test_tui_ctrl_c_stops_active_answer_without_exiting,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
         test_feedback_command_request_records_private_feedback,
+        test_feedback_targets_last_assistant_and_prior_user_when_new_prompt_is_pending,
         test_tui_feedback_plain_command_is_not_queued_during_active_work,
         test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_eval_replays_private_feedback_fixtures,
