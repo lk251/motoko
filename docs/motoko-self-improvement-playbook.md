@@ -350,8 +350,10 @@ Current progress on this backlog:
   distinguishes deleted/ignored detached sources from changed sources that have
   already been reprocessed into a fresh replacement index, so old derived
   artifacts can be cleaned after reprocessing instead of staying permanently
-  blocked. Root code still resolves those families to realm-local paths and
-  performs filesystem mutation through explicit callbacks.
+  blocked. Index-storage audit cleanup sections for safe candidates vs
+  blocked/repair-first work are now built by the lifecycle service too. Root
+  code still resolves those families to realm-local paths and performs
+  filesystem mutation through explicit callbacks.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

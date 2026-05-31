@@ -38,6 +38,7 @@ from motoko_core.artifact_lifecycle import (
     index_artifact_dependency_counts as index_artifact_dependency_counts_core,
     index_file_path_keys as index_file_path_keys_core,
     index_source_lifecycle_scan as index_source_lifecycle_scan_core,
+    index_storage_cleanup_sections as index_storage_cleanup_sections_core,
     json_matching_source_paths as json_matching_source_paths_core,
     json_paths_referencing_index as json_paths_referencing_index_core,
     json_references_index as json_references_index_core,
@@ -10064,6 +10065,39 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
         assert not (tmp / "state" / "conversations").exists()
 
 
+def test_index_storage_cleanup_sections_are_service_owned(_m):
+    sections = index_storage_cleanup_sections_core(
+        stale_superseded_indexes=[{"id": "old-index", "bytes": 10}],
+        superseded_partial_count=2,
+        superseded_partial_bytes=30,
+        orphan_chunk_files=[{"path": "/tmp/orphan.txt", "bytes": 5}],
+        older_complete_index_count=3,
+        missing_duplicate_targets=[{"index_id": "missing-target"}],
+        source_lifecycle_plans=[{"index": "needs-rebuild"}],
+    )
+
+    safe_by_kind = {row["kind"]: row for row in sections["safe_cleanup"]}
+    blocked_by_kind = {row["kind"]: row for row in sections["blocked_cleanup"]}
+    assert safe_by_kind["stale-superseded-indexes"]["bytes"] == 10
+    assert safe_by_kind["superseded-partials"]["count"] == 2
+    assert safe_by_kind["superseded-partials"]["bytes"] == 30
+    assert safe_by_kind["orphan-chunk-files"]["bytes"] == 5
+    assert blocked_by_kind["older-complete-indexes"]["count"] == 2
+    assert blocked_by_kind["missing-duplicate-targets"]["safety"] == "repair-first"
+    assert blocked_by_kind["source-lifecycle-work"]["safety"] == "rebuild-first"
+
+    empty = index_storage_cleanup_sections_core(
+        stale_superseded_indexes=[],
+        superseded_partial_count=0,
+        superseded_partial_bytes=0,
+        orphan_chunk_files=[],
+        older_complete_index_count=0,
+        missing_duplicate_targets=[],
+        source_lifecycle_plans=[],
+    )
+    assert empty == {"safe_cleanup": [], "blocked_cleanup": []}
+
+
 def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert json_references_index_core({"context_items": [{"kind": "index", "id": "old-index"}]}, "old-index")
     assert json_matching_source_paths_core({"sources": ["/tmp/docs/a.org"]}, {"/tmp/docs/a.org"}) == {
@@ -13037,6 +13071,7 @@ def main() -> int:
         test_source_lifecycle_report_blocks_changed_sources,
         test_source_lifecycle_cleanup_allows_reprocessed_changed_sources,
         test_artifact_lifecycle_family_specs_are_service_owned,
+        test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,

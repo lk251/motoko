@@ -459,6 +459,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     index_artifact_dependency_counts,
     index_file_path_keys,
     index_source_lifecycle_scan,
+    index_storage_cleanup_sections,
     index_snapshot_delete_specs,
     json_paths_referencing_index,
     source_lifecycle_affected_paths,
@@ -13092,66 +13093,15 @@ def index_storage_audit() -> dict:
                 "affected_artifacts": cleanup_plan.get("affected_artifacts", []),
             }
         )
-    safe_cleanup = []
-    if stale_superseded_indexes:
-        safe_cleanup.append(
-            {
-                "kind": "stale-superseded-indexes",
-                "count": len(stale_superseded_indexes),
-                "bytes": sum(safe_int(item.get("bytes")) for item in stale_superseded_indexes),
-                "safety": "candidate",
-                "action": "run motoko index-cleanup --yes after reviewing that the newer family index is attached/fresh",
-            }
-        )
-    if superseded_partials:
-        safe_cleanup.append(
-            {
-                "kind": "superseded-partials",
-                "count": len(superseded_partials),
-                "bytes": sum(partial_index_cleanup_bytes(partial) for partial in superseded_partials),
-                "safety": "candidate",
-                "action": "review and later remove only superseded partial checkpoints/chunk dirs",
-            }
-        )
-    if orphan_files:
-        safe_cleanup.append(
-            {
-                "kind": "orphan-chunk-files",
-                "count": len(orphan_files),
-                "bytes": sum(item.get("bytes", 0) for item in orphan_files),
-                "safety": "candidate",
-                "action": "review and later remove chunk files no index or partial references",
-            }
-        )
-    blocked_cleanup = []
-    blocked_older_count = max(0, len(older_indexes) - len(stale_superseded_indexes))
-    if blocked_older_count:
-        blocked_cleanup.append(
-            {
-                "kind": "older-complete-indexes",
-                "count": blocked_older_count,
-                "safety": "blocked",
-                "reason": "fresh or unsuperseded older indexes may still hold duplicate-reference targets; cleanup only deletes stale snapshots after materializing the newer replacement",
-            }
-        )
-    if missing_duplicate_refs:
-        blocked_cleanup.append(
-            {
-                "kind": "missing-duplicate-targets",
-                "count": len(missing_duplicate_refs),
-                "safety": "repair-first",
-                "reason": "some duplicate references cannot find stored chunk text in another index",
-            }
-        )
-    if source_lifecycle_plans:
-        blocked_cleanup.append(
-            {
-                "kind": "source-lifecycle-work",
-                "count": len(source_lifecycle_plans),
-                "safety": "rebuild-first",
-                "reason": "changed, deleted, or newly ignored source files need index refresh before derived-artifact cleanup",
-            }
-        )
+    cleanup_sections = index_storage_cleanup_sections(
+        stale_superseded_indexes=stale_superseded_indexes,
+        superseded_partial_count=len(superseded_partials),
+        superseded_partial_bytes=sum(partial_index_cleanup_bytes(partial) for partial in superseded_partials),
+        orphan_chunk_files=orphan_files,
+        older_complete_index_count=len(older_indexes),
+        missing_duplicate_targets=missing_duplicate_refs,
+        source_lifecycle_plans=source_lifecycle_plans,
+    )
     return {
         "schema": INDEX_STORAGE_AUDIT_SCHEMA_VERSION,
         "created": now(),
@@ -13180,8 +13130,8 @@ def index_storage_audit() -> dict:
         "missing_duplicate_targets": missing_duplicate_refs[:50],
         "orphan_chunk_files": orphan_files[:50],
         "source_lifecycle_plans": source_lifecycle_plans[:50],
-        "safe_cleanup": safe_cleanup,
-        "blocked_cleanup": blocked_cleanup,
+        "safe_cleanup": cleanup_sections["safe_cleanup"],
+        "blocked_cleanup": cleanup_sections["blocked_cleanup"],
     }
 
 

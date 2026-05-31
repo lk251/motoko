@@ -215,6 +215,13 @@ def derived_delete_report_labels() -> list[tuple[str, str]]:
     ]
 
 
+def _int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class ArtifactCleanupDecision:
     artifact_id: str
@@ -1023,6 +1030,88 @@ def source_lifecycle_report(
         "manual_review_artifacts_preserved": plan.get("manual_review_artifact_count", 0),
     }
     return report
+
+
+def index_storage_cleanup_sections(
+    *,
+    stale_superseded_indexes: list[dict],
+    superseded_partial_count: int,
+    superseded_partial_bytes: int,
+    orphan_chunk_files: list[dict],
+    older_complete_index_count: int,
+    missing_duplicate_targets: list[dict],
+    source_lifecycle_plans: list[dict],
+) -> dict:
+    """Return safe and blocked cleanup sections for an index storage audit."""
+
+    safe_cleanup = []
+    if stale_superseded_indexes:
+        safe_cleanup.append(
+            {
+                "kind": "stale-superseded-indexes",
+                "count": len(stale_superseded_indexes),
+                "bytes": sum(_int(item.get("bytes")) for item in stale_superseded_indexes),
+                "safety": "candidate",
+                "action": "run motoko index-cleanup --yes after reviewing that the newer family index is attached/fresh",
+            }
+        )
+    if superseded_partial_count:
+        safe_cleanup.append(
+            {
+                "kind": "superseded-partials",
+                "count": superseded_partial_count,
+                "bytes": _int(superseded_partial_bytes),
+                "safety": "candidate",
+                "action": "review and later remove only superseded partial checkpoints/chunk dirs",
+            }
+        )
+    if orphan_chunk_files:
+        safe_cleanup.append(
+            {
+                "kind": "orphan-chunk-files",
+                "count": len(orphan_chunk_files),
+                "bytes": sum(_int(item.get("bytes")) for item in orphan_chunk_files),
+                "safety": "candidate",
+                "action": "review and later remove chunk files no index or partial references",
+            }
+        )
+
+    blocked_cleanup = []
+    blocked_older_count = max(0, _int(older_complete_index_count) - len(stale_superseded_indexes))
+    if blocked_older_count:
+        blocked_cleanup.append(
+            {
+                "kind": "older-complete-indexes",
+                "count": blocked_older_count,
+                "safety": "blocked",
+                "reason": (
+                    "fresh or unsuperseded older indexes may still hold duplicate-reference targets; "
+                    "cleanup only deletes stale snapshots after materializing the newer replacement"
+                ),
+            }
+        )
+    if missing_duplicate_targets:
+        blocked_cleanup.append(
+            {
+                "kind": "missing-duplicate-targets",
+                "count": len(missing_duplicate_targets),
+                "safety": "repair-first",
+                "reason": "some duplicate references cannot find stored chunk text in another index",
+            }
+        )
+    if source_lifecycle_plans:
+        blocked_cleanup.append(
+            {
+                "kind": "source-lifecycle-work",
+                "count": len(source_lifecycle_plans),
+                "safety": "rebuild-first",
+                "reason": "changed, deleted, or newly ignored source files need index refresh before derived-artifact cleanup",
+            }
+        )
+    return {
+        "safe_cleanup": safe_cleanup,
+        "blocked_cleanup": blocked_cleanup,
+    }
 
 
 def format_source_lifecycle_report(report: dict) -> str:
