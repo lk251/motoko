@@ -357,9 +357,11 @@ Current progress on this backlog:
   remaining TUI-only cached surfaces after real usage exposes them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
-  `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh reports
-  now expose the same style of mode/cause diagnostics for missing, forced,
-  schema, stale, and source-change rebuilds.
+  `rebuild schema`, plus reuse/new row counts, durable elapsed time, and ETA.
+  Resumed vector refreshes measure visible elapsed time from the original
+  vector-progress checkpoint instead of resetting to the current TUI session.
+  Evidence refresh reports now expose the same style of mode/cause diagnostics
+  for missing, forced, schema, stale, and source-change rebuilds.
 - Artifact lifecycle policy has moved another step into
   `motoko_core.artifact_lifecycle`: delete-derived families, manual-review
   families, single-file durable state families, and derived delete-report labels

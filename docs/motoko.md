@@ -1734,6 +1734,10 @@ route fails under the requested concurrency, Motoko checkpoints completed rows
 and retries the remaining work at half the parallelism until it reaches one
 request at a time or the work succeeds. Progress messages include a row-based
 ETA once the current run has enough completed rows to estimate throughput.
+When a refresh resumes from a checkpoint, the visible elapsed time is measured
+from the original vector-progress record rather than from the new Motoko
+session, so interrupted work does not misleadingly appear to have started from
+zero.
 Before the first model batch starts, Motoko reports the safe refresh shape it
 has already determined: `full`, `resumed`, `incremental`, `reuse-only`, or
 `rebuild`, plus a content-free cause such as `missing`, `source-change`,

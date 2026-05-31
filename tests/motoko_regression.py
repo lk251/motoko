@@ -1375,6 +1375,8 @@ def test_phase_timer_key_ignores_progress_counters(m):
     assert m.phase_timer_key(full) == "bg-heavy: vectorizing(model)"
     resumed = "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 eta 2m00s"
     assert m.phase_timer_key(resumed) == "bg-heavy: vectorizing(model)"
+    elapsed = "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 elapsed 5m00s eta 2m00s"
+    assert m.phase_timer_key(elapsed) == "bg-heavy: vectorizing(model)"
     assert m.phase_timer_key("study: planning") != m.phase_timer_key(left)
 
 
@@ -1422,12 +1424,13 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         completed_rows=80,
         total_rows=160,
         eta_seconds=120,
+        elapsed_seconds=300,
         reused_rows=80,
         pending_rows=80,
         refresh_mode="resumed",
         refresh_cause="checkpoint",
     )
-    assert resumed == "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 eta 2m00s"
+    assert resumed == "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 elapsed 5m00s eta 2m00s"
 
     finalizing = m.format_vector_progress_phase(
         completed_batches=5,
@@ -1435,13 +1438,14 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         active_parallelism=32,
         completed_rows=160,
         total_rows=160,
+        elapsed_seconds=420,
         state="finalizing",
     )
-    assert finalizing == "bg-heavy: vectorizing finalizing rows 160/160"
+    assert finalizing == "bg-heavy: vectorizing finalizing rows 160/160 elapsed 7m00s"
     sanitized = m.sanitize_background_phase(
-        "bg-heavy: vectorizing(model) orgfiles incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
+        "bg-heavy: vectorizing(model) orgfiles incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 elapsed 5m00s eta ?"
     )
-    assert sanitized == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
+    assert sanitized == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 elapsed 5m00s eta ?"
     assert "orgfiles" not in sanitized
     sanitized_full = m.sanitize_background_phase(
         "bg-heavy: vectorizing(model) orgfiles full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
@@ -8321,7 +8325,9 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             progress = json.loads(progress_files[0].read_text(encoding="utf-8"))
             assert progress["completed_rows"] == 1
             assert "eta_seconds" in progress
+            assert progress["elapsed_seconds"] >= 0
             assert any("eta" in message for message in progress_messages)
+            assert any("elapsed" in message for message in progress_messages)
 
             store = m.build_vector_store("resume-vector-index", method=m.EMBEDDING_VECTOR_METHOD)
             raw_rows = [row for row in store["rows"] if row["kind"] == "raw_chunk_embedding"]
@@ -8572,6 +8578,7 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
             "embedding_parallel_fallbacks": [],
             "expected_rows": 10,
             "completed_rows": 4,
+            "elapsed_seconds": 360,
             "eta_seconds": 90,
             "rows": [
                 {
@@ -8599,6 +8606,7 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
         assert "kind=vector" in report
         assert "state=stale" in report
         assert "rows=4/10" in report
+        assert "elapsed=6m00s" in report
         assert "files=1/3" in report
         assert "route=qwen3-embedding-0b6" in report
         for private_text in [

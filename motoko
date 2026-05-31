@@ -2026,9 +2026,11 @@ def sanitize_background_phase(phase: object) -> str:
         return "idle"
     if text.startswith("bg-heavy: vectorizing"):
         rows_match = re.search(r"\brows\s+\d+/\d+\b", text)
+        elapsed_match = re.search(r"\belapsed\s+\S+\b", text)
         if "finalizing" in text:
             rows_text = f" {rows_match.group(0)}" if rows_match else ""
-            return f"bg-heavy: vectorizing finalizing{rows_text}"
+            elapsed_text = f" {elapsed_match.group(0)}" if elapsed_match else ""
+            return f"bg-heavy: vectorizing finalizing{rows_text}{elapsed_text}"
         parts = ["bg-heavy: vectorizing(model)"]
         if "retry" in text:
             parts.append("retry")
@@ -2050,6 +2052,7 @@ def sanitize_background_phase(phase: object) -> str:
             r"\bbatch\s+\d+/\d+\b",
             r"\bparallel\s+\d+\b",
             r"\brows\s+\d+/\d+\b",
+            r"\belapsed\s+\S+\b",
             r"\beta\s+\S+",
         ]:
             match = re.search(pattern, text)
@@ -2075,6 +2078,7 @@ def format_vector_progress_phase(
     completed_rows: int,
     total_rows: int,
     eta_seconds: int | None = None,
+    elapsed_seconds: int | None = None,
     state: str = "running",
     reused_rows: int = 0,
     pending_rows: int | None = None,
@@ -2082,8 +2086,9 @@ def format_vector_progress_phase(
     refresh_cause: str = "",
 ) -> str:
     state = str(state or "running").strip()
+    elapsed_text = f"elapsed {human_duration(elapsed_seconds)} " if elapsed_seconds is not None else ""
     if state == "finalizing":
-        return f"bg-heavy: vectorizing finalizing rows {completed_rows}/{total_rows}"
+        return f"bg-heavy: vectorizing finalizing rows {completed_rows}/{total_rows} {elapsed_text}".strip()
     eta_text = f"eta {human_duration(eta_seconds)}" if eta_seconds is not None else "eta ?"
     batch_text = f"batch {completed_batches}/{total_batches}" if total_batches else "batch 0/0"
     refresh_text = ""
@@ -2102,7 +2107,7 @@ def format_vector_progress_phase(
         refresh_text += f" new {new_rows}"
     return (
         f"bg-heavy: vectorizing(model) {refresh_text} {batch_text} parallel {max(1, int(active_parallelism or 1))} "
-        f"rows {completed_rows}/{total_rows} {eta_text}"
+        f"rows {completed_rows}/{total_rows} {elapsed_text}{eta_text}"
     ).replace("  ", " ")
 
 
@@ -2253,6 +2258,8 @@ def format_safe_vector_progress_row(progress: dict) -> str:
         parts.append(f"mode={progress.get('embedding_refresh_mode')}")
     if progress.get("embedding_refresh_cause"):
         parts.append(f"cause={progress.get('embedding_refresh_cause')}")
+    if progress.get("elapsed_seconds") is not None:
+        parts.append(f"elapsed={safe_duration_field(progress.get('elapsed_seconds'))}")
     if progress.get("eta_seconds") is not None:
         parts.append(f"eta={safe_duration_field(progress.get('eta_seconds'))}")
     parts.append(f"updated_age={safe_age_field(updated_age)}")
@@ -15124,6 +15131,13 @@ def build_embedding_vector_store_from_index(
                     checkpoint_rows_by_id[str(row.get("id"))] = row
     fallback_events = []
 
+    def vector_elapsed_seconds() -> int | None:
+        parsed = parse_timestamp(progress_created)
+        if parsed is not None:
+            delta = _dt.datetime.now(_dt.timezone.utc).astimezone() - parsed.astimezone()
+            return max(0, int(delta.total_seconds()))
+        return max(0, int(time.monotonic() - session_started))
+
     def vector_eta_seconds() -> int | None:
         done_this_session = len(completed_rows_by_id) - session_start_completed_rows
         remaining = len(candidates) - len(completed_rows_by_id)
@@ -15277,6 +15291,7 @@ def build_embedding_vector_store_from_index(
             "previous_store_reused_rows": previous_store_reused_rows,
             "previous_store_row_count": previous_store_row_count,
             "previous_store_superseded_rows": previous_store_superseded_rows,
+            "elapsed_seconds": vector_elapsed_seconds(),
             "eta_seconds": vector_eta_seconds(),
             "rows": [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id],
         }
@@ -15319,6 +15334,7 @@ def build_embedding_vector_store_from_index(
                 completed_rows=len(completed_rows_by_id),
                 total_rows=len(candidates),
                 eta_seconds=vector_eta_seconds(),
+                elapsed_seconds=vector_elapsed_seconds(),
                 reused_rows=initial_completed_rows,
                 pending_rows=pending_row_count,
                 refresh_mode=refresh_mode,
@@ -15344,6 +15360,7 @@ def build_embedding_vector_store_from_index(
                     completed_rows=len(completed_rows_by_id),
                     total_rows=len(candidates),
                     eta_seconds=vector_eta_seconds(),
+                    elapsed_seconds=vector_elapsed_seconds(),
                     reused_rows=initial_completed_rows,
                     pending_rows=pending_row_count,
                     refresh_mode=refresh_mode,
@@ -15462,6 +15479,7 @@ def build_embedding_vector_store_from_index(
                             completed_rows=len(completed_rows_by_id),
                             total_rows=len(candidates),
                             eta_seconds=vector_eta_seconds(),
+                            elapsed_seconds=vector_elapsed_seconds(),
                             state="retry",
                             reused_rows=initial_completed_rows,
                             pending_rows=pending_row_count,
@@ -15492,6 +15510,7 @@ def build_embedding_vector_store_from_index(
                 active_parallelism=active_parallelism,
                 completed_rows=len(completed_rows_by_id),
                 total_rows=len(candidates),
+                elapsed_seconds=vector_elapsed_seconds(),
                 state="finalizing",
             )
         )

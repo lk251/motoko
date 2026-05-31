@@ -74,6 +74,8 @@ def status_display_lines(
     if study_running:
         if "last progress" in study_status_label:
             status_parts.append(style(study_status_label, "turquoise"))
+        elif study_status_label.startswith("bg-heavy: vectorizing") and " elapsed " in f" {study_status_label} ":
+            status_parts.append(style(study_status_label, "turquoise"))
         else:
             status_parts.append(style(f"{study_status_label} {human_duration(study_elapsed)}".rstrip(), "turquoise"))
     elif study_status == "study: off":

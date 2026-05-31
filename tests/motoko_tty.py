@@ -246,6 +246,30 @@ def main() -> int:
     assert "queued:2" in status
     assert "KV not in GPU" in status
     assert "bg: idle (catalog fresh)" in status
+    vector_status = strip_ansi(
+        "\n".join(
+            status_display_lines(
+                title="Chat",
+                model_badge="model",
+                width=120,
+                idle_status="ready",
+                generating=False,
+                maintaining=False,
+                report_running=0,
+                report_status="",
+                maintenance_elapsed=0,
+                maintenance_phase="",
+                pending_count=0,
+                study_running=True,
+                study_elapsed=2,
+                study_status="bg-heavy: vectorizing(model)",
+                study_status_label="bg-heavy: vectorizing(model) resumed checkpoint rows 10/20 elapsed 5m00s eta 1m00s",
+                study_last_note="",
+            )
+        )
+    )
+    assert "elapsed 5m00s" in vector_status
+    assert "elapsed 5m00s eta 1m00s 2s" not in vector_status
     assert study_status_label_core("study: indexing", None, progress_formatter=lambda _row: "unused") == "bg-heavy: indexing(model)"
     frame_lines, frame_cursor_row, frame_cursor_col = bottom_area_frame(
         live_lines=["live1", "live2", "live3"],

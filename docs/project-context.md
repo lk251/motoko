@@ -1316,8 +1316,10 @@ Current progress on this stretch:
 - Progress: vector refresh status now reports a content-free refresh mode and
   cause (`full missing`, `resumed checkpoint`, `incremental source-change`,
   `reuse-only`, `rebuild schema/route`) plus reuse/new row counts before the
-  first model batch starts. Reports also persist the mode/cause so incremental
-  vectorization is inspectable after completion.
+  first model batch starts. Resumed refreshes also carry durable elapsed time
+  from the original vector-progress checkpoint so progress does not appear to
+  restart from zero after an interruption. Reports persist the mode/cause so
+  incremental vectorization is inspectable after completion.
 - Progress: long-lived TUI sessions now refresh attached index references after
   background study completion, complementing the existing prompt-time resync.
   Fresh evidence/vector/dossier attachment summaries are still candidates for
