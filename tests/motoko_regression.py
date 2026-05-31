@@ -29,6 +29,7 @@ from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
     cleanup_superseded_index_candidates as cleanup_superseded_index_candidates_core,
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
+    conversation_delete_json_dir_specs as conversation_delete_json_dir_specs_core,
     delete_index_snapshot_artifacts as delete_index_snapshot_artifacts_core,
     delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
     dependency_json_artifact_specs as dependency_json_artifact_specs_core,
@@ -10260,11 +10261,17 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
     }
 
     delete_specs = index_snapshot_delete_specs_core()
+    conversation_delete_specs = conversation_delete_json_dir_specs_core()
     assert ("vector_progress_deleted", "vector-progress") in derived_delete_report_labels_core()
     assert {spec["report_key"] for spec in delete_specs} >= {
         "vector_stores_deleted",
         "evidence_stores_deleted",
         "vector_progress_deleted",
+    }
+    assert {spec["report_key"] for spec in conversation_delete_specs} >= {
+        "retrieval_debug_deleted",
+        "feedback_evals_deleted",
+        "model_evals_deleted",
     }
 
     with isolated_state() as tmp:

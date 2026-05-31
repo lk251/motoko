@@ -376,10 +376,12 @@ Current progress on this backlog:
   conversations now fan out through newer derived artifact families such as
   vector stores, evidence stores, vector progress, retrieval debug/eval
   reports, feedback evals, action evals, model evals, skill suggestions, and
-  conversation-specific slot/KV cache records. Feedback targeting now pairs the
-  rated assistant answer with the nearest prior user prompt, so `/up` or
-  `/down` used while a newer prompt is preparing does not attach the wrong
-  query to the private feedback fixture.
+  conversation-specific slot/KV cache records. The JSON directory families for
+  conversation deletion are now declared by the artifact-lifecycle service
+  instead of being scattered as root-facade one-offs. Feedback targeting now
+  pairs the rated assistant answer with the nearest prior user prompt, so
+  `/up` or `/down` used while a newer prompt is preparing does not attach the
+  wrong query to the private feedback fixture.
 
 Skill work that should usually happen before new code:
 

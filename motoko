@@ -452,6 +452,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     INDEX_CLEANUP_SCHEMA,
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
+    conversation_delete_json_dir_specs,
     delete_index_snapshot_artifacts,
     dependency_json_artifact_specs,
     format_index_cleanup_report,
@@ -2942,7 +2943,7 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
     )
     report["study_job_events_deleted"] = rewrite_jsonl_without_conversation(study_jobs_path(), conversation_id)
 
-    for spec in index_snapshot_delete_specs():
+    for spec in conversation_delete_json_dir_specs():
         path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
         report_key = str(spec.get("report_key", "")).strip()
         if not path or not report_key:

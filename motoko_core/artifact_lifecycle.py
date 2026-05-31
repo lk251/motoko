@@ -206,6 +206,18 @@ def index_snapshot_delete_specs() -> list[dict]:
     ]
 
 
+def conversation_delete_json_dir_specs() -> list[dict]:
+    """Return derived JSON families invalidated by a deleted conversation."""
+
+    return [
+        {
+            "path_key": spec["path_key"],
+            "report_key": spec["delete_report_key"],
+        }
+        for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+    ]
+
+
 def derived_delete_report_labels() -> list[tuple[str, str]]:
     """Return report keys and human labels for derived cleanup summaries."""
 
