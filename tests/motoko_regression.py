@@ -29,9 +29,11 @@ from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
     cleanup_superseded_index_candidates as cleanup_superseded_index_candidates_core,
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
+    conversation_artifact_cleanup_report as conversation_artifact_cleanup_report_core,
     conversation_delete_json_dir_specs as conversation_delete_json_dir_specs_core,
     conversation_delete_json_file_specs as conversation_delete_json_file_specs_core,
     conversation_delete_jsonl_specs as conversation_delete_jsonl_specs_core,
+    conversation_delete_report_template as conversation_delete_report_template_core,
     delete_index_snapshot_artifacts as delete_index_snapshot_artifacts_core,
     delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
     dependency_json_artifact_specs as dependency_json_artifact_specs_core,
@@ -10499,6 +10501,95 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
         assert not (tmp / "state" / "conversations").exists()
 
 
+def test_conversation_artifact_cleanup_report_is_service_owned(_m):
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = pathlib.Path(tmp_name)
+        skill_suggestions = tmp / "skill-suggestions.json"
+        profile = tmp / "profile.json"
+        maintenance = tmp / "maintenance.json"
+        study_state = tmp / "study-state.json"
+        context_catalog = tmp / "context-catalog.json"
+        skill_suggestions.write_text(
+            json.dumps(
+                {
+                    "suggestions": [
+                        {"id": "delete", "conversation_id": "conv-delete"},
+                        {"id": "keep", "conversation_id": "conv-keep"},
+                    ]
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        profile.write_text(json.dumps({"conversation_ids": ["conv-delete"]}) + "\n", encoding="utf-8")
+        maintenance.write_text(
+            json.dumps({"job_id": "maint-delete", "conversation_id": "conv-delete"}) + "\n",
+            encoding="utf-8",
+        )
+        study_state.write_text(json.dumps({"owner_conversation_id": "conv-delete"}) + "\n", encoding="utf-8")
+        context_catalog.write_text("{}\n", encoding="utf-8")
+
+        path_map = {
+            "skill_suggestions": skill_suggestions,
+            "profile": profile,
+            "maintenance_state": maintenance,
+            "study_state": study_state,
+            "context_catalog": context_catalog,
+        }
+        cleared_maintenance = []
+        deleted_conversations = []
+
+        def resolve_path(key: str) -> pathlib.Path:
+            return path_map.get(key, tmp / f"{key}.json")
+
+        def clear_maintenance(job_id):
+            cleared_maintenance.append(job_id)
+            maintenance.unlink()
+
+        report = conversation_artifact_cleanup_report_core(
+            conversation_id="conv-delete",
+            resolve_path=resolve_path,
+            cleanup_memories=lambda _conversation_id: 2,
+            rewrite_jsonl=lambda _path, _conversation_id: 3,
+            delete_json_dir=lambda _path, _conversation_id: 4,
+            load_json=lambda path: json.loads(path.read_text(encoding="utf-8")),
+            write_text=lambda path, text: path.write_text(text, encoding="utf-8"),
+            unlink_path=lambda path: path.unlink(),
+            clear_maintenance=clear_maintenance,
+            cleanup_slot_cache=lambda _conversation_id: {
+                "records_removed": 5,
+                "files_deleted": 6,
+                "service_owned_records": 7,
+            },
+            delete_conversation_file=lambda conversation_id: deleted_conversations.append(conversation_id) or True,
+        )
+
+        assert conversation_delete_report_template_core("conv-delete")["conversation_id"] == "conv-delete"
+        assert report["memories_deleted"] == 2
+        assert report["feedback_deleted"] == 3
+        assert report["memory_proposals_deleted"] == 3
+        assert report["vector_stores_deleted"] == 4
+        assert report["goal_runs_deleted"] == 4
+        assert report["skill_suggestions_deleted"] == 1
+        assert report["profile_deleted"] is True
+        assert report["maintenance_deleted"] is True
+        assert report["study_state_deleted"] is True
+        assert report["context_catalog_deleted"] is True
+        assert report["slot_cache_records_deleted"] == 5
+        assert report["slot_cache_files_deleted"] == 6
+        assert report["slot_cache_service_owned_records"] == 7
+        assert report["conversation_deleted"] is True
+        assert cleared_maintenance == ["maint-delete"]
+        assert deleted_conversations == ["conv-delete"]
+        assert [row["id"] for row in json.loads(skill_suggestions.read_text(encoding="utf-8"))["suggestions"]] == [
+            "keep"
+        ]
+        assert not profile.exists()
+        assert not maintenance.exists()
+        assert not study_state.exists()
+        assert not context_catalog.exists()
+
+
 def test_index_storage_cleanup_sections_are_service_owned(_m):
     sections = index_storage_cleanup_sections_core(
         stale_superseded_indexes=[{"id": "old-index", "bytes": 10}],
@@ -13656,6 +13747,7 @@ def main() -> int:
         test_source_lifecycle_report_blocks_changed_sources,
         test_source_lifecycle_cleanup_allows_reprocessed_changed_sources,
         test_artifact_lifecycle_family_specs_are_service_owned,
+        test_conversation_artifact_cleanup_report_is_service_owned,
         test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,

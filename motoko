@@ -378,7 +378,6 @@ from motoko_core.conversations import (  # noqa: E402
     delete_json_artifacts_referencing_conversation,
     filter_json_rows_without_conversation,
     format_conversation_delete_report,
-    json_references_conversation,
     list_conversation_records,
     make_conversation_record,
     pop_queued_prompt_record,
@@ -452,9 +451,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     INDEX_CLEANUP_SCHEMA,
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
-    conversation_delete_json_dir_specs,
-    conversation_delete_json_file_specs,
-    conversation_delete_jsonl_specs,
+    conversation_artifact_cleanup_report,
     delete_index_snapshot_artifacts,
     dependency_json_artifact_specs,
     format_index_cleanup_report,
@@ -2909,106 +2906,45 @@ def delete_conversation_then_new(conv: dict) -> tuple[dict, dict]:
     return new_conversation(), report
 
 
+def cleanup_memory_rows_for_conversation(conversation_id: str) -> int:
+    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
+    kept_memories, removed = filter_json_rows_without_conversation(rows, conversation_id)
+    if removed:
+        write_memory_rows(kept_memories)
+    return removed
+
+
+def cleanup_slot_cache_records_for_conversation(conversation_id: str) -> dict:
+    if not slot_cache_manifest_path().exists():
+        return {"records_removed": 0, "files_deleted": 0, "service_owned_records": 0}
+    return clear_slot_cache_records(conversation_id=conversation_id, yes=True)
+
+
+def delete_conversation_file_for_id(conversation_id: str) -> bool:
+    try:
+        conversation_path(conversation_id).unlink()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def delete_conversation_and_artifacts(conv: dict) -> dict:
     conversation_id = str(conv.get("id", "")).strip()
     if not conversation_id:
         raise SystemExit("conversation has no id")
-    report = {
-        "conversation_id": conversation_id,
-        "conversation_deleted": False,
-        "memories_deleted": 0,
-        "memory_proposals_deleted": 0,
-        "feedback_deleted": 0,
-        "action_ledger_deleted": 0,
-        "study_job_events_deleted": 0,
-        "topics_deleted": 0,
-        "dossiers_deleted": 0,
-        "goal_loops_deleted": 0,
-        "goal_runs_deleted": 0,
-        "vector_stores_deleted": 0,
-        "evidence_stores_deleted": 0,
-        "vector_progress_deleted": 0,
-        "retrieval_debug_deleted": 0,
-        "retrieval_evals_deleted": 0,
-        "feedback_evals_deleted": 0,
-        "action_evals_deleted": 0,
-        "model_evals_deleted": 0,
-        "skill_suggestions_deleted": 0,
-        "slot_cache_records_deleted": 0,
-        "slot_cache_files_deleted": 0,
-        "slot_cache_service_owned_records": 0,
-        "profile_deleted": False,
-        "maintenance_deleted": False,
-        "study_state_deleted": False,
-        "context_catalog_deleted": False,
-    }
-
-    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
-    kept_memories, report["memories_deleted"] = filter_json_rows_without_conversation(rows, conversation_id)
-    if report["memories_deleted"]:
-        write_memory_rows(kept_memories)
-
-    for spec in conversation_delete_jsonl_specs():
-        path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
-        report_key = str(spec.get("report_key", "")).strip()
-        if not path or not report_key:
-            continue
-        report[report_key] = rewrite_jsonl_without_conversation(path, conversation_id)
-
-    for spec in conversation_delete_json_dir_specs():
-        path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
-        report_key = str(spec.get("report_key", "")).strip()
-        if not path or not report_key:
-            continue
-        report[report_key] = delete_json_artifacts_referencing_conversation(path, conversation_id)
-
-    for spec in conversation_delete_json_file_specs():
-        path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
-        report_key = str(spec.get("report_key", "")).strip()
-        action = str(spec.get("action", "")).strip()
-        if not path or not report_key or not pathlib.Path(path).exists():
-            continue
-        if action == "delete-always":
-            with contextlib.suppress(FileNotFoundError):
-                pathlib.Path(path).unlink()
-                report[report_key] = True
-            continue
-        data = safe_load_json(path)
-        if data is None:
-            continue
-        if action == "filter-list":
-            list_key = str(spec.get("list_key", "")).strip()
-            rows = data.get(list_key, []) if isinstance(data, dict) else []
-            if not isinstance(rows, list):
-                continue
-            kept_rows, removed = filter_json_rows_without_conversation(
-                [row for row in rows if isinstance(row, dict)],
-                conversation_id,
-            )
-            report[report_key] = removed
-            if removed and isinstance(data, dict):
-                data[list_key] = kept_rows
-                atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-        elif action == "delete-if-references-conversation":
-            if json_references_conversation(data, conversation_id):
-                with contextlib.suppress(FileNotFoundError):
-                    pathlib.Path(path).unlink()
-                    report[report_key] = True
-        elif action == "clear-maintenance-if-references-conversation":
-            if json_references_conversation(data, conversation_id):
-                clear_maintenance_state(data.get("job_id") if isinstance(data, dict) else None)
-                report[report_key] = True
-
-    if slot_cache_manifest_path().exists():
-        slot_report = clear_slot_cache_records(conversation_id=conversation_id, yes=True)
-        report["slot_cache_records_deleted"] = int(slot_report.get("records_removed", 0) or 0)
-        report["slot_cache_files_deleted"] = int(slot_report.get("files_deleted", 0) or 0)
-        report["slot_cache_service_owned_records"] = int(slot_report.get("service_owned_records", 0) or 0)
-
-    with contextlib.suppress(FileNotFoundError):
-        conversation_path(conversation_id).unlink()
-        report["conversation_deleted"] = True
-    return report
+    return conversation_artifact_cleanup_report(
+        conversation_id=conversation_id,
+        resolve_path=artifact_lifecycle_path_for_key,
+        cleanup_memories=cleanup_memory_rows_for_conversation,
+        rewrite_jsonl=rewrite_jsonl_without_conversation,
+        delete_json_dir=delete_json_artifacts_referencing_conversation,
+        load_json=safe_load_json,
+        write_text=atomic_write,
+        unlink_path=lambda path: path.unlink(),
+        clear_maintenance=clear_maintenance_state,
+        cleanup_slot_cache=cleanup_slot_cache_records_for_conversation,
+        delete_conversation_file=delete_conversation_file_for_id,
+    )
 
 
 def route_args_ctx_size(args) -> int | None:

@@ -9,6 +9,10 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motoko_core.conversations import (
+    filter_json_rows_without_conversation,
+    json_references_conversation,
+)
 from motoko_core.corpus_selection import motoko_ignore_matches
 from motoko_core.text import human_bytes
 
@@ -288,6 +292,177 @@ def derived_delete_report_labels() -> list[tuple[str, str]]:
         (str(spec["delete_report_key"]), str(spec["report_label"]))
         for spec in DERIVED_JSON_ARTIFACT_FAMILIES
     ]
+
+
+def conversation_delete_report_template(conversation_id: str) -> dict:
+    """Return the stable report shape for deleting a conversation.
+
+    The lifecycle service owns the report keys because it owns the cleanup
+    families. The root facade still supplies realm-local path resolution and
+    filesystem callbacks.
+    """
+
+    report = {
+        "conversation_id": conversation_id,
+        "conversation_deleted": False,
+        "memories_deleted": 0,
+        "slot_cache_records_deleted": 0,
+        "slot_cache_files_deleted": 0,
+        "slot_cache_service_owned_records": 0,
+    }
+    for spec in conversation_delete_jsonl_specs():
+        report_key = str(spec.get("report_key", "")).strip()
+        if report_key:
+            report[report_key] = 0
+    for spec in conversation_delete_json_dir_specs():
+        report_key = str(spec.get("report_key", "")).strip()
+        if report_key:
+            report[report_key] = 0
+    for spec in conversation_delete_json_file_specs():
+        report_key = str(spec.get("report_key", "")).strip()
+        if not report_key:
+            continue
+        report[report_key] = 0 if spec.get("action") == "filter-list" else False
+    return report
+
+
+def _conversation_json_file_cleanup_value(
+    spec: dict,
+    *,
+    path: pathlib.Path,
+    conversation_id: str,
+    load_json: Callable[[pathlib.Path], object | None],
+    write_text: Callable[[pathlib.Path, str], None],
+    unlink_path: Callable[[pathlib.Path], None],
+    clear_maintenance: Callable[[object | None], None] | None = None,
+) -> int | bool | None:
+    action = str(spec.get("action", "")).strip()
+    if not path.exists():
+        return None
+    if action == "delete-always":
+        try:
+            unlink_path(path)
+        except FileNotFoundError:
+            return None
+        return True
+    data = load_json(path)
+    if data is None:
+        return None
+    if action == "filter-list":
+        list_key = str(spec.get("list_key", "")).strip()
+        rows = data.get(list_key, []) if isinstance(data, dict) else []
+        if not isinstance(rows, list):
+            return None
+        kept_rows, removed = filter_json_rows_without_conversation(
+            [row for row in rows if isinstance(row, dict)],
+            conversation_id,
+        )
+        if removed and isinstance(data, dict):
+            data[list_key] = kept_rows
+            write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        return removed
+    if action == "delete-if-references-conversation":
+        if json_references_conversation(data, conversation_id):
+            try:
+                unlink_path(path)
+            except FileNotFoundError:
+                return None
+            return True
+        return None
+    if action == "clear-maintenance-if-references-conversation":
+        if json_references_conversation(data, conversation_id):
+            if clear_maintenance is not None:
+                clear_maintenance(data.get("job_id") if isinstance(data, dict) else None)
+            return True
+    return None
+
+
+def conversation_artifact_cleanup_report(
+    *,
+    conversation_id: str,
+    resolve_path: Callable[[str], pathlib.Path | None],
+    cleanup_memories: Callable[[str], int] | None = None,
+    rewrite_jsonl: Callable[[pathlib.Path, str], int] | None = None,
+    delete_json_dir: Callable[[pathlib.Path, str], int] | None = None,
+    load_json: Callable[[pathlib.Path], object | None] | None = None,
+    write_text: Callable[[pathlib.Path, str], None] | None = None,
+    unlink_path: Callable[[pathlib.Path], None] | None = None,
+    clear_maintenance: Callable[[object | None], None] | None = None,
+    cleanup_slot_cache: Callable[[str], dict] | None = None,
+    delete_conversation_file: Callable[[str], bool] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
+    """Delete a conversation and its owned derived artifacts.
+
+    This service owns the family fanout and report shape. The root facade owns
+    realm-local paths and filesystem mutation callbacks so tests can keep the
+    policy inspectable without widening authority.
+    """
+
+    conversation_id = str(conversation_id or "").strip()
+    report = conversation_delete_report_template(conversation_id)
+    if not conversation_id:
+        return report
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    maybe_cancel()
+    if cleanup_memories is not None:
+        report["memories_deleted"] = int(cleanup_memories(conversation_id) or 0)
+
+    for spec in conversation_delete_jsonl_specs():
+        maybe_cancel()
+        if rewrite_jsonl is None:
+            continue
+        path = resolve_path(str(spec.get("path_key", "")))
+        report_key = str(spec.get("report_key", "")).strip()
+        if path is None or not report_key:
+            continue
+        report[report_key] = int(rewrite_jsonl(path, conversation_id) or 0)
+
+    for spec in conversation_delete_json_dir_specs():
+        maybe_cancel()
+        if delete_json_dir is None:
+            continue
+        path = resolve_path(str(spec.get("path_key", "")))
+        report_key = str(spec.get("report_key", "")).strip()
+        if path is None or not report_key:
+            continue
+        report[report_key] = int(delete_json_dir(path, conversation_id) or 0)
+
+    for spec in conversation_delete_json_file_specs():
+        maybe_cancel()
+        if load_json is None or write_text is None or unlink_path is None:
+            continue
+        path = resolve_path(str(spec.get("path_key", "")))
+        report_key = str(spec.get("report_key", "")).strip()
+        if path is None or not report_key:
+            continue
+        value = _conversation_json_file_cleanup_value(
+            spec,
+            path=path,
+            conversation_id=conversation_id,
+            load_json=load_json,
+            write_text=write_text,
+            unlink_path=unlink_path,
+            clear_maintenance=clear_maintenance,
+        )
+        if value is not None:
+            report[report_key] = value
+
+    maybe_cancel()
+    if cleanup_slot_cache is not None:
+        slot_report = cleanup_slot_cache(conversation_id)
+        report["slot_cache_records_deleted"] = int(slot_report.get("records_removed", 0) or 0)
+        report["slot_cache_files_deleted"] = int(slot_report.get("files_deleted", 0) or 0)
+        report["slot_cache_service_owned_records"] = int(slot_report.get("service_owned_records", 0) or 0)
+
+    maybe_cancel()
+    if delete_conversation_file is not None:
+        report["conversation_deleted"] = bool(delete_conversation_file(conversation_id))
+    return report
 
 
 def _int(value, default: int = 0) -> int:
