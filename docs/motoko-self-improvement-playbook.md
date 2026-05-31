@@ -453,6 +453,30 @@ Prepared improvement list for Motoko's own code work:
 - Leave a gate behind every improvement: a focused regression, `self-eval`,
   `action-eval`, retrieval/vector eval, or a documented manual soak check.
 
+Self-improvement skill targets:
+
+- Maintain the four umbrella built-in skills first. `motoko-codebase-maintainer`
+  owns deterministic code lookup; `motoko-refactor-craft` owns service-boundary
+  extraction; `motoko-retrieval-maintainer` owns retrieval and context failures;
+  `motoko-agentic-boundary-review` owns actions, scripts, tools, and goal-loop
+  safety.
+- Build or patch a support file for a skill when a repeated repair produces a
+  reusable recipe, fixture shape, command trace, ownership map, or audit
+  checklist. Prefer support files over long `SKILL.md` bodies.
+- Consider a narrow `motoko-self-maintenance` bundle only after real use shows
+  that loading the four umbrella skills separately is noisy or easy to miss.
+  The bundle should compose existing procedures; it should not grant new
+  authority.
+- Future skill candidates should come from repeated evidence, not speculation:
+  an Org-mode structure/query maintainer, an artifact-lifecycle caretaker, a
+  background-job supervisor, a conversation-persistence auditor, and a
+  code-query precision auditor are attractive only when real failures show the
+  umbrella skills need more specialized support.
+- Keep the Hermes lesson narrow: prompted self-review, progressive disclosure,
+  support files, usage metadata, curator hygiene, patch-before-create behavior,
+  and recoverable archives are good fits. Broad host tools, hidden mutation,
+  cross-realm stores, and prompt-only security are not.
+
 Operational packet for future Motoko self-improvement sessions:
 
 1. Inspect first: run `motoko code-map`, then focused `motoko code-query`
