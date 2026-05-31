@@ -848,8 +848,15 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert report["status"] == "pass"
         names = {row.get("name") for row in report.get("checks", [])}
         assert "code_query_finds_commands_symbols_tests" in names
+        assert "self_improvement_umbrella_skills_present" in names
+        assert "self_improvement_umbrella_skills_select" in names
         assert "motoko_codebase_skill_activates" in names
         assert "skill_scanner_detects_risky_script" in names
+        umbrella = next(row for row in report.get("checks", []) if row.get("name") == "self_improvement_umbrella_skills_select")
+        selected = umbrella.get("evidence", {}).get("selected", {})
+        assert "motoko-retrieval-maintainer" in selected.get("motoko-retrieval-maintainer", [])
+        assert "motoko-refactor-craft" in selected.get("motoko-refactor-craft", [])
+        assert "motoko-agentic-boundary-review" in selected.get("motoko-agentic-boundary-review", [])
         docs_check = next(row for row in report.get("checks", []) if row.get("name") == "self_improvement_docs_present")
         assert "docs/motoko-self-improvement-playbook.md" in docs_check.get("evidence", {}).get("docs", [])
         rendered = m.format_self_improvement_eval(report)

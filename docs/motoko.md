@@ -842,7 +842,8 @@ diagnosis, refactor boundaries, validation, and deployment soak checks.
 `motoko self-eval` is a deterministic no-model readiness check for Motoko
 self-improvement. It verifies that the code map parses, code-query finds
 commands/symbols/tests, the built-in self-code skill activates for Motoko
-refactor questions, built-in skills scan cleanly, and the scanner catches a
+refactor questions, self-improvement umbrella skills are present and selected
+for representative queries, built-in skills scan cleanly, the scanner catches a
 synthetic risky script, and the self-improvement docs are present. Use it after
 changes to the skill/codebase self-improvement path or before trusting Motoko
 to help plan her own refactor.

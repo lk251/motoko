@@ -13,10 +13,24 @@ import pathlib
 from motoko_core.code_intel import build_code_map, find_motoko_repo_root, query_code_map
 from motoko_core.retrieval_planner import build_retrieval_plan
 from motoko_core.skill_scanner import scan_skill_package
-from motoko_core.skills import BUILTIN_SKILLS, MOTOKO_CODEBASE_SKILL
+from motoko_core.skills import (
+    BUILTIN_SKILLS,
+    MOTOKO_AGENTIC_BOUNDARY_SKILL,
+    MOTOKO_CODEBASE_SKILL,
+    MOTOKO_REFACTOR_CRAFT_SKILL,
+    MOTOKO_RETRIEVAL_MAINTAINER_SKILL,
+    rank_skill_rows,
+)
 
 
 SELF_EVAL_SCHEMA = "motoko-self-improvement-eval-v1"
+
+SELF_IMPROVEMENT_UMBRELLA_SKILLS = {
+    MOTOKO_CODEBASE_SKILL: "How should Motoko refactor its codebase command handlers?",
+    MOTOKO_RETRIEVAL_MAINTAINER_SKILL: "diagnose retrieval failure with weak sources and wrong span selection",
+    MOTOKO_REFACTOR_CRAFT_SKILL: "careful service boundary refactor with validation and craftsmanship",
+    MOTOKO_AGENTIC_BOUNDARY_SKILL: "review skill tool action goal loop authority and approvals",
+}
 
 
 def _utc_now() -> str:
@@ -111,6 +125,34 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             bool(code_skill),
             f"skill={MOTOKO_CODEBASE_SKILL if code_skill else 'missing'}",
             evidence={"known_builtin_skills": sorted(_skill_catalog(BUILTIN_SKILLS))},
+        )
+    )
+    missing_umbrella = [slug for slug in SELF_IMPROVEMENT_UMBRELLA_SKILLS if slug not in catalog]
+    checks.append(
+        _check(
+            "self_improvement_umbrella_skills_present",
+            not missing_umbrella,
+            f"missing={','.join(missing_umbrella) or '-'}",
+            evidence={
+                "required": sorted(SELF_IMPROVEMENT_UMBRELLA_SKILLS),
+                "known_builtin_skills": sorted(_skill_catalog(BUILTIN_SKILLS)),
+            },
+        )
+    )
+    selected = {}
+    missing_selection = []
+    skill_rows = list(catalog.values()) if catalog else BUILTIN_SKILLS
+    for slug, query in SELF_IMPROVEMENT_UMBRELLA_SKILLS.items():
+        ranked = rank_skill_rows(skill_rows, query, limit=4)
+        selected[slug] = [row.get("slug", "") for row in ranked]
+        if slug not in selected[slug]:
+            missing_selection.append(slug)
+    checks.append(
+        _check(
+            "self_improvement_umbrella_skills_select",
+            not missing_selection,
+            f"missing_selection={','.join(missing_selection) or '-'}",
+            evidence={"selected": selected},
         )
     )
     plan = build_retrieval_plan(

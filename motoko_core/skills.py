@@ -1059,12 +1059,22 @@ def rank_skills(
     limit: int = DEFAULT_SKILL_CONTEXT_LIMIT,
     lifecycle_state: dict | None = None,
 ) -> list[dict]:
+    return rank_skill_rows(list_skills(root), query, limit=limit, lifecycle_state=lifecycle_state)
+
+
+def rank_skill_rows(
+    rows: list[dict],
+    query: str,
+    *,
+    limit: int = DEFAULT_SKILL_CONTEXT_LIMIT,
+    lifecycle_state: dict | None = None,
+) -> list[dict]:
     query_terms = skill_tokens(query)
     if not query_terms:
         return []
     ranked = []
     lifecycle_state = normalize_skill_lifecycle_state(lifecycle_state or {})
-    for row in apply_skill_lifecycle(list_skills(root), lifecycle_state):
+    for row in apply_skill_lifecycle(list(rows), lifecycle_state):
         if row.get("lifecycle_state") == SKILL_STATE_ARCHIVED:
             continue
         triggers = "\n".join(str(item) for item in row.get("triggers", []) or [])

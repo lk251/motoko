@@ -1528,8 +1528,9 @@ Motoko self-code checkpoint, 2026-05-31:
   before external, community, or self-created skills are trusted further.
 - Added `motoko self-eval` and `/self-eval` as a deterministic no-model gate
   for this self-improvement path. It checks code-map parsing, code-query
-  usefulness, self-code skill activation, clean built-in skill scans, and
-  scanner detection of a synthetic risky script.
+  usefulness, self-code skill activation, self-improvement umbrella-skill
+  presence/selection, clean built-in skill scans, and scanner detection of a
+  synthetic risky script.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.
@@ -1559,8 +1560,8 @@ Motoko self-improvement list prepared for future work:
    context failures, action-eval for authority failures, and regression tests
    for every new command or handler. The first dedicated no-model check is
    now `motoko self-eval`, which verifies code-map/code-query readiness,
-   self-code skill activation, clean built-in skill scans, and scanner
-   detection of a synthetic risky script.
+   self-code skill activation, umbrella-skill selection, clean built-in skill
+   scans, and scanner detection of a synthetic risky script.
 7. Continue shrinking the root facade only when an extracted module gets clear
    ownership, tests, and a simpler public API.
 8. Treat reflection as inspectable audits and review records, not hidden
