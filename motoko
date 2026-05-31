@@ -452,7 +452,8 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
     format_source_lifecycle_report,
-    json_references_index,
+    index_artifact_dependency_counts,
+    json_paths_referencing_index,
     source_lifecycle_affected_paths,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
@@ -12267,14 +12268,7 @@ def materialize_duplicate_chunks(index: dict) -> dict:
 
 
 def json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> list[pathlib.Path]:
-    rows = []
-    if not directory.exists():
-        return rows
-    for path in sorted(directory.glob("*.json")):
-        data = safe_load_json(path)
-        if data is not None and json_references_index(data, index_id):
-            rows.append(path)
-    return rows
+    return json_paths_referencing_index(directory, index_id, load_json=safe_load_json)
 
 
 def delete_json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> int:
@@ -12291,32 +12285,26 @@ def stores_referencing_index(directory: pathlib.Path, index_id: str) -> list[pat
 
 
 def vector_progress_referencing_index(index_id: str) -> list[pathlib.Path]:
-    root = vector_progress_dir()
-    if not root.exists():
-        return []
-    rows = []
-    for path in sorted(root.glob("*.json")):
-        data = safe_load_json(path)
-        if data is not None and json_references_index(data, index_id):
-            rows.append(path)
-    return rows
+    return json_artifacts_referencing_index(vector_progress_dir(), index_id)
 
 
 def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
-    if not index_id:
-        return {}
-    return {
-        "vector_store": len(stores_referencing_index(vector_stores_dir(), index_id)),
-        "evidence_store": len(stores_referencing_index(evidence_stores_dir(), index_id)),
-        "vector_progress": len(vector_progress_referencing_index(index_id)),
-        "topic_dossier": len(json_artifacts_referencing_index(topics_dir(), index_id)),
-        "memory_dossier": len(json_artifacts_referencing_index(dossiers_dir(), index_id)),
-        "retrieval_debug": len(json_artifacts_referencing_index(retrieval_debug_dir(), index_id)),
-        "retrieval_eval": len(json_artifacts_referencing_index(retrieval_evals_dir(), index_id)),
-        "feedback_eval": len(json_artifacts_referencing_index(feedback_evals_dir(), index_id)),
-        "action_eval": len(json_artifacts_referencing_index(action_evals_dir(), index_id)),
-        "model_eval": len(json_artifacts_referencing_index(model_evals_dir(), index_id)),
-    }
+    return index_artifact_dependency_counts(
+        index_id,
+        [
+            {"path": vector_stores_dir(), "artifact_kind": "vector_store"},
+            {"path": evidence_stores_dir(), "artifact_kind": "evidence_store"},
+            {"path": vector_progress_dir(), "artifact_kind": "vector_progress"},
+            {"path": topics_dir(), "artifact_kind": "topic_dossier"},
+            {"path": dossiers_dir(), "artifact_kind": "memory_dossier"},
+            {"path": retrieval_debug_dir(), "artifact_kind": "retrieval_debug"},
+            {"path": retrieval_evals_dir(), "artifact_kind": "retrieval_eval"},
+            {"path": feedback_evals_dir(), "artifact_kind": "feedback_eval"},
+            {"path": action_evals_dir(), "artifact_kind": "action_eval"},
+            {"path": model_evals_dir(), "artifact_kind": "model_eval"},
+        ],
+        load_json=safe_load_json,
+    )
 
 
 def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> list[dict]:

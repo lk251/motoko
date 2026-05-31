@@ -1265,6 +1265,10 @@ Current progress on this stretch:
   records from JSON artifact directories, JSONL ledgers, and single JSON state
   files through injected load/size callbacks. The root facade supplies only
   explicit state-family paths, cleanup policies, and deletion callbacks.
+- Progress: index-reference dependency counting also moved into
+  `motoko_core.artifact_lifecycle`. The service now owns JSON artifact
+  reference matching and per-family dependency counts through injected JSON
+  loaders, while root deletion still stays behind explicit facade callbacks.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,

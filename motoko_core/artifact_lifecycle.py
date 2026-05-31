@@ -147,6 +147,45 @@ def json_matching_source_paths(value, source_paths: set[str]) -> set[str]:
     return matches
 
 
+def json_paths_referencing_index(
+    directory: str | pathlib.Path,
+    index_id: str,
+    *,
+    load_json: Callable[[pathlib.Path], object | None],
+) -> list[pathlib.Path]:
+    """Return JSON artifact paths that reference an index id."""
+
+    root = pathlib.Path(directory)
+    rows: list[pathlib.Path] = []
+    if not root.exists():
+        return rows
+    for path in sorted(root.glob("*.json")):
+        data = load_json(path)
+        if data is not None and json_references_index(data, index_id):
+            rows.append(path)
+    return rows
+
+
+def index_artifact_dependency_counts(
+    index_id: str,
+    artifact_targets: list[dict],
+    *,
+    load_json: Callable[[pathlib.Path], object | None],
+) -> dict[str, int]:
+    """Count JSON artifact families that reference an index id."""
+
+    if not index_id:
+        return {}
+    counts: dict[str, int] = {}
+    for target in artifact_targets:
+        kind = str(target.get("artifact_kind", "")).strip()
+        path = target.get("path", "")
+        if not kind or not path:
+            continue
+        counts[kind] = len(json_paths_referencing_index(path, index_id, load_json=load_json))
+    return counts
+
+
 def source_lifecycle_affected_paths(source_lifecycle: list[dict]) -> set[str]:
     paths = set()
     for item in source_lifecycle:

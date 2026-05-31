@@ -29,7 +29,9 @@ from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
     format_source_lifecycle_report as format_source_lifecycle_report_core,
+    index_artifact_dependency_counts as index_artifact_dependency_counts_core,
     json_matching_source_paths as json_matching_source_paths_core,
+    json_paths_referencing_index as json_paths_referencing_index_core,
     json_references_index as json_references_index_core,
     source_artifact_record as source_artifact_record_core,
     source_lifecycle_affected_paths as source_lifecycle_affected_paths_core,
@@ -9185,6 +9187,16 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
                 return json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 return None
+
+        assert json_paths_referencing_index_core(json_dir, "old-index", load_json=load_json) == [json_path]
+        assert index_artifact_dependency_counts_core(
+            "old-index",
+            [
+                {"path": json_dir, "artifact_kind": "vector_store"},
+                {"path": root / "missing", "artifact_kind": "missing_kind"},
+            ],
+            load_json=load_json,
+        ) == {"vector_store": 1, "missing_kind": 0}
 
         records = collect_source_lifecycle_artifact_records_core(
             index_id="old-index",
