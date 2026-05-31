@@ -2961,6 +2961,11 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         action = str(spec.get("action", "")).strip()
         if not path or not report_key or not pathlib.Path(path).exists():
             continue
+        if action == "delete-always":
+            with contextlib.suppress(FileNotFoundError):
+                pathlib.Path(path).unlink()
+                report[report_key] = True
+            continue
         data = safe_load_json(path)
         if data is None:
             continue
@@ -2982,27 +2987,16 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
                 with contextlib.suppress(FileNotFoundError):
                     pathlib.Path(path).unlink()
                     report[report_key] = True
+        elif action == "clear-maintenance-if-references-conversation":
+            if json_references_conversation(data, conversation_id):
+                clear_maintenance_state(data.get("job_id") if isinstance(data, dict) else None)
+                report[report_key] = True
 
     if slot_cache_manifest_path().exists():
         slot_report = clear_slot_cache_records(conversation_id=conversation_id, yes=True)
         report["slot_cache_records_deleted"] = int(slot_report.get("records_removed", 0) or 0)
         report["slot_cache_files_deleted"] = int(slot_report.get("files_deleted", 0) or 0)
         report["slot_cache_service_owned_records"] = int(slot_report.get("service_owned_records", 0) or 0)
-
-    maintenance = read_maintenance_state()
-    if maintenance is not None and json_references_conversation(maintenance, conversation_id):
-        clear_maintenance_state(maintenance.get("job_id"))
-        report["maintenance_deleted"] = True
-
-    study_state = read_study_state()
-    if study_state is not None and json_references_conversation(study_state, conversation_id):
-        with contextlib.suppress(FileNotFoundError):
-            study_state_path().unlink()
-            report["study_state_deleted"] = True
-
-    with contextlib.suppress(FileNotFoundError):
-        context_catalog_path().unlink()
-        report["context_catalog_deleted"] = True
 
     with contextlib.suppress(FileNotFoundError):
         conversation_path(conversation_id).unlink()
@@ -12785,6 +12779,9 @@ def artifact_lifecycle_path_for_key(key: str) -> pathlib.Path | None:
         "skill_suggestions": skill_suggestions_path,
         "skill_lifecycle": skill_lifecycle_path,
         "profile": profile_path,
+        "maintenance_state": maintenance_path,
+        "study_state": study_state_path,
+        "context_catalog": context_catalog_path,
     }
     resolver = resolvers.get(str(key or ""))
     return resolver() if resolver is not None else None

@@ -389,10 +389,14 @@ Current progress on this backlog:
   ledgers such as feedback, action ledgers, memory proposals, and study jobs
   have the same service-owned declaration. Goal loops and goal runs that
   structurally reference a deleted conversation are cleaned too, while
-  unrelated goals and ledgers are preserved. Feedback targeting now pairs the
-  rated assistant answer with the nearest prior user prompt, so `/up` or
-  `/down` used while a newer prompt is preparing does not attach the wrong
-  query to the private feedback fixture.
+  unrelated goals and ledgers are preserved. Conversation-linked single-file
+  state cleanup for skill suggestions, profile state, maintenance state, study
+  state, and the context catalog is also declared by the lifecycle service,
+  with the root facade only resolving realm-local paths and performing the
+  guarded user-state mutation. Feedback targeting now pairs the rated
+  assistant answer with the nearest prior user prompt, so `/up` or `/down`
+  used while a newer prompt is preparing does not attach the wrong query to
+  the private feedback fixture.
 
 Skill work that should usually happen before new code:
 

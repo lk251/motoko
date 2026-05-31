@@ -10386,9 +10386,11 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
     }
     json_file_specs = source_lifecycle_json_file_specs_core()
     assert {spec["artifact_kind"] for spec in json_file_specs} >= {
+        "maintenance_state",
         "skill_suggestion",
         "skill_lifecycle",
         "profile_dossier",
+        "study_state",
     }
 
     delete_specs = index_snapshot_delete_specs_core()
@@ -10417,10 +10419,15 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
     assert {spec["report_key"] for spec in conversation_delete_json_files} >= {
         "skill_suggestions_deleted",
         "profile_deleted",
+        "maintenance_deleted",
+        "study_state_deleted",
+        "context_catalog_deleted",
     }
     assert {spec["action"] for spec in conversation_delete_json_files} >= {
         "filter-list",
         "delete-if-references-conversation",
+        "clear-maintenance-if-references-conversation",
+        "delete-always",
     }
 
     with isolated_state() as tmp:

@@ -140,6 +140,12 @@ MANUAL_JSONL_ARTIFACT_FAMILIES: tuple[dict, ...] = (
 
 MANUAL_JSON_FILE_ARTIFACT_FAMILIES: tuple[dict, ...] = (
     {
+        "path_key": "maintenance_state",
+        "artifact_id": "maintenance_state",
+        "artifact_kind": "maintenance_state",
+        "cleanup_policy": "manual-review",
+    },
+    {
         "path_key": "skill_suggestions",
         "artifact_id": "skill_suggestion",
         "artifact_kind": "skill_suggestion",
@@ -155,6 +161,12 @@ MANUAL_JSON_FILE_ARTIFACT_FAMILIES: tuple[dict, ...] = (
         "path_key": "profile",
         "artifact_id": "profile",
         "artifact_kind": "profile_dossier",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "study_state",
+        "artifact_id": "study_state",
+        "artifact_kind": "study_state",
         "cleanup_policy": "manual-review",
     },
 )
@@ -250,6 +262,21 @@ def conversation_delete_json_file_specs() -> list[dict]:
             "path_key": "profile",
             "report_key": "profile_deleted",
             "action": "delete-if-references-conversation",
+        },
+        {
+            "path_key": "maintenance_state",
+            "report_key": "maintenance_deleted",
+            "action": "clear-maintenance-if-references-conversation",
+        },
+        {
+            "path_key": "study_state",
+            "report_key": "study_state_deleted",
+            "action": "delete-if-references-conversation",
+        },
+        {
+            "path_key": "context_catalog",
+            "report_key": "context_catalog_deleted",
+            "action": "delete-always",
         },
     ]
 

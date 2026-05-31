@@ -1287,7 +1287,9 @@ Current progress on this stretch:
   families, single-file durable state families, and derived delete report
   labels. The root facade maps those policy keys to realm-local paths and
   filesystem callbacks, so adding a new derived family should touch one policy
-  table instead of three parallel root-script lists.
+  table instead of three parallel root-script lists. Conversation-linked
+  single-file cleanup for skill suggestions, profile state, maintenance state,
+  study state, and the context catalog now follows the same declaration.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,
