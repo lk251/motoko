@@ -18690,12 +18690,17 @@ def retrieval_sufficiency_expansion(
         "strong_source_count": plan.get("strong_source_count", 0),
         "nominal_strong_source_count": plan.get("nominal_strong_source_count", 0),
         "context_source_count": plan.get("context_source_count", 0),
+        "stale_or_unavailable_source_count": plan.get("stale_or_unavailable_source_count", 0),
         "candidate_count": plan.get("candidate_count", 0),
     }
+    if plan.get("stale_or_unavailable_source_count", 0):
+        plan_note = "Initial context included stale or unavailable source evidence."
+    else:
+        plan_note = "Initial context had no excerpt-level evidence for this grounded query."
     note = textwrap.dedent(
         f"""
         Retrieval sufficiency planner:
-        Initial context had no excerpt-level evidence for this grounded query.
+        {plan_note}
         Motoko ran one bounded extra retrieval pass over {selected.get('kind', '')} {selected.get('id', '')}.
         This did not attach or mutate the conversation.
         """

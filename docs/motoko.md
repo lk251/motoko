@@ -1143,9 +1143,10 @@ retrieval workers when the normal hybrid retrieval path uses them. It appears
 in `/sources` as `retrieval-sufficiency`. Evidence strength is quality-aware:
 a fallback chunk with no lexical, structured, evidence, vector, rerank, or
 span signal no longer counts as strong grounding merely because its source
-kind is `chunk`. Future work may make this planner richer, but it should
-remain code-owned, source-visible, and limited rather than a hidden autonomous
-loop.
+kind is `chunk`. Stale or unavailable source evidence also triggers one
+bounded recovery pass when a fresh project-scoped candidate exists. Future work
+may make this planner richer, but it should remain code-owned, source-visible,
+and limited rather than a hidden autonomous loop.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to

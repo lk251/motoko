@@ -101,13 +101,38 @@ def plan_retrieval_sufficiency_expansion(
     context_source_kinds: set[str],
     min_score: int = 1,
 ) -> dict:
-    """Choose one bounded extra retrieval pass when prompt context is thin.
+    """Choose one bounded extra retrieval pass for thin or stale context.
 
     This is deliberately a planner, not an agent loop. It only inspects source
     kinds and pre-ranked candidate context items supplied by the caller. The
     caller still owns allowlists, project scoping, and rendering the selected
     item into prompt context.
     """
+
+    def source_stale_or_unavailable(source: dict) -> bool:
+        if str(source.get("kind", "")) == "context-warning":
+            return True
+        status = str(source.get("status", "")).strip().lower()
+        if status in {"stale", "missing", "deleted", "ignored", "unavailable"}:
+            return True
+        warning_text = " ".join(str(warning) for warning in source.get("warnings", []) or []).lower()
+        return any(term in warning_text for term in ("stale", "missing", "deleted", "ignored", "unavailable"))
+
+    def select_candidate() -> dict | None:
+        for candidate in candidates:
+            score = int(candidate.get("score", 0) or 0)
+            if score < min_score:
+                continue
+            item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+            if not item.get("kind") or not item.get("id"):
+                continue
+            return {
+                "kind": item.get("kind", ""),
+                "id": item.get("id", ""),
+                "score": score,
+                "reason": candidate.get("reason", ""),
+            }
+        return None
 
     clean_sources = [source for source in sources if isinstance(source, dict)]
     kinds = [str(source.get("kind", "unknown")) for source in clean_sources]
@@ -118,6 +143,7 @@ def plan_retrieval_sufficiency_expansion(
     )
     nominal_strong_count = sum(1 for kind in kinds if kind in strong_source_kinds)
     context_count = sum(1 for kind in kinds if kind in context_source_kinds)
+    stale_or_unavailable_count = sum(1 for source in clean_sources if source_stale_or_unavailable(source))
     needs_grounding = query_needs_grounded_sources_core(
         query,
         grounding_query_words=grounding_query_words,
@@ -131,6 +157,7 @@ def plan_retrieval_sufficiency_expansion(
         "strong_source_count": strong_count,
         "nominal_strong_source_count": nominal_strong_count,
         "context_source_count": context_count,
+        "stale_or_unavailable_source_count": stale_or_unavailable_count,
         "candidate_count": len(candidates),
         "selected": None,
         "reason": "question does not appear to require external grounding",
@@ -138,22 +165,31 @@ def plan_retrieval_sufficiency_expansion(
     if not needs_grounding:
         return plan
     if strong_count:
+        if stale_or_unavailable_count:
+            selected = select_candidate()
+            if selected is None:
+                plan["status"] = "stale-warning"
+                plan["reason"] = (
+                    "selected context has excerpt-level evidence but also stale or unavailable source(s); "
+                    "no project-scoped recovery candidate was available"
+                )
+                return plan
+            plan.update(
+                {
+                    "status": "expand",
+                    "selected": selected,
+                    "reason": (
+                        "selected context had excerpt-level evidence but also stale or unavailable source(s); "
+                        "run one bounded fresh retrieval pass"
+                    ),
+                }
+            )
+            return plan
         plan["status"] = "sufficient"
         plan["reason"] = "selected context already has excerpt-level evidence"
         return plan
-    for candidate in candidates:
-        score = int(candidate.get("score", 0) or 0)
-        if score < min_score:
-            continue
-        item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
-        if not item.get("kind") or not item.get("id"):
-            continue
-        selected = {
-            "kind": item.get("kind", ""),
-            "id": item.get("id", ""),
-            "score": score,
-            "reason": candidate.get("reason", ""),
-        }
+    selected = select_candidate()
+    if selected is not None:
         plan.update(
             {
                 "status": "expand",

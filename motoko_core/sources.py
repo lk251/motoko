@@ -130,6 +130,7 @@ def format_sources(sources: list[dict]) -> str:
                 f"     initial: strong {source.get('strong_source_count', 0)}  "
                 f"nominal {source.get('nominal_strong_source_count', source.get('strong_source_count', 0))}  "
                 f"context {source.get('context_source_count', 0)}  "
+                f"stale {source.get('stale_or_unavailable_source_count', 0)}  "
                 f"candidates {source.get('candidate_count', 0)}"
             )
         elif kind == "personality":

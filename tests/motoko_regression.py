@@ -3828,6 +3828,21 @@ def test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass(m):
     assert weak_chunk["nominal_strong_source_count"] == 1
     assert weak_chunk["strong_source_count"] == 0
 
+    stale_strong = m.plan_retrieval_sufficiency_expansion(
+        "according to plan.org",
+        [{"kind": "chunk", "path": "/tmp/plan.org", "chunk": 1, "lexical_score": 5, "status": "stale"}],
+        [{"item": {"kind": "index", "id": "idx-fresh"}, "score": 1, "reason": "fresh replacement"}],
+        grounding_query_words={"according"},
+        task_query_words=set(),
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"index"},
+        min_score=1,
+    )
+    assert stale_strong["status"] == "expand"
+    assert stale_strong["strong_source_count"] == 1
+    assert stale_strong["stale_or_unavailable_source_count"] == 1
+    assert "stale or unavailable" in stale_strong["reason"]
+
     sufficient = m.plan_retrieval_sufficiency_expansion(
         "according to plan.org",
         [{"kind": "chunk", "lexical_score": 1}],
