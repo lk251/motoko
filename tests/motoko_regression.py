@@ -3713,6 +3713,8 @@ def test_answer_grounding_audit_sources(m):
     assert audit["kind"] == "answer-audit"
     assert audit["status"] == "pass"
     assert audit["strong_evidence_sources"] == 1
+    assert audit["nominal_strong_evidence_sources"] == 1
+    assert audit["weak_nominal_strong_sources"] == 0
     text = m.format_sources(audited)
     assert "answer audit" in text
     assert "paths: /tmp/logbook.org" in text
@@ -3728,6 +3730,9 @@ def test_answer_grounding_audit_sources(m):
     )
     assert weak["status"] == "fail"
     assert weak["strong_evidence_sources"] == 0
+    assert weak["nominal_strong_evidence_sources"] == 1
+    assert weak["weak_nominal_strong_sources"] == 1
+    assert "weak nominal evidence" in m.format_sources([weak])
 
 
 def test_core_answer_grounding_audit_is_injectable(m):
@@ -3848,6 +3853,7 @@ def test_core_retrieval_preview_formatting_is_injectable(m):
         audit={
             "status": "pass",
             "strong_evidence_sources": 1,
+            "nominal_strong_evidence_sources": 1,
             "context_sources": 0,
             "total_sources": 2,
             "source_kinds": {"chunk": 1, "context-plan": 1},
@@ -3861,7 +3867,7 @@ def test_core_retrieval_preview_formatting_is_injectable(m):
     )
 
     assert attached == "Evidence block"
-    assert "source audit: pass  strong 1  context 0  total 2" in report
+    assert "source audit: pass  strong 1  nominal 1  context 0  total 2" in report
     assert "source kinds: chunk=1, context-plan=1" in report
     assert "warning: stale source" in report
     assert "Context plan: 10/100 chars (ok)" in report

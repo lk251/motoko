@@ -1218,8 +1218,10 @@ Current progress on this stretch:
   exposed in `/sources` as a `retrieval-sufficiency` source row. Evidence
   strength is quality-aware: a fallback chunk with no lexical, structured,
   evidence, vector, rerank, or span signal no longer counts as strong grounding
-  merely because its source kind is `chunk`. Remaining work is richer
-  sufficiency planning across more lanes and conflict checks.
+  merely because its source kind is `chunk`. `/sources` and
+  `/retrieval-preview` report both quality-aware strong evidence and nominal
+  strong source-kind counts so weak fallback chunks are visible. Remaining work
+  is richer sufficiency planning across more lanes and conflict checks.
 - Complete for `/retrieval-preview`: preview output now consumes an explicit
   retrieval-service preview result built from the same `context-package-v1`
   record as chat prompt assembly. The command remains a renderer, but it no

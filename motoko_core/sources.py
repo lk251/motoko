@@ -172,11 +172,17 @@ def format_sources(sources: list[dict]) -> str:
             lines.append(
                 f"{idx:3d}  answer audit  {source.get('status', 'unknown')}  "
                 f"strong {source.get('strong_evidence_sources', 0)}  "
+                f"nominal {source.get('nominal_strong_evidence_sources', source.get('strong_evidence_sources', 0))}  "
                 f"context {source.get('context_sources', 0)}  "
                 f"total {source.get('total_sources', 0)}"
             )
             lines.append(f"     reflection: {source.get('reflection', '')}")
             lines.append(f"     action: {source.get('recommended_action', '')}")
+            if source.get("weak_nominal_strong_sources"):
+                lines.append(
+                    "     weak nominal evidence: "
+                    f"{source.get('weak_nominal_strong_sources', 0)} source(s) had a strong kind but no retrieval signal"
+                )
             if source.get("warnings"):
                 for warning in source.get("warnings", [])[:3]:
                     lines.append(f"     warning: {warning}")

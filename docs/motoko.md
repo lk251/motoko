@@ -1412,6 +1412,9 @@ retrieved at all. In chat, `/retrieval-preview QUERY` uses the current
 conversation attachments; from the shell, `motoko retrieval-preview QUERY`
 auto-selects the best matching current index unless `--conversation` or
 `--index INDEX_ID` is supplied.
+The source audit distinguishes quality-aware strong evidence from nominal
+strong source kinds, so fallback chunks with no retrieval signal are visible
+instead of being silently counted as grounded excerpts.
 
 `model-eval` uses synthetic, source-grounded fixtures for chunk summaries, file
 summaries, lightweight labels/classification, and corpus synthesis. It asks

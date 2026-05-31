@@ -215,11 +215,13 @@ def answer_grounding_audit_core(
 ) -> dict:
     clean_sources = [source for source in sources if source.get("kind") != "answer-audit"]
     kinds = collections.Counter(source.get("kind", "unknown") for source in clean_sources)
+    nominal_strong_count = sum(kinds.get(kind, 0) for kind in strong_source_kinds)
     strong_count = sum(
         1
         for source in clean_sources
         if source_has_strong_evidence_core(source, strong_source_kinds=strong_source_kinds)
     )
+    weak_nominal_strong_count = max(0, nominal_strong_count - strong_count)
     context_count = sum(kinds.get(kind, 0) for kind in context_source_kinds)
     needs_grounding = query_needs_grounded_sources_core(
         query,
@@ -264,6 +266,8 @@ def answer_grounding_audit_core(
         "created": created,
         "status": status,
         "strong_evidence_sources": strong_count,
+        "nominal_strong_evidence_sources": nominal_strong_count,
+        "weak_nominal_strong_sources": weak_nominal_strong_count,
         "context_sources": context_count,
         "total_sources": len(clean_sources),
         "source_kinds": dict(sorted(kinds.items())),
@@ -404,6 +408,7 @@ def format_retrieval_preview_core(
         (
             f"source audit: {audit.get('status', 'unknown')}  "
             f"strong {audit.get('strong_evidence_sources', 0)}  "
+            f"nominal {audit.get('nominal_strong_evidence_sources', audit.get('strong_evidence_sources', 0))}  "
             f"context {audit.get('context_sources', 0)}  "
             f"total {audit.get('total_sources', 0)}"
         ),
