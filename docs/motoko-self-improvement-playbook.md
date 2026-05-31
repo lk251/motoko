@@ -334,9 +334,11 @@ Current progress on this backlog:
   construction. Prompt-time catalog text is now rebuilt from current
   user-owned state instead of trusting an older persisted catalog file, and
   current evidence/vector store ids, row counts, freshness, and vector refresh
-  metadata are surfaced alongside each index. The next improvement is doing
-  the same explicitly for any remaining memory/profile summaries wherever a
-  long-lived TUI view caches them.
+  metadata are surfaced alongside each index. Catalog memory/profile summaries
+  also expose current latest-memory and profile source-count metadata so
+  prompt-time private context inventory reflects newly materialized memory and
+  profile state without a restart. The next improvement is checking any
+  remaining TUI-only cached surfaces after real usage exposes them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh should

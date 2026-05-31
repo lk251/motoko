@@ -10811,14 +10811,21 @@ def build_context_catalog() -> dict:
         )
     memories = load_memories(limit=1000)
     profile = load_profile_dossier()
+    latest_memory_created = max(
+        (str(row.get("created", "")) for row in memories if str(row.get("created", "")).strip()),
+        default="",
+    )
     return {
         "updated": now(),
         "model": model_name(),
         "endpoint": endpoint(),
         "memory_count": len(memories),
         "pinned_memory_count": sum(1 for row in memories if row.get("pinned")),
+        "latest_memory_created": latest_memory_created,
         "conversation_count": len(list_conversations()),
         "profile_updated": profile.get("updated", "") if profile else "",
+        "profile_memory_count": len(profile.get("memory_ids", [])) if profile else 0,
+        "profile_conversation_count": len(profile.get("conversation_ids", [])) if profile else 0,
         "indexes": indexes,
         "topics": topics,
         "dossiers": dossiers,
@@ -10861,13 +10868,21 @@ def format_context_catalog(catalog: dict | None = None, *, project_roots: set[st
     lines = [
         f"model={catalog.get('model', '')}",
         f"endpoint={catalog.get('endpoint', '')}",
-        f"memories={catalog.get('memory_count', 0)} pinned={catalog.get('pinned_memory_count', 0)}",
+        (
+            f"memories={catalog.get('memory_count', 0)} "
+            f"pinned={catalog.get('pinned_memory_count', 0)}"
+            + (f" latest={catalog.get('latest_memory_created')}" if catalog.get("latest_memory_created") else "")
+        ),
         f"conversations={catalog.get('conversation_count', 0)}",
     ]
     if scoped:
         lines.append("scope=current project")
     if catalog.get("profile_updated"):
-        lines.append(f"profile updated={catalog.get('profile_updated')}")
+        lines.append(
+            f"profile updated={catalog.get('profile_updated')} "
+            f"memories={catalog.get('profile_memory_count', 0)} "
+            f"conversations={catalog.get('profile_conversation_count', 0)}"
+        )
     if catalog.get("dossiers") and not scoped:
         lines.append("available memory dossiers:")
         for item in catalog.get("dossiers", [])[:6]:

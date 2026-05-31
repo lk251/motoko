@@ -9143,6 +9143,52 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
         assert "rows=11 status=fresh" in text
 
 
+def test_context_catalog_reports_current_memory_and_profile_freshness(m):
+    with isolated_state():
+        m.write_memory_rows(
+            [
+                {
+                    "id": "mem-old",
+                    "text": "older memory",
+                    "created": "2026-05-20T10:00:00+00:00",
+                    "pinned": False,
+                },
+                {
+                    "id": "mem-new",
+                    "text": "newer memory",
+                    "created": "2026-05-24T12:00:00+00:00",
+                    "pinned": True,
+                },
+            ]
+        )
+        m.atomic_write(
+            m.profile_path(),
+            json.dumps(
+                {
+                    "updated": "2026-05-24T13:00:00+00:00",
+                    "memory_ids": ["mem-old", "mem-new"],
+                    "conversation_ids": ["conv-one"],
+                    "text": "Profile text.",
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+
+        catalog = m.build_context_catalog()
+        assert catalog["memory_count"] == 2
+        assert catalog["pinned_memory_count"] == 1
+        assert catalog["latest_memory_created"] == "2026-05-24T12:00:00+00:00"
+        assert catalog["profile_updated"] == "2026-05-24T13:00:00+00:00"
+        assert catalog["profile_memory_count"] == 2
+        assert catalog["profile_conversation_count"] == 1
+
+        text = m.format_context_catalog(catalog)
+        assert "memories=2 pinned=1 latest=2026-05-24T12:00:00+00:00" in text
+        assert "profile updated=2026-05-24T13:00:00+00:00 memories=2 conversations=1" in text
+
+
 def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
     old_cwd = os.getcwd()
     old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
@@ -13051,6 +13097,8 @@ def main() -> int:
         test_superseded_partials_do_not_look_unfinished,
         test_context_catalog_prefers_latest_index_per_family,
         test_prompt_context_uses_current_catalog_not_stale_catalog_file,
+        test_context_catalog_reports_current_evidence_and_vector_artifacts,
+        test_context_catalog_reports_current_memory_and_profile_freshness,
         test_index_resume_after_model_timeout,
         test_index_model_residency_defer_is_resumable_not_failed,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
