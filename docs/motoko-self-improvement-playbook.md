@@ -23,6 +23,11 @@ playbook turns the current craft direction into reusable procedure.
 
 - Prefer improving an existing built-in handler or umbrella skill before
   creating a narrow duplicate skill.
+- Built-in umbrella skills now carry the core self-improvement procedures:
+  `motoko-codebase-maintainer` for deterministic code lookup,
+  `motoko-retrieval-maintainer` for retrieval diagnosis,
+  `motoko-refactor-craft` for careful service-boundary refactors, and
+  `motoko-agentic-boundary-review` for skills/tools/actions/goal-loop safety.
 - Use `motoko skill plan QUERY` to inspect skill selection and deterministic
   handler activation without a model call.
 - Use `motoko skill curator` for library hygiene. Stale unused skills should
@@ -46,6 +51,27 @@ playbook turns the current craft direction into reusable procedure.
   dense retrieval alone.
 - Use `/feedback up|down|ok NOTE` after important answers. Feedback becomes
   private eval signal and reviewable suggestions, not direct mutation.
+
+## Improvement Queue
+
+These are durable self-improvement targets for Motoko to keep in view during
+future repo work:
+
+- Use `motoko code-query` before architectural, refactor, command, test, or
+  self-improvement answers about Motoko.
+- Strengthen `motoko-retrieval-maintainer` whenever a real retrieval failure
+  reveals a reusable diagnosis or repair procedure.
+- Strengthen `motoko-refactor-craft` whenever a refactor teaches a better
+  service-boundary, validation, migration, or deployment-soak pattern.
+- Strengthen `motoko-agentic-boundary-review` whenever a skill/tool/action
+  issue reveals a reusable safety check.
+- Prefer support files for examples, checklists, templates, or bounded script
+  designs that would bloat a skill body.
+- Keep `self-eval`, `action-eval`, retrieval evals, and focused regressions
+  close to the behavior they are meant to protect.
+- Review Hermes Agent and comparable local assistant systems periodically, but
+  adapt only ideas that preserve Motoko's realm-local, stdlib-first,
+  typed-action, review-first boundary.
 
 ## Refactor Craft
 
@@ -72,4 +98,3 @@ Before trusting a self-improvement change after deployment:
 - test `/stop` during preparing/answering and `/pause` during heavy work;
 - check `/status`, `/last-call`, `/models`, `motoko self-eval`, and
   `motoko skill scan` remain content-free outside user-owned state.
-

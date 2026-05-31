@@ -805,6 +805,15 @@ def test_skill_plan_shows_prompt_and_retrieval_selection(m):
         assert "builtin:motoko_codebase_query" in codebase
         assert "codebase intent:" in codebase
 
+        retrieval = m.format_skill_plan("diagnose retrieval failure with weak sources and wrong span selection")
+        assert "motoko-retrieval-maintainer" in retrieval
+
+        refactor = m.format_skill_plan("careful service boundary refactor with validation and craftsmanship")
+        assert "motoko-refactor-craft" in refactor
+
+        agentic = m.format_skill_plan("review skill tool action goal loop authority and approvals")
+        assert "motoko-agentic-boundary-review" in agentic
+
 
 def test_motoko_codebase_context_and_commands_are_deterministic(m):
     with isolated_state():
@@ -9771,6 +9780,10 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         listed = m.format_skills()
         assert "org-temporal-retrieval" in listed
         assert "org-structural-query" in listed
+        assert "motoko-codebase-maintainer" in listed
+        assert "motoko-retrieval-maintainer" in listed
+        assert "motoko-refactor-craft" in listed
+        assert "motoko-agentic-boundary-review" in listed
         assert "Source-scoped retrieval" in listed
         assert "Deterministic retrieval for Org tags" in listed
         assert "builtin:org_temporal_latest_entries" in listed
@@ -9783,6 +9796,10 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         assert "schema: motoko-skill-v3" in structural
         assert "kind: retrieval" in structural
         assert "handler: builtin:org_structural_query" in structural
+        retrieval = m.format_skill("motoko-retrieval-maintainer")
+        assert "kind: self-improvement" in retrieval
+        assert "handler: prompt_only" in retrieval
+        assert "Classify retrieval failures precisely" in retrieval or "Name the failure precisely" in retrieval
 
         rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
         assert "Skill: org-temporal-retrieval" in rendered
@@ -9797,6 +9814,10 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         assert sources and sources[0]["kind"] == "skill"
         assert sources[0]["path"] == "builtin:org-structural-query"
         assert sources[0]["handler"] == "builtin:org_structural_query"
+
+        rendered, sources = m.render_skills_with_sources("diagnose retrieval failure from stale sources")
+        assert "Skill: motoko-retrieval-maintainer" in rendered
+        assert sources and any(row.get("path") == "builtin:motoko-retrieval-maintainer" for row in sources)
 
 
 def test_procedural_skills_are_included_in_prompt_and_sources(m):

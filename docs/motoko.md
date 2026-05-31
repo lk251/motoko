@@ -767,6 +767,16 @@ natural-language queries rather than user-facing mini-languages:
   Motoko checkout, mapping commands, symbols, tests, imports, and large files
   before the final model is asked to reason about refactors or implementation
   work.
+- `motoko-retrieval-maintainer` is a prompt-only umbrella skill for diagnosing
+  retrieval, source-grounding, span-selection, stale-data, rerank, and final
+  synthesis failures before changing prompts or ranking.
+- `motoko-refactor-craft` is a prompt-only umbrella skill for careful
+  service-boundary refactors: characterize behavior, extract narrow modules,
+  preserve migrations and pause/resume behavior, validate, document, and
+  commit coherent slices.
+- `motoko-agentic-boundary-review` is a prompt-only umbrella skill for
+  reviewing skills, script tools, typed actions, project writes, goal loops,
+  approvals, ledgers, and effect boundaries before authority is widened.
 
 Handlers and effects are allowlisted in Motoko's code. Unknown or model-suggested
 handler names degrade to `prompt_only`, and unsupported effects are discarded.

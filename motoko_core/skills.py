@@ -42,6 +42,9 @@ DEFAULT_SKILL_EFFECTS = [PROMPT_CONTEXT_EFFECT]
 ORG_STRUCTURAL_SKILL = "org-structural-query"
 ORG_TEMPORAL_SKILL = "org-temporal-retrieval"
 MOTOKO_CODEBASE_SKILL = "motoko-codebase-maintainer"
+MOTOKO_RETRIEVAL_MAINTAINER_SKILL = "motoko-retrieval-maintainer"
+MOTOKO_REFACTOR_CRAFT_SKILL = "motoko-refactor-craft"
+MOTOKO_AGENTIC_BOUNDARY_SKILL = "motoko-agentic-boundary-review"
 ALLOWED_SKILL_SUPPORT_DIRS = {"references", "templates", "scripts"}
 
 BUILTIN_SKILLS = [
@@ -159,6 +162,118 @@ BUILTIN_SKILLS = [
                 "- Run py_compile, focused tests, git diff --check, and nix flake check before committing.",
                 "",
                 "This skill activates deterministic Motoko codebase lookup for self-improvement queries.",
+            ]
+        ),
+    },
+    {
+        "schema": SKILL_SCHEMA,
+        "name": MOTOKO_RETRIEVAL_MAINTAINER_SKILL,
+        "slug": MOTOKO_RETRIEVAL_MAINTAINER_SKILL,
+        "description": "Diagnose and improve Motoko retrieval without guessing",
+        "version": "3",
+        "kind": "self-improvement",
+        "triggers": [
+            "retrieval failure or weak sources",
+            "sources missing the right file or span",
+            "improve hybrid retrieval or rerank",
+            "answer ignored retrieved evidence",
+        ],
+        "handler": PROMPT_ONLY_HANDLER,
+        "allowed_effects": [PROMPT_CONTEXT_EFFECT],
+        "support_files": [],
+        "security": "builtin prompt-only procedure; no script execution",
+        "source_schema": SKILL_SCHEMA,
+        "created_at": "2026-05-31T00:00:00+00:00",
+        "updated_at": "2026-05-31T00:00:00+00:00",
+        "source": "builtin",
+        "builtin": True,
+        "path": "builtin:motoko-retrieval-maintainer",
+        "body": "\n".join(
+            [
+                "Use this procedure when improving Motoko retrieval, source grounding, or HRAG behavior.",
+                "",
+                "Procedure:",
+                "- Start with the evidence path, not the answer style.",
+                "- Use /sources, retrieval-preview, retrieval-debug, evidence-query, vector-query --rerank, and feedback-eval to classify the failure.",
+                "- Name the failure precisely: recall, ranking, stale data, source lifecycle, span selection, prompt packing, final synthesis, or route/model failure.",
+                "- Preserve hybrid retrieval: lexical/path/date/task truth, evidence rows, embeddings, and rerank should reinforce each other rather than replace each other.",
+                "- Add deterministic extraction or service-owned planning before adding prompt prose.",
+                "- Add or update fixtures so the same retrieval failure is caught next time.",
+                "- Keep source rows and diagnostics content-safe outside the user's Motoko state.",
+            ]
+        ),
+    },
+    {
+        "schema": SKILL_SCHEMA,
+        "name": MOTOKO_REFACTOR_CRAFT_SKILL,
+        "slug": MOTOKO_REFACTOR_CRAFT_SKILL,
+        "description": "Refactor Motoko with service boundaries and careful validation",
+        "version": "3",
+        "kind": "self-improvement",
+        "triggers": [
+            "refactor Motoko",
+            "move code out of root facade",
+            "extract service boundary",
+            "quality craftsmanship pass",
+        ],
+        "handler": PROMPT_ONLY_HANDLER,
+        "allowed_effects": [PROMPT_CONTEXT_EFFECT],
+        "support_files": [],
+        "security": "builtin prompt-only procedure; no script execution",
+        "source_schema": SKILL_SCHEMA,
+        "created_at": "2026-05-31T00:00:00+00:00",
+        "updated_at": "2026-05-31T00:00:00+00:00",
+        "source": "builtin",
+        "builtin": True,
+        "path": "builtin:motoko-refactor-craft",
+        "body": "\n".join(
+            [
+                "Use this procedure for Motoko refactors and craftsmanship work.",
+                "",
+                "Procedure:",
+                "- Read the local docs first: AGENTS.md, project-context, and the self-improvement playbook.",
+                "- Characterize behavior with tests before moving live orchestration.",
+                "- Prefer pure helpers, then fakeable service boundaries, then live subsystem extraction.",
+                "- Keep the root motoko executable as the compatibility facade until the extracted boundary is safer and simpler.",
+                "- Preserve stdlib-only runtime, realm-local state, content-free observability, migrations, durable checkpoints, and pause/resume behavior.",
+                "- Make each commit coherent, update docs with the new ownership boundary, and run syntax, regression, eval, TTY, diff-check, and flake checks.",
+            ]
+        ),
+    },
+    {
+        "schema": SKILL_SCHEMA,
+        "name": MOTOKO_AGENTIC_BOUNDARY_SKILL,
+        "slug": MOTOKO_AGENTIC_BOUNDARY_SKILL,
+        "description": "Review Motoko skills, tools, actions, and goal loops safely",
+        "version": "3",
+        "kind": "self-improvement",
+        "triggers": [
+            "skill tool or action authority",
+            "goal loop or project write",
+            "agentic capability design",
+            "Hermes-inspired skill machinery",
+        ],
+        "handler": PROMPT_ONLY_HANDLER,
+        "allowed_effects": [PROMPT_CONTEXT_EFFECT],
+        "support_files": [],
+        "security": "builtin prompt-only procedure; no script execution",
+        "source_schema": SKILL_SCHEMA,
+        "created_at": "2026-05-31T00:00:00+00:00",
+        "updated_at": "2026-05-31T00:00:00+00:00",
+        "source": "builtin",
+        "builtin": True,
+        "path": "builtin:motoko-agentic-boundary-review",
+        "body": "\n".join(
+            [
+                "Use this procedure before widening Motoko skills, script tools, actions, goal loops, or project mutation.",
+                "",
+                "Procedure:",
+                "- Treat model output as planning data only; code-owned validators decide what can run.",
+                "- Check the action schema, effect tier, approval record, argument scope, realm boundary, allowlist, .motokoignore, and ledger behavior.",
+                "- Scripts stay inert unless tool metadata, fingerprints, approval, typed action records, validators, and explicit confirmation all line up.",
+                "- Project mutation goes through project_file_write or reviewed proposals, never raw script writes.",
+                "- Run skill scan and action-eval, then add focused regression coverage for every new authority path.",
+                "- Keep network, broad terminal tools, service control, and privileged actions disabled until a separate design accepts them.",
             ]
         ),
     },

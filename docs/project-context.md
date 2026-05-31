@@ -1542,22 +1542,28 @@ Motoko self-improvement list prepared for future work:
 
 1. Use `motoko code-query` before answering architectural or refactor
    questions about Motoko's implementation.
-2. Use `motoko skill scan` before approving new script-backed skills or
+2. Use the built-in umbrella skills for self-improvement procedure:
+   `motoko-codebase-maintainer` for deterministic code lookup,
+   `motoko-retrieval-maintainer` for retrieval diagnosis,
+   `motoko-refactor-craft` for service-boundary craftsmanship, and
+   `motoko-agentic-boundary-review` for skill/tool/action/goal-loop authority
+   checks.
+3. Use `motoko skill scan` before approving new script-backed skills or
    importing community skills.
-3. Prefer improving existing built-in handlers or umbrella skills before
+4. Prefer improving existing built-in handlers or umbrella skills before
    creating narrow duplicate learned skills.
-4. Convert repeated successful debugging procedures into reviewed skill
+5. Convert repeated successful debugging procedures into reviewed skill
    suggestions with support files when the procedure needs examples,
    checklists, templates, or scripts.
-5. Keep self-improvement evals close to behavior: retrieval/debug fixtures for
+6. Keep self-improvement evals close to behavior: retrieval/debug fixtures for
    context failures, action-eval for authority failures, and regression tests
    for every new command or handler. The first dedicated no-model check is
    now `motoko self-eval`, which verifies code-map/code-query readiness,
    self-code skill activation, clean built-in skill scans, and scanner
    detection of a synthetic risky script.
-6. Continue shrinking the root facade only when an extracted module gets clear
+7. Continue shrinking the root facade only when an extracted module gets clear
    ownership, tests, and a simpler public API.
-7. Treat reflection as inspectable audits and review records, not hidden
+8. Treat reflection as inspectable audits and review records, not hidden
    rumination: what evidence was used, what failed, what should be patched,
    and which eval would catch it next time.
 
