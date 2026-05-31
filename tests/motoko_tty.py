@@ -326,9 +326,6 @@ def main() -> int:
         retrieve_topic=lambda _topic, _query: ("topic", []),
         load_dossier=lambda _id: {},
         retrieve_dossier=lambda _dossier, _query: ("dossier", []),
-        render_context_items=lambda items, query, **_callbacks: (_ for _ in ()).throw(
-            AssertionError("retrieval service should own attached context rendering")
-        ),
     )
     retrieval = service.render_attached_context([{"kind": "index", "id": "idx"}], "query")
     assert retrieval.text == "index text"

@@ -71,6 +71,22 @@ class ContextPackage:
         return ""
 
 
+@dataclass(frozen=True)
+class RetrievalPreviewResult:
+    query: str
+    audit: dict
+    context_plan: dict
+    sources: list[dict]
+    attached_context: str
+    diagnostics: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class VectorQueryResult:
+    report: dict
+    diagnostics: dict = field(default_factory=dict)
+
+
 def build_context_package(
     lanes: list[ContextLane],
     *,
@@ -107,6 +123,36 @@ def build_context_package(
             "schema": CONTEXT_PACKAGE_SCHEMA,
             "lane_count": len(lanes),
             "source_count": len(sources),
+        },
+    )
+
+
+def build_retrieval_preview_result(
+    query: str,
+    context_package: ContextPackage,
+    *,
+    audit: dict,
+) -> RetrievalPreviewResult:
+    """Shape retrieval preview data from the same package used for chat.
+
+    Formatting stays outside the service, but the preview command should not
+    reinterpret context lanes or source records differently from chat prompt
+    assembly.
+    """
+
+    sources = list(context_package.sources)
+    return RetrievalPreviewResult(
+        query=query,
+        audit=dict(audit),
+        context_plan=dict(context_package.context_plan),
+        sources=sources,
+        attached_context=context_package.text_for("attached context"),
+        diagnostics={
+            "schema": RETRIEVAL_SERVICE_SCHEMA,
+            "kind": "retrieval-preview",
+            "context_package_schema": context_package.context_plan.get("context_package_schema", ""),
+            "source_count": len(sources),
+            "lane_count": len(context_package.lanes),
         },
     )
 
@@ -1271,7 +1317,9 @@ class RetrievalService:
         retrieve_topic: Callable,
         load_dossier: Callable,
         retrieve_dossier: Callable,
-        render_context_items: Callable,
+        load_vector_store: Callable | None = None,
+        latest_vector_store: Callable | None = None,
+        query_vector_store: Callable | None = None,
         hybrid_environment: HybridRetrievalEnvironment | None = None,
     ) -> None:
         self.load_index = load_index
@@ -1281,7 +1329,9 @@ class RetrievalService:
         self.retrieve_topic = retrieve_topic
         self.load_dossier = load_dossier
         self.retrieve_dossier = retrieve_dossier
-        self.render_context_items = render_context_items
+        self.load_vector_store = load_vector_store
+        self.latest_vector_store = latest_vector_store
+        self._query_vector_store = query_vector_store
         self.hybrid_environment = hybrid_environment
 
     def retrieve_index(self, index: dict, query: str) -> RetrievalServiceResult:
@@ -1360,6 +1410,44 @@ class RetrievalService:
                 "kind": "attached-context",
                 "item_count": len(items),
                 "source_count": len(sources),
+            },
+        )
+
+    def query_vector(
+        self,
+        query: str,
+        *,
+        store: dict | None = None,
+        store_id: str | None = None,
+        limit: int | None = None,
+        rerank: bool = False,
+    ) -> VectorQueryResult:
+        if self._query_vector_store is None:
+            raise SystemExit("vector query is not configured")
+        if store is None:
+            if store_id:
+                if self.load_vector_store is None:
+                    raise SystemExit("vector store loading is not configured")
+                store = self.load_vector_store(store_id)
+            else:
+                if self.latest_vector_store is None:
+                    raise SystemExit("latest vector store lookup is not configured")
+                store = self.latest_vector_store()
+        kwargs = {"rerank": rerank}
+        if limit is not None:
+            kwargs["limit"] = limit
+        report = self._query_vector_store(store, query, **kwargs)
+        report = dict(report)
+        report["retrieval_service_schema"] = RETRIEVAL_SERVICE_SCHEMA
+        report_store = report.get("store") if isinstance(report.get("store"), dict) else {}
+        return VectorQueryResult(
+            report=report,
+            diagnostics={
+                "schema": RETRIEVAL_SERVICE_SCHEMA,
+                "kind": "vector-query",
+                "store_id": report.get("store_id") or report_store.get("id", ""),
+                "row_count": len(report.get("rows", []) or []),
+                "rerank": bool(report.get("rerank", rerank)),
             },
         )
 

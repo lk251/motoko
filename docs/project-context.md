@@ -1203,15 +1203,24 @@ Current progress on this stretch:
   surface rebuild-first work in `index-storage`.
 - Progress: prompt-level lane packing and context-plan source accounting now
   use a service-returned `context-package-v1` record. Remaining context work is
-  narrower: final prompt wording, excerpt/snippet choice across non-index
-  lanes, and some `/sources` source-record construction still live in the root
-  facade.
+  narrower: final prompt wording and excerpt/snippet choice across non-index
+  lanes. `/sources` fallback for attached context now renders through the same
+  retrieval service used for chat context, including stale or missing attached
+  context warnings, rather than reconstructing index/topic/dossier source rows
+  in the root facade.
+- Complete for `/retrieval-preview`: preview output now consumes an explicit
+  retrieval-service preview result built from the same `context-package-v1`
+  record as chat prompt assembly. The command remains a renderer, but it no
+  longer needs to reinterpret lane/source state separately from the service
+  package.
+- Complete for `/vector-query` command orchestration: root code now asks the
+  retrieval service for a typed vector-query result while still injecting the
+  realm-local vector store lookup and query callbacks. The formatter remains
+  a renderer over that result's report.
 - Progress: `retrieval-debug` now reads its displayed file/chunk rows,
   evidence/vector rows, production selected-source summary, and content-free
   diagnostics from the same retrieval-service result object used for chat
-  context. Remaining report work is narrower: keep `/retrieval-preview` and
-  `/vector-query` as thin renderers over the shared retrieval/context result
-  shapes instead of letting them grow parallel interpretation paths.
+  context.
 - Progress: artifact lifecycle now owns the stale-superseded index cleanup
   decision/apply loop through injected callbacks, so the root facade supplies
   filesystem authority while lifecycle owns report shape and blocking logic.
@@ -1260,13 +1269,15 @@ Remaining follow-up items from this stretch:
   actions. The next cancellation work is broader foreground study/index/vector
   checkpointing, not the current action runner.
 - Finish moving context/source construction out of the root facade where it
-  still owns final prompt wording, non-index lane excerpt choices, and some
-  `/sources` source-record assembly.
-- Reduce retrieval preview/debug/vector reports into thin renderers over one
+  still owns final prompt wording and non-index lane excerpt choices. Attached
+  context source fallback for `/sources` is now service-owned; future work
+  should keep new source record shapes behind the service/result boundary.
+- Reduce retrieval/debug/vector reports into thin renderers over one
   richer retrieval result shape, so diagnostics, chat context, and `/sources`
   cannot drift into parallel interpretations of the same query. The
-  `/retrieval-debug` side of this is complete; `/retrieval-preview` and
-  `/vector-query` still need final convergence work.
+  `/retrieval-debug`, `/retrieval-preview`, and `/vector-query` command paths
+  now go through retrieval-service result objects. Future report work should
+  preserve that boundary rather than adding parallel side probes.
 - Improve incremental vector-store compaction policy over time. The current
   implementation writes a compact fresh manifest after each refresh and reports
   reused, embedded, and superseded row counts. Future tuning should add corpus

@@ -10,6 +10,18 @@ not the easiest place to review what changed after a long work session.
   only the live phase/input/status controls, and shrinking slash-command
   suggestions repaints the exposed transcript rows instead of leaving blank
   holes.
+- Tightened retrieval-service ownership for `/sources` fallback. Attached
+  context shown before the first answer now comes from the same live retrieval
+  service used for chat context, including unavailable-context warnings, and
+  the stale generic attached-context renderer hook was removed from the
+  service API.
+- `/retrieval-preview` now consumes an explicit retrieval-service preview
+  result built from the same `context-package-v1` record as chat prompt
+  assembly, keeping preview diagnostics and context packing on one path.
+- `/vector-query` now routes through the retrieval service as a typed vector
+  query result. The root command still supplies realm-local vector-store/model
+  callbacks, but command orchestration and diagnostics now share the retrieval
+  service boundary.
 - Plain `feedback up|down|ok NOTE` now records private feedback on the last
   Motoko answer just like `/feedback` or `/up`, and the TUI treats it as a
   command instead of queueing it as a chat prompt during active work.

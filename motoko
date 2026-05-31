@@ -423,6 +423,7 @@ from motoko_core.retrieval_service import (  # noqa: E402
     HybridRetrievalEnvironment,
     RetrievalService,
     build_context_package,
+    build_retrieval_preview_result,
     rerank_hybrid_candidates_with_environment,
     summarize_retrieval_sources,
 )
@@ -17543,7 +17544,9 @@ def make_retrieval_service() -> RetrievalService:
         retrieve_topic=retrieve_from_topic,
         load_dossier=load_dossier,
         retrieve_dossier=retrieve_from_dossier,
-        render_context_items=core_render_context_items_with_sources,
+        load_vector_store=load_vector_store,
+        latest_vector_store=latest_vector_store,
+        query_vector_store=query_vector_store,
         hybrid_environment=hybrid_retrieval_environment(),
     )
 
@@ -17555,6 +17558,23 @@ def retrieve_index_result(index: dict, query: str):
 def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
     result = retrieve_index_result(index, query)
     return result.text, result.sources
+
+
+def query_vector_result(
+    query: str,
+    *,
+    store: dict | None = None,
+    store_id: str | None = None,
+    limit: int | None = None,
+    rerank: bool = False,
+):
+    return make_retrieval_service().query_vector(
+        query,
+        store=store,
+        store_id=store_id,
+        limit=limit,
+        rerank=rerank,
+    )
 
 
 def retrieve_from_topic(topic: dict, query: str) -> tuple[str, list[dict]]:
@@ -17936,15 +17956,14 @@ def format_retrieval_preview(
     context_package, _context_values = build_prompt_context_package(conv, query, project_scope=project_scope)
     sources = list(context_package.sources)
     audit = answer_grounding_audit(query, "", sources)
-    context_plan = context_package.context_plan
-    attached_context = context_package.text_for("attached context")
+    preview = build_retrieval_preview_result(query, context_package, audit=audit)
     return format_retrieval_preview_core(
-        query,
-        audit=audit,
-        context_plan=context_plan,
-        formatted_context_plan=format_context_plan(context_plan) if context_plan else "",
-        formatted_sources=format_sources([source for source in sources if source.get("kind") != "context-plan"][:40]),
-        attached_context=attached_context,
+        preview.query,
+        audit=preview.audit,
+        context_plan=preview.context_plan,
+        formatted_context_plan=format_context_plan(preview.context_plan) if preview.context_plan else "",
+        formatted_sources=format_sources([source for source in preview.sources if source.get("kind") != "context-plan"][:40]),
+        attached_context=preview.attached_context,
         max_chars=max_chars,
     )
 
@@ -19294,65 +19313,12 @@ def model_route_manager() -> ModelRouteManager:
 
 
 def attached_context_sources(conv: dict) -> list[dict]:
-    sources = []
     project_roots = active_project_roots(conv)
-    for item in scoped_context_items(conv.get("context_items", []), project_roots):
-        kind = item.get("kind")
-        if kind == "index":
-            try:
-                index = load_index(item["id"])
-                status, warnings = index_staleness(index)
-            except (KeyError, SystemExit, OSError, json.JSONDecodeError):
-                continue
-            sources.append(
-                {
-                    "kind": "index",
-                    "id": index.get("id", ""),
-                    "name": index.get("name", ""),
-                    "root": index.get("root", ""),
-                    "status": status,
-                    "warnings": warnings[:8],
-                }
-            )
-            continue
-        if kind == "topic":
-            try:
-                topic = load_topic(item["id"])
-            except (KeyError, SystemExit, OSError, json.JSONDecodeError):
-                continue
-            sources.append(
-                {
-                    "kind": "topic",
-                    "id": topic.get("id", ""),
-                    "name": topic.get("name", ""),
-                    "query": topic.get("query", ""),
-                }
-            )
-            for evidence in topic.get("evidence", [])[:20]:
-                sources.append(
-                    {
-                        "kind": "topic-evidence",
-                        "topic": topic.get("id", ""),
-                        "index": evidence.get("index", ""),
-                        "path": evidence.get("path", ""),
-                        "chunk": evidence.get("chunk"),
-                    }
-                )
-            continue
-        if kind == "dossier":
-            try:
-                dossier = load_dossier(item["id"])
-            except (KeyError, SystemExit, OSError, json.JSONDecodeError):
-                continue
-            sources.append(
-                {
-                    "kind": "dossier",
-                    "id": dossier.get("id", ""),
-                    "name": dossier.get("name", ""),
-                    "query": dossier.get("query", ""),
-                }
-            )
-    return sources
+    result = make_retrieval_service().render_attached_context(
+        scoped_context_items(conv.get("context_items", []), project_roots),
+        "",
+    )
+    return result.sources
 
 
 def format_conversation_sources(conv: dict) -> str:
@@ -19611,7 +19577,7 @@ def vector_command_request(text: str, conv: dict):
     if primary == "/vector-query":
         query, rerank = parse_vector_query_input(body)
         query = query or context_query_text(conv, conv.get("title", ""))
-        return "/vector-query", lambda: format_vector_query_report(query_vector_store(latest_vector_store(), query, rerank=rerank))
+        return "/vector-query", lambda: format_vector_query_report(query_vector_result(query, rerank=rerank).report)
     if primary == "/vector-eval" and not body:
         return "/vector-eval", lambda: format_vector_eval_report(run_vector_eval())
     return None
@@ -23386,8 +23352,12 @@ def command_vector_doctor(args) -> None:
 
 
 def command_vector_query(args) -> None:
-    store = load_vector_store(args.store) if args.store else latest_vector_store()
-    report = query_vector_store(store, " ".join(args.query), limit=args.limit, rerank=args.rerank)
+    report = query_vector_result(
+        " ".join(args.query),
+        store_id=args.store,
+        limit=args.limit,
+        rerank=args.rerank,
+    ).report
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

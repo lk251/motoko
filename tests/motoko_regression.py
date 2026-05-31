@@ -3571,6 +3571,9 @@ def test_stale_attached_topic_is_skipped_in_chat_context(m):
         assert "matched 0" in sources[0]["warning"]
         formatted = m.format_sources(sources)
         assert "attached topic unavailable" in formatted
+        fallback = m.format_conversation_sources(conv)
+        assert "No recorded sources for the last answer yet" in fallback
+        assert "attached topic unavailable" in fallback
 
 
 def test_answer_grounding_audit_sources(m):
@@ -4981,6 +4984,16 @@ def test_context_package_builds_sources_and_plan(m):
     assert package.context_plan["lanes"][1]["lane"] == "attached context"
     assert package.context_plan["lanes"][1]["sources"] == 1
     assert package.text_for("identity") == "Motoko realm"
+    preview = m.build_retrieval_preview_result(
+        "source query",
+        package,
+        audit={"status": "grounded"},
+    )
+    assert preview.query == "source query"
+    assert preview.attached_context == "source excerpt"
+    assert preview.context_plan["context_package_schema"] == "context-package-v1"
+    assert preview.diagnostics["kind"] == "retrieval-preview"
+    assert preview.diagnostics["source_count"] == len(package.sources)
 
 
 def test_system_prompt_uses_context_package_for_plan(m):
@@ -5853,10 +5866,11 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         old_format_vector_query_report = m.format_vector_query_report
         try:
             m.latest_vector_store = lambda: {"id": "vector-store"}
-            m.query_vector_store = lambda store, query, rerank=False: {
+            m.query_vector_store = lambda store, query, limit=None, rerank=False: {
                 "store": store,
                 "query": query,
                 "rerank": rerank,
+                "rows": [],
             }
             m.format_vector_query_report = lambda report: f"vector query: {report['query']} rerank={report['rerank']}"
             ui.handle_command("/vector-query --rerank texere")
@@ -8872,7 +8886,14 @@ def test_retrieval_service_renders_attached_context_without_generic_callback(m):
         retrieve_topic=lambda topic, query: ("topic", [{"kind": "topic", "id": topic["id"]}]),
         load_dossier=lambda dossier_id: {"id": dossier_id},
         retrieve_dossier=lambda dossier, query: ("dossier", [{"kind": "dossier", "id": dossier["id"]}]),
-        render_context_items=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("generic renderer should not be used")),
+        load_vector_store=lambda store_id: {"id": store_id},
+        latest_vector_store=lambda: {"id": "latest-vector"},
+        query_vector_store=lambda store, query, limit=None, rerank=False: {
+            "store_id": store["id"],
+            "query": query,
+            "rerank": rerank,
+            "rows": [{"path": "/tmp/a.txt"}],
+        },
     )
 
     result = service.render_attached_context(
@@ -8889,6 +8910,11 @@ def test_retrieval_service_renders_attached_context_without_generic_callback(m):
     assert "file:/tmp/a.txt" in result.text
     assert [source["kind"] for source in result.sources] == ["index", "repo", "file"]
     assert result.diagnostics["source_count"] == 3
+    vector = service.query_vector("alpha", store_id="vec-1", limit=4, rerank=True)
+    assert vector.report["retrieval_service_schema"] == "retrieval-service-v1"
+    assert vector.report["store_id"] == "vec-1"
+    assert vector.diagnostics["kind"] == "vector-query"
+    assert vector.diagnostics["row_count"] == 1
 
 
 def test_core_recent_conversation_renderer_is_injectable(m):
