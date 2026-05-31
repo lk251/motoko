@@ -207,9 +207,11 @@ fresh evidence shows a better target:
    report construction. `index-storage` audits now also run inside a
    foreground cancel scope and check cancellation during index, partial,
    duplicate-reference, orphan-chunk, and source-lifecycle scans. Continue this
-   work by adding checkpoints inside any remaining topic, memory-dossier,
-   profile/report, or non-index context lane operation that still lacks
-   cooperative cancellation.
+   work by adding checkpoints inside any remaining long report or non-index
+   context lane operation that still lacks cooperative cancellation. Memory
+   dossier ranking, recent-conversation recall ranking, prompt-time
+   memory/conversation recall, and profile source-material scans now also
+   receive and honor foreground cancellation before model work starts.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or

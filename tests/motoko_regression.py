@@ -9764,6 +9764,88 @@ def test_topic_dossier_passes_cancel_event_to_chunk_ranking(m):
     assert seen["cancel_event"] is event
 
 
+def test_memory_dossier_honors_cancel_event_before_ranking(m):
+    event = threading.Event()
+    event.set()
+    try:
+        m.build_memory_dossier("craftsmanship", cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "dossier"
+    else:
+        raise AssertionError("memory dossier should honor a pre-set cancel event before retrieval ranking")
+
+
+def test_memory_dossier_passes_cancel_event_to_retrieval_ranking(m):
+    old_ranked_memories = m.ranked_memories
+    seen = {}
+    event = threading.Event()
+
+    def fake_ranked_memories(*_args, **kwargs):
+        seen["cancel_event"] = kwargs.get("cancel_event")
+        raise m.WorkPaused("memory dossier interrupted by request", work_kind="dossier")
+
+    try:
+        m.ranked_memories = fake_ranked_memories
+        try:
+            m.build_memory_dossier("craftsmanship", cancel_event=event)
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "dossier"
+        else:
+            raise AssertionError("memory dossier should propagate retrieval cancellation")
+    finally:
+        m.ranked_memories = old_ranked_memories
+
+    assert seen["cancel_event"] is event
+
+
+def test_recent_conversation_ranking_honors_cancel_event(m):
+    event = threading.Event()
+    event.set()
+    try:
+        m.ranked_recent_conversations({"id": "current", "messages": []}, "craft", cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "retrieval"
+    else:
+        raise AssertionError("recent conversation ranking should honor a pre-set cancel event")
+
+
+def test_profile_source_material_honors_cancel_event(m):
+    event = threading.Event()
+    event.set()
+    try:
+        m.profile_source_material(cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "profile"
+    else:
+        raise AssertionError("profile source scan should honor a pre-set cancel event")
+
+
+def test_profile_refresh_passes_cancel_event_to_source_material(m):
+    old_profile_source_material = m.profile_source_material
+    seen = {}
+    event = threading.Event()
+
+    def fake_profile_source_material(*, cancel_event=None):
+        seen["cancel_event"] = cancel_event
+        raise m.WorkPaused("profile refresh interrupted by request", work_kind="profile")
+
+    try:
+        m.profile_source_material = fake_profile_source_material
+        try:
+            m.refresh_profile_dossier(cancel_event=event)
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "profile"
+        else:
+            raise AssertionError("profile refresh should propagate source material cancellation")
+    finally:
+        m.profile_source_material = old_profile_source_material
+
+    assert seen["cancel_event"] is event
+
+
 def test_index_cancel_event_writes_paused_partial(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -13450,6 +13532,11 @@ def main() -> int:
         test_summarize_blocks_cancel_event_raises_work_paused,
         test_topic_chunk_ranking_honors_cancel_event,
         test_topic_dossier_passes_cancel_event_to_chunk_ranking,
+        test_memory_dossier_honors_cancel_event_before_ranking,
+        test_memory_dossier_passes_cancel_event_to_retrieval_ranking,
+        test_recent_conversation_ranking_honors_cancel_event,
+        test_profile_source_material_honors_cancel_event,
+        test_profile_refresh_passes_cancel_event_to_source_material,
         test_index_cancel_event_writes_paused_partial,
         test_vector_build_cancel_event_stops_before_work,
         test_tui_stop_requests_report_job_cancel,

@@ -5678,13 +5678,17 @@ def ranked_memories(
     query: str = "",
     limit: int = MEMORY_RETRIEVAL_LIMIT,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> list[dict]:
+    raise_if_work_cancelled(cancel_event, "memory retrieval interrupted by request", work_kind="retrieval")
     rows = load_memories(limit=500)
+    raise_if_work_cancelled(cancel_event, "memory retrieval interrupted by request", work_kind="retrieval")
     if project_scope is not None:
         project_roots = project_scope_roots(project_scope)
         if project_roots:
             scoped_rows = []
             for row in rows:
+                raise_if_work_cancelled(cancel_event, "memory retrieval interrupted by request", work_kind="retrieval")
                 conversation_id = str(row.get("conversation_id", "") or "").strip()
                 if not conversation_id:
                     scoped_rows.append(row)
@@ -5695,6 +5699,7 @@ def ranked_memories(
                     if roots_match_project(memory_roots, project_roots):
                         scoped_rows.append(row)
             rows = scoped_rows
+    raise_if_work_cancelled(cancel_event, "memory retrieval interrupted by request", work_kind="retrieval")
     return rank_memory_rows(
         rows,
         conv=conv,
@@ -5705,8 +5710,13 @@ def ranked_memories(
     )
 
 
-def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT) -> list[dict]:
-    return ranked_memories(query=query, limit=limit, project_scope=project_scope_for_request(query=query))
+def search_memories(query: str, *, limit: int = MEMORY_SEARCH_LIMIT, cancel_event=None) -> list[dict]:
+    return ranked_memories(
+        query=query,
+        limit=limit,
+        project_scope=project_scope_for_request(query=query),
+        cancel_event=cancel_event,
+    )
 
 
 def conversation_recall_text_with_config(conv: dict, recall: dict) -> str:
@@ -5757,11 +5767,12 @@ def recent_conversation_matched_snippets(row: dict, query_counts, *, limit: int,
     return snippets
 
 
-def attach_recent_conversation_snippets(rows: list[dict], query_counts, recall: dict) -> list[dict]:
+def attach_recent_conversation_snippets(rows: list[dict], query_counts, recall: dict, *, cancel_event=None) -> list[dict]:
     if not rows or recall["matched_snippets"] <= 0:
         return rows
     enriched_rows = []
     for row in rows:
+        raise_if_work_cancelled(cancel_event, "conversation recall interrupted by request", work_kind="retrieval")
         enriched = dict(row)
         snippets = recent_conversation_matched_snippets(
             enriched,
@@ -5775,13 +5786,23 @@ def attach_recent_conversation_snippets(rows: list[dict], query_counts, recall: 
     return enriched_rows
 
 
-def ranked_recent_conversations(conv: dict, query: str = "", *, project_scope: dict | None = None) -> list[dict]:
+def ranked_recent_conversations(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+    cancel_event=None,
+) -> list[dict]:
+    raise_if_work_cancelled(cancel_event, "conversation recall interrupted by request", work_kind="retrieval")
     recall = conversation_recall_config()
     current_id = conv.get("id", "")
     project_scope = project_scope or project_scope_for_request(conv, query)
     project_roots = project_scope_roots(project_scope)
     rows = []
-    for row in list_conversations():
+    conversations = list_conversations()
+    raise_if_work_cancelled(cancel_event, "conversation recall interrupted by request", work_kind="retrieval")
+    for row in conversations:
+        raise_if_work_cancelled(cancel_event, "conversation recall interrupted by request", work_kind="retrieval")
         if row.get("id") == current_id:
             continue
         if not conversation_recall_text_with_config(row, recall).strip():
@@ -5801,6 +5822,7 @@ def ranked_recent_conversations(conv: dict, query: str = "", *, project_scope: d
         reverse=True,
     )
     query_counts = token_counts(context_query_text(conv, query))
+    raise_if_work_cancelled(cancel_event, "conversation recall interrupted by request", work_kind="retrieval")
     ranked = rank_recent_conversation_rows(
         rows,
         query_counts=query_counts,
@@ -5810,7 +5832,8 @@ def ranked_recent_conversations(conv: dict, query: str = "", *, project_scope: d
         relevance_lane=recall["relevant_conversations"],
         limit=recall["conversation_limit"],
     )
-    return attach_recent_conversation_snippets(ranked, query_counts, recall)
+    raise_if_work_cancelled(cancel_event, "conversation recall interrupted by request", work_kind="retrieval")
+    return attach_recent_conversation_snippets(ranked, query_counts, recall, cancel_event=cancel_event)
 
 
 def render_recent_conversations_with_sources(
@@ -5818,9 +5841,10 @@ def render_recent_conversations_with_sources(
     query: str = "",
     *,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> tuple[str, list[dict]]:
     recall = conversation_recall_config()
-    conversations = ranked_recent_conversations(conv, query, project_scope=project_scope)
+    conversations = ranked_recent_conversations(conv, query, project_scope=project_scope, cancel_event=cancel_event)
     return render_recent_conversations_with_sources_core(
         conversations,
         relative_time_func=relative_time,
@@ -10334,19 +10358,24 @@ def profile_matches_project_scope(profile: dict | None, project_scope: dict | No
     return True
 
 
-def profile_source_material() -> tuple[str, list[str], list[str]]:
+def profile_source_material(*, cancel_event=None) -> tuple[str, list[str], list[str]]:
+    raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
     memories = load_memories(limit=PROFILE_SOURCE_MEMORIES)
-    conversations = [
-        conv
-        for conv in list_conversations()[:PROFILE_SOURCE_CONVERSATIONS]
-        if conversation_recall_text(conv).strip()
-    ]
-    memory_lines = [
-        f"- [{row.get('id', '')}; i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)}] {row.get('text', '')}"
-        for row in memories
-    ]
+    raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
+    conversations = []
+    for conv in list_conversations()[:PROFILE_SOURCE_CONVERSATIONS]:
+        raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
+        if conversation_recall_text(conv).strip():
+            conversations.append(conv)
+    memory_lines = []
+    for row in memories:
+        raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
+        memory_lines.append(
+            f"- [{row.get('id', '')}; i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)}] {row.get('text', '')}"
+        )
     conversation_blocks = []
     for conv in conversations:
+        raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
         title = conv.get("title") or "Untitled"
         conversation_blocks.append(
             f"--- conversation:{conv.get('id', '')} title:{title} updated:{conv.get('updated', '')} ---\n"
@@ -10370,7 +10399,7 @@ def profile_source_material() -> tuple[str, list[str], list[str]]:
 
 def refresh_profile_dossier(*, cancel_event=None) -> dict:
     raise_if_work_cancelled(cancel_event, "profile refresh interrupted by request", work_kind="profile")
-    source_text, memory_ids, conversation_ids = profile_source_material()
+    source_text, memory_ids, conversation_ids = profile_source_material(cancel_event=cancel_event)
     if not memory_ids and not conversation_ids:
         raise SystemExit("no memories or conversations available for a profile dossier yet")
     raise_if_work_cancelled(cancel_event, "profile refresh interrupted by request", work_kind="profile")
@@ -17387,6 +17416,7 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
     query = query.strip()
     if not query:
         raise SystemExit("dossier query is empty")
+    raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
 
     seed_conv = {
         "id": "",
@@ -17398,8 +17428,12 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
         conv=seed_conv,
         query=query,
         limit=MEMORY_DOSSIER_SOURCE_MEMORIES,
+        cancel_event=cancel_event,
     )
-    conversations = ranked_recent_conversations(seed_conv, query)[:MEMORY_DOSSIER_SOURCE_CONVERSATIONS]
+    conversations = ranked_recent_conversations(seed_conv, query, cancel_event=cancel_event)[
+        :MEMORY_DOSSIER_SOURCE_CONVERSATIONS
+    ]
+    raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
     profile = load_profile_dossier()
 
     if not memories and not conversations and not profile:
@@ -18726,8 +18760,10 @@ def render_memories_with_sources(
     query: str = "",
     *,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> tuple[str, list[dict]]:
-    memories = ranked_memories(conv=conv, query=query, project_scope=project_scope)
+    memories = ranked_memories(conv=conv, query=query, project_scope=project_scope, cancel_event=cancel_event)
+    raise_if_work_cancelled(cancel_event, "memory retrieval interrupted by request", work_kind="retrieval")
     return render_memories_with_sources_core(
         memories,
         has_any_memory=bool(load_memories(limit=1)),
@@ -18915,8 +18951,18 @@ def build_prompt_context_package(
     project_scope = project_scope or project_scope_for_request(conv, query)
     project_roots = project_scope_roots(project_scope)
     identity = identity_config()
-    memory_text, memory_sources = render_memories_with_sources(conv, query, project_scope=project_scope)
-    recent_text, recent_sources = render_recent_conversations_with_sources(conv, query, project_scope=project_scope)
+    memory_text, memory_sources = render_memories_with_sources(
+        conv,
+        query,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
+    recent_text, recent_sources = render_recent_conversations_with_sources(
+        conv,
+        query,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
     profile_text, profile_sources = render_profile_with_sources(project_scope=project_scope)
     skill_text, skill_sources = render_skills_with_sources(query)
     codebase_text, codebase_sources = render_motoko_codebase_context(query)
