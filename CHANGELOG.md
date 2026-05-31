@@ -5,6 +5,15 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Improved the report-first skill curator. Curator reports now hide raw
+  feedback notes by default, while `motoko skill curator --suggest` can queue
+  content-safe support-file plans for oversized skills and consolidation review
+  notes for overlapping learned skills.
+- Added `motoko vector-doctor` and `/vector-doctor [ID]` to explain embedding
+  vector refresh parallelism, planned batch shape, latest store statistics, and
+  why low VRAM/watts can be normal for the tiny 0.6B embedding worker.
+- Expanded the startup `Tips:` block with the review-first skill learning loop,
+  `/bg-now`, and `/vector-doctor`.
 - Queued TUI prompts are now durable conversation state. Prompts typed while an
   answer or `bg-heavy` job is active are saved immediately, restored into input
   history after restart, processed when the blocking work clears, and removed

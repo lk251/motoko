@@ -730,7 +730,10 @@ possible consolidation groups, and recent feedback rows that may indicate a
 skill should be patched. `motoko skill curator --suggest` turns the concrete
 curator candidates into ordinary pending `skill_manage` suggestions. They are
 still review-first: inspect them with `motoko skill suggestion ID`, then accept
-or reject them explicitly.
+or reject them explicitly. Curator reports hide raw feedback notes by default.
+Suggestion candidates can add content-safe support-file plans for oversized
+skills and consolidation review notes for overlapping learned skills; accepting
+those suggestions still goes through the normal explicit skill-management path.
 
 Current `motoko-skill-v3` skills can declare a kind, trigger hints, handler,
 allowed effects, support files, and inert script-tool metadata. Prompt-only
@@ -982,6 +985,7 @@ Useful in-chat commands:
 /vector-plan [INDEX_ID]
 /vector-build [INDEX_ID]
 /vector-refresh [INDEX_ID]
+/vector-doctor [INDEX_ID]
 /vector-query [--rerank] QUERY
 /vector-eval
 /identity
@@ -1640,6 +1644,13 @@ Vector status labels are intentionally content-free. They show batch, row,
 parallelism, ETA, and finalizing/stalled state, but not corpus names or source
 paths. If no vector progress update arrives for several minutes, the TUI marks
 the work as possibly stalled instead of letting an old row count look active.
+Use `motoko vector-doctor [INDEX_ID]` or `/vector-doctor [INDEX_ID]` when
+vectorizing appears to underuse the GPU. The report is content-free: it shows
+the embedding route, declared parallelism, candidate row counts, batch size,
+planned requests, latest store statistics, and an interpretation of whether
+Motoko is filling the declared route slots. Low VRAM and low watts can be
+normal for the Qwen3 0.6B Q8 embedding worker; row/batch progress is a better
+health signal than resident VRAM size.
 Embedding inputs are bounded before they are sent to the route. Long source
 chunks are split into several source-linked subchunk rows rather than being
 compressed into one lossy truncated embedding; each row keeps the original

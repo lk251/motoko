@@ -7160,6 +7160,88 @@ def test_embedding_vector_store_stale_when_route_model_changes(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_vector_doctor_reports_embedding_parallelism_without_private_rows(m):
+    old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
+    old_model = os.environ.get("MOTOKO_MODEL")
+    old_parallel = os.environ.get("MOTOKO_EMBEDDING_PARALLEL")
+    old_batch = os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE")
+    try:
+        os.environ.pop("MOTOKO_ENDPOINT", None)
+        os.environ.pop("MOTOKO_MODEL", None)
+        os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            path = docs / "tasks.org"
+            content = "* TODO Vector doctor\n"
+            path.write_text(content, encoding="utf-8")
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen3-embedding-0b6": {
+                        "kind": "embedding",
+                        "endpoint": "http://127.0.0.1:65530/v1/embeddings",
+                        "modelId": "qwen3-embedding-0.6b-q8-0",
+                        "tasks": ["embedding", "vector_index", "vector_query"],
+                        "endpoint_paths": ["/v1/embeddings"],
+                        "embedding_dimensions": 1024,
+                        "maxParallel": 32,
+                        "openai_compatible": True,
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            index = {
+                "id": "vector-doctor-index",
+                "name": "docs",
+                "root": str(docs),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-31T00:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": "Vector doctor task file.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Vector doctor task.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+            m.atomic_write(m.index_path("vector-doctor-index"), json.dumps(index, ensure_ascii=False) + "\n")
+
+            report = m.format_vector_doctor("vector-doctor-index")
+            assert "vector doctor: embedding refresh throughput" in report
+            assert "declared maxParallel: 32" in report
+            assert "candidate rows:" in report
+            assert "about 963 MiB VRAM can be normal" in report
+    finally:
+        if old_endpoint is None:
+            os.environ.pop("MOTOKO_ENDPOINT", None)
+        else:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is None:
+            os.environ.pop("MOTOKO_MODEL", None)
+        else:
+            os.environ["MOTOKO_MODEL"] = old_model
+        if old_parallel is None:
+            os.environ.pop("MOTOKO_EMBEDDING_PARALLEL", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
+        if old_batch is None:
+            os.environ.pop("MOTOKO_EMBEDDING_BATCH_SIZE", None)
+        else:
+            os.environ["MOTOKO_EMBEDDING_BATCH_SIZE"] = old_batch
+
+
 def test_embedding_vector_store_resumes_saved_progress(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -9244,6 +9326,8 @@ def test_skill_curator_creates_feedback_patch_suggestion(m):
         report = m.skill_curator_report_text()
         assert "curator suggestion candidates: 1" in report
         assert "queue them with: motoko skill curator --suggest" in report
+        assert "retrieval debugging needs ranking" not in report
+        assert "raw note hidden" in report
 
         command = m.shared_command_request("/skill curator suggest", conv)
         assert command is not None
@@ -9256,6 +9340,7 @@ def test_skill_curator_creates_feedback_patch_suggestion(m):
         assert suggestions[0]["action"] == "patch"
         assert suggestions[0]["target_skill"] == "retrieval-debugging"
         assert "Feedback-derived review notes" in suggestions[0]["new_string"]
+        assert "retrieval debugging needs ranking" not in suggestions[0]["new_string"]
 
         duplicate = m.curator_skill_suggestions_text()
         assert "no new suggestions" in duplicate
@@ -9281,6 +9366,45 @@ def test_skill_curator_creates_loaded_skill_patch_suggestion(m):
         assert candidates[0]["action"] == "patch"
         assert candidates[0]["target_skill"] == "racefocus-response-style"
         assert "Curator usage review notes" in candidates[0]["new_string"]
+
+
+def test_skill_curator_creates_support_file_plan_for_large_skill(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "large-retrieval-workflow",
+            description="Large retrieval workflow",
+            body="Keep retrieval grounded.\n" * 180,
+        )
+
+        candidates = m.curator_skill_suggestion_candidates()
+        support = next(row for row in candidates if row.get("file_path") == "references/support-file-plan.md")
+        assert support["action"] == "write_file"
+        assert support["target_skill"] == "large-retrieval-workflow"
+        assert "Support-file plan" in support["file_content"]
+        assert "body chars" in support["file_content"]
+
+
+def test_skill_curator_creates_consolidation_support_suggestion(m):
+    with isolated_state():
+        m.learn_skill(
+            "racefocus-hud-review",
+            description="RaceFocus HUD renderer review",
+            body="Keep RaceFocus renderer answers grounded.",
+            triggers=["racefocus", "renderer", "hud"],
+        )
+        m.learn_skill(
+            "racefocus-renderer-planning",
+            description="RaceFocus renderer planning",
+            body="Preserve RaceFocus renderer planning constraints.",
+            triggers=["racefocus", "renderer", "planning"],
+        )
+
+        candidates = m.curator_skill_suggestion_candidates()
+        consolidation = next(row for row in candidates if row.get("file_path") == "references/consolidation-review.md")
+        assert consolidation["action"] == "write_file"
+        assert consolidation["target_skill"] == "racefocus-hud-review"
+        assert "racefocus-renderer-planning" in consolidation["file_content"]
+        assert "overlap terms" in consolidation["file_content"]
 
 
 def write_demo_tool(m, skill_name="tool-backed-skill"):
@@ -10756,6 +10880,7 @@ def main() -> int:
         test_embedding_parallelism_allows_32_cap,
         test_retrieval_vector_query_uses_short_worker_timeouts,
         test_embedding_vector_store_stale_when_route_model_changes,
+        test_vector_doctor_reports_embedding_parallelism_without_private_rows,
         test_embedding_vector_store_resumes_saved_progress,
         test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh,
         test_diagnose_safe_redacts_private_progress_metadata,
@@ -10793,6 +10918,8 @@ def main() -> int:
         test_skill_lifecycle_commands_are_realm_local,
         test_skill_curator_creates_feedback_patch_suggestion,
         test_skill_curator_creates_loaded_skill_patch_suggestion,
+        test_skill_curator_creates_support_file_plan_for_large_skill,
+        test_skill_curator_creates_consolidation_support_suggestion,
     ]
     for test in tests:
         test(m)

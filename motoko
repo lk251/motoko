@@ -894,6 +894,7 @@ SLASH_COMMANDS = [
     ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
     ("/vector-build [ID]", "build a realm-local vector store for an index"),
     ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
+    ("/vector-doctor [ID]", "diagnose embedding vector refresh parallelism"),
     ("/vector-query [--rerank] QUERY", "query the latest vector store"),
     ("/vector-eval", "evaluate vector retrieval fixtures"),
     ("/identity", "show the active account/realm identity"),
@@ -1020,6 +1021,7 @@ SHELL_COMMANDS = [
     "vector-plan",
     "vector-build",
     "vector-refresh",
+    "vector-doctor",
     "vector-query",
     "vector-eval",
     "identity",
@@ -1060,6 +1062,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/vector-plan",
     "/vector-build",
     "/vector-refresh",
+    "/vector-doctor",
     "/vector-query",
     "/vector-eval",
     "/identity",
@@ -5772,6 +5775,31 @@ def skill_curator_feedback_matches(active: list[dict], *, limit: int = 20) -> li
     return matches
 
 
+def skill_support_file_count(row: dict) -> int:
+    return len([item for item in row.get("support_files", []) or [] if str(item or "").strip()])
+
+
+def skill_consolidation_groups(active: list[dict]) -> list[tuple[dict, list[tuple[dict, list[str]]]]]:
+    groups = []
+    for idx, row in enumerate(active):
+        row_terms = skill_curator_terms(
+            " ".join([row.get("slug", ""), row.get("description", ""), " ".join(row.get("triggers", []) or [])])
+        )
+        if len(row_terms) < 2:
+            continue
+        matches = []
+        for other in active[idx + 1 :]:
+            other_terms = skill_curator_terms(
+                " ".join([other.get("slug", ""), other.get("description", ""), " ".join(other.get("triggers", []) or [])])
+            )
+            overlap = sorted(row_terms & other_terms)
+            if len(overlap) >= 2:
+                matches.append((other, overlap))
+        if matches:
+            groups.append((row, matches))
+    return groups
+
+
 def _append_patch_suggestion_for_skill(
     row: dict,
     *,
@@ -5837,13 +5865,10 @@ def curator_skill_suggestion_candidates(*, limit: int = AUTO_SKILL_MAX_PROPOSALS
         if not matched:
             continue
         row, overlap = matched[0]
-        note = compact_text(feedback.get("note", "") or feedback.get("user_prompt", ""), 220)
-        if not note:
-            continue
         feedback_id = str(feedback.get("id", ""))[:80]
         bullet = (
             f"Feedback {feedback_id or '(unidentified)'} ({feedback.get('rating', '')}) matched "
-            f"{', '.join(overlap[:5])}: {note}"
+            f"{', '.join(overlap[:5])}. Inspect the private feedback row before accepting this patch."
         )
         candidate = _append_patch_suggestion_for_skill(
             row,
@@ -5861,15 +5886,14 @@ def curator_skill_suggestion_candidates(*, limit: int = AUTO_SKILL_MAX_PROPOSALS
                     f"- feedback: {feedback_id}",
                     f"- rating: {feedback.get('rating', '')}",
                     f"- matched terms: {', '.join(overlap[:8])}",
-                    f"- note: {note}",
                     "",
-                    "Use this as review material before patching the skill.",
+                    "Use this as content-safe review material before inspecting the private feedback row and patching the skill.",
                 ]
             )
             candidate = _support_file_suggestion_for_skill(
                 row,
                 description=f"Record recent feedback signal for {row.get('slug', '')}.",
-                file_slug=f"feedback-{feedback_id or hashlib.sha256(note.encode('utf-8')).hexdigest()[:8]}",
+                file_slug=f"feedback-{feedback_id or hashlib.sha256('|'.join(overlap).encode('utf-8')).hexdigest()[:8]}",
                 content=content,
                 reason="The skill body is too large for a safe exact patch, so the curator suggests a support file instead.",
                 signals=[f"feedback:{feedback.get('rating', '')}", f"feedback_id:{feedback_id}", "curator-feedback-match"],
@@ -5905,6 +5929,68 @@ def curator_skill_suggestion_candidates(*, limit: int = AUTO_SKILL_MAX_PROPOSALS
             candidates.append(candidate)
         if len(candidates) >= limit:
             break
+    for row in active:
+        if len(candidates) >= limit:
+            break
+        if row.get("pinned") or skill_support_file_count(row) or len(str(row.get("body", ""))) <= 2500:
+            continue
+        content = "\n".join(
+            [
+                f"# Support-file plan for {row.get('slug', '')}",
+                "",
+                "This content-safe curator note exists to keep SKILL.md short and useful.",
+                "",
+                f"- skill body chars: {len(str(row.get('body', '')))}",
+                "- keep trigger rules and decision boundaries in SKILL.md",
+                "- move durable examples, checklists, templates, and long references into support files",
+                "- prefer references/ for prose and templates/ for reusable skeletons",
+                "- leave scripts/ inert unless a separate tool contract is reviewed and approved",
+            ]
+        )
+        candidate = _support_file_suggestion_for_skill(
+            row,
+            description=f"Create a support-file organization plan for {row.get('slug', '')}.",
+            file_slug="support-file-plan",
+            content=content,
+            reason="The skill body is large and has no support files; a support-file plan helps keep procedural memory maintainable.",
+            signals=["curator-support-file-opportunity", f"body_chars:{len(str(row.get('body', '')))}"],
+        )
+        if candidate is not None:
+            candidates.append(candidate)
+    for row, matches in skill_consolidation_groups(active):
+        if len(candidates) >= limit:
+            break
+        content = "\n".join(
+            [
+                f"# Consolidation review for {row.get('slug', '')}",
+                "",
+                "This content-safe curator note lists overlapping learned skills. It does not archive or patch anything by itself.",
+                "",
+                "Candidate related skills:",
+            ]
+            + [
+                f"- {other.get('slug', '')}: overlap terms {', '.join(overlap[:8])}"
+                for other, overlap in matches[:8]
+            ]
+            + [
+                "",
+                "Review path:",
+                "- decide whether one skill should become the umbrella procedure",
+                "- move durable examples or edge cases into support files",
+                "- patch triggers/descriptions before archiving any duplicate",
+                "- archive only after the useful procedure has been preserved elsewhere",
+            ]
+        )
+        candidate = _support_file_suggestion_for_skill(
+            row,
+            description=f"Create a consolidation review note for {row.get('slug', '')}.",
+            file_slug="consolidation-review",
+            content=content,
+            reason="Several active learned skills share trigger terms; reviewing consolidation reduces duplicate narrow skills.",
+            signals=["curator-consolidation-candidate", f"match_count:{len(matches)}"],
+        )
+        if candidate is not None:
+            candidates.append(candidate)
     return candidates[:limit]
 
 
@@ -5948,25 +6034,9 @@ def skill_curator_report_text() -> str:
     support_opportunities = [
         row
         for row in active
-        if len(str(row.get("body", ""))) > 2500 and not row.get("support_files")
+        if len(str(row.get("body", ""))) > 2500 and not skill_support_file_count(row)
     ]
-    consolidation = []
-    for idx, row in enumerate(active):
-        row_terms = _action_plan_terms(
-            " ".join([row.get("slug", ""), row.get("description", ""), " ".join(row.get("triggers", []) or [])])
-        ) - skill_curator_generic_terms()
-        if len(row_terms) < 2:
-            continue
-        matches = []
-        for other in active[idx + 1 :]:
-            other_terms = _action_plan_terms(
-                " ".join([other.get("slug", ""), other.get("description", ""), " ".join(other.get("triggers", []) or [])])
-            ) - skill_curator_generic_terms()
-            overlap = sorted(row_terms & other_terms)
-            if len(overlap) >= 2:
-                matches.append((other, overlap))
-        if matches:
-            consolidation.append((row, matches))
+    consolidation = skill_consolidation_groups(active)
     feedback_links = skill_curator_feedback_matches(active)
     pending_candidates = curator_skill_suggestion_candidates()
     lines = [
@@ -6028,7 +6098,7 @@ def skill_curator_report_text() -> str:
             )
             lines.append(
                 f"- {feedback.get('rating', '')} {feedback.get('id', '')}: {skill_text}; "
-                f"note={compact_text(feedback.get('note', ''), 120)}"
+                "raw note hidden; inspect a specific feedback/suggestion record if needed"
             )
     if pending_candidates:
         lines.append("")
@@ -15045,6 +15115,102 @@ def format_vector_store(store: dict) -> str:
     return "\n".join(lines)
 
 
+def vector_embedding_candidate_counts(index: dict) -> dict:
+    raw_rows = 0
+    evidence_rows = 0
+    chunk_count = 0
+    file_count = 0
+    for file_item in index.get("files", []):
+        file_count += 1
+        for chunk in file_item.get("chunks", []):
+            chunk_count += 1
+            raw_rows += len(vector_embedding_input_rows(index, file_item, chunk))
+            evidence_rows += len(evidence_vector_embedding_input_rows(index, file_item, chunk))
+    return {
+        "files": file_count,
+        "chunks": chunk_count,
+        "raw_rows": raw_rows,
+        "evidence_rows": evidence_rows,
+        "total_rows": raw_rows + evidence_rows,
+    }
+
+
+def format_vector_doctor(index_id: str | None = None, conv: dict | None = None) -> str:
+    route_info = embedding_route_info()
+    index = load_index(index_id) if index_id else default_vector_index(conv)
+    counts = vector_embedding_candidate_counts(index)
+    total_rows = int(counts.get("total_rows", 0) or 0)
+    batch_size = embedding_batch_size(route_info, total_rows)
+    batch_count = (total_rows + batch_size - 1) // batch_size if total_rows else 0
+    configured_cap = embedding_parallel_limit(route_info)
+    requested_parallelism = embedding_parallelism(route_info, batch_count)
+    route_cap = route_max_parallel(route_info, default=1, maximum=32)
+    store = latest_vector_store_for_index(index, method=EMBEDDING_VECTOR_METHOD, fresh_only=False)
+    store_freshness = "missing"
+    store_warnings: list[str] = []
+    if store is not None:
+        store_freshness, store_warnings = vector_store_freshness(store)
+    env_rows = [
+        ("MOTOKO_EMBEDDING_PARALLEL", os.environ.get("MOTOKO_EMBEDDING_PARALLEL", "")),
+        ("MOTOKO_EMBEDDING_BATCH_SIZE", os.environ.get("MOTOKO_EMBEDDING_BATCH_SIZE", "")),
+        ("MOTOKO_EMBEDDING_BATCHES_PER_WORKER", os.environ.get("MOTOKO_EMBEDDING_BATCHES_PER_WORKER", "")),
+        ("MOTOKO_EMBEDDING_INPUT_CHARS", os.environ.get("MOTOKO_EMBEDDING_INPUT_CHARS", "")),
+        ("MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK", os.environ.get("MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK", "")),
+    ]
+    env_text = ", ".join(f"{key}={value or 'default'}" for key, value in env_rows)
+    lines = [
+        "vector doctor: embedding refresh throughput",
+        f"route: {route_info.get('catalog_route') or route_info.get('route', '')}",
+        f"model: {route_info.get('model', '')}",
+        f"dims: {route_info.get('embedding_dimensions', '')}",
+        f"declared maxParallel: {route_info.get('max_parallel', '')}  Motoko cap: {configured_cap}  route cap: {route_cap}",
+        f"index: {index.get('id', '')}  files={counts.get('files', 0)} chunks={counts.get('chunks', 0)}",
+        f"candidate rows: raw={counts.get('raw_rows', 0)} evidence={counts.get('evidence_rows', 0)} total={total_rows}",
+        f"planned batches: {batch_count}  batch size: {batch_size}  requested parallel: {requested_parallelism}",
+        f"input policy: chars={embedding_input_chars_limit()} max_parts_per_chunk={embedding_max_parts_per_chunk()}",
+        f"env overrides: {env_text}",
+    ]
+    if store is not None:
+        lines.extend(
+            [
+                "",
+                "latest store:",
+                f"id: {store.get('id', '')}  status: {store_freshness}  rows={store.get('row_count', len(store.get('rows', [])))}",
+                f"batches={store.get('embedding_batch_count', 0)} batch_size={store.get('embedding_batch_size', '')} "
+                f"parallel={store.get('embedding_parallelism', '')} requested={store.get('embedding_requested_parallelism', '')} "
+                f"fallbacks={len(store.get('embedding_parallel_fallbacks', []) or [])}",
+                f"incremental: reused={store.get('embedding_reused_rows', 0)} "
+                f"embedded={store.get('embedding_embedded_rows', store.get('row_count', 0))} "
+                f"superseded={store.get('embedding_superseded_rows', 0)}",
+            ]
+        )
+        for warning in store_warnings[:3]:
+            lines.append(f"warning: {warning}")
+    lines.extend(["", "interpretation:"])
+    if total_rows <= 0:
+        lines.append("- there are no embedding candidate rows for this index")
+    elif batch_count < configured_cap:
+        lines.append(
+            "- this index has fewer batches than the configured parallel cap, so Motoko cannot fill every route slot for this run"
+        )
+    elif requested_parallelism >= min(configured_cap, route_cap):
+        lines.append(
+            "- Motoko is already planning to fill the declared embedding route parallelism; raising Motoko parallelism alone should not help"
+        )
+    else:
+        lines.append(
+            "- Motoko is not filling the route cap; check env overrides or batch count before blaming llama.cpp"
+        )
+    lines.extend(
+        [
+            "- about 963 MiB VRAM can be normal for a 0.6B Q8 embedding model; low VRAM alone is not evidence of underuse",
+            "- low watts during vectorizing usually means the run is reusing rows, finalizing JSON/checkpoints, waiting on HTTP/CPU overhead, or the tiny embedding model is not compute-bound",
+            "- if rows stop changing for more than the stale-progress window, treat it as a stall; otherwise prefer row/sec and batch progress over VRAM size as the health signal",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def run_vector_eval(
     *,
     dims: int = DEFAULT_LEXICAL_VECTOR_DIMS,
@@ -18741,6 +18907,7 @@ HELP_SECTIONS = [
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
+            ("/vector-doctor [ID]", "diagnose embedding vector refresh parallelism"),
             ("/vector-query [--rerank] QUERY", "query the latest vector store"),
             ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/identity", "show the active account/realm identity"),
@@ -18768,6 +18935,7 @@ HELP_SECTIONS = [
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
+            ("/vector-doctor [ID]", "diagnose embedding vector refresh parallelism"),
             ("/vector-query [--rerank] QUERY", "query the latest vector store"),
             ("/vector-eval", "evaluate vector retrieval fixtures"),
             ("/index-repair [ID]", "repair failed index quality artifacts"),
@@ -18894,6 +19062,7 @@ HELP_SECTIONS = [
             ("motoko vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("motoko vector-build [ID]", "build a realm-local vector store for an index"),
             ("motoko vector-refresh [ID]", "build missing or stale embedding vector stores"),
+            ("motoko vector-doctor [ID]", "diagnose embedding vector refresh parallelism"),
             ("motoko vector-query [--rerank] QUERY", "query the latest vector store"),
             ("motoko vector-eval", "evaluate vector retrieval fixtures"),
             ("motoko index-repair [ID]", "repair failed index quality artifacts"),
@@ -18983,6 +19152,8 @@ HELP_SECTIONS = [
 STARTUP_TIPS_LINES = [
     "Tips: ask normally from the relevant directory; /sources checks grounding.",
     "Use /feedback up|down|ok NOTE after important answers; /retrieval-debug QUERY diagnoses failures.",
+    "Use /skill review after reusable workflows; /skill curator suggest and /skill suggestions handle review-first learning.",
+    "Use /bg-now to force catch-up work; /vector-doctor explains vectorizing parallelism and low-GPU symptoms.",
     "Evals are health checks after updates or suspicious answers, not daily chores. /tips opens the guide.",
 ]
 
@@ -19014,7 +19185,13 @@ def format_tips() -> str:
         "",
         "Self-improvement:",
         "  Motoko should improve through inspectable feedback, eval gates, skill suggestions, and approved changes.",
+        "  Use /skill review when a conversation reveals reusable procedure.",
+        "  Use /skill curator to inspect lifecycle health, /skill curator suggest to queue review-first patches/support files, and /skill suggestions to inspect, accept, or reject them.",
         "  Hermes-style skill learning remains the direction, but with Motoko's stricter realm-local, approval-first, dependency-light boundaries.",
+        "",
+        "Background and vectors:",
+        "  Use /bg-now when you want Motoko to catch up stale indexes/evidence/vectors now instead of waiting for cooldowns.",
+        "  Use /vector-doctor if vectorizing looks idle or underpowered; it explains route parallelism, planned batches, latest store stats, and whether low VRAM/watts are expected for the tiny embedding model.",
     ]
     return "\n".join(lines)
 
@@ -19428,6 +19605,9 @@ def vector_command_request(text: str, conv: dict):
                 refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)
             ),
         )
+    if primary == "/vector-doctor":
+        selector = body or None
+        return "/vector-doctor", lambda: format_vector_doctor(selector, conv)
     if primary == "/vector-query":
         query, rerank = parse_vector_query_input(body)
         query = query or context_query_text(conv, conv.get("title", ""))
@@ -23121,6 +23301,10 @@ def command_vector_refresh(args) -> None:
         print_report(format_vector_refresh_report(report))
 
 
+def command_vector_doctor(args) -> None:
+    print_report(format_vector_doctor(args.index))
+
+
 def command_vector_query(args) -> None:
     store = load_vector_store(args.store) if args.store else latest_vector_store()
     report = query_vector_store(store, " ".join(args.query), limit=args.limit, rerank=args.rerank)
@@ -23984,6 +24168,10 @@ def main(argv: list[str]) -> int:
     vector_refresh.add_argument("--force", action="store_true", help="rebuild even if a fresh store exists")
     vector_refresh.add_argument("--json", action="store_true", help="print JSON report")
     vector_refresh.set_defaults(func=command_vector_refresh)
+
+    vector_doctor = sub.add_parser("vector-doctor", help="diagnose embedding vector refresh parallelism")
+    vector_doctor.add_argument("index", nargs="?", help="optional document index; defaults to the active/latest index")
+    vector_doctor.set_defaults(func=command_vector_doctor)
 
     vector_query = sub.add_parser("vector-query", help="query the latest vector store")
     vector_query.add_argument("query", nargs="+")

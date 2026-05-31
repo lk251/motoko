@@ -1319,6 +1319,19 @@ Skill Curator v2 roadmap:
   why a procedure belongs in `SKILL.md`, `references/`, `templates/`, or an
   inert `scripts/` support file, and scripts must remain inactive unless they
   pass the existing metadata, fingerprint, typed-action, and approval gates.
+- Curator v2 checkpoint: reports should stay content-safe by default and hide
+  raw feedback notes. Concrete review-first suggestions can now create
+  support-file organization plans for oversized skills and consolidation
+  review notes for overlapping learned skills. These remain pending
+  `skill_manage` suggestions until the user explicitly inspects and accepts
+  them.
+- Vector refresh diagnostics checkpoint: use `motoko vector-doctor [INDEX_ID]`
+  or `/vector-doctor [INDEX_ID]` before assuming low VRAM/watts means Motoko is
+  under-parallelized. The report compares candidate rows, batch size,
+  requested parallelism, route `maxParallel`, and latest store metadata. A
+  Qwen3 0.6B Q8 embedding route can legitimately occupy around 1 GiB VRAM; row
+  progress and stale-progress detection are better health signals than resident
+  memory size alone.
 
 ## Roadmap Candidates
 
