@@ -1140,9 +1140,12 @@ initial context window and a project-scoped stored context item is available.
 This pass does not attach or mutate the conversation and does not make a
 generative synthesis call; it may still use configured embedding/rerank
 retrieval workers when the normal hybrid retrieval path uses them. It appears
-in `/sources` as `retrieval-sufficiency`. Future work may make this planner
-richer, but it should remain code-owned, source-visible, and limited rather
-than a hidden autonomous loop.
+in `/sources` as `retrieval-sufficiency`. Evidence strength is quality-aware:
+a fallback chunk with no lexical, structured, evidence, vector, rerank, or
+span signal no longer counts as strong grounding merely because its source
+kind is `chunk`. Future work may make this planner richer, but it should
+remain code-owned, source-visible, and limited rather than a hidden autonomous
+loop.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to

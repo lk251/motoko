@@ -1215,8 +1215,11 @@ Current progress on this stretch:
   This does not attach or mutate the conversation and does not make a
   generative synthesis call; it may still use configured embedding/rerank
   retrieval workers when the normal hybrid retrieval path uses them. It is
-  exposed in `/sources` as a `retrieval-sufficiency` source row. Remaining work
-  is richer sufficiency planning across more lanes and conflict checks.
+  exposed in `/sources` as a `retrieval-sufficiency` source row. Evidence
+  strength is quality-aware: a fallback chunk with no lexical, structured,
+  evidence, vector, rerank, or span signal no longer counts as strong grounding
+  merely because its source kind is `chunk`. Remaining work is richer
+  sufficiency planning across more lanes and conflict checks.
 - Complete for `/retrieval-preview`: preview output now consumes an explicit
   retrieval-service preview result built from the same `context-package-v1`
   record as chat prompt assembly. The command remains a renderer, but it no

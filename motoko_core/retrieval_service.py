@@ -25,6 +25,7 @@ from motoko_core.retrieval import (
     score_text,
     selected_evidence_excerpt,
     selected_temporal_evidence_excerpt,
+    source_has_strong_evidence_core,
     token_counts,
     unavailable_context_source,
 )
@@ -110,7 +111,12 @@ def plan_retrieval_sufficiency_expansion(
 
     clean_sources = [source for source in sources if isinstance(source, dict)]
     kinds = [str(source.get("kind", "unknown")) for source in clean_sources]
-    strong_count = sum(1 for kind in kinds if kind in strong_source_kinds)
+    strong_count = sum(
+        1
+        for source in clean_sources
+        if source_has_strong_evidence_core(source, strong_source_kinds=strong_source_kinds)
+    )
+    nominal_strong_count = sum(1 for kind in kinds if kind in strong_source_kinds)
     context_count = sum(1 for kind in kinds if kind in context_source_kinds)
     needs_grounding = query_needs_grounded_sources_core(
         query,
@@ -123,6 +129,7 @@ def plan_retrieval_sufficiency_expansion(
         "status": "not-needed",
         "needs_grounding": needs_grounding,
         "strong_source_count": strong_count,
+        "nominal_strong_source_count": nominal_strong_count,
         "context_source_count": context_count,
         "candidate_count": len(candidates),
         "selected": None,

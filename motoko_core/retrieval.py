@@ -166,6 +166,41 @@ def query_needs_grounded_sources_core(
     return bool(query_path_mentions(query) or (terms & grounding_query_words) or (terms & task_query_words))
 
 
+def source_numeric_signal(source: dict) -> float:
+    best = 0.0
+    for key in (
+        "score",
+        "hybrid_score",
+        "lexical_score",
+        "structured_score",
+        "evidence_score",
+        "vector_score",
+        "rerank_score",
+    ):
+        value = source.get(key)
+        if value is None:
+            continue
+        try:
+            best = max(best, float(value))
+        except (TypeError, ValueError):
+            continue
+    return best
+
+
+def source_has_strong_evidence_core(source: dict, *, strong_source_kinds: set[str]) -> bool:
+    kind = str(source.get("kind", ""))
+    if kind not in strong_source_kinds:
+        return False
+    if kind != "chunk":
+        return True
+    methods = {str(method) for method in source.get("retrieval_methods", []) or [] if str(method).strip()}
+    if methods & {"evidence", "structural", "temporal", "code", "vector"}:
+        return True
+    if source.get("evidence_id") or source.get("evidence_rows") or source.get("excerpt_spans"):
+        return True
+    return source_numeric_signal(source) > 0
+
+
 def answer_grounding_audit_core(
     query: str,
     reply: str,
@@ -180,7 +215,11 @@ def answer_grounding_audit_core(
 ) -> dict:
     clean_sources = [source for source in sources if source.get("kind") != "answer-audit"]
     kinds = collections.Counter(source.get("kind", "unknown") for source in clean_sources)
-    strong_count = sum(kinds.get(kind, 0) for kind in strong_source_kinds)
+    strong_count = sum(
+        1
+        for source in clean_sources
+        if source_has_strong_evidence_core(source, strong_source_kinds=strong_source_kinds)
+    )
     context_count = sum(kinds.get(kind, 0) for kind in context_source_kinds)
     needs_grounding = query_needs_grounded_sources_core(
         query,

@@ -3694,6 +3694,7 @@ def test_answer_grounding_audit_sources(m):
             "index": "idx",
             "path": "/tmp/logbook.org",
             "chunk": 1,
+            "lexical_score": 25,
         },
         {
             "kind": "context-plan",
@@ -3719,6 +3720,14 @@ def test_answer_grounding_audit_sources(m):
     thin = m.answer_grounding_audit("summarize according to logbook.org", "No documents are attached.", [])
     assert thin["status"] == "fail"
     assert "attach or study" in thin["recommended_action"]
+
+    weak = m.answer_grounding_audit(
+        "summarize according to logbook.org",
+        "Weak answer.",
+        [{"kind": "chunk", "path": "/tmp/other.org", "chunk": 1, "lexical_score": 0}],
+    )
+    assert weak["status"] == "fail"
+    assert weak["strong_evidence_sources"] == 0
 
 
 def test_core_answer_grounding_audit_is_injectable(m):
@@ -3800,9 +3809,23 @@ def test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass(m):
     assert plan["selected"]["id"] == "idx-1"
     assert plan["strong_source_count"] == 0
 
+    weak_chunk = m.plan_retrieval_sufficiency_expansion(
+        "according to plan.org",
+        [{"kind": "chunk", "path": "/tmp/other.org", "chunk": 1, "lexical_score": 0}],
+        [{"item": {"kind": "index", "id": "idx-1"}, "score": 1}],
+        grounding_query_words={"according"},
+        task_query_words=set(),
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"index"},
+        min_score=1,
+    )
+    assert weak_chunk["status"] == "expand"
+    assert weak_chunk["nominal_strong_source_count"] == 1
+    assert weak_chunk["strong_source_count"] == 0
+
     sufficient = m.plan_retrieval_sufficiency_expansion(
         "according to plan.org",
-        [{"kind": "chunk"}],
+        [{"kind": "chunk", "lexical_score": 1}],
         [{"item": {"kind": "index", "id": "idx-1"}, "score": 1}],
         grounding_query_words={"according"},
         task_query_words=set(),

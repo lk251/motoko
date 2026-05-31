@@ -18688,6 +18688,7 @@ def retrieval_sufficiency_expansion(
         "selected_score": selected.get("score", 0),
         "selected_reason": selected.get("reason", ""),
         "strong_source_count": plan.get("strong_source_count", 0),
+        "nominal_strong_source_count": plan.get("nominal_strong_source_count", 0),
         "context_source_count": plan.get("context_source_count", 0),
         "candidate_count": plan.get("candidate_count", 0),
     }
