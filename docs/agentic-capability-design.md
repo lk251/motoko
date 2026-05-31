@@ -953,6 +953,10 @@ Self-code and static scan checkpoint, 2026-05-31:
   the self-code and static-scan path. It verifies that code-map/code-query
   work, the self-code skill activates, built-in skills scan cleanly, and the
   scanner catches a synthetic risky script.
+- Added `docs/motoko-self-improvement-playbook.md` as the durable operating
+  checklist for Motoko self-improvement. The built-in self-code skill points
+  long refactor or capability-building work at that checklist instead of
+  stuffing every craft rule into prompt context.
 
 Next long stretch after skill lifecycle:
 

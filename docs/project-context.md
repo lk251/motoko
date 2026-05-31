@@ -1509,6 +1509,9 @@ Motoko self-code checkpoint, 2026-05-31:
   for this self-improvement path. It checks code-map parsing, code-query
   usefulness, self-code skill activation, clean built-in skill scans, and
   scanner detection of a synthetic risky script.
+- Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
+  for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
+  retrieval diagnosis, refactor boundaries, validation, and deployment soak.
 - This completes the first practical version of "Motoko can inspect her own
   code before proposing improvements." It does not replace Codex-level
   engineering review, tests, commits, or user approval; it gives Motoko better
@@ -1536,6 +1539,10 @@ Motoko self-improvement list prepared for future work:
 7. Treat reflection as inspectable audits and review records, not hidden
    rumination: what evidence was used, what failed, what should be patched,
    and which eval would catch it next time.
+
+For long self-improvement work, use
+`docs/motoko-self-improvement-playbook.md` as the operating checklist before
+making code changes.
 
 ## Agentic Capability Design Gate
 

@@ -841,6 +841,8 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "code_query_finds_commands_symbols_tests" in names
         assert "motoko_codebase_skill_activates" in names
         assert "skill_scanner_detects_risky_script" in names
+        docs_check = next(row for row in report.get("checks", []) if row.get("name") == "self_improvement_docs_present")
+        assert "docs/motoko-self-improvement-playbook.md" in docs_check.get("evidence", {}).get("docs", [])
         rendered = m.format_self_improvement_eval(report)
         assert "self-improvement eval:" in rendered
         assert "status: pass" in rendered

@@ -166,6 +166,7 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
         repo_root / "docs" / "project-context.md",
         repo_root / "docs" / "motoko.md",
         repo_root / "docs" / "agentic-capability-design.md",
+        repo_root / "docs" / "motoko-self-improvement-playbook.md",
     ]
     missing_docs = [path.name for path in docs if not path.exists()]
     checks.append(
