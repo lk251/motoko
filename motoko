@@ -7237,7 +7237,7 @@ def goal_readonly_project_scope(run: dict) -> dict:
     return project_scope_for_request(query=str(run.get("objective", "")), path=scope_path)
 
 
-def build_goal_readonly_context(run: dict) -> tuple[str, list[dict], dict]:
+def build_goal_readonly_context(run: dict, *, cancel_event=None) -> tuple[str, list[dict], dict]:
     objective = str(run.get("objective", "") or "")
     project_scope = goal_readonly_project_scope(run)
     conv = {
@@ -7252,9 +7252,15 @@ def build_goal_readonly_context(run: dict) -> tuple[str, list[dict], dict]:
     except SystemExit:
         indexes = []
     for index in indexes[:2]:
+        raise_if_work_cancelled(cancel_event, "goal retrieval interrupted by request", work_kind="goal")
         with contextlib.suppress(Exception):
             conv.setdefault("context_items", []).append(context_item_from_index(index))
-    context_package, _context_values = build_prompt_context_package(conv, objective, project_scope=project_scope)
+    context_package, _context_values = build_prompt_context_package(
+        conv,
+        objective,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
     parts = []
     used = 0
     for lane in context_package.lanes:
@@ -7476,7 +7482,7 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
     write_goal_run_record(run)
     started = time.monotonic()
     try:
-        context_text, sources, project_scope = build_goal_readonly_context(run)
+        context_text, sources, project_scope = build_goal_readonly_context(run, cancel_event=cancel_event)
         run["planner_steps"].append(
             {
                 "phase": "retrieve",
@@ -7502,6 +7508,7 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
             sampling_preset="deterministic",
             json_schema=GOAL_READONLY_OUTPUT_SCHEMA,
             max_tokens=GOAL_READONLY_MAX_MODEL_OUTPUT_TOKENS,
+            cancel_event=cancel_event,
         ).strip()
         parsed, json_error = extract_json_object(reply)
         if parsed is None:
@@ -7535,6 +7542,8 @@ def execute_goal_readonly_run_record(run: dict, *, yes: bool, cancel_event=None)
             run,
             status="awaiting_confirmation" if is_confirmed and parsed.get("proposed_actions") else "completed",
         )
+    except WorkPaused as exc:
+        finish_goal_readonly_run(run, status="interrupted", error=str(exc))
     except SystemExit as exc:
         finish_goal_readonly_run(run, status="stopped", error=str(exc))
     except AgenticValidationError as exc:
@@ -18965,7 +18974,7 @@ def build_prompt_context_package(
     )
     profile_text, profile_sources = render_profile_with_sources(project_scope=project_scope)
     skill_text, skill_sources = render_skills_with_sources(query)
-    codebase_text, codebase_sources = render_motoko_codebase_context(query)
+    codebase_text, codebase_sources = render_motoko_codebase_context(query, cancel_event=cancel_event)
     retrieval_query = context_query_text(conv, query)
     raise_if_work_cancelled(cancel_event, "context preparation interrupted by request", work_kind="retrieval")
     context_selection = scoped_context_selection(conv, retrieval_query, project_scope)
@@ -20610,27 +20619,43 @@ def format_tips() -> str:
     return "\n".join(lines)
 
 
-def motoko_code_map(root: str | None = None) -> dict:
-    return build_code_map(find_motoko_repo_root(root))
+def motoko_code_cancel_check(cancel_event):
+    if cancel_event is None:
+        return None
+
+    def check() -> None:
+        raise_if_work_cancelled(cancel_event, "codebase context interrupted by request", work_kind="retrieval")
+
+    return check
 
 
-def format_motoko_code_map(root: str | None = None) -> str:
-    return format_code_map_report(motoko_code_map(root))
+def motoko_code_map(root: str | None = None, *, cancel_event=None) -> dict:
+    return build_code_map(find_motoko_repo_root(root), cancel_check=motoko_code_cancel_check(cancel_event))
 
 
-def motoko_code_query(query: str, *, root: str | None = None, limit: int = 12) -> dict:
-    return query_code_map(motoko_code_map(root), query, limit=limit)
+def format_motoko_code_map(root: str | None = None, *, cancel_event=None) -> str:
+    return format_code_map_report(motoko_code_map(root, cancel_event=cancel_event))
 
 
-def format_motoko_code_query(query: str, *, root: str | None = None, limit: int = 12) -> str:
-    return format_code_query_report(motoko_code_query(query, root=root, limit=limit))
+def motoko_code_query(query: str, *, root: str | None = None, limit: int = 12, cancel_event=None) -> dict:
+    cancel_check = motoko_code_cancel_check(cancel_event)
+    return query_code_map(
+        motoko_code_map(root, cancel_event=cancel_event),
+        query,
+        limit=limit,
+        cancel_check=cancel_check,
+    )
 
 
-def render_motoko_codebase_context(query: str) -> tuple[str, list[dict]]:
+def format_motoko_code_query(query: str, *, root: str | None = None, limit: int = 12, cancel_event=None) -> str:
+    return format_code_query_report(motoko_code_query(query, root=root, limit=limit, cancel_event=cancel_event))
+
+
+def render_motoko_codebase_context(query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
     plan = build_retrieval_plan(query, skills=active_skills())
     if not plan.get("codebase"):
         return "", []
-    report = motoko_code_query(query, limit=10)
+    report = motoko_code_query(query, limit=10, cancel_event=cancel_event)
     return (
         format_code_query_report(report),
         [
@@ -20943,7 +20968,7 @@ def report_command_request(text: str, conv: dict):
         return "/code-map", format_motoko_code_map
     if primary == "/code-query":
         query = body or context_query_text(conv, conv.get("title", ""))
-        return "/code-query", lambda: format_motoko_code_query(query)
+        return "/code-query", lambda cancel_event=None: format_motoko_code_query(query, cancel_event=cancel_event)
     if primary == "/self-eval" and not body:
         return "/self-eval", lambda: format_self_improvement_eval(run_self_improvement_eval())
     if primary == "/identity" and not body:

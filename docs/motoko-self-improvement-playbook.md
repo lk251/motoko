@@ -212,6 +212,9 @@ fresh evidence shows a better target:
    dossier ranking, recent-conversation recall ranking, prompt-time
    memory/conversation recall, and profile source-material scans now also
    receive and honor foreground cancellation before model work starts.
+   Deterministic Motoko codebase context (`code-map` / `code-query`) and
+   model-planned goal-loop retrieval now also carry the same cancel signal, so
+   self-improvement scans can stop cleanly before expensive planning continues.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or

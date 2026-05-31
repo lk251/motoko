@@ -1014,6 +1014,39 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert "Motoko code query:" in run()
 
 
+def test_motoko_codebase_context_honors_cancel_event(m):
+    with isolated_state():
+        event = threading.Event()
+        event.set()
+        try:
+            m.render_motoko_codebase_context(
+                "How should Motoko refactor its codebase command handlers?",
+                cancel_event=event,
+            )
+        except m.WorkPaused as exc:
+            assert "interrupted" in str(exc)
+            assert exc.work_kind == "retrieval"
+        else:
+            raise AssertionError("Motoko codebase context should honor a pre-set cancel event")
+
+
+def test_code_query_report_command_honors_cancel_event(m):
+    with isolated_state():
+        conv = m.new_conversation("Code query cancel")
+        command = m.shared_command_request("/code-query Motoko skill command implementation", conv)
+        assert command is not None
+        assert command.kind == m.COMMAND_KIND_REPORT
+        _label, run = command
+        event = threading.Event()
+        event.set()
+        try:
+            m.run_command_callable(run, cancel_event=event)
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "retrieval"
+        else:
+            raise AssertionError("/code-query report should honor a pre-set cancel event")
+
+
 def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
     with isolated_state():
         report = m.run_self_improvement_eval()
@@ -12946,6 +12979,40 @@ def test_goal_loop_model_readonly_rejects_mutating_effects(m):
         assert not list(m.goal_runs_dir().glob("*.json"))
 
 
+def test_goal_loop_model_readonly_passes_cancel_event_to_context(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        preview = m.format_goal_plan(
+            "Review context but stop during retrieval",
+            scope=[str(docs)],
+            model_readonly=True,
+            save=True,
+        )
+        assert "planner: model_readonly" in preview
+        goal_path = next(m.goal_loops_dir().glob("*.json"))
+        old_build_goal_readonly_context = m.build_goal_readonly_context
+        seen = {}
+        event = threading.Event()
+
+        def fake_build_goal_readonly_context(run, *, cancel_event=None):
+            seen["cancel_event"] = cancel_event
+            raise m.WorkPaused("goal retrieval interrupted by request", work_kind="goal")
+
+        try:
+            m.build_goal_readonly_context = fake_build_goal_readonly_context
+            output = m.run_goal_text(str(goal_path), yes=True, cancel_event=event)
+        finally:
+            m.build_goal_readonly_context = old_build_goal_readonly_context
+
+        assert seen["cancel_event"] is event
+        assert "status: interrupted" in output
+        assert "goal retrieval interrupted by request" in output
+        run_record = m.safe_load_json(next(m.goal_runs_dir().glob("*.json")))
+        assert run_record["status"] == "interrupted"
+
+
 def test_goal_loop_model_confirmed_applies_reviewed_proposals(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -13374,6 +13441,7 @@ def main() -> int:
         test_goal_loop_preview_save_and_list_without_execution,
         test_goal_loop_model_readonly_runs_and_stores_reviewable_proposals,
         test_goal_loop_model_readonly_rejects_mutating_effects,
+        test_goal_loop_model_readonly_passes_cancel_event_to_context,
         test_goal_loop_model_confirmed_applies_reviewed_proposals,
         test_git_worktree_actions_are_managed_confirmed_and_mergeable,
         test_goal_loop_runs_explicit_confirmed_action_list,
@@ -13562,6 +13630,8 @@ def main() -> int:
         test_skill_lifecycle_records_usage_and_archive_restore,
         test_skill_lifecycle_commands_are_realm_local,
         test_motoko_codebase_context_and_commands_are_deterministic,
+        test_motoko_codebase_context_honors_cancel_event,
+        test_code_query_report_command_honors_cancel_event,
         test_self_improvement_eval_checks_codebase_skill_and_scanner,
         test_skill_scan_reports_script_risks,
         test_skill_curator_creates_feedback_patch_suggestion,

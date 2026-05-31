@@ -17,6 +17,11 @@ CODE_INTEL_SCHEMA = "motoko-code-intel-v1"
 CODE_QUERY_SCHEMA = "motoko-code-query-v1"
 
 
+def _maybe_cancel(cancel_check=None) -> None:
+    if cancel_check is not None:
+        cancel_check()
+
+
 @dataclass(frozen=True)
 class CodeSymbol:
     kind: str
@@ -552,7 +557,7 @@ def _build_service_boundaries(modules: list[dict], symbols: list[dict], imports:
     return rows
 
 
-def build_code_map(root: str | pathlib.Path | None = None) -> dict:
+def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None) -> dict:
     repo_root = find_motoko_repo_root(root)
     files = code_files(repo_root)
     symbols: list[dict] = []
@@ -563,7 +568,9 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
     parse_errors: list[dict] = []
     modules = []
     file_texts: dict[str, str] = {}
+    _maybe_cancel(cancel_check)
     for path in files:
+        _maybe_cancel(cancel_check)
         text = _safe_read(path)
         relpath = _rel(repo_root, path)
         file_texts[relpath] = text
@@ -587,11 +594,17 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
                 "constants": len(file_constants),
             }
         )
+    _maybe_cancel(cancel_check)
     tests = [row for row in symbols if row["path"].startswith("tests/") and row["kind"] == "function" and row["name"].startswith("test_")]
+    _maybe_cancel(cancel_check)
     command_traces = _build_command_traces(commands, symbols, tests, file_texts)
+    _maybe_cancel(cancel_check)
     call_edges = _build_call_edges(calls, symbols)
+    _maybe_cancel(cancel_check)
     root_hotspots = _build_root_hotspots(symbols, calls)
+    _maybe_cancel(cancel_check)
     service_boundaries = _build_service_boundaries(modules, symbols, imports, call_edges)
+    _maybe_cancel(cancel_check)
     command_handlers = {row.get("handler", "") for row in commands if row.get("handler")}
     symbol_names = {row.get("name", "") for row in symbols}
     unlinked_commands = [
@@ -649,7 +662,7 @@ def _score_text(query_terms: set[str], haystack: str) -> tuple[int, list[str]]:
     return len(overlap), overlap
 
 
-def query_code_map(code_map: dict, query: str, *, limit: int = 12) -> dict:
+def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=None) -> dict:
     query_terms = _tokenize(query)
     if not query_terms:
         query_terms = _tokenize("motoko")
@@ -657,6 +670,7 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12) -> dict:
     def rank(rows: list[dict], fields: list[str], *, name_field: str = "name") -> list[dict]:
         ranked = []
         for row in rows:
+            _maybe_cancel(cancel_check)
             haystack = " ".join(str(row.get(field, "")) for field in fields)
             overlap_count, overlap = _score_text(query_terms, haystack)
             if not overlap:
@@ -672,9 +686,11 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12) -> dict:
             item["score"] = score
             item["matched_terms"] = overlap[:12]
             ranked.append(item)
+        _maybe_cancel(cancel_check)
         ranked.sort(key=lambda row: (row.get("score", 0), -int(row.get("line", 0) or 0)), reverse=True)
         return ranked[: max(0, int(limit or 0))]
 
+    _maybe_cancel(cancel_check)
     return {
         "schema": CODE_QUERY_SCHEMA,
         "query": str(query or ""),
