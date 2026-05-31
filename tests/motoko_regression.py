@@ -11276,6 +11276,71 @@ def test_skill_curator_creates_feedback_patch_suggestion(m):
         assert "Feedback-derived review notes" in m.format_skill("retrieval-debugging")
 
 
+def test_skill_curator_uses_saved_feedback_eval_fixtures(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "retrieval-debugging",
+            description="Retrieval debugging checklist",
+            body="Inspect sources first.",
+        )
+        m.save_feedback_eval_report(
+            {
+                "schema": m.FEEDBACK_EVAL_SCHEMA_VERSION,
+                "id": "feedback-eval-curator",
+                "created": "2026-05-31T00:00:00+00:00",
+                "realm": "mares",
+                "source": "synthetic-test",
+                "fixture_count": 1,
+                "ratings": {"down": 1},
+                "focus": {"ranking": 1, "staleness": 1},
+                "fixtures": [
+                    {
+                        "id": "fixture-curator",
+                        "created": "2026-05-31T00:00:00+00:00",
+                        "realm": "mares",
+                        "rating": "down",
+                        "quality_status": "needs-review",
+                        "focus": ["ranking", "staleness"],
+                        "query": "retrieval debugging ignored stale evidence",
+                        "note": "raw private feedback note should not appear in curator reports",
+                        "source_path_count": 2,
+                        "source_evidence_count": 1,
+                    }
+                ],
+                "privacy": "test fixture",
+            }
+        )
+
+        report = m.skill_curator_report_text()
+        assert "saved feedback-eval fixtures that may point at skill updates:" in report
+        assert "fixture-curator" in report
+        assert "raw fixture text hidden" in report
+        assert "raw private feedback note" not in report
+        assert "ignored stale evidence" not in report
+
+        candidates = m.curator_skill_suggestion_candidates()
+        candidate = next(
+            row
+            for row in candidates
+            if row.get("file_path") == "references/feedback-eval-fixture-curator.md"
+        )
+        assert candidate["action"] == "write_file"
+        assert candidate["target_skill"] == "retrieval-debugging"
+        assert "curator-feedback-eval-match" in candidate["signals"]
+        assert "source path count: 2" in candidate["file_content"]
+        assert "source evidence count: 1" in candidate["file_content"]
+        assert "raw private feedback note" not in candidate["file_content"]
+        assert "ignored stale evidence" not in candidate["file_content"]
+
+        queued = m.curator_skill_suggestions_text()
+        assert "skill curator: 1 pending suggestion" in queued
+        suggestions = m.list_skill_suggestions(status="pending")
+        accepted = m.accept_skill_suggestion_text(suggestions[0]["id"])
+        assert "support file written: references/feedback-eval-fixture-curator.md" in accepted
+        support = m.format_skill_support_file("retrieval-debugging", "references/feedback-eval-fixture-curator.md")
+        assert "Feedback eval review for retrieval-debugging" in support
+
+
 def test_skill_curator_creates_loaded_skill_patch_suggestion(m):
     with isolated_state():
         m.learn_skill_text(
@@ -12716,6 +12781,7 @@ def main() -> int:
         test_skill_review_prompt_prioritizes_loaded_skill_context,
         test_manual_skill_review_and_suggestion_detail,
         test_skill_suggestion_accepts_patch_action,
+        test_skill_curator_uses_saved_feedback_eval_fixtures,
         test_skill_manage_support_file_is_confined,
         test_skill_manage_support_file_commands,
         test_skill_upgrade_rewrites_legacy_skill_files,

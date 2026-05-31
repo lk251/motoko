@@ -348,6 +348,11 @@ Current progress on this backlog:
   artifacts can be cleaned after reprocessing instead of staying permanently
   blocked. Root code still resolves those families to realm-local paths and
   performs filesystem mutation through explicit callbacks.
+- Skill curator review can now use saved private `feedback-eval` fixtures, not
+  only raw response-feedback rows. Matching fixtures create review-first,
+  content-safe support-file suggestions for existing learned skills, hiding raw
+  query/note/source text until the user explicitly inspects the private eval
+  artifact.
 
 Skill work that should usually happen before new code:
 

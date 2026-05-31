@@ -731,6 +731,8 @@ AUTO_SKILL_LOADED_INTERVAL_MESSAGES = 4
 AUTO_SKILL_MAX_PROPOSALS = 2
 SKILL_SUGGESTION_BODY_CHARS = 3000
 CURATOR_STALE_UNUSED_DAYS = 30
+CURATOR_FEEDBACK_EVAL_REPORT_LIMIT = 8
+CURATOR_FEEDBACK_EVAL_FIXTURE_LIMIT = 24
 ORG_TODO_KEYWORDS = {
     "TODO",
     "NEXT",
@@ -6011,6 +6013,77 @@ def skill_curator_feedback_matches(active: list[dict], *, limit: int = 20) -> li
     return matches
 
 
+def read_feedback_eval_reports_for_curator(*, limit: int = CURATOR_FEEDBACK_EVAL_REPORT_LIMIT) -> list[dict]:
+    paths = []
+    try:
+        paths = sorted(feedback_evals_dir().glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+    except OSError:
+        paths = []
+    reports = []
+    for path in paths[: max(0, int(limit or 0))]:
+        report = safe_load_json(path)
+        if not isinstance(report, dict) or report.get("schema") != FEEDBACK_EVAL_SCHEMA_VERSION:
+            continue
+        item = dict(report)
+        item["_path"] = str(path)
+        reports.append(item)
+    return reports
+
+
+def feedback_eval_curator_fixtures(
+    *,
+    report_limit: int = CURATOR_FEEDBACK_EVAL_REPORT_LIMIT,
+    fixture_limit: int = CURATOR_FEEDBACK_EVAL_FIXTURE_LIMIT,
+) -> list[dict]:
+    fixtures = []
+    for report in read_feedback_eval_reports_for_curator(limit=report_limit):
+        raw_fixtures = report.get("fixtures", []) if isinstance(report.get("fixtures"), list) else []
+        for raw_fixture in raw_fixtures:
+            if not isinstance(raw_fixture, dict) or raw_fixture.get("rating") == "up":
+                continue
+            fixture = dict(raw_fixture)
+            fixture["_feedback_eval_report_id"] = str(report.get("id", ""))
+            fixture["_feedback_eval_path"] = str(report.get("_path", ""))
+            fixtures.append(fixture)
+            if len(fixtures) >= fixture_limit:
+                return fixtures
+    return fixtures
+
+
+def skill_curator_feedback_eval_matches(
+    active: list[dict],
+    *,
+    report_limit: int = CURATOR_FEEDBACK_EVAL_REPORT_LIMIT,
+    fixture_limit: int = CURATOR_FEEDBACK_EVAL_FIXTURE_LIMIT,
+) -> list[tuple[dict, list[tuple[dict, list[str]]]]]:
+    matches = []
+    for fixture in feedback_eval_curator_fixtures(report_limit=report_limit, fixture_limit=fixture_limit):
+        text = " ".join(
+            [
+                " ".join(str(item) for item in fixture.get("focus", []) if str(item).strip())
+                if isinstance(fixture.get("focus"), list)
+                else "",
+                str(fixture.get("query", "")),
+                str(fixture.get("note", "")),
+                str(fixture.get("quality_status", "")),
+            ]
+        )
+        terms = skill_curator_terms(text)
+        if not terms:
+            continue
+        matched = []
+        for row in active:
+            skill_terms = skill_curator_terms(
+                " ".join([row.get("slug", ""), row.get("description", ""), row.get("body", "")[:1000]])
+            )
+            overlap = sorted(terms & skill_terms)
+            if overlap:
+                matched.append((row, overlap))
+        if matched:
+            matches.append((fixture, matched[:3]))
+    return matches
+
+
 def skill_support_file_count(row: dict) -> int:
     return len([item for item in row.get("support_files", []) or [] if str(item or "").strip()])
 
@@ -6171,6 +6244,57 @@ def curator_skill_suggestion_candidates(*, limit: int = AUTO_SKILL_MAX_PROPOSALS
                 reason="The skill body is too large for a safe exact patch, so the curator suggests a support file instead.",
                 signals=[f"feedback:{feedback.get('rating', '')}", f"feedback_id:{feedback_id}", "curator-feedback-match"],
             )
+        if candidate is not None:
+            candidates.append(candidate)
+        if len(candidates) >= limit:
+            return candidates
+    for fixture, matched in skill_curator_feedback_eval_matches(active):
+        if not matched:
+            continue
+        row, overlap = matched[0]
+        fixture_id = str(fixture.get("id", ""))[:80]
+        report_id = str(fixture.get("_feedback_eval_report_id", ""))[:80]
+        focus = [
+            str(item)
+            for item in fixture.get("focus", [])
+            if str(item).strip()
+        ] if isinstance(fixture.get("focus"), list) else []
+        content = "\n".join(
+            [
+                f"# Feedback eval review for {row.get('slug', '')}",
+                "",
+                "This content-safe curator note was generated from a saved private feedback-eval fixture.",
+                "It does not expose the raw query, note, answer, source paths, or support-file contents.",
+                "",
+                "Signals:",
+                f"- feedback eval report: {report_id or '-'}",
+                f"- fixture: {fixture_id or '-'}",
+                f"- rating: {fixture.get('rating', '')}",
+                f"- quality status: {fixture.get('quality_status', '')}",
+                f"- focus: {', '.join(focus[:8]) if focus else '-'}",
+                f"- source path count: {int(fixture.get('source_path_count', 0) or 0)}",
+                f"- source evidence count: {int(fixture.get('source_evidence_count', 0) or 0)}",
+                f"- matched term count: {len(overlap)}",
+                "",
+                "Review path:",
+                "- inspect the private feedback-eval report if you need the raw query or note",
+                "- decide whether this is a retrieval, prompt-packing, or skill-procedure problem",
+                "- patch the existing skill only after the procedure generalizes",
+                "- prefer a regression, retrieval fixture, or support-file note over an automatic behavior change",
+            ]
+        )
+        candidate = _support_file_suggestion_for_skill(
+            row,
+            description=f"Record feedback-eval review signal for {row.get('slug', '')}.",
+            file_slug=f"feedback-eval-{fixture_id or hashlib.sha256('|'.join(overlap).encode('utf-8')).hexdigest()[:8]}",
+            content=content,
+            reason="A saved feedback-eval fixture matched this skill; the curator records review material without mutating skill behavior.",
+            signals=[
+                f"feedback_eval:{report_id}",
+                f"feedback_fixture:{fixture_id}",
+                "curator-feedback-eval-match",
+            ],
+        )
         if candidate is not None:
             candidates.append(candidate)
         if len(candidates) >= limit:
@@ -6345,6 +6469,7 @@ def skill_curator_report_text() -> str:
     consolidation = skill_consolidation_groups(active)
     archive_reviews = stale_unused_skill_rows(active)
     feedback_links = skill_curator_feedback_matches(active)
+    feedback_eval_links = skill_curator_feedback_eval_matches(active)
     pending_candidates = curator_skill_suggestion_candidates()
     lines = [
         "skill curator report: report-only",
@@ -6408,12 +6533,29 @@ def skill_curator_report_text() -> str:
         lines.append("recent feedback that may point at skill updates:")
         for feedback, matched in feedback_links[:6]:
             skill_text = ", ".join(
-                f"{row.get('slug', '')} ({'/'.join(overlap[:3])})"
+                f"{row.get('slug', '')} ({len(overlap)} signal term(s))"
                 for row, overlap in matched
             )
             lines.append(
                 f"- {feedback.get('rating', '')} {feedback.get('id', '')}: {skill_text}; "
                 "raw note hidden; inspect a specific feedback/suggestion record if needed"
+            )
+    if feedback_eval_links:
+        lines.append("")
+        lines.append("saved feedback-eval fixtures that may point at skill updates:")
+        for fixture, matched in feedback_eval_links[:6]:
+            focus = [
+                str(item)
+                for item in fixture.get("focus", [])
+                if str(item).strip()
+            ] if isinstance(fixture.get("focus"), list) else []
+            skill_text = ", ".join(
+                f"{row.get('slug', '')} ({len(overlap)} signal term(s))"
+                for row, overlap in matched
+            )
+            lines.append(
+                f"- {fixture.get('rating', '')} {fixture.get('id', '')}: {skill_text}; "
+                f"focus={', '.join(focus[:4]) if focus else '-'}; raw fixture text hidden"
             )
     if pending_candidates:
         lines.append("")

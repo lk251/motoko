@@ -1393,10 +1393,17 @@ Remaining follow-up items from this stretch:
   support-file note first; Motoko never archives a skill unless the user later
   runs the explicit archive command. Patches and support-file writes still
   require explicit inspection and acceptance.
-- Next stretch after the lifecycle target: improve umbrella-skill
-  consolidation and support-file workflows, then connect richer feedback/eval
-  rows to higher-quality patch proposals. Keep the path report-first until real
-  usage shows that any automatic patch suggestion is trustworthy.
+- Feedback-eval curator checkpoint: saved private `feedback-eval` fixtures can
+  also become review-first curator candidates. The report shows only fixture
+  ids, ratings, focus labels, counts, and matched-skill signal counts; raw
+  query text, feedback notes, answer text, source paths, and support-file
+  contents stay hidden unless the user explicitly inspects the private eval
+  artifact. Accepted suggestions write content-safe support notes rather than
+  silently patching skill behavior.
+- Next stretch after the lifecycle target: continue improving umbrella-skill
+  consolidation and support-file workflows, then make feedback/eval-derived
+  review notes mature into higher-quality patch proposals only when real usage
+  shows the procedure is trustworthy. Keep the path report-first until then.
 
 Skill Curator v2 roadmap:
 
