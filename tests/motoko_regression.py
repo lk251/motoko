@@ -219,7 +219,7 @@ def test_maintenance_state_and_phases(m):
 
         old_propose = m.propose_memories_bounded
         try:
-            m.propose_memories_bounded = lambda _conv, timeout=m.MODEL_TIMEOUT_SECONDS: [
+            m.propose_memories_bounded = lambda _conv, **_kwargs: [
                 "Javier prefers concise terminal output."
             ]
             state = m.begin_maintenance_state(conv)
@@ -382,6 +382,127 @@ def test_memory_proposal_queue_defers_behind_active_chat_route(m):
         rows = m.read_memory_proposal_queue()
         assert rows[0]["status"] == "pending"
         assert "active chat route" in rows[0]["last_error"]
+
+
+def test_memory_proposal_queue_cancel_leaves_retryable(m):
+    with isolated_state():
+        conv = m.new_conversation("Cancel queued memory")
+        conv["id"] = "cancel-queued-memory"
+        conv["messages"] = [
+            {"role": "user", "content": "Queued memory cancellation should be durable."},
+            {"role": "assistant", "content": "Yes."},
+            {"role": "user", "content": "Interrupted proposals should retry later."},
+            {"role": "assistant", "content": "Understood."},
+        ]
+        write_conversation(m, conv)
+        m.enqueue_memory_proposal(conv, message_count=len(conv["messages"]))
+
+        cancel_event = threading.Event()
+        old_propose = m.propose_memories_bounded
+        try:
+            def fake_propose(_conv, **kwargs):
+                assert kwargs.get("cancel_event") is cancel_event
+                cancel_event.set()
+                raise m.WorkPaused("memory proposal interrupted by request", work_kind="maintenance")
+
+            m.propose_memories_bounded = fake_propose
+            try:
+                m.run_queued_memory_proposals(current_conv=conv, cancel_event=cancel_event)
+            except m.WorkPaused as exc:
+                assert exc.work_kind == "maintenance"
+            else:
+                raise AssertionError("cancelled memory proposal should raise WorkPaused")
+        finally:
+            m.propose_memories_bounded = old_propose
+
+        rows = m.read_memory_proposal_queue()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "pending"
+        assert int(rows[0].get("attempts", 0) or 0) == 1
+        assert "interrupted" in rows[0].get("last_error", "")
+        assert m.queued_memory_proposal_count() == 1
+        assert int(conv.get("last_auto_memory_message_count", 0) or 0) == 0
+
+
+def test_auto_maintenance_passes_cancel_event_to_memory_queue(m):
+    with isolated_state():
+        conv = m.new_conversation("Cancel event propagation")
+        conv["id"] = "cancel-event-propagation"
+        conv["title_kind"] = "manual"
+        conv["title_generated"] = m.now()
+        conv["messages"] = [
+            {"role": "user", "content": "Propagate cancel events."},
+            {"role": "assistant", "content": "Yes."},
+            {"role": "user", "content": "Memory maintenance should receive them."},
+            {"role": "assistant", "content": "Understood."},
+        ]
+        conv["last_auto_compact_message_count"] = len(conv["messages"])
+        write_conversation(m, conv)
+
+        cancel_event = threading.Event()
+        seen = []
+        old_run = m.run_queued_memory_proposals
+        try:
+            def fake_run(**kwargs):
+                seen.append(kwargs.get("cancel_event"))
+                return []
+
+            m.run_queued_memory_proposals = fake_run
+            m.auto_maintain_conversation(conv, cancel_event=cancel_event)
+        finally:
+            m.run_queued_memory_proposals = old_run
+
+        assert seen == [cancel_event]
+
+
+def test_memory_proposal_helper_subprocess_terminates_on_cancel(m):
+    with isolated_state():
+        cancel_event = threading.Event()
+        calls = {"communicate": 0, "terminated": 0, "killed": 0}
+
+        class FakeProcess:
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def communicate(self, input=None, timeout=None):
+                calls["communicate"] += 1
+                cancel_event.set()
+                raise subprocess.TimeoutExpired("fake-helper", timeout)
+
+            def terminate(self):
+                calls["terminated"] += 1
+                self.returncode = -15
+
+            def kill(self):
+                calls["killed"] += 1
+                self.returncode = -9
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        old_popen = m.subprocess.Popen
+        old_timeout = m.memory_proposal_helper_timeout
+        try:
+            m.subprocess.Popen = lambda *_args, **_kwargs: FakeProcess()
+            m.memory_proposal_helper_timeout = lambda _timeout: 30
+            try:
+                m.propose_memories_subprocess(
+                    {"id": "helper-cancel", "messages": [{"role": "user", "content": "hello"}]},
+                    cancel_event=cancel_event,
+                )
+            except m.WorkPaused as exc:
+                assert exc.work_kind == "maintenance"
+            else:
+                raise AssertionError("cancelled helper should raise WorkPaused")
+        finally:
+            m.subprocess.Popen = old_popen
+            m.memory_proposal_helper_timeout = old_timeout
+
+        assert calls["communicate"] == 1
+        assert calls["terminated"] == 1
+        assert calls["killed"] == 0
 
 
 def test_delete_conversation_removes_memory_proposal_jobs(m):
@@ -12226,6 +12347,9 @@ def main() -> int:
         test_memory_proposal_queue_retries_until_saved,
         test_running_memory_proposal_queue_recovers_after_restart,
         test_memory_proposal_queue_defers_behind_active_chat_route,
+        test_memory_proposal_queue_cancel_leaves_retryable,
+        test_auto_maintenance_passes_cancel_event_to_memory_queue,
+        test_memory_proposal_helper_subprocess_terminates_on_cancel,
         test_delete_conversation_removes_memory_proposal_jobs,
         test_skill_suggestion_parser_uses_local_review_signal,
         test_skill_registry_downgrades_unknown_handlers_and_effects,

@@ -1596,10 +1596,13 @@ Motoko self-code checkpoint, 2026-05-31:
   paths. Lifecycle apply/report helpers also accept injected cancellation
   checkpoints before materialization or deletion. Index artifact
   enrich/upgrade, quality repair, and profile refresh now also carry
-  cancellation through CLI/background/model-call paths. This is still not the
-  final durable-job design; it is the next careful checkpoint toward making all
-  visible foreground work interruptible without corrupting indexes, vectors,
-  evidence stores, memories, or ledgers.
+  cancellation through CLI/background/model-call paths. Model-backed memory
+  maintenance now carries cancellation through queued proposal, helper
+  subprocess, title, skill-suggestion, and compaction paths, and interrupted
+  memory proposals stay retryable. This is still not the final durable-job
+  design; it is the next careful checkpoint toward making all visible
+  foreground work interruptible without corrupting indexes, vectors, evidence
+  stores, memories, or ledgers.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

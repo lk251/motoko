@@ -19199,6 +19199,9 @@ def call_model(
 
 
 def run_with_wall_timeout(label: str, wall_timeout: float, func, *args, **kwargs):
+    wall_cancel_event = kwargs.pop("_wall_cancel_event", None)
+    wall_cancel_message = kwargs.pop("_wall_cancel_message", f"{label} interrupted by request")
+    wall_work_kind = kwargs.pop("_wall_work_kind", "work")
     result: list[object] = []
     errors: list[BaseException] = []
 
@@ -19210,9 +19213,17 @@ def run_with_wall_timeout(label: str, wall_timeout: float, func, *args, **kwargs
 
     thread = threading.Thread(target=target, daemon=True)
     thread.start()
-    thread.join(wall_timeout)
-    if thread.is_alive():
-        raise TimeoutError(f"{label} timed out after {int(wall_timeout)}s")
+    deadline = time.monotonic() + max(0.0, float(wall_timeout))
+    while thread.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(f"{label} timed out after {int(wall_timeout)}s")
+        thread.join(min(0.2, remaining))
+        raise_if_work_cancelled(
+            wall_cancel_event,
+            wall_cancel_message,
+            work_kind=wall_work_kind,
+        )
     if errors:
         raise errors[0]
     return result[0] if result else None
@@ -19328,6 +19339,7 @@ def run_queued_memory_proposals(
     current_conv: dict | None = None,
     limit: int = MEMORY_PROPOSAL_QUEUE_DRAIN_LIMIT,
     phase_callback=None,
+    cancel_event=None,
 ) -> list[str]:
     rows = read_memory_proposal_queue()
     if not rows:
@@ -19336,6 +19348,7 @@ def run_queued_memory_proposals(
     processed = 0
     retry_statuses = memory_proposal_queue_retry_statuses()
     for row in rows:
+        raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
         if processed >= limit:
             break
         if str(row.get("status", "pending")) not in retry_statuses:
@@ -19349,6 +19362,7 @@ def run_queued_memory_proposals(
         row["attempts"] = int(row.get("attempts", 0) or 0) + 1
         row["updated"] = now()
         write_memory_proposal_queue(rows)
+        raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
         if current_conv is not None and str(current_conv.get("id", "")) == conversation_id:
             conv = current_conv
         else:
@@ -19362,16 +19376,25 @@ def run_queued_memory_proposals(
             processed += 1
             continue
         try:
+            raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
             prepare_route_residency_for_request(
                 memory_route_info,
                 phase_callback=(lambda phase: phase_callback(f"memory: {phase}")) if phase_callback else None,
             )
+            raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
             if phase_callback is not None:
                 phase_callback(f"memory: proposing({memory_route_name})")
             proposals = propose_memories_bounded(
                 conv,
                 timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+                cancel_event=cancel_event,
             )
+        except WorkPaused:
+            row["status"] = "pending"
+            row["updated"] = now()
+            row["last_error"] = "memory proposal interrupted by request"
+            write_memory_proposal_queue(rows)
+            raise
         except RouteResidencyBusy as exc:
             row["status"] = "pending"
             row["updated"] = now()
@@ -19385,6 +19408,25 @@ def run_queued_memory_proposals(
             write_memory_proposal_queue(rows)
             processed += 1
             continue
+        except RuntimeError as exc:
+            paused = work_cancelled_from_model(
+                exc,
+                "memory proposal interrupted by request",
+                work_kind="maintenance",
+            )
+            if paused is not None:
+                row["status"] = "pending"
+                row["updated"] = now()
+                row["last_error"] = "memory proposal interrupted by request"
+                write_memory_proposal_queue(rows)
+                raise paused
+            row["status"] = "pending"
+            row["updated"] = now()
+            row["last_error"] = f"{type(exc).__name__}: {exc}"
+            notes.append("memory proposal queued for retry")
+            write_memory_proposal_queue(rows)
+            processed += 1
+            continue
         except (Exception, SystemExit) as exc:
             row["status"] = "pending"
             row["updated"] = now()
@@ -19395,6 +19437,7 @@ def run_queued_memory_proposals(
             continue
         if phase_callback is not None:
             phase_callback("memory: saving")
+        raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
         saved = save_memory_proposals_from_conversation(conv, proposals)
         conv["last_auto_memory_message_count"] = max(
             int(conv.get("last_auto_memory_message_count", 0) or 0),
@@ -19416,31 +19459,74 @@ def run_queued_memory_proposals(
     return notes
 
 
-def propose_memories_subprocess(conv: dict, *, timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS) -> list[str]:
+def _stop_memory_proposal_helper(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    with contextlib.suppress(OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=2)
+
+
+def propose_memories_subprocess(
+    conv: dict,
+    *,
+    timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
+) -> list[str]:
     payload = json.dumps({"conversation": conv, "timeout": timeout}, ensure_ascii=False)
     env = dict(os.environ)
     env["MOTOKO_INTERNAL"] = "1"
     wall_timeout = memory_proposal_helper_timeout(timeout)
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
+    process = subprocess.Popen(
+        [sys.executable, motoko_program_path(), "__internal-propose-memories"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    sent_input = False
+    deadline = time.monotonic() + wall_timeout
     try:
-        result = subprocess.run(
-            [sys.executable, motoko_program_path(), "__internal-propose-memories"],
-            input=payload,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            timeout=wall_timeout,
-            check=False,
-        )
+        while True:
+            raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_memory_proposal_helper(process)
+                raise TimeoutError(
+                    f"memory proposal helper timed out after {int(wall_timeout)}s; helper process was terminated"
+                )
+            try:
+                if not sent_input:
+                    sent_input = True
+                    stdout, stderr = process.communicate(input=payload, timeout=min(0.2, remaining))
+                else:
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except WorkPaused:
+        _stop_memory_proposal_helper(process)
+        raise
+    except TimeoutError:
+        raise
     except subprocess.TimeoutExpired as exc:
+        _stop_memory_proposal_helper(process)
         raise TimeoutError(
             f"memory proposal helper timed out after {int(wall_timeout)}s; helper process was terminated"
         ) from exc
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
+    if process.returncode != 0:
+        detail = (stderr or stdout).strip()
         raise RuntimeError(f"memory proposal helper failed: {detail or 'no diagnostic'}")
     try:
-        data = json.loads(result.stdout or "[]")
+        data = json.loads(stdout or "[]")
     except json.JSONDecodeError as exc:
         raise RuntimeError("memory proposal helper returned invalid JSON") from exc
     if not isinstance(data, list):
@@ -19452,17 +19538,23 @@ def propose_memories_bounded(
     conv: dict,
     *,
     timeout: float = MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> list[str]:
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
     if os.environ.get("MOTOKO_INTERNAL") == "1":
-        return propose_memories(conv, timeout=timeout)
+        return propose_memories(conv, timeout=timeout, cancel_event=cancel_event)
     if env_flag("MOTOKO_MEMORY_PROPOSAL_HELPER", True):
-        return propose_memories_subprocess(conv, timeout=timeout)
+        return propose_memories_subprocess(conv, timeout=timeout, cancel_event=cancel_event)
     return run_with_wall_timeout(
         "memory proposal",
         timeout,
         propose_memories,
         conv,
         timeout=timeout,
+        cancel_event=cancel_event,
+        _wall_cancel_event=cancel_event,
+        _wall_cancel_message="memory proposal interrupted by request",
+        _wall_work_kind="maintenance",
     )
 
 
@@ -21020,8 +21112,12 @@ def run_background_now_text(
     return format_background_now_report(notes)
 
 
-def compact_conversation_text(conv: dict) -> str:
-    return "conversation compacted" if compact_conversation(conv, quiet=True) else "conversation is already compact enough"
+def compact_conversation_text(conv: dict, *, cancel_event=None) -> str:
+    return (
+        "conversation compacted"
+        if compact_conversation(conv, quiet=True, cancel_event=cancel_event)
+        else "conversation is already compact enough"
+    )
 
 
 def refresh_profile_dossier_text() -> str:
@@ -21057,9 +21153,15 @@ def blocking_command_request(text: str, conv: dict):
             ),
         )
     if primary == "/compact" and not body:
-        return foreground_command_request("Compacting conversation...", lambda: compact_conversation_text(conv))
+        return foreground_command_request(
+            "Compacting conversation...",
+            lambda cancel_event=None: compact_conversation_text(conv, cancel_event=cancel_event),
+        )
     if primary == "/memorize" and not body:
-        return foreground_command_request("Running memory proposal...", lambda: memorize_conversation(conv))
+        return foreground_command_request(
+            "Running memory proposal...",
+            lambda cancel_event=None: memorize_conversation(conv, cancel_event=cancel_event),
+        )
     if primary == "/index" and body:
         return foreground_command_request("Building document index...", lambda cancel_event=None: attach_index_from_path_text(conv, body, cancel_event=cancel_event))
     if primary == "/index-resume":
@@ -22765,6 +22867,7 @@ class MotokoTui:
         self.maintenance_phase_started = time.monotonic()
         self.status = self.maintenance_status
         state = begin_maintenance_state(self.conv, resumed=resumed)
+        cancel_event = threading.Event()
 
         def worker() -> None:
             try:
@@ -22775,6 +22878,7 @@ class MotokoTui:
                     self.conv,
                     phase_callback=on_phase,
                     state=state,
+                    cancel_event=cancel_event,
                 )
                 clear_maintenance_state(state.get("job_id"))
                 self.put_event(("maintenance_done", notes))
@@ -22794,6 +22898,7 @@ class MotokoTui:
             lane="small-model",
             label="memory maintenance",
             target=worker,
+            cancel_event=cancel_event,
         )
 
     def compact_command_menu(self) -> str:
@@ -23288,14 +23393,24 @@ def chat_loop(conv: dict) -> None:
         print("sys resuming memory maintenance")
         state = begin_maintenance_state(conv, resumed=True)
         try:
-            notes = auto_maintain_conversation(
-                conv,
-                phase_callback=lambda phase: print(f"sys {phase}"),
-                state=state,
-            )
+            with foreground_cancel_scope("keyboard interrupt during memory maintenance") as cancel_event:
+                notes = auto_maintain_conversation(
+                    conv,
+                    phase_callback=lambda phase: print(f"sys {phase}"),
+                    state=state,
+                    cancel_event=cancel_event,
+                )
             clear_maintenance_state(state.get("job_id"))
             if notes:
                 print(f"sys {'; '.join(notes)}")
+        except WorkPaused as exc:
+            update_maintenance_state(
+                state,
+                "memory: paused",
+                status="paused",
+                error=str(exc),
+            )
+            print(f"sys {exc}")
         except Exception as exc:
             update_maintenance_state(
                 state,
@@ -23361,9 +23476,12 @@ def chat_loop(conv: dict) -> None:
         if blocking_request is not None:
             _label, func = blocking_request
             try:
-                result = func()
+                with foreground_cancel_scope("keyboard interrupt during foreground command") as cancel_event:
+                    result = run_command_callable(func, cancel_event=cancel_event)
                 if result:
                     print_report(str(result))
+            except WorkPaused as exc:
+                print(exc)
             except SystemExit as exc:
                 print(exc)
             continue
@@ -23398,8 +23516,17 @@ def chat_loop(conv: dict) -> None:
         save_conversation(conv)
         state = begin_maintenance_state(conv)
         try:
-            auto_maintain_conversation(conv, state=state)
+            with foreground_cancel_scope("keyboard interrupt during memory maintenance") as cancel_event:
+                auto_maintain_conversation(conv, state=state, cancel_event=cancel_event)
             clear_maintenance_state(state.get("job_id"))
+        except WorkPaused as exc:
+            update_maintenance_state(
+                state,
+                "memory: paused",
+                status="paused",
+                error=str(exc),
+            )
+            print(f"sys {exc}")
         except Exception as exc:
             update_maintenance_state(
                 state,
@@ -23415,7 +23542,9 @@ def compact_conversation(
     *,
     quiet: bool = False,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> bool:
+    raise_if_work_cancelled(cancel_event, "conversation compaction interrupted by request", work_kind="maintenance")
     messages = conv.get("messages", [])
     if len(messages) <= COMPACT_KEEP_MESSAGES:
         if not quiet:
@@ -23430,6 +23559,7 @@ def compact_conversation(
         content = msg.get("content", "")
         transcript.append(f"{role}: {content}")
     older_text = "\n\n".join(transcript)
+    raise_if_work_cancelled(cancel_event, "conversation compaction interrupted by request", work_kind="maintenance")
     prompt = textwrap.dedent(
         f"""
         Existing compacted summary:
@@ -23457,7 +23587,9 @@ def compact_conversation(
         temperature=0.2,
         timeout=timeout,
         route=MODEL_ROUTE_MEMORY,
+        cancel_event=cancel_event,
     )
+    raise_if_work_cancelled(cancel_event, "conversation compaction interrupted by request", work_kind="maintenance")
     conv["summary"] = summary[:MAX_CONVERSATION_SUMMARY_CHARS]
     conv["summary_artifact"] = artifact_provenance(
         "conversation-summary",
@@ -23478,7 +23610,9 @@ def propose_memories(
     conv: dict,
     *,
     timeout: float = MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> list[str]:
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
     if not conv.get("messages"):
         return []
     prompt = textwrap.dedent(
@@ -23508,6 +23642,7 @@ def propose_memories(
         "required": ["memories"],
     }
     transcript = conversation_transcript_for_model(conv)
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
     messages = [
         {"role": "system", "content": prompt},
         {"role": "user", "content": f"Conversation transcript:\n{transcript}"},
@@ -23521,7 +23656,9 @@ def propose_memories(
         route=MODEL_ROUTE_MEMORY,
         sampling_preset="deterministic",
         json_schema=schema,
+        cancel_event=cancel_event,
     ).strip()
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
     parsed, _json_error = extract_json_object(proposal)
     if parsed is not None and isinstance(parsed.get("memories"), list):
         return [
@@ -23628,7 +23765,9 @@ def propose_skill_suggestions(
     *,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     review_reasons: list[str] | None = None,
+    cancel_event=None,
 ) -> list[dict]:
+    raise_if_work_cancelled(cancel_event, "skill suggestion interrupted by request", work_kind="maintenance")
     if not conv.get("messages"):
         return []
     catalog_lines = []
@@ -23706,6 +23845,7 @@ def propose_skill_suggestions(
         """
     ).strip()
     transcript = conversation_transcript_for_model(conv, limit=MAX_RECENT_MESSAGES, max_chars=16000)
+    raise_if_work_cancelled(cancel_event, "skill suggestion interrupted by request", work_kind="maintenance")
     reply = call_model(
         [
             {"role": "system", "content": prompt},
@@ -23724,7 +23864,9 @@ def propose_skill_suggestions(
         echo=False,
         timeout=timeout,
         route=MODEL_ROUTE_MEMORY,
+        cancel_event=cancel_event,
     ).strip()
+    raise_if_work_cancelled(cancel_event, "skill suggestion interrupted by request", work_kind="maintenance")
     return parse_skill_suggestion_output(reply)
 
 
@@ -23763,7 +23905,9 @@ def generate_conversation_title(
     conv: dict,
     *,
     timeout: float = TITLE_MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> str:
+    raise_if_work_cancelled(cancel_event, "title generation interrupted by request", work_kind="maintenance")
     transcript = []
     if conv.get("summary"):
         transcript.append(f"summary: {conv.get('summary', '')[:1200]}")
@@ -23790,7 +23934,9 @@ def generate_conversation_title(
         temperature=0.2,
         timeout=timeout,
         route=MODEL_ROUTE_TITLE,
+        cancel_event=cancel_event,
     )
+    raise_if_work_cancelled(cancel_event, "title generation interrupted by request", work_kind="maintenance")
     return sanitize_generated_title(title)
 
 
@@ -23798,10 +23944,12 @@ def maybe_generate_conversation_title(
     conv: dict,
     *,
     timeout: float = TITLE_MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> str | None:
+    raise_if_work_cancelled(cancel_event, "title generation interrupted by request", work_kind="maintenance")
     if not should_generate_conversation_title(conv):
         return None
-    title = generate_conversation_title(conv, timeout=timeout)
+    title = generate_conversation_title(conv, timeout=timeout, cancel_event=cancel_event)
     if not title:
         return None
     conv["title"] = title
@@ -23819,12 +23967,14 @@ def conversation_transcript_for_model(conv: dict, *, limit: int = MAX_RECENT_MES
     )
 
 
-def memorize_conversation(conv: dict) -> None:
+def memorize_conversation(conv: dict, *, cancel_event=None) -> None:
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
     if not conv.get("messages"):
         print("nothing to memorize yet")
         return
     print("Motoko memory proposal:")
-    proposals = propose_memories(conv)
+    proposals = propose_memories(conv, cancel_event=cancel_event)
+    raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
     if not proposals:
         print("no memory saved")
         return
@@ -23834,6 +23984,7 @@ def memorize_conversation(conv: dict) -> None:
     answer = input().strip().lower()
     if answer == "yes":
         for text in proposals:
+            raise_if_work_cancelled(cancel_event, "memory proposal interrupted by request", work_kind="maintenance")
             add_memory(
                 text,
                 source="model-proposed",
@@ -23850,8 +24001,15 @@ def auto_maintain_conversation(
     *,
     phase_callback=None,
     state: dict | None = None,
+    cancel_event=None,
 ) -> list[str]:
     def set_phase(phase: str, *, note: str | None = None) -> None:
+        raise_if_work_cancelled(
+            cancel_event,
+            "memory maintenance interrupted by request",
+            work_id=state.get("job_id", "") if state else "",
+            work_kind="maintenance",
+        )
         if state is not None:
             update_maintenance_state(state, phase, note=note)
         if phase_callback is not None:
@@ -23881,7 +24039,23 @@ def auto_maintain_conversation(
                 maybe_generate_conversation_title,
                 conv,
                 timeout=TITLE_MODEL_TIMEOUT_SECONDS,
+                cancel_event=cancel_event,
+                _wall_cancel_event=cancel_event,
+                _wall_cancel_message="title generation interrupted by request",
+                _wall_work_kind="maintenance",
             )
+        except WorkPaused:
+            raise
+        except RuntimeError as exc:
+            paused = work_cancelled_from_model(
+                exc,
+                "title generation interrupted by request",
+                work_id=state.get("job_id", "") if state else "",
+                work_kind="maintenance",
+            )
+            if paused is not None:
+                raise paused
+            title = None
         except (Exception, SystemExit):
             title = None
         if title:
@@ -23901,6 +24075,7 @@ def auto_maintain_conversation(
                 current_conv=conv,
                 limit=MEMORY_PROPOSAL_QUEUE_DRAIN_LIMIT,
                 phase_callback=set_phase,
+                cancel_event=cancel_event,
             )
         )
 
@@ -23917,7 +24092,23 @@ def auto_maintain_conversation(
                 conv,
                 timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
                 review_reasons=skill_reasons,
+                cancel_event=cancel_event,
+                _wall_cancel_event=cancel_event,
+                _wall_cancel_message="skill suggestion interrupted by request",
+                _wall_work_kind="maintenance",
             )
+        except WorkPaused:
+            raise
+        except RuntimeError as exc:
+            paused = work_cancelled_from_model(
+                exc,
+                "skill suggestion interrupted by request",
+                work_id=state.get("job_id", "") if state else "",
+                work_kind="maintenance",
+            )
+            if paused is not None:
+                raise paused
+            suggestions = []
         except (Exception, SystemExit):
             suggestions = []
         if suggestions:
@@ -23934,7 +24125,12 @@ def auto_maintain_conversation(
         and message_count - last_compact >= AUTO_SUMMARY_INTERVAL_MESSAGES
     ):
         set_phase("memory: compacting")
-        if compact_conversation(conv, quiet=True, timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS):
+        if compact_conversation(
+            conv,
+            quiet=True,
+            timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+            cancel_event=cancel_event,
+        ):
             notes.append("compacted older conversation context")
     save_conversation(conv)
     set_phase("memory: done", note="; ".join(notes) if notes else "no changes")

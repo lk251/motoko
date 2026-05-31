@@ -193,10 +193,11 @@ fresh evidence shows a better target:
    source-lifecycle reports, and `bg-now` now pass cancel events through their
    CLI or slash-command paths. Lifecycle apply/report helpers now also accept
    injected cancellation checkpoints before materialization or deletion. Index
-   artifact enrich/upgrade, quality repair, and profile refresh now carry
-   cancellation through CLI/background/model-call paths. Continue this work by
-   adding checkpoints inside remaining model-backed memory maintenance and any
-   remaining dossier/report operations that still lack cooperative cancellation.
+   artifact enrich/upgrade, quality repair, profile refresh, and model-backed
+   memory maintenance now carry cancellation through CLI/background/model-call
+   paths. Queued memory proposals remain retryable when interrupted. Continue
+   this work by adding checkpoints inside any remaining dossier/report
+   operations that still lack cooperative cancellation.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or
@@ -282,9 +283,10 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
    rebuild decisions, vector/evidence/dossier invalidation, and conservative
    cleanup into `motoko_core.artifact_lifecycle` instead of adding more
    root-facade branches.
-2. Finish cooperative cancellation and durable interruption. The next target is
-   model-backed memory maintenance plus any remaining dossier/report operations
-   that can still block `/stop`, `/pause`, or clean shutdown.
+2. Finish cooperative cancellation and durable interruption. Model-backed
+   memory maintenance now cooperatively cancels and leaves queued proposals
+   retryable. The next target is any remaining dossier/report operation that
+   can still block `/stop`, `/pause`, or clean shutdown.
 3. Improve always-fresh context behavior. When background refresh finishes while
    a TUI session is open, the session should notice fresh indexes, evidence
    stores, vectors, memories, and dossiers without needing a restart.
