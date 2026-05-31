@@ -1208,22 +1208,23 @@ Current progress on this stretch:
   retrieval service used for chat context, including stale or missing attached
   context warnings, rather than reconstructing index/topic/dossier source rows
   in the root facade.
-- Progress: retrieval sufficiency is now partly operational, not only a prompt
-  note. When a grounded query has no excerpt-level evidence in the initially
-  selected context, prompt assembly may run one bounded deterministic extra
-  retrieval pass over an already indexed, project-scoped stored context item.
-  This does not attach or mutate the conversation and does not make a
-  generative synthesis call; it may still use configured embedding/rerank
-  retrieval workers when the normal hybrid retrieval path uses them. It is
-  exposed in `/sources` as a `retrieval-sufficiency` source row. Evidence
-  strength is quality-aware: a fallback chunk with no lexical, structured,
-  evidence, vector, rerank, or span signal no longer counts as strong grounding
-  merely because its source kind is `chunk`. `/sources` and
-  `/retrieval-preview` report both quality-aware strong evidence and nominal
-  strong source-kind counts so weak fallback chunks are visible. Stale or
-  unavailable sources now also trigger one bounded recovery pass when a fresh
-  project-scoped candidate exists. Remaining work is richer sufficiency
-  planning across more lanes and conflict checks.
+- Progress: retrieval sufficiency is now operational through the retrieval
+  service, not only a prompt note. When a grounded query has no excerpt-level
+  evidence in the initially selected context, prompt assembly may run one
+  bounded deterministic extra retrieval pass over an already indexed,
+  project-scoped stored context item. This does not attach or mutate the
+  conversation and does not make a generative synthesis call; it may still use
+  configured embedding/rerank retrieval workers when the normal hybrid
+  retrieval path uses them. The service owns the selected-item render, note,
+  source row, and diagnostics, and exposes the pass in `/sources` as a
+  `retrieval-sufficiency` source row. Evidence strength is quality-aware: a
+  fallback chunk with no lexical, structured, evidence, vector, rerank, or span
+  signal no longer counts as strong grounding merely because its source kind is
+  `chunk`. `/sources` and `/retrieval-preview` report both quality-aware strong
+  evidence and nominal strong source-kind counts so weak fallback chunks are
+  visible. Stale or unavailable sources now also trigger one bounded recovery
+  pass when a fresh project-scoped candidate exists. Remaining work is richer
+  sufficiency planning across more lanes and conflict checks.
 - Complete for `/retrieval-preview`: preview output now consumes an explicit
   retrieval-service preview result built from the same `context-package-v1`
   record as chat prompt assembly. The command remains a renderer, but it no

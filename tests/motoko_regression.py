@@ -3856,6 +3856,47 @@ def test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass(m):
     assert sufficient["status"] == "sufficient"
 
 
+def test_retrieval_service_builds_sufficiency_expansion(m):
+    service = m.RetrievalService(
+        load_index=lambda index_id: {"id": index_id},
+        retrieve_index_query=lambda index, query: (
+            f"index {index['id']} query {query}\nThe next task is calibrating RaceFocus.",
+            [{"kind": "chunk", "index": index["id"], "path": "/tmp/plan.org", "chunk": 1, "lexical_score": 5}],
+        ),
+        render_index_overview=lambda index: ("overview", [{"kind": "index", "id": index["id"]}]),
+        load_topic=lambda topic_id: {"id": topic_id},
+        retrieve_topic=lambda topic, query: ("topic", [{"kind": "topic", "id": topic["id"]}]),
+        load_dossier=lambda dossier_id: {"id": dossier_id},
+        retrieve_dossier=lambda dossier, query: ("dossier", [{"kind": "dossier", "id": dossier["id"]}]),
+    )
+
+    expansion = service.build_sufficiency_expansion(
+        "according to plan.org, what is the next task?",
+        [{"kind": "memory"}],
+        [
+            {
+                "item": {"kind": "index", "id": "idx-1"},
+                "score": 3,
+                "reason": "current-project document index",
+            }
+        ],
+        grounding_query_words={"according"},
+        task_query_words={"task"},
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"memory", "index"},
+        min_score=1,
+    )
+
+    assert expansion.plan["status"] == "expand"
+    assert expansion.selected_item == {"kind": "index", "id": "idx-1"}
+    assert "Retrieval sufficiency planner:" in expansion.text
+    assert "calibrating RaceFocus" in expansion.text
+    assert expansion.sources[0]["kind"] == "retrieval-sufficiency"
+    assert expansion.sources[0]["selected_id"] == "idx-1"
+    assert expansion.sources[1]["kind"] == "chunk"
+    assert expansion.diagnostics["source_count"] == 2
+
+
 def test_core_retrieval_preview_formatting_is_injectable(m):
     prompt = "Intro\n\nAttached documents and dossiers:\nEvidence block\n\nAvailable private context catalog:\nCatalog"
     attached = m.extract_prompt_section_core(
@@ -11456,6 +11497,7 @@ def main() -> int:
         test_retrieval_eval_replays_private_feedback_fixtures,
         test_retrieval_preview_shows_context_without_model_call,
         test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass,
+        test_retrieval_service_builds_sufficiency_expansion,
         test_prompt_context_runs_bounded_retrieval_sufficiency_pass,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,

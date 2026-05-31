@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import textwrap
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -87,6 +88,15 @@ class RetrievalPreviewResult:
 @dataclass(frozen=True)
 class VectorQueryResult:
     report: dict
+    diagnostics: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RetrievalSufficiencyExpansion:
+    text: str = ""
+    sources: list[dict] = field(default_factory=list)
+    plan: dict = field(default_factory=dict)
+    selected_item: dict | None = None
     diagnostics: dict = field(default_factory=dict)
 
 
@@ -1526,6 +1536,115 @@ class RetrievalService:
                 "kind": "attached-context",
                 "item_count": len(items),
                 "source_count": len(sources),
+            },
+        )
+
+    def build_sufficiency_expansion(
+        self,
+        query: str,
+        sources: list[dict],
+        candidates: list[dict],
+        *,
+        grounding_query_words: set[str],
+        task_query_words: set[str],
+        strong_source_kinds: set[str],
+        context_source_kinds: set[str],
+        min_score: int = 1,
+    ) -> RetrievalSufficiencyExpansion:
+        """Build one bounded retrieval recovery pass when context is thin.
+
+        Candidate discovery is still injected by the facade because it depends
+        on realm-local stores and project scope. The service owns the
+        planner-selected item lookup, attached-context rendering, source row,
+        and user-visible note so chat context, previews, and /sources keep one
+        interpretation of the sufficiency pass.
+        """
+
+        plan = plan_retrieval_sufficiency_expansion(
+            query,
+            sources,
+            candidates,
+            grounding_query_words=grounding_query_words,
+            task_query_words=task_query_words,
+            strong_source_kinds=strong_source_kinds,
+            context_source_kinds=context_source_kinds,
+            min_score=min_score,
+        )
+        selected = plan.get("selected") if isinstance(plan.get("selected"), dict) else None
+        if plan.get("status") != "expand" or not selected:
+            return RetrievalSufficiencyExpansion(
+                plan=plan,
+                diagnostics={
+                    "schema": RETRIEVAL_SERVICE_SCHEMA,
+                    "kind": "retrieval-sufficiency",
+                    "status": plan.get("status", ""),
+                    "source_count": 0,
+                },
+            )
+
+        selected_item = None
+        for candidate in candidates:
+            item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+            if item.get("kind") == selected.get("kind") and item.get("id") == selected.get("id"):
+                selected_item = item
+                break
+        if selected_item is None:
+            missing_plan = {
+                **plan,
+                "status": "no-candidate",
+                "reason": "selected context item was no longer available",
+            }
+            return RetrievalSufficiencyExpansion(
+                plan=missing_plan,
+                diagnostics={
+                    "schema": RETRIEVAL_SERVICE_SCHEMA,
+                    "kind": "retrieval-sufficiency",
+                    "status": "no-candidate",
+                    "source_count": 0,
+                },
+            )
+
+        result = self.render_attached_context([selected_item], query)
+        planner_source = {
+            "kind": "retrieval-sufficiency",
+            "schema": plan.get("schema", ""),
+            "status": plan.get("status", ""),
+            "reason": plan.get("reason", ""),
+            "selected_kind": selected.get("kind", ""),
+            "selected_id": selected.get("id", ""),
+            "selected_score": selected.get("score", 0),
+            "selected_reason": selected.get("reason", ""),
+            "strong_source_count": plan.get("strong_source_count", 0),
+            "nominal_strong_source_count": plan.get("nominal_strong_source_count", 0),
+            "context_source_count": plan.get("context_source_count", 0),
+            "stale_or_unavailable_source_count": plan.get("stale_or_unavailable_source_count", 0),
+            "candidate_count": plan.get("candidate_count", 0),
+        }
+        if plan.get("stale_or_unavailable_source_count", 0):
+            plan_note = "Initial context included stale or unavailable source evidence."
+        else:
+            plan_note = "Initial context had no excerpt-level evidence for this grounded query."
+        note = textwrap.dedent(
+            f"""
+            Retrieval sufficiency planner:
+            {plan_note}
+            Motoko ran one bounded extra retrieval pass over {selected.get('kind', '')} {selected.get('id', '')}.
+            This did not attach or mutate the conversation.
+            """
+        ).strip()
+        expansion_text = "\n\n".join(part for part in [note, result.text] if part)
+        expansion_sources = [planner_source] + list(result.sources)
+        return RetrievalSufficiencyExpansion(
+            text=expansion_text,
+            sources=expansion_sources,
+            plan=plan,
+            selected_item=selected_item,
+            diagnostics={
+                "schema": RETRIEVAL_SERVICE_SCHEMA,
+                "kind": "retrieval-sufficiency",
+                "status": plan.get("status", ""),
+                "source_count": len(expansion_sources),
+                "selected_kind": selected.get("kind", ""),
             },
         )
 

@@ -18654,7 +18654,7 @@ def retrieval_sufficiency_expansion(
         project_scope,
         context_selection.get("scoped_items", []),
     )
-    plan = plan_retrieval_sufficiency_expansion(
+    expansion = make_retrieval_service().build_sufficiency_expansion(
         query,
         sources,
         candidates,
@@ -18664,48 +18664,7 @@ def retrieval_sufficiency_expansion(
         context_source_kinds=GROUNDING_CONTEXT_SOURCE_KINDS,
         min_score=STUDY_INDEX_MIN_SCORE,
     )
-    selected = plan.get("selected") if isinstance(plan.get("selected"), dict) else None
-    if plan.get("status") != "expand" or not selected:
-        return "", [], plan
-
-    selected_item = None
-    for candidate in candidates:
-        item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
-        if item.get("kind") == selected.get("kind") and item.get("id") == selected.get("id"):
-            selected_item = item
-            break
-    if selected_item is None:
-        return "", [], {**plan, "status": "no-candidate", "reason": "selected context item was no longer available"}
-
-    text, extra_sources = render_context_with_sources([selected_item], query)
-    planner_source = {
-        "kind": "retrieval-sufficiency",
-        "schema": plan.get("schema", ""),
-        "status": plan.get("status", ""),
-        "reason": plan.get("reason", ""),
-        "selected_kind": selected.get("kind", ""),
-        "selected_id": selected.get("id", ""),
-        "selected_score": selected.get("score", 0),
-        "selected_reason": selected.get("reason", ""),
-        "strong_source_count": plan.get("strong_source_count", 0),
-        "nominal_strong_source_count": plan.get("nominal_strong_source_count", 0),
-        "context_source_count": plan.get("context_source_count", 0),
-        "stale_or_unavailable_source_count": plan.get("stale_or_unavailable_source_count", 0),
-        "candidate_count": plan.get("candidate_count", 0),
-    }
-    if plan.get("stale_or_unavailable_source_count", 0):
-        plan_note = "Initial context included stale or unavailable source evidence."
-    else:
-        plan_note = "Initial context had no excerpt-level evidence for this grounded query."
-    note = textwrap.dedent(
-        f"""
-        Retrieval sufficiency planner:
-        {plan_note}
-        Motoko ran one bounded extra retrieval pass over {selected.get('kind', '')} {selected.get('id', '')}.
-        This did not attach or mutate the conversation.
-        """
-    ).strip()
-    return note + "\n\n" + text, [planner_source] + extra_sources, plan
+    return expansion.text, expansion.sources, expansion.plan
 
 
 def render_conversation_summary(conv: dict) -> str:
