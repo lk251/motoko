@@ -32,12 +32,15 @@ from motoko_core.artifact_lifecycle import (
     delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
     format_source_lifecycle_report as format_source_lifecycle_report_core,
     index_artifact_dependency_counts as index_artifact_dependency_counts_core,
+    index_file_path_keys as index_file_path_keys_core,
+    index_source_lifecycle_scan as index_source_lifecycle_scan_core,
     json_matching_source_paths as json_matching_source_paths_core,
     json_paths_referencing_index as json_paths_referencing_index_core,
     json_references_index as json_references_index_core,
     source_artifact_record as source_artifact_record_core,
     source_lifecycle_affected_paths as source_lifecycle_affected_paths_core,
     source_lifecycle_report as build_source_lifecycle_report,
+    superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
 
 
@@ -9304,6 +9307,64 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert "/tmp/docs/a.org" in source_lifecycle_affected_paths_core(
         [{"path": "/tmp/docs/a.org", "status": "ignored"}]
     )
+    cleanup_candidates = superseded_stale_index_candidates_core(
+        [
+            {"id": "old-a", "root": "/docs", "glob": "*.org", "created": "2026-05-01T00:00:00+00:00"},
+            {"id": "new-a", "root": "/docs", "glob": "*.org", "created": "2026-05-02T00:00:00+00:00"},
+            {"id": "fresh-b", "root": "/other", "glob": "*.org", "created": "2026-05-01T00:00:00+00:00"},
+        ],
+        family_key=lambda row: f"{row.get('root')}:{row.get('glob')}",
+        index_sort_key=lambda row: (row.get("created", ""), row.get("id", "")),
+        staleness=lambda row: ("stale", ["older index"]) if row.get("id") == "old-a" else ("fresh", []),
+        bytes_estimate=lambda row: 64 if row.get("id") == "old-a" else 0,
+    )
+    assert len(cleanup_candidates) == 1
+    assert cleanup_candidates[0]["index"]["id"] == "old-a"
+    assert cleanup_candidates[0]["latest"]["id"] == "new-a"
+    assert cleanup_candidates[0]["warnings"] == ["older index"]
+    assert cleanup_candidates[0]["bytes"] == 64
+    with tempfile.TemporaryDirectory() as source_tmp:
+        source_root = pathlib.Path(source_tmp)
+        kept = source_root / "kept.org"
+        ignored = source_root / "ignored.org"
+        changed = source_root / "changed.org"
+        deleted = source_root / "deleted.org"
+        for path in [kept, ignored, changed]:
+            path.write_text("* source\n", encoding="utf-8")
+        index_for_scan = {
+            "id": "source-scan-index",
+            "files": [
+                {"path": str(kept), "status": "fresh"},
+                {"path": str(ignored), "status": "fresh"},
+                {"path": str(changed), "status": "stale"},
+                {"path": str(deleted), "status": "fresh"},
+            ],
+        }
+        scan = index_source_lifecycle_scan_core(
+            index_for_scan,
+            current_paths={str(kept.resolve()), str(changed.resolve())},
+            root=source_root,
+            ignore_rules=[
+                {
+                    "pattern": "ignored.org",
+                    "directory": False,
+                    "negated": False,
+                    "line": 1,
+                    "raw": "ignored.org",
+                }
+            ],
+            file_status=lambda item: str(item.get("status", "fresh")),
+        )
+        assert index_file_path_keys_core(index_for_scan) >= {str(kept), str(kept.resolve())}
+        assert scan["covered_files"] == 2
+        assert str(ignored.resolve()) in scan["missing_paths"]
+        statuses = {pathlib.Path(row["path"]).name: row["status"] for row in scan["source_lifecycle"]}
+        assert statuses == {
+            "ignored.org": "ignored",
+            "changed.org": "changed",
+            "deleted.org": "deleted",
+        }
+        assert scan["source_lifecycle_counts"] == {"ignored": 1, "changed": 1, "deleted": 1}
     record = source_artifact_record_core(
         artifact_id="artifact",
         artifact_kind="vector_store",

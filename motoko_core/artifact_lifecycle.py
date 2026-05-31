@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
 
+from motoko_core.corpus_selection import motoko_ignore_matches
 from motoko_core.text import human_bytes
 
 
@@ -220,6 +222,87 @@ def source_lifecycle_affected_paths(source_lifecycle: list[dict]) -> set[str]:
         except OSError:
             paths.add(str(pathlib.Path(path_text).expanduser()))
     return paths
+
+
+def index_file_path_keys(index: dict) -> set[str]:
+    """Return normalized path keys for files recorded in an index."""
+
+    keys: set[str] = set()
+    for file_item in index.get("files", []):
+        path_text = str(file_item.get("path", "")).strip()
+        if not path_text:
+            continue
+        keys.add(path_text)
+        try:
+            keys.add(str(pathlib.Path(path_text).expanduser().resolve()))
+        except OSError:
+            keys.add(str(pathlib.Path(path_text).expanduser()))
+    return keys
+
+
+def _path_key(path: pathlib.Path) -> str:
+    try:
+        return str(path.expanduser().resolve())
+    except OSError:
+        return str(path.expanduser())
+
+
+def index_source_lifecycle_scan(
+    index: dict,
+    *,
+    current_paths: set[str],
+    root: str | pathlib.Path,
+    ignore_rules: list[dict] | None = None,
+    file_status: Callable[[dict], str] | None = None,
+    path_exists: Callable[[pathlib.Path], bool] | None = None,
+) -> dict:
+    """Classify indexed source files against current corpus selection.
+
+    The caller supplies the current candidate path set and the file staleness
+    callback; this service owns the source lifecycle policy and summary shape.
+    """
+
+    current = set(current_paths or set())
+    rules = ignore_rules or []
+    root_path = pathlib.Path(root).expanduser()
+    try:
+        root_path = root_path.resolve()
+    except OSError:
+        pass
+    exists_fn = path_exists or (lambda path: path.exists())
+    status_fn = file_status or (lambda _file_item: "fresh")
+    known_paths: set[str] = set()
+    source_lifecycle: list[dict] = []
+    for file_item in index.get("files", []):
+        path_text = str(file_item.get("path", "")).strip()
+        if not path_text:
+            continue
+        path = pathlib.Path(path_text).expanduser()
+        resolved = _path_key(path)
+        known_paths.add(resolved)
+        exists = bool(exists_fn(path))
+        ignored = exists and resolved not in current
+        if exists and rules:
+            with contextlib.suppress(OSError, ValueError):
+                rel = pathlib.Path(resolved).relative_to(root_path).as_posix()
+                ignored = ignored or motoko_ignore_matches(rules, rel, is_dir=False) is not None
+        source_status = status_fn(file_item)
+        lifecycle = source_lifecycle_state(
+            path=path_text,
+            exists=exists,
+            ignored=ignored,
+            fingerprint_changed=source_status == "stale" and exists and not ignored,
+        )
+        if lifecycle.get("status") != "fresh":
+            source_lifecycle.append(lifecycle)
+    lifecycle_counts = dict(collections.Counter(item.get("status", "unknown") for item in source_lifecycle))
+    return {
+        "known_paths": sorted(known_paths),
+        "missing_paths": sorted(path_text for path_text in known_paths if path_text not in current),
+        "covered_files": len(known_paths & current),
+        "source_lifecycle": source_lifecycle,
+        "source_lifecycle_counts": lifecycle_counts,
+    }
 
 
 def source_artifact_record(
@@ -887,6 +970,44 @@ def cleanup_superseded_index_candidates(
         "deleted": deleted,
         "blocked": blocked,
     }
+
+
+def superseded_stale_index_candidates(
+    indexes: list[dict],
+    *,
+    family_key: Callable[[dict], str],
+    index_sort_key: Callable[[dict], tuple],
+    staleness: Callable[[dict], tuple[str, list[str]]],
+    bytes_estimate: Callable[[dict], int],
+) -> list[dict]:
+    """Select stale index snapshots superseded by a newer same-family index."""
+
+    latest_by_key: dict[str, dict] = {}
+    for index in indexes:
+        key = family_key(index)
+        current = latest_by_key.get(key)
+        if current is None or index_sort_key(index) > index_sort_key(current):
+            latest_by_key[key] = index
+    candidates = []
+    for index in indexes:
+        index_id = str(index.get("id", "")).strip()
+        latest = latest_by_key.get(family_key(index))
+        if not index_id or latest is None or latest.get("id") == index_id:
+            continue
+        status, warnings = staleness(index)
+        if status != "stale":
+            continue
+        candidates.append(
+            {
+                "index": index,
+                "latest": latest,
+                "status": status,
+                "warnings": warnings,
+                "bytes": int(bytes_estimate(index) or 0),
+            }
+        )
+    candidates.sort(key=lambda row: index_sort_key(row.get("index", {})))
+    return candidates
 
 
 def format_index_cleanup_report(report: dict) -> str:

@@ -1569,9 +1569,11 @@ Motoko self-code checkpoint, 2026-05-31:
 - Artifact lifecycle ownership has continued moving out of the root facade:
   `motoko_core.artifact_lifecycle` now owns source-lifecycle artifact
   scanning, index dependency counting, JSON artifact deletion, superseded
-  index snapshot deletion, and index cleanup report formatting. The root
-  executable still supplies explicit state paths and filesystem callbacks,
-  preserving the security boundary while reducing policy spread.
+  index snapshot deletion, index cleanup report formatting, source lifecycle
+  classification, and stale superseded-index candidate selection. The root
+  executable still supplies explicit state paths, corpus candidates,
+  staleness checks, and filesystem callbacks, preserving the security boundary
+  while reducing policy spread.
 - Foreground cancellation coverage has expanded beyond active chat answers:
   evidence build/refresh, index cleanup, source-lifecycle reports, and
   `bg-now` now receive cooperative cancel events in both CLI and slash-command

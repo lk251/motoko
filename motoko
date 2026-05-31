@@ -456,12 +456,14 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     format_index_cleanup_report,
     format_source_lifecycle_report,
     index_artifact_dependency_counts,
+    index_file_path_keys,
+    index_source_lifecycle_scan,
     json_paths_referencing_index,
     source_lifecycle_affected_paths,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
     source_lifecycle_report,
-    source_lifecycle_state,
+    superseded_stale_index_candidates,
 )
 from motoko_core.observability import (  # noqa: E402
     format_observability_report,
@@ -12373,27 +12375,16 @@ def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> 
 
 def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:
     all_indexes = indexes if indexes is not None else list_indexes()
-    latest_by_key = {index_family_key(index): index for index in latest_indexes_by_family(all_indexes)}
-    candidates = []
-    for index in all_indexes:
-        index_id = str(index.get("id", "")).strip()
-        latest = latest_by_key.get(index_family_key(index))
-        if not index_id or latest is None or latest.get("id") == index_id:
-            continue
-        status, warnings = index_staleness(index)
-        if status != "stale":
-            continue
-        candidates.append(
-            {
-                "index": index,
-                "latest": latest,
-                "status": status,
-                "warnings": warnings,
-                "bytes": path_size(index_path(index_id)) + tree_size(indexes_dir() / f"{index_id}.chunks"),
-            }
-        )
-    candidates.sort(key=lambda row: stored_record_sort_key(row.get("index", {})))
-    return candidates
+    return superseded_stale_index_candidates(
+        all_indexes,
+        family_key=index_family_key,
+        index_sort_key=stored_record_sort_key,
+        staleness=index_staleness,
+        bytes_estimate=lambda index: (
+            path_size(index_path(str(index.get("id", "")).strip()))
+            + tree_size(indexes_dir() / f"{str(index.get('id', '')).strip()}.chunks")
+        ),
+    )
 
 
 def delete_index_snapshot(index: dict) -> dict:
@@ -12445,20 +12436,6 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False, c
         delete_snapshot=delete_index_snapshot,
         invalidate_catalog=invalidate_context_catalog_after_cleanup,
     )
-
-
-def index_file_path_keys(index: dict) -> set[str]:
-    keys = set()
-    for file_item in index.get("files", []):
-        path_text = str(file_item.get("path", "")).strip()
-        if not path_text:
-            continue
-        keys.add(path_text)
-        try:
-            keys.add(str(pathlib.Path(path_text).expanduser().resolve()))
-        except OSError:
-            keys.add(str(pathlib.Path(path_text).expanduser()))
-    return keys
 
 
 def source_lifecycle_replacement(index: dict, source_paths: set[str]) -> tuple[dict | None, bool, str]:
@@ -17194,11 +17171,7 @@ def index_change_summary(index: dict) -> dict:
     status, warnings = index_staleness(index)
     root = pathlib.Path(index.get("root", "")).expanduser().resolve()
     pattern = index.get("glob") or AUTO_INDEX_GLOB
-    known_paths = {
-        str(pathlib.Path(file_item.get("path", "")).expanduser().resolve())
-        for file_item in index.get("files", [])
-        if file_item.get("path")
-    }
+    known_paths = set(index_source_lifecycle_scan(index, current_paths=set(), root=root).get("known_paths", []))
     try:
         require_allowed(root)
         candidate_report = index_candidate_report(root, pattern)
@@ -17226,43 +17199,26 @@ def index_change_summary(index: dict) -> dict:
             "coverage_score": 0,
         }
     current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
+    lifecycle_scan = index_source_lifecycle_scan(
+        index,
+        current_paths=set(current_paths),
+        root=root,
+        ignore_rules=candidate_report.get("selection_policy", {}).get("motokoignore", {}).get("rules", []),
+        file_status=lambda file_item: file_staleness(file_item)[0],
+    )
+    known_paths = set(lifecycle_scan.get("known_paths", []))
     new_files = sorted(
         path for path_text, path in current_paths.items() if path_text not in known_paths
     )
-    missing_paths = sorted(path_text for path_text in known_paths if path_text not in current_paths)
-    rules = candidate_report.get("selection_policy", {}).get("motokoignore", {}).get("rules", [])
-    source_lifecycle = []
-    for file_item in index.get("files", []):
-        path_text = file_item.get("path", "")
-        if not path_text:
-            continue
-        path = pathlib.Path(path_text).expanduser()
-        try:
-            resolved = str(path.resolve())
-        except OSError:
-            resolved = str(path)
-        exists = path.exists()
-        ignored = exists and resolved not in current_paths
-        if exists and rules and root.is_dir():
-            with contextlib.suppress(OSError, ValueError):
-                rel = path.resolve().relative_to(root).as_posix()
-                ignored = ignored or motoko_ignore_matches(rules, rel, is_dir=False) is not None
-        file_status, _file_warnings = file_staleness(file_item)
-        lifecycle = source_lifecycle_state(
-            path=path_text,
-            exists=exists,
-            ignored=ignored,
-            fingerprint_changed=file_status == "stale" and exists and not ignored,
-        )
-        if lifecycle.get("status") != "fresh":
-            source_lifecycle.append(lifecycle)
-    lifecycle_counts = dict(collections.Counter(item.get("status", "unknown") for item in source_lifecycle))
+    missing_paths = lifecycle_scan.get("missing_paths", [])
+    source_lifecycle = lifecycle_scan.get("source_lifecycle", [])
+    lifecycle_counts = lifecycle_scan.get("source_lifecycle_counts", {})
     artifact_plan = source_lifecycle_artifact_plan(
         index_id=str(index.get("id", "")),
         source_lifecycle=source_lifecycle,
         dependent_counts=artifact_dependency_counts_for_index(str(index.get("id", ""))),
     )
-    covered_files = len(known_paths & set(current_paths))
+    covered_files = int(lifecycle_scan.get("covered_files", 0) or 0)
     new_bytes = 0
     for path in new_files:
         try:
