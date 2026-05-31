@@ -577,7 +577,7 @@ VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
 VECTOR_ROW_ID_SCHEMA_VERSION = "vector-row-id-v2"
 SAFE_DIAGNOSE_SCHEMA_VERSION = "diagnose-safe-v1"
 VECTOR_EVAL_SCHEMA_VERSION = "vector-eval-v1"
-EVIDENCE_STORE_SCHEMA_VERSION = "evidence-store-v1"
+EVIDENCE_STORE_SCHEMA_VERSION = "evidence-store-v2"
 EVIDENCE_QUERY_SCHEMA_VERSION = "evidence-query-v1"
 FEEDBACK_EVAL_SCHEMA_VERSION = "feedback-eval-v1"
 RESPONSE_FEEDBACK_SCHEMA_VERSION = "response-feedback-v1"
@@ -591,8 +591,8 @@ GOAL_READONLY_MAX_MODEL_OUTPUT_TOKENS = 2048
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
-EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v2"
-EVIDENCE_INPUT_SCHEMA_VERSION = "evidence-input-v1"
+EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v3"
+EVIDENCE_INPUT_SCHEMA_VERSION = "evidence-input-v2"
 EMBEDDING_TASKS = {"embedding", "embed", "vector", "vector_embedding", "vector_index", "vector_query"}
 RERANKER_TASKS = {"reranker", "rerank", "vector_rerank"}
 SAFE_PROGRESS_STALE_SECONDS = 300
@@ -9345,7 +9345,13 @@ SKILL_REVIEW_SIGNAL_PATTERNS = [
     "repeatable workflow",
     "should become a skill",
     "make this a skill",
+    "build a skill",
+    "built as a skill",
+    "turn this into a skill",
+    "turning this into a skill",
+    "worth turning into a skill",
     "learn a skill",
+    "skill candidate",
     "skill-worthy",
     "next time",
     "in future",
@@ -9471,6 +9477,19 @@ def format_skill_plan(query: str) -> str:
             f"count={temporal.get('requested_count', '')} "
             f"sources={', '.join(temporal.get('path_mentions', [])[:6])} "
             f"handler={temporal.get('handler', '')}"
+        )
+    if retrieval_plan.get("structural"):
+        structural = retrieval_plan.get("structural", {})
+        flags = structural.get("flags") if isinstance(structural.get("flags"), dict) else {}
+        flag_text = ",".join(key for key, enabled in flags.items() if enabled) or "-"
+        lines.append(
+            "structural intent: "
+            f"tags={','.join(structural.get('tags', [])[:6]) or '-'} "
+            f"todo={','.join(structural.get('todo_states', [])[:6]) or '-'} "
+            f"priorities={','.join(structural.get('priorities', [])[:6]) or '-'} "
+            f"flags={flag_text} "
+            f"sources={', '.join(structural.get('path_mentions', [])[:6]) or '-'} "
+            f"handler={structural.get('handler', '')}"
         )
     prompt_skills = [
         source
@@ -12456,6 +12475,11 @@ def evidence_store_source_fingerprint(index: dict) -> str:
 
 def org_heading_metadata(title: str) -> dict:
     title = title.strip()
+    tags = []
+    tag_match = re.search(r"\s+(:[A-Za-z0-9_@#%:]+:)\s*$", title)
+    if tag_match:
+        tags = [tag for tag in tag_match.group(1).strip(":").split(":") if tag]
+        title = title[: tag_match.start()].rstrip()
     parts = title.split()
     todo = ""
     priority = ""
@@ -12469,6 +12493,7 @@ def org_heading_metadata(title: str) -> dict:
         "todo": todo,
         "priority": priority,
         "date": org_date_from_line(title),
+        "tags": tags,
     }
 
 
@@ -12486,6 +12511,16 @@ def org_heading_sections(content: str) -> list[dict]:
             while stack and int(stack[-1].get("level", 0) or 0) >= level:
                 stack.pop()
             parent_titles = [str(row.get("title", "")) for row in stack if row.get("title")]
+            inherited_tags = []
+            for row in stack:
+                for tag in row.get("tags", []) or []:
+                    if tag not in inherited_tags:
+                        inherited_tags.append(tag)
+            local_tags = [str(tag) for tag in meta.get("tags", []) if str(tag).strip()]
+            all_tags = list(inherited_tags)
+            for tag in local_tags:
+                if tag not in all_tags:
+                    all_tags.append(tag)
             heading = {
                 "start": offset,
                 "level": level,
@@ -12494,6 +12529,9 @@ def org_heading_sections(content: str) -> list[dict]:
                 "todo": meta.get("todo", ""),
                 "priority": meta.get("priority", ""),
                 "date": meta.get("date", ""),
+                "tags": all_tags,
+                "local_tags": local_tags,
+                "inherited_tags": [tag for tag in inherited_tags if tag not in local_tags],
                 "parent_titles": parent_titles,
             }
             headings.append(heading)
@@ -12617,6 +12655,9 @@ def make_evidence_object(
     todo: str = "",
     priority: str = "",
     date: str = "",
+    tags: list[str] | None = None,
+    local_tags: list[str] | None = None,
+    inherited_tags: list[str] | None = None,
 ) -> dict:
     text = text.strip()
     if not text:
@@ -12640,6 +12681,9 @@ def make_evidence_object(
         "todo": todo,
         "priority": priority,
         "date": date,
+        "tags": [compact_text(str(tag), 80) for tag in (tags or []) if str(tag).strip()],
+        "local_tags": [compact_text(str(tag), 80) for tag in (local_tags or []) if str(tag).strip()],
+        "inherited_tags": [compact_text(str(tag), 80) for tag in (inherited_tags or []) if str(tag).strip()],
         "text": compact_source_text_middle(text, EVIDENCE_TEXT_LIMIT),
         "text_sha256": sha256_hex(text.encode("utf-8")),
         "text_chars": len(text),
@@ -12674,6 +12718,9 @@ def evidence_objects_for_chunk(index: dict, file_item: dict, chunk: dict) -> lis
                 todo=str(section.get("todo", "")),
                 priority=str(section.get("priority", "")),
                 date=str(section.get("date", "")),
+                tags=section.get("tags", []),
+                local_tags=section.get("local_tags", []),
+                inherited_tags=section.get("inherited_tags", []),
             )
             if row:
                 rows.append(row)
@@ -12962,6 +13009,8 @@ def evidence_row_haystack(row: dict) -> str:
             row.get("todo", ""),
             row.get("priority", ""),
             row.get("date", ""),
+            " ".join(row.get("tags", []) or []),
+            " ".join(f":{tag}:" for tag in row.get("tags", []) or []),
             row.get("text", ""),
         ]
         if str(part).strip()
@@ -13086,6 +13135,8 @@ def format_evidence_query_report(report: dict) -> str:
             labels.append(f"todo={row.get('todo')}")
         if row.get("priority"):
             labels.append(f"priority={row.get('priority')}")
+        if row.get("tags"):
+            labels.append("tags=:" + ":".join(row.get("tags", [])[:8]) + ":")
         if row.get("title"):
             labels.append(f"title={row.get('title')}")
         if labels:
@@ -13737,6 +13788,7 @@ def evidence_embedding_text(file_item: dict, row: dict, *, limit: int) -> str:
             f"date: {row.get('date', '')}" if row.get("date") else "",
             f"todo: {row.get('todo', '')}" if row.get("todo") else "",
             f"priority: {row.get('priority', '')}" if row.get("priority") else "",
+            f"tags: {', '.join(row.get('tags', []) or [])}" if row.get("tags") else "",
         ]
         if part.strip()
     )
@@ -13758,6 +13810,7 @@ def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: di
                 str(item.get("date", "")),
                 str(item.get("todo", "")),
                 str(item.get("priority", "")),
+                ",".join(item.get("tags", []) or []),
                 str(item.get("title", "")),
                 str(item.get("text_sha256", "")),
             ]
@@ -13782,6 +13835,7 @@ def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: di
                     "evidence_date": item.get("date", ""),
                     "evidence_todo": item.get("todo", ""),
                     "evidence_priority": item.get("priority", ""),
+                    "evidence_tags": item.get("tags", []),
                     "evidence_start": item.get("start", 0),
                     "evidence_end": item.get("end", 0),
                     "evidence_excerpt": compact_source_text_middle(str(item.get("text", "")), 1000),
@@ -13882,6 +13936,7 @@ def build_vector_store_from_index(
                         "evidence_date": item.get("date", ""),
                         "evidence_todo": item.get("todo", ""),
                         "evidence_priority": item.get("priority", ""),
+                        "evidence_tags": item.get("tags", []),
                         "evidence_start": item.get("start", 0),
                         "evidence_end": item.get("end", 0),
                         "evidence_excerpt": compact_source_text_middle(str(item.get("text", "")), 1000),
@@ -14754,6 +14809,7 @@ def vector_query_document_text(index: dict | None, lookup: dict, row: dict, quer
                 row.get("path", ""),
                 f"chunk {row.get('chunk', '')}",
                 f"evidence {row.get('evidence_kind', '')} {row.get('evidence_title', '')}".strip(),
+                "tags: :" + ":".join(row.get("evidence_tags", []) or []) + ":" if row.get("evidence_tags") else "",
                 str(row.get("evidence_excerpt", "")),
             ]
             if str(part).strip()

@@ -107,6 +107,9 @@ Accepted directions:
   or irrelevant files from automatic indexing without weakening allowlists;
 - durable progress and ETA reporting for heavy corpus indexing;
 - deterministic Org-mode task/headline/deadline signals inside corpus indexes;
+- natural-language Org structure retrieval through code-owned skills/handlers
+  for tags, inherited tags, TODO states, priorities, deadlines, scheduled
+  items, and dated headings;
 - deterministic CPU lanes for parsing, fingerprints, corpus health, artifact
   upgrades, lexical retrieval, and other reliable non-LLM work;
 - named local-model routes for repetitive small-model work, large-model

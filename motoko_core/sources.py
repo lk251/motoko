@@ -14,6 +14,8 @@ def format_source_span_detail(span: dict) -> str:
     detail = f"{span.get('kind', '')}:{span.get('label', '')}".strip(":")
     if span.get("evidence_id"):
         detail += f"#{str(span.get('evidence_id'))[-8:]}"
+    if span.get("tags"):
+        detail += ":tags=" + ":".join(str(tag) for tag in span.get("tags", [])[:4])
     if span.get("selected_sub_start") is not None and span.get("selected_sub_end") is not None:
         detail += (
             f"@{span.get('selected_sub_start')}-"
@@ -95,6 +97,21 @@ def format_sources(sources: list[dict]) -> str:
                 lines.append(
                     f"     temporal: {temporal.get('mode', '')} "
                     f"count={temporal.get('requested_count', 0)} source={mentions}"
+                )
+            structural = source.get("structural") or {}
+            if structural:
+                bits = []
+                if structural.get("tags"):
+                    bits.append("tags=" + ",".join(structural.get("tags", [])[:6]))
+                if structural.get("todo_states"):
+                    bits.append("todo=" + ",".join(structural.get("todo_states", [])[:6]))
+                if structural.get("priorities"):
+                    bits.append("priority=" + ",".join(structural.get("priorities", [])[:6]))
+                if structural.get("path_mentions"):
+                    bits.append("source=" + ",".join(structural.get("path_mentions", [])[:4]))
+                lines.append(
+                    f"     structural: {structural.get('mode', '')}"
+                    + (f" {' '.join(bits)}" if bits else "")
                 )
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
@@ -189,6 +206,15 @@ def format_sources(sources: list[dict]) -> str:
                 )
             if source.get("temporal_selected_dates"):
                 lines.append("     temporal: selected newest dates present in source: " + ", ".join(source.get("temporal_selected_dates", [])[:8]))
+            if source.get("structural_matches") is not None:
+                lines.append(
+                    f"     structural: {source.get('structural_matches', 0)} Org evidence match(es)"
+                    + (
+                        " for " + ", ".join(source.get("structural_filters", [])[:8])
+                        if source.get("structural_filters")
+                        else ""
+                    )
+                )
             if source.get("activated_skills"):
                 lines.append("     activated skills: " + ", ".join(source.get("activated_skills", [])[:8]))
             for warning in source.get("warnings", [])[:3]:
@@ -268,6 +294,8 @@ def format_sources(sources: list[dict]) -> str:
                 )
             if source.get("temporal_selected_dates"):
                 lines.append("     temporal: selected newest dates present in source: " + ", ".join(source.get("temporal_selected_dates", [])[:8]))
+            if source.get("structural_filters"):
+                lines.append("     structural: " + ", ".join(source.get("structural_filters", [])[:8]))
             for warning in source.get("excerpt_warnings", [])[:2]:
                 lines.append(f"     warning: {warning}")
         else:

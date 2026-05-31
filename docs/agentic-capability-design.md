@@ -917,6 +917,21 @@ Skill lifecycle checkpoint, 2026-05-30:
   writes only pending suggestions; accepting a patch still goes through the
   existing validators.
 
+Skill/handler checkpoint, 2026-05-31:
+
+- Added `org-structural-query`, a built-in retrieval skill backed by the
+  code-owned `builtin:org_structural_query` handler. It lets ordinary chat
+  queries such as "show me everything tagged RaceFocus" activate deterministic
+  Org evidence selection before final synthesis; users do not need a special
+  `/org-query` mini-language for normal use.
+- The handler parses Org headings, inherited tags, TODO state, priority,
+  `DEADLINE`, `SCHEDULED`, and dated headings into evidence rows. It preserves
+  source spans and records the activated skill/handler in `/sources`.
+- This is the intended near-term pattern for Hermes-inspired self-improvement:
+  skills describe reusable procedure and trigger metadata, planners decide
+  when the procedure should affect a subsystem, code-owned handlers/tools do
+  bounded deterministic work, and learned changes remain review-first.
+
 Next long stretch after skill lifecycle:
 
 - Improve curator usefulness without auto-application: improve

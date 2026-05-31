@@ -7,11 +7,13 @@ import pathlib
 import re
 
 from motoko_core.skill_registry import (
+    ORG_STRUCTURAL_HANDLER,
     ORG_TEMPORAL_HANDLER,
     PROMPT_CONTEXT_EFFECT,
     PROMPT_ONLY_HANDLER,
     RETRIEVAL_PLAN_EFFECT,
     SOURCE_SCOPED_EVIDENCE_EFFECT,
+    STRUCTURED_ORG_EVIDENCE_EFFECT,
     normalize_skill_effects,
     normalize_skill_handler,
 )
@@ -35,6 +37,7 @@ DEFAULT_SKILL_CONTEXT_CHARS = 5000
 DEFAULT_SKILL_KIND = "workflow"
 DEFAULT_SKILL_HANDLER = PROMPT_ONLY_HANDLER
 DEFAULT_SKILL_EFFECTS = [PROMPT_CONTEXT_EFFECT]
+ORG_STRUCTURAL_SKILL = "org-structural-query"
 ORG_TEMPORAL_SKILL = "org-temporal-retrieval"
 ALLOWED_SKILL_SUPPORT_DIRS = {"references", "templates", "scripts"}
 
@@ -75,7 +78,45 @@ BUILTIN_SKILLS = [
                 "This skill activates the built-in deterministic retrieval handler for source selection, date parsing, and evidence extraction.",
             ]
         ),
-    }
+    },
+    {
+        "schema": SKILL_SCHEMA,
+        "name": ORG_STRUCTURAL_SKILL,
+        "slug": ORG_STRUCTURAL_SKILL,
+        "description": "Deterministic retrieval for Org tags, TODOs, priorities, and dated headings",
+        "version": "3",
+        "kind": "retrieval",
+        "triggers": [
+            "all Org elements with a tag",
+            "headings/tasks tagged with a project tag",
+            "TODO/DONE/priority/deadline/scheduled Org queries",
+        ],
+        "handler": ORG_STRUCTURAL_HANDLER,
+        "allowed_effects": [RETRIEVAL_PLAN_EFFECT, STRUCTURED_ORG_EVIDENCE_EFFECT],
+        "support_files": [],
+        "security": "builtin deterministic handler; no script execution",
+        "source_schema": SKILL_SCHEMA,
+        "created_at": "2026-05-31T00:00:00+00:00",
+        "updated_at": "2026-05-31T00:00:00+00:00",
+        "source": "builtin",
+        "builtin": True,
+        "path": "builtin:org-structural-query",
+        "body": "\n".join(
+            [
+                "When a query asks for Org structure, tags, TODO states, priorities, deadlines, scheduled items, or dated headings,",
+                "treat that as a deterministic Org evidence-selection task before final synthesis.",
+                "",
+                "Procedure:",
+                "- Let the user ask naturally; do not require Org syntax or a slash command.",
+                "- Parse Org headings, inherited tags, TODO state, priority, DEADLINE, SCHEDULED, and dated headings programmatically.",
+                "- Scope to an explicitly named file/path when the query names one; otherwise search attached Org indexes.",
+                "- Prefer source-linked Org evidence rows over broad chunk summaries.",
+                "- Return bounded, cited excerpts so the final answer can explain what matched and where.",
+                "",
+                "This skill activates the built-in deterministic retrieval handler for Org structure queries.",
+            ]
+        ),
+    },
 ]
 
 
@@ -866,7 +907,8 @@ def rank_skills(
     for row in apply_skill_lifecycle(list_skills(root), lifecycle_state):
         if row.get("lifecycle_state") == SKILL_STATE_ARCHIVED:
             continue
-        haystack = "\n".join([row.get("name", ""), row.get("description", ""), row.get("body", "")[:3000]])
+        triggers = "\n".join(str(item) for item in row.get("triggers", []) or [])
+        haystack = "\n".join([row.get("name", ""), row.get("description", ""), triggers, row.get("body", "")[:3000]])
         terms = skill_tokens(haystack)
         overlap = query_terms & terms
         if not overlap:

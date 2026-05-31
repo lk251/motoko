@@ -179,6 +179,18 @@ intended architecture for similar cases: skills preserve procedural knowledge,
 planners decide whether the skill should affect a subsystem, and handlers
 perform bounded inspectable work.
 
+Motoko also ships the built-in `org-structural-query` skill with the
+`builtin:org_structural_query` handler. It is the same architecture applied to
+natural-language Org structure questions: the user can ask for entries or tasks
+with a tag, TODO state, priority, deadline, scheduled timestamp, dated heading,
+or named Org source without typing an Org query language. The handler parses
+Org headings and inherited tags programmatically, selects bounded evidence rows,
+records the activated skill/handler in `/sources`, and lets the final model
+synthesize from that evidence. Evidence stores moved to `evidence-store-v2` /
+`evidence-input-v2`, and embedding inputs moved to `embedding-input-v3`, so old
+evidence/vector artifacts are rebuilt by the existing background refresh path
+rather than silently reused with weaker Org metadata.
+
 Motoko now has an internal review-first `skill_manage` action layer for
 `create`, `patch`, `write_file`, and `remove_file` suggestions. Support files
 are useful for preserving references, templates, and script-like deterministic

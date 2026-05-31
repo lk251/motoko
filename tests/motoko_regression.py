@@ -780,6 +780,14 @@ def test_skill_plan_shows_prompt_and_retrieval_selection(m):
         assert "count=3" in temporal
         assert "model calls: none" in temporal
 
+        structural = m.format_skill_plan("show me all elements with tag racefocus")
+        assert "activated retrieval skills:" in structural
+        assert "org-structural-query" in structural
+        assert "builtin:org_structural_query" in structural
+        assert "structural intent:" in structural
+        assert "tags=racefocus" in structural
+        assert "model calls: none" in structural
+
         prompt = m.format_skill_plan("RaceFocus OBS renderer plan")
         assert "selected prompt skills:" in prompt
         assert "racefocus-response-style" in prompt
@@ -791,6 +799,17 @@ def test_skill_plan_shows_prompt_and_retrieval_selection(m):
         assert report.kind == m.COMMAND_KIND_REPORT
         _label, run = report
         assert "racefocus-response-style" in run()
+
+
+def test_skill_review_signal_recognizes_skill_candidate_language(m):
+    with isolated_state():
+        conv = m.new_conversation("Skill candidate")
+        conv["messages"] = [
+            {"role": "user", "content": "This pattern is worth turning into a skill for next time."},
+            {"role": "assistant", "content": "I will treat it as reusable procedural knowledge."},
+        ]
+        reasons = m.skill_review_triggers(conv, message_count=len(conv["messages"]), last_skill=0)
+        assert any(reason.startswith("explicit-signal:worth turning into a skill") for reason in reasons)
 
 
 def test_interrupted_maintenance_resume(m):
@@ -4007,6 +4026,87 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert "selected newest dates present in source: 2026-05-19, 2026-05-18" in m.format_sources(sources)
         assert "retrieval plan" in m.format_sources(sources)
         assert "builtin:org_temporal_latest_entries" in m.format_sources(sources)
+
+
+def test_org_structural_tag_query_uses_skill_and_inherited_tags(m):
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "1"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "orgfiles"
+            docs.mkdir()
+            path = docs / "todo.org"
+            content = "\n".join(
+                [
+                    "* Product :racefocus:",
+                    "** TODO [#A] Build HUD complication",
+                    "DEADLINE: <2026-06-01 Mon>",
+                    "Use fighter HUD symbology.",
+                    "** DONE Archive OBS note :archive:",
+                    "Keep this as historical RaceFocus context.",
+                    "* Other :unrelated:",
+                    "** TODO Buy keyboard",
+                ]
+            ) + "\n"
+            path.write_text(content, encoding="utf-8")
+            index = {
+                "id": "org-structural-index",
+                "name": "orgfiles",
+                "root": str(docs),
+                "created": "2026-05-31T00:00:00+00:00",
+                "files": [
+                    {
+                        "path": str(path),
+                        "source_fingerprint": m.source_fingerprint(path),
+                        "summary": "Org task and project notes.",
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "RaceFocus product notes and unrelated task.",
+                                "content": content,
+                                "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                                "content_bytes": len(content.encode("utf-8")),
+                            }
+                        ],
+                    }
+                ],
+            }
+
+            store = m.build_evidence_store_from_index(index, write=False)
+            task_rows = [row for row in store["rows"] if row.get("title") == "Build HUD complication"]
+            assert task_rows
+            assert "racefocus" in task_rows[0].get("tags", [])
+            assert "racefocus" in task_rows[0].get("inherited_tags", [])
+
+            text, sources = m.retrieve_from_index(index, "show me all elements with tag racefocus")
+            assert "Org structural selection:" in text
+            assert "Matched" in text
+            assert "Build HUD complication" in text
+            assert "Archive OBS note" in text
+            assert "Buy keyboard" not in text
+            index_source = next(source for source in sources if source.get("kind") == "index")
+            assert index_source["activated_skills"] == ["org-structural-query"]
+            assert index_source["structural_matches"] >= 2
+            assert "tag:racefocus" in index_source["structural_filters"]
+            plan_source = next(source for source in sources if source.get("kind") == "retrieval-plan")
+            assert plan_source["activated_skills"] == ["org-structural-query"]
+            assert plan_source["handlers"] == ["builtin:org_structural_query"]
+            assert plan_source["structural"]["tags"] == ["racefocus"]
+            chunks = [source for source in sources if source.get("kind") == "chunk"]
+            assert chunks
+            assert any("structural" in source.get("retrieval_methods", []) for source in chunks)
+            assert "structural: tag:racefocus" in m.format_sources(sources)
+    finally:
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
 def test_source_code_locator_prioritizes_implementation_chunks(m):
@@ -8932,12 +9032,19 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
     with isolated_state():
         listed = m.format_skills()
         assert "org-temporal-retrieval" in listed
+        assert "org-structural-query" in listed
         assert "Source-scoped retrieval" in listed
+        assert "Deterministic retrieval for Org tags" in listed
         assert "builtin:org_temporal_latest_entries" in listed
+        assert "builtin:org_structural_query" in listed
         shown = m.format_skill("org-temporal-retrieval")
         assert "schema: motoko-skill-v3" in shown
         assert "kind: retrieval" in shown
         assert "handler: builtin:org_temporal_latest_entries" in shown
+        structural = m.format_skill("org-structural-query")
+        assert "schema: motoko-skill-v3" in structural
+        assert "kind: retrieval" in structural
+        assert "handler: builtin:org_structural_query" in structural
 
         rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
         assert "Skill: org-temporal-retrieval" in rendered
@@ -8945,6 +9052,13 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         assert sources and sources[0]["kind"] == "skill"
         assert sources[0]["path"] == "builtin:org-temporal-retrieval"
         assert sources[0]["handler"] == "builtin:org_temporal_latest_entries"
+
+        rendered, sources = m.render_skills_with_sources("show all entries tagged racefocus")
+        assert "Skill: org-structural-query" in rendered
+        assert "inherited tags" in rendered
+        assert sources and sources[0]["kind"] == "skill"
+        assert sources[0]["path"] == "builtin:org-structural-query"
+        assert sources[0]["handler"] == "builtin:org_structural_query"
 
 
 def test_procedural_skills_are_included_in_prompt_and_sources(m):

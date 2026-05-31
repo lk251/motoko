@@ -32,7 +32,7 @@ from motoko_core.retrieval_planner import (
     plan_has_handler,
     retrieval_plan_source,
 )
-from motoko_core.skills import ORG_TEMPORAL_HANDLER
+from motoko_core.skills import ORG_STRUCTURAL_HANDLER, ORG_TEMPORAL_HANDLER
 
 
 RETRIEVAL_SERVICE_SCHEMA = "retrieval-service-v1"
@@ -347,6 +347,124 @@ def _selected_candidates_with_required_temporal_dates(
             selected_keys.add(key)
             break
     return selected
+
+
+def _structural_filters(plan: dict) -> dict:
+    structural = plan.get("structural") if isinstance(plan.get("structural"), dict) else {}
+    return {
+        "tags": [str(item).lower() for item in structural.get("tags", []) if str(item).strip()],
+        "todo_states": [str(item).upper() for item in structural.get("todo_states", []) if str(item).strip()],
+        "priorities": [str(item).upper() for item in structural.get("priorities", []) if str(item).strip()],
+        "flags": structural.get("flags", {}) if isinstance(structural.get("flags"), dict) else {},
+        "path_mentions": [str(item) for item in structural.get("path_mentions", []) if str(item).strip()],
+    }
+
+
+def _structural_filter_labels(filters: dict) -> list[str]:
+    labels = []
+    if filters.get("tags"):
+        labels.append("tag:" + ",".join(filters["tags"][:8]))
+    if filters.get("todo_states"):
+        labels.append("todo:" + ",".join(filters["todo_states"][:8]))
+    if filters.get("priorities"):
+        labels.append("priority:" + ",".join(filters["priorities"][:8]))
+    flags = filters.get("flags") or {}
+    for key in ("deadline", "scheduled", "heading"):
+        if flags.get(key):
+            labels.append(key)
+    if filters.get("path_mentions"):
+        labels.append("source:" + ",".join(filters["path_mentions"][:4]))
+    return labels
+
+
+def _row_org_tags(row: dict) -> set[str]:
+    return {str(tag).lower() for tag in row.get("tags", []) or [] if str(tag).strip()}
+
+
+def _row_matches_structural_filters(row: dict, query: str, filters: dict) -> tuple[bool, int]:
+    kind = str(row.get("kind", ""))
+    if not kind.startswith("org_"):
+        return False, 0
+    path_boost = query_path_match_boost(query, row.get("path", ""))
+    if filters.get("path_mentions") and path_boost <= 0:
+        return False, 0
+    score = 6500 + path_boost
+    tags = filters.get("tags") or []
+    if tags:
+        row_tags = _row_org_tags(row)
+        if not all(tag in row_tags for tag in tags):
+            return False, 0
+        score += 1200 * len(tags)
+    todo_states = filters.get("todo_states") or []
+    if todo_states:
+        if str(row.get("todo", "")).upper() not in set(todo_states):
+            return False, 0
+        score += 900
+    priorities = filters.get("priorities") or []
+    if priorities:
+        if str(row.get("priority", "")).upper() not in set(priorities):
+            return False, 0
+        score += 700
+    flags = filters.get("flags") or {}
+    text = str(row.get("text", ""))
+    if flags.get("deadline"):
+        if "DEADLINE:" not in text:
+            return False, 0
+        score += 500
+    if flags.get("scheduled"):
+        if "SCHEDULED:" not in text:
+            return False, 0
+        score += 500
+    if flags.get("heading") and kind not in {"org_heading", "org_day", "org_task"}:
+        return False, 0
+    if not (tags or todo_states or priorities or any(flags.values()) or filters.get("path_mentions")):
+        return False, 0
+    return True, score
+
+
+def _org_structural_evidence_rows(store: dict, query: str, plan: dict, *, limit: int) -> tuple[list[dict], list[str]]:
+    filters = _structural_filters(plan)
+    query_counts = token_counts(query)
+    rows = []
+    for row in store.get("rows", []) or []:
+        if not isinstance(row, dict):
+            continue
+        matched, structured = _row_matches_structural_filters(row, query, filters)
+        if not matched:
+            continue
+        haystack = "\n".join(
+            [
+                row.get("path", ""),
+                row.get("kind", ""),
+                row.get("title", ""),
+                " ".join(row.get("parent_titles", []) or []),
+                " ".join(row.get("tags", []) or []),
+                row.get("text", ""),
+            ]
+        )
+        lexical = score_text(query_counts, haystack)
+        item = dict(row)
+        item.update(
+            {
+                "matched_terms": retrieval_haystack_terms(query_counts, haystack)[:16],
+                "lexical": lexical,
+                "path_boost": query_path_match_boost(query, row.get("path", "")),
+                "structured": structured,
+                "total": structured + lexical,
+                "structural_filters": _structural_filter_labels(filters),
+            }
+        )
+        rows.append(item)
+    rows.sort(
+        key=lambda item: (
+            float(item.get("total", 0) or 0),
+            float(item.get("structured", 0) or 0),
+            str(item.get("path", "")),
+            -int(item.get("start", 0) or 0),
+        ),
+        reverse=True,
+    )
+    return rows[: max(1, int(limit or 1))], _structural_filter_labels(filters)
 
 
 CODE_FILE_SUFFIXES = {
@@ -676,11 +794,45 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         add_hybrid_candidate(candidates, file_item, chunk, "temporal", row.get("total", 0), row)
         temporal_candidate_keys.add((file_item.get("path", ""), str(chunk.get("chunk", ""))))
 
+    evidence_store = None
+    structural_rows = []
+    structural_filters = []
+    structural_warning = ""
+    structural_candidate_keys: set[tuple[str, str]] = set()
+    if env.evidence_enabled() and plan_has_handler(retrieval_plan, ORG_STRUCTURAL_HANDLER):
+        try:
+            evidence_store = env.evidence_store_for_retrieval(index)
+            structural_rows, structural_filters = _org_structural_evidence_rows(
+                evidence_store,
+                query,
+                retrieval_plan,
+                limit=max(top_chunks * 4, env.evidence_context_limit * 3),
+            )
+        except SystemExit as exc:
+            structural_warning = str(exc).splitlines()[0][:240]
+        else:
+            for row in structural_rows:
+                found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
+                if not found:
+                    continue
+                file_item, chunk = found
+                add_hybrid_candidate(
+                    candidates,
+                    file_item,
+                    chunk,
+                    "structural",
+                    row.get("total", 0),
+                    row,
+                    evidence_context_limit=max(env.evidence_context_limit, 24),
+                )
+                structural_candidate_keys.add((file_item.get("path", ""), str(chunk.get("chunk", ""))))
+
     evidence_report = None
     evidence_warning = ""
     if env.evidence_enabled():
         try:
-            evidence_store = env.evidence_store_for_retrieval(index)
+            if evidence_store is None:
+                evidence_store = env.evidence_store_for_retrieval(index)
             evidence_report = env.query_evidence_store(
                 evidence_store,
                 query,
@@ -724,6 +876,12 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             key: value
             for key, value in candidates.items()
             if key in temporal_candidate_keys
+        }
+    elif structural_candidate_keys:
+        rerank_candidates = {
+            key: value
+            for key, value in candidates.items()
+            if key in structural_candidate_keys
         }
     selected_candidates, hybrid_report = rerank_hybrid_candidates_with_environment(index, query, rerank_candidates, env)
     selected_candidate_rows = _selected_candidates_with_required_temporal_dates(
@@ -795,6 +953,40 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             f"{', '.join(temporal_dates)}. "
             "Do not assume missing intervening calendar dates have entries."
         )
+    if structural_rows or structural_warning:
+        activated = ", ".join(
+            row.get("slug") or row.get("name", "")
+            for row in retrieval_plan.get("activated_skills", [])
+            if row.get("handler") == ORG_STRUCTURAL_HANDLER and (row.get("slug") or row.get("name"))
+        )
+        detail = ", ".join(structural_filters) if structural_filters else "Org structure"
+        if structural_rows:
+            preview_lines = []
+            for row in structural_rows[: min(20, len(structural_rows))]:
+                labels = []
+                if row.get("todo"):
+                    labels.append(str(row.get("todo")))
+                if row.get("priority"):
+                    labels.append(f"[#{row.get('priority')}]")
+                if row.get("date"):
+                    labels.append(str(row.get("date")))
+                if row.get("tags"):
+                    labels.append(":" + ":".join(row.get("tags", [])[:6]) + ":")
+                title = row.get("title") or row.get("kind", "org")
+                preview_lines.append(
+                    f"- {row.get('path', '')} chunk {row.get('chunk', '')}: "
+                    f"{' '.join(labels)} {title}".strip()
+                )
+            parts.append(
+                "Org structural selection:\n"
+                + (f"Activated skill(s): {activated}. " if activated else "")
+                + f"Matched {len(structural_rows)} source-linked Org evidence row(s)"
+                + (f" for {detail}." if detail else ".")
+                + "\n"
+                + "\n".join(preview_lines)
+            )
+        else:
+            parts.append(f"Org structural selection:\nwarning: {structural_warning}")
     if code_rows:
         top_code = ", ".join(
             f"{row.get('path', '')} chunk {row.get('chunk', '')}"
@@ -827,6 +1019,11 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         index_source["retrieval_plan_status"] = retrieval_plan.get("status", "")
     if temporal_dates:
         index_source["temporal_selected_dates"] = temporal_dates
+    if structural_rows:
+        index_source["structural_matches"] = len(structural_rows)
+        index_source["structural_filters"] = structural_filters
+    if structural_warning:
+        index_source["warnings"] = index_source.get("warnings", []) + [f"structural Org retrieval skipped: {structural_warning}"]
     if code_rows:
         index_source["code_locator_hits"] = len(code_rows)
         index_source["code_locator_top_paths"] = [
@@ -922,7 +1119,12 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                         dates=temporal_dates,
                     )
                 else:
-                    excerpt, evidence_spans = selected_evidence_excerpt(evidence_rows, max_chars=remaining)
+                    excerpt_limit = max(env.evidence_context_limit, 24) if "structural" in retrieval_details.get("retrieval_methods", []) else env.evidence_context_limit
+                    excerpt, evidence_spans = selected_evidence_excerpt(
+                        evidence_rows,
+                        max_chars=remaining,
+                        evidence_context_limit=excerpt_limit,
+                    )
                 excerpt_selection = {
                     "excerpt": excerpt,
                     "spans": evidence_spans,
@@ -969,6 +1171,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                     "evidence_title": evidence_spans[0].get("label", "") if evidence_rows and evidence_spans else "",
                     "evidence_date": evidence_spans[0].get("date", "") if evidence_rows and evidence_spans else "",
                     "temporal_selected_dates": temporal_dates if "temporal" in retrieval_details.get("retrieval_methods", []) else [],
+                    "structural_filters": structural_filters if "structural" in retrieval_details.get("retrieval_methods", []) else [],
                 }
             )
     debug_row_limit = max(50, top_files * 8, top_chunks * 8, env.max_rerank_candidates)
@@ -1190,6 +1393,8 @@ def summarize_retrieval_sources(sources: list[dict], *, limit: int = 8) -> list[
             "evidence_kind",
             "evidence_date",
             "temporal_selected_dates",
+            "structural_matches",
+            "structural_filters",
             "warning",
         ):
             if source.get(key) not in (None, "", []):

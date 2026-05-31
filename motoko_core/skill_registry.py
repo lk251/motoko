@@ -6,10 +6,12 @@ only handlers and effects listed here can influence Motoko behavior.
 
 PROMPT_ONLY_HANDLER = "prompt_only"
 ORG_TEMPORAL_HANDLER = "builtin:org_temporal_latest_entries"
+ORG_STRUCTURAL_HANDLER = "builtin:org_structural_query"
 
 PROMPT_CONTEXT_EFFECT = "prompt_context"
 RETRIEVAL_PLAN_EFFECT = "retrieval_plan"
 SOURCE_SCOPED_EVIDENCE_EFFECT = "source_scoped_evidence"
+STRUCTURED_ORG_EVIDENCE_EFFECT = "structured_org_evidence"
 
 SUPPORTED_SKILL_HANDLERS = {
     PROMPT_ONLY_HANDLER: {
@@ -22,12 +24,18 @@ SUPPORTED_SKILL_HANDLERS = {
         "allowed_effects": [RETRIEVAL_PLAN_EFFECT, SOURCE_SCOPED_EVIDENCE_EFFECT],
         "description": "Deterministic source-scoped latest dated Org retrieval.",
     },
+    ORG_STRUCTURAL_HANDLER: {
+        "kind": "retrieval",
+        "allowed_effects": [RETRIEVAL_PLAN_EFFECT, STRUCTURED_ORG_EVIDENCE_EFFECT],
+        "description": "Deterministic Org heading, tag, TODO, priority, and date retrieval.",
+    },
 }
 
 SUPPORTED_SKILL_EFFECTS = {
     PROMPT_CONTEXT_EFFECT,
     RETRIEVAL_PLAN_EFFECT,
     SOURCE_SCOPED_EVIDENCE_EFFECT,
+    STRUCTURED_ORG_EVIDENCE_EFFECT,
 }
 
 

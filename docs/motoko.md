@@ -734,6 +734,18 @@ deterministic handlers that Motoko's planner can activate before a subsystem
 runs. This borrows the useful progressive disclosure idea from Hermes Agent
 while keeping Motoko realm-local, dependency-light, and inspectable.
 
+The first retrieval handlers are built-in, deterministic, and selected from
+natural-language queries rather than user-facing mini-languages:
+
+- `org-temporal-retrieval` handles "last/latest N dated entries present in
+  this named Org file" before context packing.
+- `org-structural-query` handles Org tags, inherited tags, TODO states,
+  priorities, deadlines, scheduled items, and dated headings. For example,
+  "show me everything tagged RaceFocus" should activate the handler, select
+  source-linked Org evidence rows, and pass those rows into the normal final
+  answer with `/sources` provenance. Slash commands are inspection and
+  debugging surfaces; ordinary chat should be enough for this class of query.
+
 Handlers and effects are allowlisted in Motoko's code. Unknown or model-suggested
 handler names degrade to `prompt_only`, and unsupported effects are discarded.
 That keeps skill suggestions safe to inspect and accept without creating a

@@ -5,6 +5,17 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added a built-in `org-structural-query` skill and deterministic
+  `builtin:org_structural_query` retrieval handler. Natural-language questions
+  such as "show me everything tagged RaceFocus" can now select source-linked
+  Org evidence rows for tags, inherited tags, TODO states, priorities,
+  deadlines, scheduled items, and headings before the final model answers.
+  Evidence stores move to `evidence-store-v2` / `evidence-input-v2`, and
+  embedding inputs move to `embedding-input-v3` so older derived artifacts are
+  rebuilt instead of silently missing the richer Org metadata.
+- Skill ranking now includes trigger hints, and the automatic skill-review
+  trigger recognizes more "turn this into a skill" phrasing while keeping
+  learned skill changes review-first.
 - Added incremental embedding-vector refresh. A refreshed same-family source
   index can now reuse compatible unchanged vector rows from the previous store,
   embed only new or changed rows, omit removed/ignored rows from the new compact
