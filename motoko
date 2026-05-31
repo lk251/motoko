@@ -453,6 +453,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
     conversation_delete_json_dir_specs,
+    conversation_delete_json_file_specs,
     conversation_delete_jsonl_specs,
     delete_index_snapshot_artifacts,
     dependency_json_artifact_specs,
@@ -2954,28 +2955,39 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
             continue
         report[report_key] = delete_json_artifacts_referencing_conversation(path, conversation_id)
 
-    skill_state = read_skill_suggestion_state()
-    skill_rows = skill_state.get("suggestions", [])
-    if isinstance(skill_rows, list):
-        kept_skill_rows, report["skill_suggestions_deleted"] = filter_json_rows_without_conversation(
-            [row for row in skill_rows if isinstance(row, dict)],
-            conversation_id,
-        )
-        if report["skill_suggestions_deleted"]:
-            skill_state["suggestions"] = kept_skill_rows
-            write_skill_suggestion_state(skill_state)
+    for spec in conversation_delete_json_file_specs():
+        path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
+        report_key = str(spec.get("report_key", "")).strip()
+        action = str(spec.get("action", "")).strip()
+        if not path or not report_key or not pathlib.Path(path).exists():
+            continue
+        data = safe_load_json(path)
+        if data is None:
+            continue
+        if action == "filter-list":
+            list_key = str(spec.get("list_key", "")).strip()
+            rows = data.get(list_key, []) if isinstance(data, dict) else []
+            if not isinstance(rows, list):
+                continue
+            kept_rows, removed = filter_json_rows_without_conversation(
+                [row for row in rows if isinstance(row, dict)],
+                conversation_id,
+            )
+            report[report_key] = removed
+            if removed and isinstance(data, dict):
+                data[list_key] = kept_rows
+                atomic_write(path, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        elif action == "delete-if-references-conversation":
+            if json_references_conversation(data, conversation_id):
+                with contextlib.suppress(FileNotFoundError):
+                    pathlib.Path(path).unlink()
+                    report[report_key] = True
 
     if slot_cache_manifest_path().exists():
         slot_report = clear_slot_cache_records(conversation_id=conversation_id, yes=True)
         report["slot_cache_records_deleted"] = int(slot_report.get("records_removed", 0) or 0)
         report["slot_cache_files_deleted"] = int(slot_report.get("files_deleted", 0) or 0)
         report["slot_cache_service_owned_records"] = int(slot_report.get("service_owned_records", 0) or 0)
-
-    profile = safe_load_json(profile_path())
-    if profile is not None and json_references_conversation(profile, conversation_id):
-        with contextlib.suppress(FileNotFoundError):
-            profile_path().unlink()
-            report["profile_deleted"] = True
 
     maintenance = read_maintenance_state()
     if maintenance is not None and json_references_conversation(maintenance, conversation_id):

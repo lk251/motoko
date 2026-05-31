@@ -236,6 +236,24 @@ def conversation_delete_jsonl_specs() -> list[dict]:
     ]
 
 
+def conversation_delete_json_file_specs() -> list[dict]:
+    """Return single JSON files cleaned when a conversation is deleted."""
+
+    return [
+        {
+            "path_key": "skill_suggestions",
+            "report_key": "skill_suggestions_deleted",
+            "action": "filter-list",
+            "list_key": "suggestions",
+        },
+        {
+            "path_key": "profile",
+            "report_key": "profile_deleted",
+            "action": "delete-if-references-conversation",
+        },
+    ]
+
+
 def derived_delete_report_labels() -> list[tuple[str, str]]:
     """Return report keys and human labels for derived cleanup summaries."""
 

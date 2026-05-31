@@ -187,7 +187,9 @@ fresh evidence shows a better target:
    counting, JSON artifact deletion, superseded index snapshot deletion
    reports, index cleanup formatting, source lifecycle classification, and
    stale superseded-index candidate selection now live in the lifecycle
-   service.
+   service. Conversation deletion now also gets its JSON-dir, JSONL-ledger, and
+   single-JSON-file cleanup families from the lifecycle service instead of
+   hard-coding those policies only in the root facade.
 2. Add finer cooperative cancellation checkpoints for long foreground study,
    index, vector, dossier, and report operations. The job supervisor exists;
    the remaining work is making the long functions yield durable stop/pause
