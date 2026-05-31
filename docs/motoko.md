@@ -448,7 +448,8 @@ The normal daily loop is:
 2. Ask questions naturally. If an index exists for the current directory,
    Motoko auto-attaches the best current-directory index; if she offers to learn
    the directory tree, answer `yes` only when that corpus should become part of
-   her local derived knowledge.
+   her local derived knowledge. When that learning job completes in the TUI,
+   the new index is attached and persisted immediately.
 3. After important answers, run `/sources` to inspect the files, spans, and
    context-selection reasons used for the answer.
 4. When an answer seems wrong, run `/retrieval-debug QUERY` to decide whether

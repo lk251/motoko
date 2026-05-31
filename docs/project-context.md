@@ -1323,9 +1323,11 @@ Current progress on this stretch:
 - Progress: long-lived TUI sessions now refresh attached index references after
   background study completion, complementing the existing prompt-time resync.
   `/status` also builds its context-catalog line from current user-owned state
-  instead of trusting an older persisted catalog file. Fresh
-  evidence/vector/dossier attachment summaries are still candidates for the
-  next always-fresh context pass.
+  instead of trusting an older persisted catalog file. Current-directory corpus
+  learning completion attaches the new index, saves the conversation, and
+  refreshes the catalog from the TUI event handler. Fresh evidence/vector/dossier
+  attachment summaries are still candidates for the next always-fresh context
+  pass.
 
 Completion criteria for this next stretch:
 

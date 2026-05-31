@@ -22900,7 +22900,6 @@ class MotokoTui:
                     quiet=True,
                     cancel_event=cancel_event,
                 )
-                attach_context_item(self.conv, context_item_from_index(index))
                 self.put_event(("cwd_index_done", index.get("id", "")))
             except WorkPaused as exc:
                 self.put_event(("cwd_index_paused", exc.work_id or ""))
@@ -23382,6 +23381,11 @@ class MotokoTui:
                 self.study_running = False
                 self.index_progress = None
                 index_id = event[1]
+                index = load_index_if_exists(str(index_id))
+                if index is not None:
+                    attach_context_item(self.conv, context_item_from_index(index))
+                    with contextlib.suppress(Exception):
+                        write_context_catalog()
                 self.study_last_note = f"learned corpus index {index_id}"
                 self.study_status = "study: idle"
                 self.append("system", f"learned corpus index: {index_id}")

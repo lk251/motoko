@@ -46,6 +46,8 @@ Design constraints:
 - Current-directory corpus learning: when started inside an allowlisted
   directory without an attached index, Motoko can ask once whether to learn that
   directory tree and then stores separate corpus artifacts per directory root.
+  Completed TUI learning attaches the new index to the conversation and
+  refreshes the context catalog immediately.
 - Repo-local `.motokoignore` files let a corpus deterministically exclude
   archival or irrelevant paths from automatic indexing and derived evidence /
   vector work without changing the document allowlist security boundary.

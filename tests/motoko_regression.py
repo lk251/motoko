@@ -11653,6 +11653,59 @@ def test_cwd_indexing_ignores_light_study_done(m):
     assert ui.study_last_note == ""
 
 
+def test_cwd_index_done_attaches_index_and_refreshes_catalog(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "notes.org"
+        source.write_text("* TODO Learned during TUI\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "cwd-learned-index",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-31T13:00:00+00:00",
+            "corpus_summary": "learned current directory",
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        conv = m.new_conversation("Cwd learned")
+        m.save_conversation(conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.events = m.collections.deque([("cwd_index_done", index["id"])])
+        ui.events_lock = m.threading.Lock()
+        ui.cwd_indexing = True
+        ui.study_running = True
+        ui.index_progress = {"status": "running"}
+        ui.study_status = "bg-heavy: indexing(model)"
+        ui.study_last_note = ""
+        ui.pending_prompts = m.collections.deque()
+        ui.generating = False
+        ui.maintaining = False
+        ui.dirty = False
+
+        ui.drain_events()
+
+        assert not ui.cwd_indexing
+        assert not ui.study_running
+        assert ui.conv["context_items"][0]["id"] == index["id"]
+        saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved["context_items"][0]["id"] == index["id"]
+        catalog = json.loads(m.context_catalog_path().read_text(encoding="utf-8"))
+        assert catalog["indexes"][0]["id"] == index["id"]
+
+
 def test_color_survives_quiet_index_redirect(m):
     class FakeTty:
         def isatty(self):
@@ -13679,6 +13732,7 @@ def main() -> int:
         test_retrieval_service_renders_attached_context_without_generic_callback,
         test_blocking_profile_refresh_passes_cancel_event,
         test_cwd_indexing_ignores_light_study_done,
+        test_cwd_index_done_attaches_index_and_refreshes_catalog,
         test_color_survives_quiet_index_redirect,
         test_live_command_request_metadata,
         test_procedural_skills_are_realm_local_and_retrievable,

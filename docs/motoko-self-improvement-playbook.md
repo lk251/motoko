@@ -355,8 +355,10 @@ Current progress on this backlog:
   prompt-time private context inventory reflects newly materialized memory and
   profile state without a restart. `/status` now also builds its
   context-catalog line from current state instead of trusting an older
-  persisted catalog file. The next improvement is checking any remaining
-  TUI-only cached surfaces after real usage exposes them.
+  persisted catalog file. Current-directory corpus learning now attaches the
+  newly built index, saves the conversation, and refreshes the catalog from the
+  TUI event handler when the job completes. The next improvement is checking
+  any remaining TUI-only cached surfaces after real usage exposes them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts, durable elapsed time, and ETA.
