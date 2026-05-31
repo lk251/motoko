@@ -450,6 +450,7 @@ from motoko_core.runtime import (  # noqa: E402
 )
 from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
+    format_source_lifecycle_report,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
     source_lifecycle_report,
@@ -12792,80 +12793,6 @@ def source_lifecycle_report_for_index(index: dict, *, apply: bool = False, yes: 
         delete_snapshot=delete_index_snapshot,
         invalidate_catalog=invalidate_context_catalog_after_cleanup,
     )
-
-
-def format_source_lifecycle_report(report: dict) -> str:
-    index = report.get("index", {})
-    replacement = report.get("replacement", {})
-    plan = report.get("plan", {})
-    lines = [
-        f"source lifecycle: {report.get('schema', 'source-lifecycle-report-v1')}",
-        f"created: {report.get('created', '')}",
-        f"mode: {'dry-run' if report.get('dry_run') else 'apply'}",
-        f"index: {index.get('id', '')} {index.get('name', '')} {index.get('root', '')}".rstrip(),
-        f"index status: {index.get('status', '')}",
-        f"replacement: {replacement.get('id') or '-'} ({'ready' if replacement.get('ready') else 'not ready'})",
-        f"replacement reason: {replacement.get('reason', '')}",
-        f"plan: {plan.get('status', '')} -> {plan.get('recommended_action', '')}",
-        f"apply: {plan.get('apply_status', '')} ({plan.get('apply_reason', '')})",
-    ]
-    source_counts = plan.get("source_counts") or {}
-    if source_counts:
-        lines.append("sources: " + ", ".join(f"{key}:{source_counts[key]}" for key in sorted(source_counts)))
-    else:
-        lines.append("sources: fresh")
-    for source in report.get("source_lifecycle", [])[:20]:
-        lines.append(
-            f"- {source.get('status', '')}: {source.get('path', '')} "
-            f"({source.get('recommended_action', '')})"
-        )
-    if plan.get("affected_artifacts"):
-        lines.append("affected artifacts:")
-        for item in plan.get("affected_artifacts", []):
-            bytes_part = f", {human_bytes(item.get('bytes', 0))}" if item.get("bytes") else ""
-            lines.append(
-                f"- {item.get('kind', '')}: {item.get('count', 0)} "
-                f"policy={item.get('policy', '')}{bytes_part}"
-            )
-    else:
-        lines.append("affected artifacts: none")
-    manual = plan.get("manual_review_artifact_count", 0)
-    if manual:
-        lines.append(
-            f"manual review: {manual} durable artifact(s) may mention these sources; "
-            "Motoko will not delete memories, conversations, profile, or raw feedback automatically."
-        )
-    applied = report.get("applied")
-    if applied:
-        lines.append(f"applied: {applied.get('status', '')}")
-        if applied.get("reason"):
-            lines.append(f"reason: {applied.get('reason')}")
-        deleted = applied.get("deleted") or {}
-        if deleted:
-            extras = []
-            for key, label in [
-                ("vector_stores_deleted", "vector"),
-                ("evidence_stores_deleted", "evidence"),
-                ("topics_deleted", "topics"),
-                ("dossiers_deleted", "dossiers"),
-                ("retrieval_debug_deleted", "retrieval-debug"),
-                ("retrieval_evals_deleted", "retrieval-evals"),
-                ("feedback_evals_deleted", "feedback-evals"),
-                ("action_evals_deleted", "action-evals"),
-                ("model_evals_deleted", "model-evals"),
-            ]:
-                if deleted.get(key):
-                    extras.append(f"{label}:{deleted.get(key)}")
-            lines.append(
-                "deleted: "
-                f"index={deleted.get('index_deleted')} chunks={deleted.get('chunk_dir_deleted')} "
-                + (", ".join(extras) if extras else "derived=0")
-            )
-    elif plan.get("apply_status") == "ready" and report.get("dry_run"):
-        lines.append("next: run motoko source-lifecycle INDEX --apply --yes after reviewing this report")
-    elif plan.get("apply_status") == "blocked":
-        lines.append("next: rebuild/refresh the corpus first, then rerun source-lifecycle")
-    return "\n".join(lines)
 
 
 def index_storage_scan_record(

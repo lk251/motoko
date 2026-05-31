@@ -26,7 +26,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from motoko_core import slot_cache as slot_cache_core
-from motoko_core.artifact_lifecycle import source_lifecycle_report as build_source_lifecycle_report
+from motoko_core.artifact_lifecycle import (
+    format_source_lifecycle_report as format_source_lifecycle_report_core,
+    source_lifecycle_report as build_source_lifecycle_report,
+)
 
 
 def load_motoko():
@@ -9200,6 +9203,10 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert applied["applied"]["manual_review_artifacts_preserved"] == 1
     assert deleted == ["old-index"]
     assert invalidated == [True]
+    text = format_source_lifecycle_report_core(applied)
+    assert "manual review: 1 durable artifact(s)" in text
+    assert "action ledgers, or goal-loop records" in text
+    assert "deleted: index=True chunks=" in text
 
     changed_summary = dict(summary)
     changed_summary["source_lifecycle"] = [
