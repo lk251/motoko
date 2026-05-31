@@ -352,7 +352,8 @@ Current progress on this backlog:
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw
   query/note/source text until the user explicitly inspects the private eval
-  artifact.
+  artifact. `motoko self-eval` now checks that the code-query path can find
+  this curator/eval implementation and its regression coverage.
 
 Skill work that should usually happen before new code:
 

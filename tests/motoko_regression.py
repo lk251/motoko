@@ -1024,7 +1024,18 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "code_map_schema_constants_present" in names
         assert "code_query_finds_schema_constants" in names
         assert "code_query_finds_traces_and_services" in names
+        assert "code_query_finds_feedback_eval_curator_path" in names
         assert "skill_scanner_detects_risky_script" in names
+        curator_check = next(
+            row
+            for row in report.get("checks", [])
+            if row.get("name") == "code_query_finds_feedback_eval_curator_path"
+        )
+        assert curator_check.get("status") == "pass"
+        assert (
+            "test_skill_curator_uses_saved_feedback_eval_fixtures"
+            in curator_check.get("evidence", {}).get("tests", [])
+        )
         umbrella = next(row for row in report.get("checks", []) if row.get("name") == "self_improvement_umbrella_skills_select")
         selected = umbrella.get("evidence", {}).get("selected", {})
         assert "motoko-retrieval-maintainer" in selected.get("motoko-retrieval-maintainer", [])

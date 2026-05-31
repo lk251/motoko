@@ -185,6 +185,33 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             },
         )
     )
+    curator_query = query_code_map(code_map, "feedback eval curator skill suggestion tests", limit=16)
+    curator_symbols = {
+        str(row.get("qualname", ""))
+        for row in curator_query.get("symbols", [])
+        if isinstance(row, dict)
+    }
+    curator_tests = {
+        str(row.get("name", ""))
+        for row in curator_query.get("tests", [])
+        if isinstance(row, dict)
+    }
+    checks.append(
+        _check(
+            "code_query_finds_feedback_eval_curator_path",
+            "skill_curator_feedback_eval_matches" in curator_symbols
+            and "test_skill_curator_uses_saved_feedback_eval_fixtures" in curator_tests,
+            (
+                f"symbols={len(curator_query.get('symbols', []))} "
+                f"tests={len(curator_query.get('tests', []))}"
+            ),
+            evidence={
+                "top_symbol": (curator_query.get("symbols") or [{}])[0].get("qualname", ""),
+                "top_test": (curator_query.get("tests") or [{}])[0].get("name", ""),
+                "tests": sorted(curator_tests)[:16],
+            },
+        )
+    )
 
     catalog = _skill_catalog(skills)
     code_skill = catalog.get(MOTOKO_CODEBASE_SKILL)
