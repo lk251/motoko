@@ -1667,7 +1667,10 @@ Lifecycle ownership checkpoint on 2026-05-31:
   lives in `motoko_core.artifact_lifecycle` as service-owned lifecycle logic.
   The root executable still discovers the latest same-family index and computes
   its freshness, but the tested service decides whether that replacement safely
-  includes changed sources and excludes detached sources.
+  includes changed sources and excludes detached sources. Storage-audit
+  source-lifecycle plan row formatting is also service-owned, so future report
+  fanout can keep moving toward `motoko_core.artifact_lifecycle` instead of
+  growing root-facade policy.
 
 Motoko self-improvement list prepared for future work:
 

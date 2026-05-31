@@ -49,6 +49,7 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_json_dir_specs as source_lifecycle_json_dir_specs_core,
     source_lifecycle_json_file_specs as source_lifecycle_json_file_specs_core,
     source_lifecycle_jsonl_specs as source_lifecycle_jsonl_specs_core,
+    source_lifecycle_plan_summary as source_lifecycle_plan_summary_core,
     source_lifecycle_replacement_readiness as source_lifecycle_replacement_readiness_core,
     source_lifecycle_report as build_source_lifecycle_report,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
@@ -10449,6 +10450,16 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert dry_run["plan"]["derived_artifact_count"] == 1
     assert dry_run["plan"]["manual_review_artifact_count"] == 1
     assert deleted == []
+    plan_summary = source_lifecycle_plan_summary_core(
+        index=index,
+        cleanup_plan=dry_run["plan"],
+        replacement_reason=dry_run["replacement"]["reason"],
+    )
+    assert plan_summary["index"] == "old-index"
+    assert plan_summary["replacement_index"] == "new-index"
+    assert plan_summary["replacement_reason"] == "replacement is fresh"
+    assert plan_summary["derived_artifact_count"] == 1
+    assert plan_summary["manual_review_artifact_count"] == 1
 
     lifecycle_cancel_calls = {"count": 0}
     lifecycle_deleted = []

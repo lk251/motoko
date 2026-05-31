@@ -985,6 +985,33 @@ def source_lifecycle_cleanup_plan(
     }
 
 
+def source_lifecycle_plan_summary(
+    *,
+    index: dict,
+    cleanup_plan: dict,
+    replacement_reason: str = "",
+) -> dict:
+    """Return the source-lifecycle row used in storage/audit reports."""
+
+    return {
+        "index": index.get("id", ""),
+        "name": index.get("name", ""),
+        "root": index.get("root", ""),
+        "source_counts": cleanup_plan.get("source_counts", {}),
+        "recommended_action": cleanup_plan.get("recommended_action", ""),
+        "apply_status": cleanup_plan.get("apply_status", ""),
+        "apply_reason": cleanup_plan.get("apply_reason", ""),
+        "replacement_index": cleanup_plan.get("replacement_index", ""),
+        "replacement_ready": cleanup_plan.get("replacement_ready", False),
+        "replacement_reason": replacement_reason,
+        "derived_artifact_count": cleanup_plan.get("derived_artifact_count", 0),
+        "manual_review_artifact_count": cleanup_plan.get("manual_review_artifact_count", 0),
+        "derived_bytes": cleanup_plan.get("derived_bytes", 0),
+        "manual_review_bytes": cleanup_plan.get("manual_review_bytes", 0),
+        "affected_artifacts": cleanup_plan.get("affected_artifacts", []),
+    }
+
+
 def source_lifecycle_report(
     *,
     index: dict,
