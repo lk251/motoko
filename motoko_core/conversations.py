@@ -194,6 +194,7 @@ def format_conversation_delete_report(report: dict) -> str:
         f"memories deleted: {report.get('memories_deleted', 0)}",
         f"memory proposal jobs deleted: {report.get('memory_proposals_deleted', 0)}",
         f"feedback rows deleted: {report.get('feedback_deleted', 0)}",
+        f"action ledger rows deleted: {report.get('action_ledger_deleted', 0)}",
         f"study job events deleted: {report.get('study_job_events_deleted', 0)}",
         f"topic dossiers deleted: {report.get('topics_deleted', 0)}",
         f"memory dossiers deleted: {report.get('dossiers_deleted', 0)}",
@@ -208,6 +209,8 @@ def format_conversation_delete_report(report: dict) -> str:
         ("action_evals_deleted", "action evals"),
         ("model_evals_deleted", "model evals"),
         ("skill_suggestions_deleted", "skill suggestions"),
+        ("goal_loops_deleted", "goal loops"),
+        ("goal_runs_deleted", "goal runs"),
     ]:
         if report.get(key):
             lines.append(f"{label} deleted: {report.get(key, 0)}")

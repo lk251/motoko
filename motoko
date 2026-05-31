@@ -453,6 +453,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
     conversation_delete_json_dir_specs,
+    conversation_delete_jsonl_specs,
     delete_index_snapshot_artifacts,
     dependency_json_artifact_specs,
     format_index_cleanup_report,
@@ -2910,9 +2911,12 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         "memories_deleted": 0,
         "memory_proposals_deleted": 0,
         "feedback_deleted": 0,
+        "action_ledger_deleted": 0,
         "study_job_events_deleted": 0,
         "topics_deleted": 0,
         "dossiers_deleted": 0,
+        "goal_loops_deleted": 0,
+        "goal_runs_deleted": 0,
         "vector_stores_deleted": 0,
         "evidence_stores_deleted": 0,
         "vector_progress_deleted": 0,
@@ -2936,12 +2940,12 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
     if report["memories_deleted"]:
         write_memory_rows(kept_memories)
 
-    report["feedback_deleted"] = rewrite_jsonl_without_conversation(response_feedback_path(), conversation_id)
-    report["memory_proposals_deleted"] = rewrite_jsonl_without_conversation(
-        memory_proposal_queue_path(),
-        conversation_id,
-    )
-    report["study_job_events_deleted"] = rewrite_jsonl_without_conversation(study_jobs_path(), conversation_id)
+    for spec in conversation_delete_jsonl_specs():
+        path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
+        report_key = str(spec.get("report_key", "")).strip()
+        if not path or not report_key:
+            continue
+        report[report_key] = rewrite_jsonl_without_conversation(path, conversation_id)
 
     for spec in conversation_delete_json_dir_specs():
         path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))

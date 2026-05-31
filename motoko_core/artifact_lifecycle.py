@@ -209,12 +209,30 @@ def index_snapshot_delete_specs() -> list[dict]:
 def conversation_delete_json_dir_specs() -> list[dict]:
     """Return derived JSON families invalidated by a deleted conversation."""
 
-    return [
+    specs = [
         {
             "path_key": spec["path_key"],
             "report_key": spec["delete_report_key"],
         }
         for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+    ]
+    specs.extend(
+        [
+            {"path_key": "goal_loops", "report_key": "goal_loops_deleted"},
+            {"path_key": "goal_runs", "report_key": "goal_runs_deleted"},
+        ]
+    )
+    return specs
+
+
+def conversation_delete_jsonl_specs() -> list[dict]:
+    """Return JSONL ledgers filtered when a conversation is deleted."""
+
+    return [
+        {"path_key": "response_feedback", "report_key": "feedback_deleted"},
+        {"path_key": "action_ledger", "report_key": "action_ledger_deleted"},
+        {"path_key": "memory_proposal_queue", "report_key": "memory_proposals_deleted"},
+        {"path_key": "study_jobs", "report_key": "study_job_events_deleted"},
     ]
 
 

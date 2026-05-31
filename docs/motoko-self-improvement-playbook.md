@@ -378,10 +378,14 @@ Current progress on this backlog:
   reports, feedback evals, action evals, model evals, skill suggestions, and
   conversation-specific slot/KV cache records. The JSON directory families for
   conversation deletion are now declared by the artifact-lifecycle service
-  instead of being scattered as root-facade one-offs. Feedback targeting now
-  pairs the rated assistant answer with the nearest prior user prompt, so
-  `/up` or `/down` used while a newer prompt is preparing does not attach the
-  wrong query to the private feedback fixture.
+  instead of being scattered as root-facade one-offs; conversation-linked JSONL
+  ledgers such as feedback, action ledgers, memory proposals, and study jobs
+  have the same service-owned declaration. Goal loops and goal runs that
+  structurally reference a deleted conversation are cleaned too, while
+  unrelated goals and ledgers are preserved. Feedback targeting now pairs the
+  rated assistant answer with the nearest prior user prompt, so `/up` or
+  `/down` used while a newer prompt is preparing does not attach the wrong
+  query to the private feedback fixture.
 
 Skill work that should usually happen before new code:
 

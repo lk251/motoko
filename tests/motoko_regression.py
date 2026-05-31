@@ -30,6 +30,7 @@ from motoko_core.artifact_lifecycle import (
     cleanup_superseded_index_candidates as cleanup_superseded_index_candidates_core,
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
     conversation_delete_json_dir_specs as conversation_delete_json_dir_specs_core,
+    conversation_delete_jsonl_specs as conversation_delete_jsonl_specs_core,
     delete_index_snapshot_artifacts as delete_index_snapshot_artifacts_core,
     delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
     dependency_json_artifact_specs as dependency_json_artifact_specs_core,
@@ -6093,12 +6094,18 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         )
         m.append_jsonl(m.response_feedback_path(), {"schema": m.RESPONSE_FEEDBACK_SCHEMA_VERSION, "conversation_id": "delete-me"})
         m.append_jsonl(m.response_feedback_path(), {"schema": m.RESPONSE_FEEDBACK_SCHEMA_VERSION, "conversation_id": "keep-me"})
+        m.append_jsonl(m.action_ledger_path(), {"schema": "motoko-action-ledger-v1", "conversation_id": "delete-me"})
+        m.append_jsonl(m.action_ledger_path(), {"schema": "motoko-action-ledger-v1", "conversation_id": "keep-me"})
         m.append_jsonl(m.study_jobs_path(), {"job_id": "job-delete", "conversation_id": "delete-me"})
         m.append_jsonl(m.study_jobs_path(), {"job_id": "job-keep", "conversation_id": "keep-me"})
         m.atomic_write(m.topic_path("topic-delete"), json.dumps({"id": "topic-delete", "owner_conversation_id": "delete-me"}) + "\n")
         m.atomic_write(m.topic_path("topic-keep"), json.dumps({"id": "topic-keep", "owner_conversation_id": "keep-me"}) + "\n")
         m.atomic_write(m.dossier_path("dossier-delete"), json.dumps({"id": "dossier-delete", "source_conversations": [{"id": "delete-me"}]}) + "\n")
         m.atomic_write(m.dossier_path("dossier-keep"), json.dumps({"id": "dossier-keep", "source_conversations": [{"id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.goal_loop_path("goal-delete"), json.dumps({"id": "goal-delete", "created_by_conversation_id": "delete-me"}) + "\n")
+        m.atomic_write(m.goal_loop_path("goal-keep"), json.dumps({"id": "goal-keep", "created_by_conversation_id": "keep-me"}) + "\n")
+        m.atomic_write(m.goal_run_path("run-delete"), json.dumps({"id": "run-delete", "conversation_ids": ["delete-me"]}) + "\n")
+        m.atomic_write(m.goal_run_path("run-keep"), json.dumps({"id": "run-keep", "conversation_ids": ["keep-me"]}) + "\n")
         m.atomic_write(m.vector_store_path("vec-delete"), json.dumps({"rows": [{"conversation_id": "delete-me"}]}) + "\n")
         m.atomic_write(m.vector_store_path("vec-keep"), json.dumps({"rows": [{"conversation_id": "keep-me"}]}) + "\n")
         m.atomic_write(m.evidence_store_path("evidence-delete"), json.dumps({"rows": [{"conversation_id": "delete-me"}]}) + "\n")
@@ -6159,9 +6166,12 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert report["conversation_deleted"]
         assert report["memories_deleted"] == 1
         assert report["feedback_deleted"] == 1
+        assert report["action_ledger_deleted"] == 1
         assert report["study_job_events_deleted"] == 1
         assert report["topics_deleted"] == 1
         assert report["dossiers_deleted"] == 1
+        assert report["goal_loops_deleted"] == 1
+        assert report["goal_runs_deleted"] == 1
         assert report["vector_stores_deleted"] == 1
         assert report["evidence_stores_deleted"] == 1
         assert report["vector_progress_deleted"] == 1
@@ -6177,11 +6187,16 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert m.conversation_path("keep-me").exists()
         assert [row["id"] for row in m.read_memory_rows()] == ["mem-keep"]
         assert [row["conversation_id"] for row in m.read_response_feedback_rows()] == ["keep-me"]
+        assert [row["conversation_id"] for row in m.read_jsonl(m.action_ledger_path())] == ["keep-me"]
         assert [row["conversation_id"] for row in m.read_jsonl(m.study_jobs_path())] == ["keep-me"]
         assert not m.topic_path("topic-delete").exists()
         assert m.topic_path("topic-keep").exists()
         assert not m.dossier_path("dossier-delete").exists()
         assert m.dossier_path("dossier-keep").exists()
+        assert not m.goal_loop_path("goal-delete").exists()
+        assert m.goal_loop_path("goal-keep").exists()
+        assert not m.goal_run_path("run-delete").exists()
+        assert m.goal_run_path("run-keep").exists()
         assert not m.vector_store_path("vec-delete").exists()
         assert m.vector_store_path("vec-keep").exists()
         assert not m.evidence_store_path("evidence-delete").exists()
@@ -10262,6 +10277,7 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
 
     delete_specs = index_snapshot_delete_specs_core()
     conversation_delete_specs = conversation_delete_json_dir_specs_core()
+    conversation_delete_jsonl = conversation_delete_jsonl_specs_core()
     assert ("vector_progress_deleted", "vector-progress") in derived_delete_report_labels_core()
     assert {spec["report_key"] for spec in delete_specs} >= {
         "vector_stores_deleted",
@@ -10269,9 +10285,17 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
         "vector_progress_deleted",
     }
     assert {spec["report_key"] for spec in conversation_delete_specs} >= {
+        "goal_loops_deleted",
+        "goal_runs_deleted",
         "retrieval_debug_deleted",
         "feedback_evals_deleted",
         "model_evals_deleted",
+    }
+    assert {spec["report_key"] for spec in conversation_delete_jsonl} >= {
+        "feedback_deleted",
+        "action_ledger_deleted",
+        "memory_proposals_deleted",
+        "study_job_events_deleted",
     }
 
     with isolated_state() as tmp:
