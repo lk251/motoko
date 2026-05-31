@@ -1222,9 +1222,13 @@ Current progress on this stretch:
   signal no longer counts as strong grounding merely because its source kind is
   `chunk`. `/sources` and `/retrieval-preview` report both quality-aware strong
   evidence and nominal strong source-kind counts so weak fallback chunks are
-  visible. Stale or unavailable sources now also trigger one bounded recovery
-  pass when a fresh project-scoped candidate exists. Remaining work is richer
-  sufficiency planning across more lanes and conflict checks.
+  visible. For named-source queries, strong evidence from the wrong file/path
+  no longer counts as sufficient; the sufficiency pass can recover from a
+  fresh project-scoped candidate and `/sources` shows requested path mentions
+  plus strong-source path matches. Stale or unavailable sources now also
+  trigger one bounded recovery pass when a fresh project-scoped candidate
+  exists. Remaining work is richer sufficiency planning across more lanes and
+  conflict checks.
 - Complete for `/retrieval-preview`: preview output now consumes an explicit
   retrieval-service preview result built from the same `context-package-v1`
   record as chat prompt assembly. The command remains a renderer, but it no

@@ -133,6 +133,12 @@ def format_sources(sources: list[dict]) -> str:
                 f"stale {source.get('stale_or_unavailable_source_count', 0)}  "
                 f"candidates {source.get('candidate_count', 0)}"
             )
+            if source.get("requested_path_mentions"):
+                lines.append(
+                    "     requested source: "
+                    + ", ".join(str(item) for item in source.get("requested_path_mentions", [])[:4])
+                    + f"  strong-source matches {source.get('strong_requested_path_source_count', 0)}"
+                )
         elif kind == "personality":
             lines.append(
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "

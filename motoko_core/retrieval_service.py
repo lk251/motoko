@@ -128,6 +128,17 @@ def plan_retrieval_sufficiency_expansion(
         warning_text = " ".join(str(warning) for warning in source.get("warnings", []) or []).lower()
         return any(term in warning_text for term in ("stale", "missing", "deleted", "ignored", "unavailable"))
 
+    requested_path_mentions = query_path_mentions(query)
+
+    def source_matches_requested_path(source: dict) -> bool:
+        if not requested_path_mentions:
+            return False
+        for key in ("path", "root", "id", "name"):
+            value = str(source.get(key, "")).strip()
+            if value and query_path_match_boost(query, value) > 0:
+                return True
+        return False
+
     def select_candidate() -> dict | None:
         for candidate in candidates:
             score = int(candidate.get("score", 0) or 0)
@@ -151,6 +162,12 @@ def plan_retrieval_sufficiency_expansion(
         for source in clean_sources
         if source_has_strong_evidence_core(source, strong_source_kinds=strong_source_kinds)
     )
+    strong_requested_path_count = sum(
+        1
+        for source in clean_sources
+        if source_has_strong_evidence_core(source, strong_source_kinds=strong_source_kinds)
+        and source_matches_requested_path(source)
+    )
     nominal_strong_count = sum(1 for kind in kinds if kind in strong_source_kinds)
     context_count = sum(1 for kind in kinds if kind in context_source_kinds)
     stale_or_unavailable_count = sum(1 for source in clean_sources if source_stale_or_unavailable(source))
@@ -165,9 +182,11 @@ def plan_retrieval_sufficiency_expansion(
         "status": "not-needed",
         "needs_grounding": needs_grounding,
         "strong_source_count": strong_count,
+        "strong_requested_path_source_count": strong_requested_path_count,
         "nominal_strong_source_count": nominal_strong_count,
         "context_source_count": context_count,
         "stale_or_unavailable_source_count": stale_or_unavailable_count,
+        "requested_path_mentions": requested_path_mentions,
         "candidate_count": len(candidates),
         "selected": None,
         "reason": "question does not appear to require external grounding",
@@ -175,6 +194,26 @@ def plan_retrieval_sufficiency_expansion(
     if not needs_grounding:
         return plan
     if strong_count:
+        if requested_path_mentions and not strong_requested_path_count:
+            selected = select_candidate()
+            if selected is None:
+                plan["status"] = "path-warning"
+                plan["reason"] = (
+                    "selected context has excerpt-level evidence but not from the requested source path; "
+                    "no project-scoped recovery candidate was available"
+                )
+                return plan
+            plan.update(
+                {
+                    "status": "expand",
+                    "selected": selected,
+                    "reason": (
+                        "query named a source path but selected strong evidence did not match it; "
+                        "run one bounded source-scoped recovery pass"
+                    ),
+                }
+            )
+            return plan
         if stale_or_unavailable_count:
             selected = select_candidate()
             if selected is None:
@@ -1615,12 +1654,16 @@ class RetrievalService:
             "selected_score": selected.get("score", 0),
             "selected_reason": selected.get("reason", ""),
             "strong_source_count": plan.get("strong_source_count", 0),
+            "strong_requested_path_source_count": plan.get("strong_requested_path_source_count", 0),
             "nominal_strong_source_count": plan.get("nominal_strong_source_count", 0),
             "context_source_count": plan.get("context_source_count", 0),
             "stale_or_unavailable_source_count": plan.get("stale_or_unavailable_source_count", 0),
+            "requested_path_mentions": plan.get("requested_path_mentions", []),
             "candidate_count": plan.get("candidate_count", 0),
         }
-        if plan.get("stale_or_unavailable_source_count", 0):
+        if plan.get("requested_path_mentions") and not plan.get("strong_requested_path_source_count", 0):
+            plan_note = "Initial context had excerpt-level evidence, but not from the requested source path."
+        elif plan.get("stale_or_unavailable_source_count", 0):
             plan_note = "Initial context included stale or unavailable source evidence."
         else:
             plan_note = "Initial context had no excerpt-level evidence for this grounded query."

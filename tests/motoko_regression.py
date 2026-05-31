@@ -3843,9 +3843,38 @@ def test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass(m):
     assert stale_strong["stale_or_unavailable_source_count"] == 1
     assert "stale or unavailable" in stale_strong["reason"]
 
+    wrong_path_strong = m.plan_retrieval_sufficiency_expansion(
+        "according to plan.org",
+        [{"kind": "chunk", "path": "/tmp/other.org", "chunk": 1, "lexical_score": 5}],
+        [{"item": {"kind": "index", "id": "idx-1"}, "score": 1}],
+        grounding_query_words={"according"},
+        task_query_words=set(),
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"index"},
+        min_score=1,
+    )
+    assert wrong_path_strong["status"] == "expand"
+    assert wrong_path_strong["strong_source_count"] == 1
+    assert wrong_path_strong["strong_requested_path_source_count"] == 0
+    assert wrong_path_strong["requested_path_mentions"] == ["plan.org"]
+    assert "source path" in wrong_path_strong["reason"]
+
+    matching_path_strong = m.plan_retrieval_sufficiency_expansion(
+        "according to plan.org",
+        [{"kind": "chunk", "path": "/tmp/plan.org", "chunk": 1, "lexical_score": 5}],
+        [{"item": {"kind": "index", "id": "idx-1"}, "score": 1}],
+        grounding_query_words={"according"},
+        task_query_words=set(),
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"index"},
+        min_score=1,
+    )
+    assert matching_path_strong["status"] == "sufficient"
+    assert matching_path_strong["strong_requested_path_source_count"] == 1
+
     sufficient = m.plan_retrieval_sufficiency_expansion(
         "according to plan.org",
-        [{"kind": "chunk", "lexical_score": 1}],
+        [{"kind": "chunk", "path": "/tmp/plan.org", "lexical_score": 1}],
         [{"item": {"kind": "index", "id": "idx-1"}, "score": 1}],
         grounding_query_words={"according"},
         task_query_words=set(),
@@ -3893,6 +3922,7 @@ def test_retrieval_service_builds_sufficiency_expansion(m):
     assert "calibrating RaceFocus" in expansion.text
     assert expansion.sources[0]["kind"] == "retrieval-sufficiency"
     assert expansion.sources[0]["selected_id"] == "idx-1"
+    assert expansion.sources[0]["requested_path_mentions"] == ["plan.org"]
     assert expansion.sources[1]["kind"] == "chunk"
     assert expansion.diagnostics["source_count"] == 2
 
