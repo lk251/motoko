@@ -16905,6 +16905,7 @@ def context_item_from_index(index: dict) -> dict:
         "id": index["id"],
         "name": index.get("name", index["id"]),
         "root": index.get("root", ""),
+        "glob": index.get("glob") or AUTO_INDEX_GLOB,
         "status": status,
         "warnings": warnings[:5],
         "summary": summary,
@@ -17260,12 +17261,52 @@ def replace_attached_index(conv: dict, old_index_id: str, new_index: dict) -> No
     save_conversation(conv)
 
 
+def context_item_root_key(root: str) -> str:
+    root = str(root or "").strip()
+    if not root:
+        return ""
+    try:
+        return str(pathlib.Path(root).expanduser().resolve())
+    except OSError:
+        return str(pathlib.Path(root).expanduser())
+
+
+def latest_index_for_context_item(item: dict, available_indexes: list[dict]) -> dict | None:
+    """Find the newest same-family index for an attached index context item.
+
+    Older conversation records may point at an index snapshot that has since
+    been cleaned up. In that case we cannot call latest_index_for_family() on
+    the missing record, so we recover from the stable context metadata stored
+    with the attachment: root, name, and glob when available.
+    """
+
+    item_root = context_item_root_key(str(item.get("root", "")))
+    item_name = str(item.get("name", "") or "").strip()
+    item_glob = str(item.get("glob", "") or "").strip()
+    if not item_root:
+        return None
+    candidates = []
+    for index in available_indexes:
+        if context_item_root_key(str(index.get("root", ""))) != item_root:
+            continue
+        if item_name and str(index.get("name", index.get("id", "")) or "") != item_name:
+            continue
+        if item_glob and str(index.get("glob") or AUTO_INDEX_GLOB) != item_glob:
+            continue
+        candidates.append(index)
+    if not candidates:
+        return None
+    candidates.sort(key=stored_record_sort_key, reverse=True)
+    return candidates[0]
+
+
 def sync_attached_indexes_to_latest(conv: dict) -> list[str]:
-    """Refresh attached index references to newer completed same-family indexes.
+    """Refresh attached context records to currently materialized artifacts.
 
     This is deliberately cheap: it only swaps conversation context items to
-    already materialized index records. Source rebuilds, evidence refreshes,
-    and vector refreshes remain normal background work.
+    already materialized records and updates stored summaries/status fields.
+    Source rebuilds, evidence refreshes, vector refreshes, and dossier rebuilds
+    remain normal background work.
     """
 
     items = conv.setdefault("context_items", [])
@@ -17276,19 +17317,50 @@ def sync_attached_indexes_to_latest(conv: dict) -> list[str]:
     notes = []
     changed = False
     for idx, item in enumerate(list(items)):
-        if item.get("kind") != "index" or not item.get("id"):
+        kind = item.get("kind")
+        if kind == "index" and item.get("id"):
+            current = by_id.get(str(item.get("id", "")))
+            latest = latest_index_for_family(current, available_indexes) if current is not None else None
+            if latest is None:
+                latest = latest_index_for_context_item(item, available_indexes)
+            if latest is None:
+                continue
+            if current is not None and latest.get("id") != current.get("id"):
+                if stored_record_sort_key(latest) <= stored_record_sort_key(current):
+                    latest = current
+            replacement = context_item_from_index(latest)
+            if items[idx] == replacement:
+                continue
+            items[idx] = replacement
+            changed = True
+            if current is None:
+                notes.append(f"attached latest index for missing {item.get('id')} -> {latest.get('id')}")
+            elif latest.get("id") != current.get("id"):
+                notes.append(f"attached newer index {current.get('id')} -> {latest.get('id')}")
+            else:
+                notes.append(f"refreshed attached index metadata {latest.get('id')}")
             continue
-        current = by_id.get(str(item.get("id", "")))
-        if current is None:
+        if kind == "topic" and item.get("id"):
+            topic = load_topic_if_exists(str(item.get("id", "")))
+            if topic is None:
+                continue
+            replacement = context_item_from_topic(topic)
+            if items[idx] == replacement:
+                continue
+            items[idx] = replacement
+            changed = True
+            notes.append(f"refreshed attached topic metadata {topic.get('id')}")
             continue
-        latest = latest_index_for_family(current, available_indexes)
-        if latest is None or latest.get("id") == current.get("id"):
-            continue
-        if stored_record_sort_key(latest) <= stored_record_sort_key(current):
-            continue
-        items[idx] = context_item_from_index(latest)
-        changed = True
-        notes.append(f"attached newer index {current.get('id')} -> {latest.get('id')}")
+        if kind == "dossier" and item.get("id"):
+            dossier = load_dossier_if_exists(str(item.get("id", "")))
+            if dossier is None:
+                continue
+            replacement = context_item_from_dossier(dossier)
+            if items[idx] == replacement:
+                continue
+            items[idx] = replacement
+            changed = True
+            notes.append(f"refreshed attached dossier metadata {dossier.get('id')}")
     if changed:
         save_conversation(conv)
     return notes

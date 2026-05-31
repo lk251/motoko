@@ -201,6 +201,13 @@ Current UI direction:
   conversations as title, summary, matched snippets, recent turns, and
   provenance, with NixOS able to set different budgets per Unix account through
   `~/.config/motoko/config.json`.
+- Long-lived chat sessions should not need a restart to notice newly
+  materialized context artifacts. Before prompt construction, Motoko refreshes
+  attached context records from current user-owned state: index attachments can
+  advance to a newer same-family index, recover from a cleaned-up old snapshot
+  using stored root/name/glob metadata, and refresh stored status/summary
+  fields; topic and memory-dossier attachments refresh their visible metadata
+  from the current artifact file.
 - Query-focused memory dossiers should be available when Javier wants Motoko to
   study a subject across saved memories and prior conversations before
   continuing the chat.

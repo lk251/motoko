@@ -9075,6 +9075,131 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
             os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
+def test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up(m):
+    old_cwd = os.getcwd()
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            source = docs / "logbook.org"
+            fresh_content = "* [2026-05-24 Sun 09:00]\n** log\nRecovered fresh note.\n"
+            source.write_text(fresh_content, encoding="utf-8")
+            m.add_allowed_dir(str(docs))
+            os.chdir(docs)
+            base = {
+                "name": "docs",
+                "root": str(docs.resolve()),
+                "glob": "*.org",
+                "files": [
+                    {
+                        "path": str(source.resolve()),
+                        "source_fingerprint": m.source_fingerprint(source),
+                        "summary": "Daily logbook entries.",
+                    }
+                ],
+            }
+            old_index = {
+                **base,
+                "id": "20260524-010000-cleaned",
+                "created": "2026-05-24T01:00:00+00:00",
+                "corpus_summary": "cleaned old summary",
+                "files": [],
+            }
+            new_index = {
+                **base,
+                "id": "20260524-020000-current",
+                "created": "2026-05-24T02:00:00+00:00",
+                "corpus_summary": "current summary",
+                "files": [
+                    {
+                        **base["files"][0],
+                        "chunks": [
+                            {
+                                "chunk": 1,
+                                "summary": "Fresh chunk.",
+                                "content": fresh_content,
+                            }
+                        ],
+                    }
+                ],
+            }
+            m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
+            m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
+            attached = m.context_item_from_index(old_index)
+            m.index_path(old_index["id"]).unlink()
+            conv = m.new_conversation("Cleaned attached snapshot")
+            conv["context_items"] = [attached]
+            m.save_conversation(conv)
+
+            package, values = m.build_prompt_context_package(
+                conv,
+                "summarize the latest logbook note",
+            )
+
+            assert conv["context_items"][0]["id"] == new_index["id"]
+            assert conv["context_items"][0]["glob"] == "*.org"
+            assert "Recovered fresh note" in values["context_text"]
+            assert not any(source.get("context_kind") == "index" for source in package.sources)
+    finally:
+        os.chdir(old_cwd)
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
+def test_sync_attached_context_refreshes_topic_and_dossier_metadata(m):
+    with isolated_state():
+        topic = {
+            "id": "topic-refresh",
+            "name": "Fresh Topic Name",
+            "query": "fresh topic query",
+            "summary": "Fresh topic summary",
+        }
+        dossier = {
+            "id": "dossier-refresh",
+            "name": "Fresh Dossier Name",
+            "query": "fresh dossier query",
+            "summary": "Fresh dossier summary",
+        }
+        m.atomic_write(m.topic_path(topic["id"]), json.dumps(topic, ensure_ascii=False, indent=2) + "\n")
+        m.atomic_write(m.dossier_path(dossier["id"]), json.dumps(dossier, ensure_ascii=False, indent=2) + "\n")
+        conv = m.new_conversation("Stale context metadata")
+        conv["context_items"] = [
+            {
+                "kind": "topic",
+                "id": topic["id"],
+                "name": "Old Topic Name",
+                "query": "old topic query",
+                "summary": "Old topic summary",
+            },
+            {
+                "kind": "dossier",
+                "id": dossier["id"],
+                "name": "Old Dossier Name",
+                "query": "old dossier query",
+                "summary": "Old dossier summary",
+            },
+        ]
+
+        notes = m.sync_attached_indexes_to_latest(conv)
+
+        assert "refreshed attached topic metadata topic-refresh" in notes
+        assert "refreshed attached dossier metadata dossier-refresh" in notes
+        assert conv["context_items"] == [
+            m.context_item_from_topic(topic),
+            m.context_item_from_dossier(dossier),
+        ]
+
+
 def test_index_resume_after_model_timeout(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -12558,6 +12683,9 @@ def main() -> int:
         test_identity_config,
         test_context_package_builds_sources_and_plan,
         test_system_prompt_uses_context_package_for_plan,
+        test_prompt_context_resyncs_attached_index_to_newer_completed_index,
+        test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up,
+        test_sync_attached_context_refreshes_topic_and_dossier_metadata,
         test_prompt_context_filters_attached_artifacts_to_current_project,
         test_project_scope_filters_topic_reuse_before_attachment,
         test_assistant_color_config,
@@ -12622,7 +12750,6 @@ def main() -> int:
         test_list_indexes_ignores_progress_files,
         test_superseded_partials_do_not_look_unfinished,
         test_context_catalog_prefers_latest_index_per_family,
-        test_prompt_context_resyncs_attached_index_to_newer_completed_index,
         test_index_resume_after_model_timeout,
         test_index_model_residency_defer_is_resumable_not_failed,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,

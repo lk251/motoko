@@ -327,9 +327,13 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
 Current progress on this backlog:
 
 - Always-fresh context behavior now refreshes attached index references at
-  prompt/retrieval time and after background study completion. The next
-  improvement is doing the same explicitly for evidence, vector, dossier, and
-  memory attachment summaries wherever a long-lived TUI view caches them.
+  prompt/retrieval time and after background study completion. Attached index
+  records now also carry the corpus glob, can recover to the latest same
+  root/name/glob index if an old snapshot was cleaned up, and refresh stored
+  index/topic/dossier summaries from current artifact files before prompt
+  construction. The next improvement is doing the same explicitly for evidence,
+  vector, memory, and profile attachment summaries wherever a long-lived TUI
+  view caches them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh should
