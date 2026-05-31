@@ -10860,6 +10860,42 @@ def context_catalog_retrieval_artifacts(
     return artifacts
 
 
+def index_retrieval_artifact_source_fields(index: dict) -> dict:
+    artifacts = context_catalog_retrieval_artifacts(
+        index,
+        evidence_stores=list_evidence_stores(),
+        vector_stores=list_vector_stores(),
+    )
+    fields: dict = {}
+    warnings: list[str] = []
+    evidence_store = artifacts.get("evidence_store") if isinstance(artifacts.get("evidence_store"), dict) else {}
+    if evidence_store.get("id"):
+        fields.update(
+            {
+                "evidence_store": evidence_store.get("id", ""),
+                "evidence_rows": evidence_store.get("row_count", 0),
+                "evidence_status": evidence_store.get("status", "unknown"),
+            }
+        )
+        warnings.extend(f"evidence store {warning}" for warning in evidence_store.get("warnings", [])[:3])
+    vector_store = artifacts.get("vector_store") if isinstance(artifacts.get("vector_store"), dict) else {}
+    if vector_store.get("id"):
+        fields.update(
+            {
+                "vector_store": vector_store.get("id", ""),
+                "vector_method": vector_store.get("method", ""),
+                "vector_rows": vector_store.get("row_count", 0),
+                "vector_status": vector_store.get("status", "unknown"),
+                "vector_refresh_mode": vector_store.get("refresh_mode", ""),
+                "vector_refresh_cause": vector_store.get("refresh_cause", ""),
+            }
+        )
+        warnings.extend(f"vector store {warning}" for warning in vector_store.get("warnings", [])[:3])
+    if warnings:
+        fields["artifact_warnings"] = warnings
+    return fields
+
+
 def build_context_catalog() -> dict:
     evidence_stores = list_evidence_stores()
     vector_stores = list_vector_stores()
@@ -18810,6 +18846,8 @@ def render_memories_with_sources(
 
 def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
     status, warnings = index_staleness(index)
+    artifact_fields = index_retrieval_artifact_source_fields(index)
+    source_warnings = warnings[:8] + artifact_fields.pop("artifact_warnings", [])
     text = textwrap.dedent(
         f"""
         === Document index: {index.get('name', index.get('id'))} ===
@@ -18830,7 +18868,8 @@ def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
                 "name": index.get("name", ""),
                 "root": index.get("root", ""),
                 "status": status,
-                "warnings": warnings[:8],
+                "warnings": source_warnings[:12],
+                **artifact_fields,
             }
         ],
     )

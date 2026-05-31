@@ -231,8 +231,22 @@ def format_sources(sources: list[dict]) -> str:
                     rerank += f" via {route}"
                 lines.append(f"     hybrid: {source.get('hybrid_candidates', 0)} candidate(s), {rerank}")
             if source.get("evidence_store"):
+                status = f" status={source.get('evidence_status')}" if source.get("evidence_status") else ""
                 lines.append(
-                    f"     evidence: {source.get('evidence_rows', 0)} row(s) from {source.get('evidence_store', '')}"
+                    f"     evidence: {source.get('evidence_rows', 0)} row(s) from {source.get('evidence_store', '')}{status}"
+                )
+            if source.get("vector_store"):
+                status = f" status={source.get('vector_status')}" if source.get("vector_status") else ""
+                method = f" method={source.get('vector_method')}" if source.get("vector_method") else ""
+                refresh = ""
+                if source.get("vector_refresh_mode") or source.get("vector_refresh_cause"):
+                    refresh = (
+                        f" refresh={source.get('vector_refresh_mode', '')}"
+                        f"/{source.get('vector_refresh_cause', '')}"
+                    )
+                lines.append(
+                    f"     vector: {source.get('vector_rows', 0)} row(s) from {source.get('vector_store', '')}"
+                    f"{method}{status}{refresh}"
                 )
             if source.get("temporal_selected_dates"):
                 lines.append("     temporal: selected newest dates present in source: " + ", ".join(source.get("temporal_selected_dates", [])[:8]))

@@ -357,8 +357,10 @@ Current progress on this backlog:
   context-catalog line from current state instead of trusting an older
   persisted catalog file. Current-directory corpus learning now attaches the
   newly built index, saves the conversation, and refreshes the catalog from the
-  TUI event handler when the job completes. The next improvement is checking
-  any remaining TUI-only cached surfaces after real usage exposes them.
+  TUI event handler when the job completes. `/sources` fallback for attached
+  index context now reports current evidence/vector artifact ids, row counts,
+  freshness, and vector refresh labels from live state. The next improvement is
+  checking any remaining TUI-only cached surfaces after real usage exposes them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts, durable elapsed time, and ETA.

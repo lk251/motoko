@@ -1325,9 +1325,11 @@ Current progress on this stretch:
   `/status` also builds its context-catalog line from current user-owned state
   instead of trusting an older persisted catalog file. Current-directory corpus
   learning completion attaches the new index, saves the conversation, and
-  refreshes the catalog from the TUI event handler. Fresh evidence/vector/dossier
-  attachment summaries are still candidates for the next always-fresh context
-  pass.
+  refreshes the catalog from the TUI event handler. `/sources` fallback for
+  attached index context now reports current evidence/vector artifact ids, row
+  counts, freshness, and vector refresh labels from live state. Fresh
+  dossier/remaining TUI attachment summaries are still candidates for the next
+  always-fresh context pass.
 
 Completion criteria for this next stretch:
 

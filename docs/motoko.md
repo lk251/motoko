@@ -1210,8 +1210,11 @@ model prompt.
 
 `/sources` prints the memories, recent conversation capsules, compacted summary,
 attached files, file summaries, document chunks, index freshness state, and
-context planning lanes used for the last answer. It also prints a short `why:`
-line for each source. It ends with an answer-grounding audit that reports
+context planning lanes used for the last answer. When it falls back to attached
+index context before an answer has sources, it also reports the current
+evidence/vector artifact ids, row counts, and freshness for that index. It
+prints a short `why:` line for each source. It ends with an answer-grounding
+audit that reports
 whether the answer had excerpt-level evidence, only summary/memory context,
 stale context, or no usable grounding for a source-shaped question. This is
 meant to make answers inspectable: Motoko should be able to say which stored

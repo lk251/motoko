@@ -9357,6 +9357,24 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
         assert "evidence=evidence-current rows=7 status=fresh" in text
         assert "vector=vector-current method=lexical" in text
         assert "rows=11 status=fresh" in text
+        conv = m.new_conversation("Attached artifact sources")
+        conv["context_items"] = [m.context_item_from_index(index)]
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(docs)
+            attached_sources = m.attached_context_sources(conv)
+            attached_index = next(row for row in attached_sources if row.get("kind") == "index")
+            assert attached_index["evidence_store"] == "evidence-current"
+            assert attached_index["evidence_rows"] == 7
+            assert attached_index["evidence_status"] == "fresh"
+            assert attached_index["vector_store"] == "vector-current"
+            assert attached_index["vector_rows"] == 11
+            assert attached_index["vector_status"] == "fresh"
+            source_text = m.format_conversation_sources(conv)
+            assert "evidence: 7 row(s) from evidence-current status=fresh" in source_text
+            assert "vector: 11 row(s) from vector-current method=lexical-hash-v1 status=fresh" in source_text
+        finally:
+            os.chdir(old_cwd)
 
 
 def test_context_catalog_reports_current_memory_and_profile_freshness(m):
