@@ -7606,6 +7606,40 @@ def test_vector_refresh_report_shows_refresh_mode_and_cause(m):
     assert "incremental: reused=10 embedded=2 superseded=3" in text
 
 
+def test_evidence_refresh_report_shows_refresh_mode_and_cause(m):
+    assert m.evidence_refresh_cause_from_reason("missing") == "missing"
+    assert m.evidence_refresh_mode_from_cause("missing") == "full"
+    assert m.evidence_refresh_cause_from_reason(
+        "source index fingerprint changed; rebuild this evidence store"
+    ) == "source-change"
+    assert m.evidence_refresh_mode_from_cause("source-change") == "rebuild"
+    assert m.evidence_refresh_cause_from_reason("force", force=True) == "forced"
+    assert m.evidence_refresh_mode_from_cause("forced") == "forced-rebuild"
+
+    report = {
+        "status": "built",
+        "built": 1,
+        "created": "2026-05-31T00:00:00+00:00",
+        "items": [
+            {
+                "status": "built",
+                "index": "idx1",
+                "name": "docs",
+                "reason": "source index fingerprint changed; rebuild this evidence store",
+                "store_id": "ev1",
+                "rows": 12,
+                "refresh_mode": "rebuild",
+                "refresh_cause": "source-change",
+            }
+        ],
+    }
+
+    text = m.format_evidence_refresh_report(report)
+
+    assert "refresh: mode=rebuild cause=source-change" in text
+    assert "store: ev1 rows=12" in text
+
+
 def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -13291,6 +13325,8 @@ def main() -> int:
         test_embedding_vector_store_falls_back_from_excess_parallelism,
         test_vector_query_can_use_catalog_reranker_route,
         test_normal_retrieval_uses_embedding_rerank_by_default,
+        test_vector_refresh_report_shows_refresh_mode_and_cause,
+        test_evidence_refresh_report_shows_refresh_mode_and_cause,
         test_index_limits,
         test_index_progress_state,
         test_index_progress_eta_tracks_model_timing,

@@ -1686,7 +1686,10 @@ present, and compact source text. `motoko evidence-query QUERY` or
 the background study loop also performs one bounded CPU-lane evidence refresh
 when `MOTOKO_BACKGROUND_EVIDENCE_REFRESH` is enabled. Evidence stores are
 rebuilt from the saved source index when the evidence schema/input policy or
-source fingerprint changes.
+source fingerprint changes. Evidence refresh reports include content-free
+mode/cause diagnostics such as `full missing`, `forced-rebuild forced`, or
+`rebuild source-change` so the user can tell why deterministic evidence work is
+running.
 
 Use `motoko vector-plan` or `/vector-plan [INDEX_ID]` before trusting embedding
 or reranker storage. The report is also read-only: it sizes planned

@@ -13601,6 +13601,40 @@ def evidence_store_due(index: dict) -> tuple[bool, str]:
     return False, "fresh"
 
 
+def evidence_refresh_cause_from_reason(reason: object, *, force: bool = False) -> str:
+    if force:
+        return "forced"
+    text = str(reason or "").lower()
+    if not text:
+        return ""
+    if text.startswith("skip:"):
+        return "source-stale" if "source index stale" in text else "skipped"
+    if "schema" in text or "input schema" in text:
+        return "schema"
+    if "fingerprint" in text or "source index changed" in text:
+        return "source-change"
+    if "source index unavailable" in text:
+        return "source-missing"
+    if "missing" in text:
+        return "missing"
+    if "stale" in text:
+        return "stale"
+    return "refresh"
+
+
+def evidence_refresh_mode_from_cause(cause: str) -> str:
+    cause = str(cause or "")
+    if cause == "missing":
+        return "full"
+    if cause == "forced":
+        return "forced-rebuild"
+    if cause in {"schema", "source-change", "source-missing", "stale", "refresh"}:
+        return "rebuild"
+    if cause in {"source-stale", "skipped"}:
+        return "skipped"
+    return ""
+
+
 def evidence_refresh_candidates(*, index_id: str | None = None, force: bool = False) -> list[tuple[dict, str]]:
     indexes = [load_index(index_id)] if index_id else latest_indexes_by_family()
     rows = []
@@ -13641,6 +13675,12 @@ def refresh_evidence_stores(
             "root": index.get("root", ""),
             "reason": reason,
         }
+        refresh_cause = evidence_refresh_cause_from_reason(reason, force=force)
+        refresh_mode = evidence_refresh_mode_from_cause(refresh_cause)
+        if refresh_cause:
+            item["refresh_cause"] = refresh_cause
+        if refresh_mode:
+            item["refresh_mode"] = refresh_mode
         if reason.startswith("skip:"):
             item["status"] = "skipped"
             report["items"].append(item)
@@ -13654,6 +13694,8 @@ def refresh_evidence_stores(
             item["status"] = "built"
             item["store_id"] = store.get("id", "")
             item["rows"] = store.get("row_count", 0)
+            item["refresh_cause"] = item.get("refresh_cause", "")
+            item["refresh_mode"] = item.get("refresh_mode", "")
             item["path"] = store.get("path", "")
             built += 1
         report["items"].append(item)
@@ -13675,6 +13717,12 @@ def format_evidence_refresh_report(report: dict) -> str:
             f"- {item.get('status', 'unknown')}: {item.get('index', '')} "
             f"{item.get('name', '')} ({item.get('reason', '')})"
         )
+        if item.get("refresh_mode") or item.get("refresh_cause"):
+            lines.append(
+                "  refresh: "
+                f"mode={item.get('refresh_mode', '') or 'unknown'} "
+                f"cause={item.get('refresh_cause', '') or 'unknown'}"
+            )
         if item.get("store_id"):
             lines.append(f"  store: {item.get('store_id', '')} rows={item.get('rows', 0)}")
         if item.get("error"):
