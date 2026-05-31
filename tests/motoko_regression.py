@@ -6528,8 +6528,13 @@ def test_cli_heavy_commands_pass_cancel_events(m):
     seen = {}
     old_build_document_index = m.build_document_index
     old_refresh_vector_stores = m.refresh_vector_stores
+    old_refresh_evidence_stores = m.refresh_evidence_stores
+    old_cleanup_superseded_stale_indexes = m.cleanup_superseded_stale_indexes
+    old_source_lifecycle_report_for_index = m.source_lifecycle_report_for_index
+    old_run_background_now_text = m.run_background_now_text
     old_study_query = m.study_query
     old_load_conversation = m.load_conversation
+    old_load_index = m.load_index
 
     def fake_build_document_index(path, pattern, name=None, max_derived_bytes=None, *, cancel_event=None):
         seen["index"] = cancel_event
@@ -6545,6 +6550,39 @@ def test_cli_heavy_commands_pass_cancel_events(m):
             "items": [],
         }
 
+    def fake_refresh_evidence_stores(**kwargs):
+        seen["evidence_refresh"] = kwargs.get("cancel_event")
+        return {"status": "no-build", "built": 0, "created": "2026-05-31T00:00:00+00:00", "items": []}
+
+    def fake_cleanup_superseded_stale_indexes(*, limit=1, dry_run=False, cancel_event=None):
+        seen["index_cleanup"] = cancel_event
+        return {
+            "schema": m.INDEX_CLEANUP_SCHEMA_VERSION,
+            "created": "2026-05-31T00:00:00+00:00",
+            "dry_run": dry_run,
+            "candidate_count": 0,
+            "selected_count": 0,
+            "materialized": [],
+            "deleted": [],
+            "blocked": [],
+        }
+
+    def fake_source_lifecycle_report_for_index(index, *, apply=False, yes=False, cancel_event=None):
+        seen["source_lifecycle"] = cancel_event
+        return {
+            "schema": "source-lifecycle-report-v1",
+            "created": "2026-05-31T00:00:00+00:00",
+            "dry_run": not apply,
+            "index": {"id": index.get("id", "")},
+            "replacement": {},
+            "plan": {"apply_status": "no-op", "apply_reason": "test"},
+            "source_lifecycle": [],
+        }
+
+    def fake_run_background_now_text(conv, **kwargs):
+        seen["bg_now"] = kwargs.get("cancel_event")
+        return "bg-now ok"
+
     def fake_study_query(conv, query, *, focus=None, cancel_event=None):
         seen["study"] = cancel_event
         return "study ok"
@@ -6552,8 +6590,13 @@ def test_cli_heavy_commands_pass_cancel_events(m):
     try:
         m.build_document_index = fake_build_document_index
         m.refresh_vector_stores = fake_refresh_vector_stores
+        m.refresh_evidence_stores = fake_refresh_evidence_stores
+        m.cleanup_superseded_stale_indexes = fake_cleanup_superseded_stale_indexes
+        m.source_lifecycle_report_for_index = fake_source_lifecycle_report_for_index
+        m.run_background_now_text = fake_run_background_now_text
         m.study_query = fake_study_query
         m.load_conversation = lambda _selector: {"id": "conv", "title": "Conversation", "messages": []}
+        m.load_index = lambda _selector=None: {"id": "idx", "name": "docs", "root": "/tmp/docs"}
         with contextlib.redirect_stdout(io.StringIO()):
             m.command_index(
                 m.argparse.Namespace(
@@ -6574,6 +6617,35 @@ def test_cli_heavy_commands_pass_cancel_events(m):
                     json=False,
                 )
             )
+            m.command_evidence_refresh(
+                m.argparse.Namespace(
+                    index=None,
+                    force=False,
+                    limit=1,
+                    json=False,
+                )
+            )
+            m.command_index_cleanup(
+                m.argparse.Namespace(
+                    limit=1,
+                    yes=False,
+                    json=False,
+                )
+            )
+            m.command_source_lifecycle(
+                m.argparse.Namespace(
+                    index=None,
+                    apply=False,
+                    yes=False,
+                    json=False,
+                )
+            )
+            m.command_bg_now(
+                m.argparse.Namespace(
+                    conversation=None,
+                    no_cwd=True,
+                )
+            )
             m.command_study(
                 m.argparse.Namespace(
                     query=["find", "context"],
@@ -6585,11 +6657,20 @@ def test_cli_heavy_commands_pass_cancel_events(m):
     finally:
         m.build_document_index = old_build_document_index
         m.refresh_vector_stores = old_refresh_vector_stores
+        m.refresh_evidence_stores = old_refresh_evidence_stores
+        m.cleanup_superseded_stale_indexes = old_cleanup_superseded_stale_indexes
+        m.source_lifecycle_report_for_index = old_source_lifecycle_report_for_index
+        m.run_background_now_text = old_run_background_now_text
         m.study_query = old_study_query
         m.load_conversation = old_load_conversation
+        m.load_index = old_load_index
 
     assert isinstance(seen["index"], threading.Event)
     assert isinstance(seen["vector_refresh"], threading.Event)
+    assert isinstance(seen["evidence_refresh"], threading.Event)
+    assert isinstance(seen["index_cleanup"], threading.Event)
+    assert isinstance(seen["source_lifecycle"], threading.Event)
+    assert isinstance(seen["bg_now"], threading.Event)
     assert isinstance(seen["study"], threading.Event)
 
 

@@ -12429,8 +12429,10 @@ def invalidate_context_catalog_after_cleanup() -> None:
         context_catalog_path().unlink()
 
 
-def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False) -> dict:
+def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "index cleanup interrupted by request", work_kind="index-cleanup")
     candidates = index_cleanup_candidates()
+    raise_if_work_cancelled(cancel_event, "index cleanup interrupted by request", work_kind="index-cleanup")
     return cleanup_superseded_index_candidates(
         candidates,
         schema=INDEX_CLEANUP_SCHEMA_VERSION,
@@ -12474,16 +12476,26 @@ def source_lifecycle_replacement(index: dict, source_paths: set[str]) -> tuple[d
     return latest, True, "replacement index is fresh and does not reference detached source path(s)"
 
 
-def source_lifecycle_report_for_index(index: dict, *, apply: bool = False, yes: bool = False) -> dict:
+def source_lifecycle_report_for_index(
+    index: dict,
+    *,
+    apply: bool = False,
+    yes: bool = False,
+    cancel_event=None,
+) -> dict:
+    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
     index_id = str(index.get("id", "")).strip()
     summary = index_change_summary(index)
     source_lifecycle = summary.get("source_lifecycle", [])
     source_paths = source_lifecycle_affected_paths(source_lifecycle)
+    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
     if source_lifecycle:
         replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(index, source_paths)
     else:
         replacement, replacement_ready, replacement_reason = None, False, "all indexed sources are fresh"
+    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
     records = source_lifecycle_artifact_records(index_id, source_paths) if source_lifecycle else []
+    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
     return source_lifecycle_report(
         index=index,
         summary=summary,
@@ -13138,12 +13150,21 @@ def evidence_objects_for_chunk(index: dict, file_item: dict, chunk: dict) -> lis
     return deduped
 
 
-def build_evidence_store_from_index(index: dict, *, store_id: str | None = None, write: bool = True) -> dict:
+def build_evidence_store_from_index(
+    index: dict,
+    *,
+    store_id: str | None = None,
+    write: bool = True,
+    cancel_event=None,
+) -> dict:
+    raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = evidence_store_source_fingerprint(index)
     rows = []
     for file_item in index.get("files", []):
+        raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
         for chunk in file_item.get("chunks", []):
+            raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
             rows.extend(evidence_objects_for_chunk(index, file_item, chunk))
     kind_counts = dict(collections.Counter(row.get("kind", "unknown") for row in rows))
     store = {
@@ -13181,6 +13202,7 @@ def build_evidence_store_from_index(index: dict, *, store_id: str | None = None,
         }
     )
     if write:
+        raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
         path = evidence_store_path(store_id)
         store["path"] = str(path)
         atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
@@ -13301,7 +13323,14 @@ def evidence_refresh_candidates(*, index_id: str | None = None, force: bool = Fa
     return rows
 
 
-def refresh_evidence_stores(*, index_id: str | None = None, force: bool = False, limit: int = 1) -> dict:
+def refresh_evidence_stores(
+    *,
+    index_id: str | None = None,
+    force: bool = False,
+    limit: int = 1,
+    cancel_event=None,
+) -> dict:
+    raise_if_work_cancelled(cancel_event, "evidence refresh interrupted by request", work_kind="evidence")
     limit = max(1, int(limit or 1))
     report = {
         "schema": "evidence-refresh-v1",
@@ -13311,6 +13340,7 @@ def refresh_evidence_stores(*, index_id: str | None = None, force: bool = False,
     }
     built = 0
     for index, reason in evidence_refresh_candidates(index_id=index_id, force=force):
+        raise_if_work_cancelled(cancel_event, "evidence refresh interrupted by request", work_kind="evidence")
         if built >= limit:
             break
         item = {
@@ -13324,7 +13354,7 @@ def refresh_evidence_stores(*, index_id: str | None = None, force: bool = False,
             report["items"].append(item)
             continue
         try:
-            store = build_evidence_store_from_index(index, write=True)
+            store = build_evidence_store_from_index(index, write=True, cancel_event=cancel_event)
         except SystemExit as exc:
             item["status"] = "failed"
             item["error"] = str(exc)
@@ -17892,7 +17922,7 @@ def background_study_step(
         evidence_candidates = evidence_refresh_candidates()
         if evidence_candidates:
             set_phase("study: evidence-store", notes=notes)
-            evidence_report = refresh_evidence_stores(limit=evidence_limit)
+            evidence_report = refresh_evidence_stores(limit=evidence_limit, cancel_event=cancel_event)
             built = int(evidence_report.get("built", 0) or 0)
             if built:
                 notes.append(f"evidence store(s) refreshed: {built}")
@@ -20221,17 +20251,22 @@ def evidence_command_request(text: str, conv: dict):
     body = command_body(text)
     if primary == "/evidence-build":
         selector = body or None
-        return (
-            "/evidence-build",
-            lambda: format_evidence_store(
-                build_evidence_store_from_index(load_index(selector) if selector else default_vector_index(conv))
+        return foreground_command_request(
+            "Building evidence store...",
+            lambda cancel_event=None: format_evidence_store(
+                build_evidence_store_from_index(
+                    load_index(selector) if selector else default_vector_index(conv),
+                    cancel_event=cancel_event,
+                )
             ),
         )
     if primary == "/evidence-refresh":
         selector = body or None
-        return (
-            "/evidence-refresh",
-            lambda: format_evidence_refresh_report(refresh_evidence_stores(index_id=selector, limit=1)),
+        return foreground_command_request(
+            "Refreshing evidence stores...",
+            lambda cancel_event=None: format_evidence_refresh_report(
+                refresh_evidence_stores(index_id=selector, limit=1, cancel_event=cancel_event)
+            ),
         )
     if primary == "/evidence-query":
         query = body or context_query_text(conv, conv.get("title", ""))
@@ -20360,9 +20395,15 @@ def index_report_command_request(text: str, conv: dict):
         return "/index-storage", lambda: format_index_storage_audit(index_storage_audit())
     if primary == "/index-cleanup":
         apply_cleanup = body in {"yes", "--yes", "apply"}
-        return (
-            "/index-cleanup",
-            lambda: format_index_cleanup_report(cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)),
+        return foreground_command_request(
+            "Cleaning index artifacts...",
+            lambda cancel_event=None: format_index_cleanup_report(
+                cleanup_superseded_stale_indexes(
+                    limit=1,
+                    dry_run=not apply_cleanup,
+                    cancel_event=cancel_event,
+                )
+            ),
         )
     if primary == "/source-lifecycle":
         parts = body.split()
@@ -20370,10 +20411,15 @@ def index_report_command_request(text: str, conv: dict):
         yes = any(part == "--yes" for part in parts)
         selector_parts = [part for part in parts if part not in {"--apply", "apply", "--yes"}]
         selector = " ".join(selector_parts).strip() or None
-        return (
-            "/source-lifecycle",
-            lambda: format_source_lifecycle_report(
-                source_lifecycle_report_for_index(load_index(selector), apply=apply_cleanup, yes=yes)
+        return foreground_command_request(
+            "Reviewing source lifecycle...",
+            lambda cancel_event=None: format_source_lifecycle_report(
+                source_lifecycle_report_for_index(
+                    load_index(selector),
+                    apply=apply_cleanup,
+                    yes=yes,
+                    cancel_event=cancel_event,
+                )
             ),
         )
     if primary == "/index-repair":
@@ -24050,10 +24096,16 @@ def command_index_storage(args) -> None:
 
 
 def command_index_cleanup(args) -> None:
-    report = cleanup_superseded_stale_indexes(
-        limit=args.limit,
-        dry_run=not args.yes,
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during index-cleanup command") as cancel_event:
+            report = cleanup_superseded_stale_indexes(
+                limit=args.limit,
+                dry_run=not args.yes,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -24062,7 +24114,12 @@ def command_index_cleanup(args) -> None:
 
 def command_source_lifecycle(args) -> None:
     index = load_index(args.index)
-    report = source_lifecycle_report_for_index(index, apply=args.apply, yes=args.yes)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during source-lifecycle command") as cancel_event:
+            report = source_lifecycle_report_for_index(index, apply=args.apply, yes=args.yes, cancel_event=cancel_event)
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -24076,19 +24133,29 @@ def command_bg_now(args) -> None:
     else:
         conv = new_conversation("bg-now")
         save_result = False
-    print_report(
-        run_background_now_text(
-            conv,
-            attach_current_project=not args.no_cwd,
-            phase_callback=print_background_phase,
-            save_result=save_result,
-        )
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during bg-now command") as cancel_event:
+            report = run_background_now_text(
+                conv,
+                attach_current_project=not args.no_cwd,
+                phase_callback=print_background_phase,
+                save_result=save_result,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
+    print_report(report)
 
 
 def command_evidence_build(args) -> None:
     index = load_index(args.index) if args.index else default_vector_index()
-    store = build_evidence_store_from_index(index, write=True)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during evidence-build command") as cancel_event:
+            store = build_evidence_store_from_index(index, write=True, cancel_event=cancel_event)
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(store, ensure_ascii=False, indent=2))
     else:
@@ -24096,7 +24163,17 @@ def command_evidence_build(args) -> None:
 
 
 def command_evidence_refresh(args) -> None:
-    report = refresh_evidence_stores(index_id=args.index, force=args.force, limit=args.limit)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during evidence-refresh command") as cancel_event:
+            report = refresh_evidence_stores(
+                index_id=args.index,
+                force=args.force,
+                limit=args.limit,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

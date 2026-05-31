@@ -186,6 +186,11 @@ fresh evidence shows a better target:
    index, vector, dossier, and report operations. The job supervisor exists;
    the remaining work is making the long functions yield durable stop/pause
    points without corrupting indexes, vectors, memories, or ledgers.
+   Current progress: active chat answers, queued prompts, foreground
+   index/vector/study paths, evidence build/refresh, index cleanup,
+   source-lifecycle reports, and `bg-now` now pass cancel events through their
+   CLI or slash-command paths. Continue this work by adding checkpoints inside
+   remaining model-backed dossier, repair, memory, and profile operations.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or
@@ -236,6 +241,31 @@ durable, inspectable, and maintained." Current public Hermes discussions also
 reinforce why Motoko needs code-level guards, not only prompt instructions:
 curator or background-review agents must not be able to silently alter
 protected skills, bundled skills, project files, or cross-realm state.
+
+## Next Motoko Self-Code Session
+
+When Motoko is next asked to improve her own repository, she should start with
+this operational list:
+
+1. Run `motoko code-map` and a focused `motoko code-query QUERY` before
+   answering or editing. For architecture work, include terms for the command,
+   schema, artifact family, service module, and tests.
+2. Activate existing umbrella skills first:
+   `motoko-codebase-maintainer`, `motoko-refactor-craft`,
+   `motoko-retrieval-maintainer`, or `motoko-agentic-boundary-review`. Patch
+   those skills or add support files when the procedure generalizes.
+3. Check `motoko skill curator` and `motoko skill scan` before trusting new
+   skill/script material. Prefer support-file notes, consolidation proposals,
+   or pending `skill_manage` suggestions over immediate autonomous mutation.
+4. Treat feedback and real failures as eval seeds. A good improvement leaves a
+   regression, retrieval fixture, `self-eval`, `action-eval`, or documented
+   soak check that would catch the same class of problem later.
+5. Favor the current highest-value craftsmanship targets: artifact lifecycle
+   fanout, cancellation/job supervision, code-query precision, skill curator
+   quality, feedback-to-eval flow, and goal-loop review behavior.
+6. Keep the authority boundary explicit. Model reasoning may propose; Motoko
+   code validates, records provenance, asks for confirmation when required,
+   and applies changes only through typed actions.
 
 ## Refactor Craft
 

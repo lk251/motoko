@@ -1572,6 +1572,12 @@ Motoko self-code checkpoint, 2026-05-31:
   index snapshot deletion, and index cleanup report formatting. The root
   executable still supplies explicit state paths and filesystem callbacks,
   preserving the security boundary while reducing policy spread.
+- Foreground cancellation coverage has expanded beyond active chat answers:
+  evidence build/refresh, index cleanup, source-lifecycle reports, and
+  `bg-now` now receive cooperative cancel events in both CLI and slash-command
+  paths. This is still not the final durable-job design; it is the next
+  careful checkpoint toward making all visible foreground work interruptible
+  without corrupting indexes, vectors, evidence stores, memories, or ledgers.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.
@@ -1579,6 +1585,25 @@ Motoko self-code checkpoint, 2026-05-31:
   code before proposing improvements." It does not replace Codex-level
   engineering review, tests, commits, or user approval; it gives Motoko better
   local evidence and safer procedural scaffolding.
+
+Bird's-eye status on 2026-05-31:
+
+- Motoko is usable and meaningfully smarter than the original text-only
+  assistant: hybrid lexical/structured/evidence/vector/rerank retrieval,
+  deterministic Org/date evidence, source visibility, feedback fixtures,
+  memory/conversation recall, skills, typed actions, goal loops, and local
+  model routes are all present.
+- Motoko is not "finished" architecturally. The remaining high-value work is
+  craftsmanship work: shrink the root `motoko` facade, complete artifact
+  lifecycle ownership across all derived families, finish cooperative
+  cancellation for every long foreground operation, improve code-intelligence
+  precision, and keep skill learning review-first rather than broadly
+  autonomous.
+- The right next implementation targets are therefore not new spectacle
+  features. They are the pieces that make Motoko more reliable at improving
+  herself: lifecycle fanout, cancellation/job supervision, code-query quality,
+  curated skill/support-file maintenance, feedback-to-eval flow, and narrow
+  goal-loop review behavior.
 
 Motoko self-improvement list prepared for future work:
 
