@@ -452,6 +452,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
+    source_lifecycle_report,
     source_lifecycle_state,
 )
 from motoko_core.observability import (  # noqa: E402
@@ -12777,54 +12778,20 @@ def source_lifecycle_report_for_index(index: dict, *, apply: bool = False, yes: 
     else:
         replacement, replacement_ready, replacement_reason = None, False, "all indexed sources are fresh"
     records = source_lifecycle_artifact_records(index_id, source_paths) if source_lifecycle else []
-    plan = source_lifecycle_cleanup_plan(
-        index_id=index_id,
-        source_lifecycle=source_lifecycle,
+    return source_lifecycle_report(
+        index=index,
+        summary=summary,
         artifact_records=records,
-        replacement_index_id=str((replacement or {}).get("id", "")),
+        replacement_index=replacement,
         replacement_ready=replacement_ready,
+        replacement_reason=replacement_reason,
+        created=now(),
+        default_glob=AUTO_INDEX_GLOB,
+        apply=apply,
+        yes=yes,
+        delete_snapshot=delete_index_snapshot,
+        invalidate_catalog=invalidate_context_catalog_after_cleanup,
     )
-    report = {
-        "schema": "source-lifecycle-report-v1",
-        "created": now(),
-        "index": {
-            "id": index_id,
-            "name": index.get("name", ""),
-            "root": index.get("root", ""),
-            "glob": index.get("glob") or AUTO_INDEX_GLOB,
-            "status": summary.get("status", ""),
-            "warnings": summary.get("warnings", [])[:6],
-        },
-        "replacement": {
-            "id": str((replacement or {}).get("id", "")),
-            "ready": replacement_ready,
-            "reason": replacement_reason,
-        },
-        "dry_run": not apply,
-        "source_lifecycle": source_lifecycle[:100],
-        "plan": plan,
-        "artifact_records": records[:200],
-        "artifact_record_count": len(records),
-        "applied": None,
-    }
-    if apply:
-        if not yes:
-            raise SystemExit("refusing source lifecycle cleanup without --yes")
-        if plan.get("apply_status") != "ready":
-            report["applied"] = {
-                "status": "blocked",
-                "reason": plan.get("apply_reason", "cleanup is not ready"),
-            }
-            return report
-        deletion = delete_index_snapshot(index)
-        invalidate_context_catalog_after_cleanup()
-        report["applied"] = {
-            "status": "deleted-superseded-index-snapshot",
-            "index": index_id,
-            "deleted": deletion,
-            "manual_review_artifacts_preserved": plan.get("manual_review_artifact_count", 0),
-        }
-    return report
 
 
 def format_source_lifecycle_report(report: dict) -> str:

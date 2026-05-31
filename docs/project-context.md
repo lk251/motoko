@@ -1251,6 +1251,10 @@ Current progress on this stretch:
   Apply remains conservative: it deletes only stale superseded index snapshots
   and rebuildable derived artifacts after a fresh replacement index exists,
   while durable human signal stays manual-review.
+- Progress: `motoko_core.artifact_lifecycle` now owns the source-lifecycle
+  report shape and ready/blocked/apply decision flow through injected
+  filesystem callbacks. The root facade still gathers source freshness,
+  replacement-index facts, artifact records, and delete callbacks.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,

@@ -9,6 +9,7 @@ from typing import Callable
 
 ARTIFACT_LIFECYCLE_SCHEMA = "artifact-lifecycle-v1"
 SOURCE_LIFECYCLE_PLAN_SCHEMA = "source-lifecycle-plan-v1"
+SOURCE_LIFECYCLE_REPORT_SCHEMA = "source-lifecycle-report-v1"
 
 
 @dataclass(frozen=True)
@@ -197,6 +198,90 @@ def source_lifecycle_cleanup_plan(
             value for policy, value in bytes_by_policy.items() if policy != "delete-derived"
         ),
     }
+
+
+def source_lifecycle_report(
+    *,
+    index: dict,
+    summary: dict,
+    artifact_records: list[dict] | None,
+    replacement_index: dict | None = None,
+    replacement_ready: bool = False,
+    replacement_reason: str = "",
+    created: str = "",
+    default_glob: str = "**/*",
+    apply: bool = False,
+    yes: bool = False,
+    delete_snapshot: Callable[[dict], dict] | None = None,
+    invalidate_catalog: Callable[[], None] | None = None,
+) -> dict:
+    """Build and optionally apply a source lifecycle cleanup report.
+
+    Filesystem discovery and mutation stay behind injected callbacks. This
+    function owns the report shape and the ready/blocked/apply decision flow.
+    """
+
+    index_id = str(index.get("id", "")).strip()
+    source_lifecycle = [
+        row for row in summary.get("source_lifecycle", []) or [] if isinstance(row, dict)
+    ]
+    replacement_id = str((replacement_index or {}).get("id", ""))
+    plan = source_lifecycle_cleanup_plan(
+        index_id=index_id,
+        source_lifecycle=source_lifecycle,
+        artifact_records=artifact_records or [],
+        replacement_index_id=replacement_id,
+        replacement_ready=replacement_ready,
+    )
+    report = {
+        "schema": SOURCE_LIFECYCLE_REPORT_SCHEMA,
+        "created": created,
+        "index": {
+            "id": index_id,
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "glob": index.get("glob") or default_glob,
+            "status": summary.get("status", ""),
+            "warnings": summary.get("warnings", [])[:6],
+        },
+        "replacement": {
+            "id": replacement_id,
+            "ready": bool(replacement_ready),
+            "reason": replacement_reason,
+        },
+        "dry_run": not apply,
+        "source_lifecycle": source_lifecycle[:100],
+        "plan": plan,
+        "artifact_records": (artifact_records or [])[:200],
+        "artifact_record_count": len(artifact_records or []),
+        "applied": None,
+    }
+    if not apply:
+        return report
+    if not yes:
+        raise SystemExit("refusing source lifecycle cleanup without --yes")
+    if plan.get("apply_status") != "ready":
+        report["applied"] = {
+            "status": "blocked",
+            "reason": plan.get("apply_reason", "cleanup is not ready"),
+        }
+        return report
+    if delete_snapshot is None:
+        report["applied"] = {
+            "status": "blocked",
+            "reason": "source lifecycle cleanup has no deletion callback",
+        }
+        return report
+    deletion = delete_snapshot(index)
+    if invalidate_catalog is not None:
+        invalidate_catalog()
+    report["applied"] = {
+        "status": "deleted-superseded-index-snapshot",
+        "index": index_id,
+        "deleted": deletion,
+        "manual_review_artifacts_preserved": plan.get("manual_review_artifact_count", 0),
+    }
+    return report
 
 
 def cleanup_superseded_index_candidates(

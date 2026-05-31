@@ -26,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from motoko_core import slot_cache as slot_cache_core
+from motoko_core.artifact_lifecycle import source_lifecycle_report as build_source_lifecycle_report
 
 
 def load_motoko():
@@ -9106,6 +9107,124 @@ def test_source_lifecycle_report_blocks_changed_sources(m):
             m.quiet_model = old_quiet_model
 
 
+def test_source_lifecycle_report_service_owns_apply_decision(_m):
+    index = {
+        "id": "old-index",
+        "name": "docs",
+        "root": "/tmp/docs",
+        "glob": "*.org",
+    }
+    summary = {
+        "status": "stale",
+        "warnings": ["source changed"],
+        "source_lifecycle": [
+            {
+                "path": "/tmp/docs/a.org",
+                "status": "ignored",
+                "recommended_action": "detach-derived-artifacts",
+            }
+        ],
+    }
+    artifacts = [
+        {
+            "artifact_id": "vec",
+            "artifact_kind": "vector_store",
+            "cleanup_policy": "delete-derived",
+            "bytes_estimate": 120,
+        },
+        {
+            "artifact_id": "ledger",
+            "artifact_kind": "action_ledger",
+            "cleanup_policy": "manual-review",
+            "bytes_estimate": 80,
+        },
+    ]
+    deleted = []
+    invalidated = []
+
+    def delete_snapshot(item):
+        deleted.append(item["id"])
+        return {"index": item["id"], "index_deleted": True, "vector_stores_deleted": 1}
+
+    def invalidate_catalog():
+        invalidated.append(True)
+
+    dry_run = build_source_lifecycle_report(
+        index=index,
+        summary=summary,
+        artifact_records=artifacts,
+        replacement_index={"id": "new-index"},
+        replacement_ready=True,
+        replacement_reason="replacement is fresh",
+        created="2026-05-31T00:00:00+00:00",
+        apply=False,
+        delete_snapshot=delete_snapshot,
+        invalidate_catalog=invalidate_catalog,
+    )
+    assert dry_run["schema"] == "source-lifecycle-report-v1"
+    assert dry_run["dry_run"] is True
+    assert dry_run["plan"]["apply_status"] == "ready"
+    assert dry_run["plan"]["derived_artifact_count"] == 1
+    assert dry_run["plan"]["manual_review_artifact_count"] == 1
+    assert deleted == []
+
+    try:
+        build_source_lifecycle_report(
+            index=index,
+            summary=summary,
+            artifact_records=artifacts,
+            replacement_index={"id": "new-index"},
+            replacement_ready=True,
+            replacement_reason="replacement is fresh",
+            apply=True,
+            yes=False,
+            delete_snapshot=delete_snapshot,
+        )
+        raise AssertionError("source lifecycle apply should require explicit confirmation")
+    except SystemExit as exc:
+        assert "--yes" in str(exc)
+
+    applied = build_source_lifecycle_report(
+        index=index,
+        summary=summary,
+        artifact_records=artifacts,
+        replacement_index={"id": "new-index"},
+        replacement_ready=True,
+        replacement_reason="replacement is fresh",
+        apply=True,
+        yes=True,
+        delete_snapshot=delete_snapshot,
+        invalidate_catalog=invalidate_catalog,
+    )
+    assert applied["applied"]["status"] == "deleted-superseded-index-snapshot"
+    assert applied["applied"]["manual_review_artifacts_preserved"] == 1
+    assert deleted == ["old-index"]
+    assert invalidated == [True]
+
+    changed_summary = dict(summary)
+    changed_summary["source_lifecycle"] = [
+        {
+            "path": "/tmp/docs/a.org",
+            "status": "changed",
+            "recommended_action": "reprocess-from-source",
+        }
+    ]
+    blocked = build_source_lifecycle_report(
+        index=index,
+        summary=changed_summary,
+        artifact_records=artifacts,
+        replacement_index={"id": "new-index"},
+        replacement_ready=True,
+        replacement_reason="replacement is fresh",
+        apply=True,
+        yes=True,
+        delete_snapshot=delete_snapshot,
+    )
+    assert blocked["applied"]["status"] == "blocked"
+    assert "changed sources require source reprocessing" in blocked["applied"]["reason"]
+    assert deleted == ["old-index"]
+
+
 def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -11579,6 +11698,7 @@ def main() -> int:
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
         test_source_lifecycle_report_blocks_changed_sources,
+        test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
