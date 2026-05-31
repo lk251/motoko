@@ -6536,6 +6536,9 @@ def test_cli_heavy_commands_pass_cancel_events(m):
     old_cleanup_superseded_stale_indexes = m.cleanup_superseded_stale_indexes
     old_source_lifecycle_report_for_index = m.source_lifecycle_report_for_index
     old_run_background_now_text = m.run_background_now_text
+    old_upgrade_index_artifacts = m.upgrade_index_artifacts
+    old_repair_index_artifacts = m.repair_index_artifacts
+    old_refresh_profile_dossier = m.refresh_profile_dossier
     old_study_query = m.study_query
     old_load_conversation = m.load_conversation
     old_load_index = m.load_index
@@ -6587,6 +6590,18 @@ def test_cli_heavy_commands_pass_cancel_events(m):
         seen["bg_now"] = kwargs.get("cancel_event")
         return "bg-now ok"
 
+    def fake_upgrade_index_artifacts(index, *, cancel_event=None):
+        seen["index_upgrade"] = cancel_event
+        return index, False, "upgrade ok"
+
+    def fake_repair_index_artifacts(index, *, limit=None, phase_callback=None, cancel_event=None):
+        seen["index_repair"] = cancel_event
+        return index, False, "repair ok"
+
+    def fake_refresh_profile_dossier(*, cancel_event=None):
+        seen["profile_refresh"] = cancel_event
+        return {"updated": "2026-05-31T00:00:00+00:00"}
+
     def fake_study_query(conv, query, *, focus=None, cancel_event=None):
         seen["study"] = cancel_event
         return "study ok"
@@ -6598,6 +6613,9 @@ def test_cli_heavy_commands_pass_cancel_events(m):
         m.cleanup_superseded_stale_indexes = fake_cleanup_superseded_stale_indexes
         m.source_lifecycle_report_for_index = fake_source_lifecycle_report_for_index
         m.run_background_now_text = fake_run_background_now_text
+        m.upgrade_index_artifacts = fake_upgrade_index_artifacts
+        m.repair_index_artifacts = fake_repair_index_artifacts
+        m.refresh_profile_dossier = fake_refresh_profile_dossier
         m.study_query = fake_study_query
         m.load_conversation = lambda _selector: {"id": "conv", "title": "Conversation", "messages": []}
         m.load_index = lambda _selector=None: {"id": "idx", "name": "docs", "root": "/tmp/docs"}
@@ -6644,6 +6662,25 @@ def test_cli_heavy_commands_pass_cancel_events(m):
                     json=False,
                 )
             )
+            m.command_index_upgrade(
+                m.argparse.Namespace(
+                    all=False,
+                    limit=None,
+                    index=None,
+                )
+            )
+            m.command_index_repair(
+                m.argparse.Namespace(
+                    all=False,
+                    limit=1,
+                    index=None,
+                )
+            )
+            m.command_profile(
+                m.argparse.Namespace(
+                    profile_command="refresh",
+                )
+            )
             m.command_bg_now(
                 m.argparse.Namespace(
                     conversation=None,
@@ -6665,6 +6702,9 @@ def test_cli_heavy_commands_pass_cancel_events(m):
         m.cleanup_superseded_stale_indexes = old_cleanup_superseded_stale_indexes
         m.source_lifecycle_report_for_index = old_source_lifecycle_report_for_index
         m.run_background_now_text = old_run_background_now_text
+        m.upgrade_index_artifacts = old_upgrade_index_artifacts
+        m.repair_index_artifacts = old_repair_index_artifacts
+        m.refresh_profile_dossier = old_refresh_profile_dossier
         m.study_query = old_study_query
         m.load_conversation = old_load_conversation
         m.load_index = old_load_index
@@ -6674,6 +6714,9 @@ def test_cli_heavy_commands_pass_cancel_events(m):
     assert isinstance(seen["evidence_refresh"], threading.Event)
     assert isinstance(seen["index_cleanup"], threading.Event)
     assert isinstance(seen["source_lifecycle"], threading.Event)
+    assert isinstance(seen["index_upgrade"], threading.Event)
+    assert isinstance(seen["index_repair"], threading.Event)
+    assert isinstance(seen["profile_refresh"], threading.Event)
     assert isinstance(seen["bg_now"], threading.Event)
     assert isinstance(seen["study"], threading.Event)
 

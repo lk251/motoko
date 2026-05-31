@@ -1578,8 +1578,10 @@ Motoko self-code checkpoint, 2026-05-31:
   evidence build/refresh, index cleanup, source-lifecycle reports, and
   `bg-now` now receive cooperative cancel events in both CLI and slash-command
   paths. Lifecycle apply/report helpers also accept injected cancellation
-  checkpoints before materialization or deletion. This is still not the final
-  durable-job design; it is the next careful checkpoint toward making all
+  checkpoints before materialization or deletion. Index artifact
+  enrich/upgrade, quality repair, and profile refresh now also carry
+  cancellation through CLI/background/model-call paths. This is still not the
+  final durable-job design; it is the next careful checkpoint toward making all
   visible foreground work interruptible without corrupting indexes, vectors,
   evidence stores, memories, or ledgers.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist

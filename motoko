@@ -10090,10 +10090,12 @@ def profile_source_material() -> tuple[str, list[str], list[str]]:
     )
 
 
-def refresh_profile_dossier() -> dict:
+def refresh_profile_dossier(*, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "profile refresh interrupted by request", work_kind="profile")
     source_text, memory_ids, conversation_ids = profile_source_material()
     if not memory_ids and not conversation_ids:
         raise SystemExit("no memories or conversations available for a profile dossier yet")
+    raise_if_work_cancelled(cancel_event, "profile refresh interrupted by request", work_kind="profile")
     prompt = textwrap.dedent(
         f"""
         Build a compact profile dossier for future private conversations with Javier.
@@ -10127,7 +10129,9 @@ def refresh_profile_dossier() -> dict:
         temperature=0.2,
         timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
         route=MODEL_ROUTE_PROFILE,
+        cancel_event=cancel_event,
     )[:MAX_PROFILE_DOSSIER_CHARS]
+    raise_if_work_cancelled(cancel_event, "profile refresh interrupted by request", work_kind="profile")
     data = {
         "updated": now(),
         "memory_ids": memory_ids,
@@ -11512,14 +11516,16 @@ def index_with_current_summary_provenance(index: dict) -> dict:
     return enriched
 
 
-def index_with_current_signals(index: dict) -> dict:
+def index_with_current_signals(index: dict, *, cancel_event=None) -> dict:
     enriched = dict(index)
     enriched_files = []
     for file_item in index.get("files", []):
+        raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
         path = pathlib.Path(file_item.get("path", ""))
         enriched_file = dict(file_item)
         enriched_chunks = []
         for chunk in file_item.get("chunks", []):
+            raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
             enriched_chunk = dict(chunk)
             content = read_chunk_content(index, chunk)
             signals = extract_document_signals(path, content)
@@ -11551,8 +11557,9 @@ def index_with_current_signals(index: dict) -> dict:
     return enriched
 
 
-def index_with_current_corpus_profile(index: dict) -> dict:
+def index_with_current_corpus_profile(index: dict, *, cancel_event=None) -> dict:
     enriched = dict(index)
+    raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
     try:
         root = pathlib.Path(enriched.get("root", "")).expanduser().resolve()
     except OSError:
@@ -11563,6 +11570,7 @@ def index_with_current_corpus_profile(index: dict) -> dict:
         enriched.get("files", []) or [],
         created=enriched.get("created", ""),
     )
+    raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
     enriched["corpus_profile_schema"] = CORPUS_PROFILE_SCHEMA_VERSION
     enriched["corpus_profile_enriched"] = profile.get("generated", now())
     enriched["corpus_profile"] = profile
@@ -11571,7 +11579,8 @@ def index_with_current_corpus_profile(index: dict) -> dict:
     return enriched
 
 
-def upgrade_index_artifacts(index: dict) -> tuple[dict, bool, str]:
+def upgrade_index_artifacts(index: dict, *, cancel_event=None) -> tuple[dict, bool, str]:
+    raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
     index_id = index.get("id", "")
     if not index_id:
         raise SystemExit("index has no id")
@@ -11581,30 +11590,33 @@ def upgrade_index_artifacts(index: dict) -> tuple[dict, bool, str]:
     changed = []
     upgraded = dict(index)
     if index_needs_summary_provenance(upgraded):
+        raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
         upgraded = index_with_current_summary_provenance(upgraded)
         changed.append("summary provenance")
     signals_changed = False
     if index_needs_signal_enrichment(upgraded):
-        upgraded = index_with_current_signals(upgraded)
+        upgraded = index_with_current_signals(upgraded, cancel_event=cancel_event)
         signals_changed = True
         changed.append("signals")
     if signals_changed or index_needs_corpus_profile(upgraded):
-        upgraded = index_with_current_corpus_profile(upgraded)
+        upgraded = index_with_current_corpus_profile(upgraded, cancel_event=cancel_event)
         changed.append("corpus profile")
     if not changed:
         return index, False, f"index artifacts already current: {index_id}"
+    raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
     atomic_write(index_path(index_id), json.dumps(upgraded, ensure_ascii=False, indent=2) + "\n")
     return upgraded, True, f"index artifacts enriched: {index_id} ({', '.join(changed)})"
 
 
-def enrich_index_signals(index: dict) -> tuple[dict, bool, str]:
-    return upgrade_index_artifacts(index)
+def enrich_index_signals(index: dict, *, cancel_event=None) -> tuple[dict, bool, str]:
+    return upgrade_index_artifacts(index, cancel_event=cancel_event)
 
 
-def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
+def enrich_indexes_needing_signals(*, limit: int | None = None, cancel_event=None) -> list[str]:
     notes = []
     changed = 0
     for index in list_indexes():
+        raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
         if limit is not None and changed >= limit:
             break
         if not index_needs_artifact_upgrade(index):
@@ -11614,7 +11626,9 @@ def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
             notes.append(f"index artifact upgrade skipped active job {index_id}")
             continue
         try:
-            _enriched, did_change, note = upgrade_index_artifacts(index)
+            _enriched, did_change, note = upgrade_index_artifacts(index, cancel_event=cancel_event)
+        except WorkPaused:
+            raise
         except Exception as exc:
             notes.append(f"index artifact upgrade failed for {index_id}: {type(exc).__name__}: {exc}")
             continue
@@ -11624,8 +11638,8 @@ def enrich_indexes_needing_signals(*, limit: int | None = None) -> list[str]:
     return notes
 
 
-def upgrade_indexes_needing_artifacts(*, limit: int | None = None) -> list[str]:
-    return enrich_indexes_needing_signals(limit=limit)
+def upgrade_indexes_needing_artifacts(*, limit: int | None = None, cancel_event=None) -> list[str]:
+    return enrich_indexes_needing_signals(limit=limit, cancel_event=cancel_event)
 
 
 def quality_gate_check_failed(report: dict, name: str) -> bool:
@@ -11683,6 +11697,7 @@ def summarize_for_repair(
     route: str,
     prompt_version: str,
     timeout: float = INDEX_MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> tuple[str, dict]:
     summary = summarize_text(
         label,
@@ -11691,6 +11706,7 @@ def summarize_for_repair(
         timeout=timeout,
         route=route,
         prompt_version=prompt_version,
+        cancel_event=cancel_event,
     ).strip()
     source_sha = sha256_hex(text.encode("utf-8"))
     if summary:
@@ -11711,7 +11727,8 @@ def summarize_for_repair(
     )
 
 
-def repair_chunk_summary(index: dict, file_item: dict, chunk: dict) -> tuple[dict, str]:
+def repair_chunk_summary(index: dict, file_item: dict, chunk: dict, *, cancel_event=None) -> tuple[dict, str]:
+    raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
     content = read_chunk_content(index, chunk)
     if not content.strip():
         raise ValueError(f"no stored chunk text for {file_item.get('path', '')} chunk {chunk.get('chunk')}")
@@ -11722,6 +11739,7 @@ def repair_chunk_summary(index: dict, file_item: dict, chunk: dict) -> tuple[dic
         "Repair this retrieval chunk summary. Preserve names, dates, TODOs, obligations, decisions, and concrete details.",
         route=MODEL_ROUTE_INDEX_CHUNK,
         prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
+        cancel_event=cancel_event,
     )
     repaired = dict(chunk)
     repaired["summary"] = summary
@@ -11733,7 +11751,8 @@ def repair_chunk_summary(index: dict, file_item: dict, chunk: dict) -> tuple[dic
     return repaired, f"{file_item.get('path', '')} chunk {chunk.get('chunk')}"
 
 
-def repair_file_summary(file_item: dict) -> dict:
+def repair_file_summary(file_item: dict, *, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
     repaired = dict(file_item)
     blocks = [f"Chunk {chunk.get('chunk')}:\n{chunk.get('summary', '')}" for chunk in repaired.get("chunks", [])]
     input_text = "\n\n".join(blocks).strip()
@@ -11743,6 +11762,7 @@ def repair_file_summary(file_item: dict) -> dict:
         "Repair this file-level summary from chunk summaries. Include what the file is for and when to retrieve it.",
         route=MODEL_ROUTE_INDEX_FILE,
         prompt_version=FILE_SUMMARY_SCHEMA_VERSION,
+        cancel_event=cancel_event,
     )
     repaired["summary"] = summary
     source_sha = (
@@ -11762,7 +11782,8 @@ def repair_file_summary(file_item: dict) -> dict:
     return repaired
 
 
-def repair_corpus_summary(index: dict) -> dict:
+def repair_corpus_summary(index: dict, *, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
     repaired = dict(index)
     files = repaired.get("files", []) or []
     blocks = [f"{item.get('path', '')}:\n{item.get('summary', '')}" for item in files]
@@ -11773,6 +11794,7 @@ def repair_corpus_summary(index: dict) -> dict:
         "Repair this corpus-level map from file summaries. Explain the main themes and which files matter for which questions.",
         route=MODEL_ROUTE_INDEX_CORPUS,
         prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
+        cancel_event=cancel_event,
     )
     repaired["corpus_summary"] = summary
     repaired["corpus_summary_artifact"] = artifact_provenance(
@@ -11792,7 +11814,9 @@ def repair_index_artifacts(
     *,
     limit: int | None = None,
     phase_callback=None,
+    cancel_event=None,
 ) -> tuple[dict, bool, str]:
+    raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
     index_id = index.get("id", "")
     if not index_id:
         raise SystemExit("index has no id")
@@ -11806,11 +11830,12 @@ def repair_index_artifacts(
     repaired = dict(index)
     changes = []
     if index_needs_summary_provenance(repaired):
+        raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
         repaired = index_with_current_summary_provenance(repaired)
         changes.append("summary provenance")
     if index_needs_signal_enrichment(repaired) or quality_gate_check_failed(before, "task/date evidence preserved"):
-        repaired = index_with_current_signals(repaired)
-        repaired = index_with_current_corpus_profile(repaired)
+        repaired = index_with_current_signals(repaired, cancel_event=cancel_event)
+        repaired = index_with_current_corpus_profile(repaired, cancel_event=cancel_event)
         changes.append("structured signals")
 
     max_repairs = BACKGROUND_INDEX_REPAIR_LIMIT if limit is None else max(0, int(limit))
@@ -11818,15 +11843,17 @@ def repair_index_artifacts(
     affected_files: set[str] = set()
     repaired_files = []
     for file_item in repaired.get("files", []) or []:
+        raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
         new_file = dict(file_item)
         new_chunks = []
         file_changed = False
         for chunk in file_item.get("chunks", []) or []:
+            raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
             reasons = chunk_repair_reasons(repaired, file_item, chunk)
             if reasons and repaired_chunks < max_repairs:
                 if phase_callback is not None:
                     phase_callback("bg-heavy: repairing index(model)")
-                new_chunk, label = repair_chunk_summary(repaired, file_item, chunk)
+                new_chunk, label = repair_chunk_summary(repaired, file_item, chunk, cancel_event=cancel_event)
                 new_chunks.append(new_chunk)
                 repaired_chunks += 1
                 file_changed = True
@@ -11844,7 +11871,7 @@ def repair_index_artifacts(
         if file_changed or file_repair_reasons(new_file):
             if phase_callback is not None:
                 phase_callback("bg-heavy: repairing index(model)")
-            new_file = repair_file_summary(new_file)
+            new_file = repair_file_summary(new_file, cancel_event=cancel_event)
             affected_files.add(str(file_item.get("path", "")))
             changes.append(f"file summary {file_item.get('path', '')}")
         repaired_files.append(new_file)
@@ -11856,11 +11883,11 @@ def repair_index_artifacts(
     ):
         if phase_callback is not None:
             phase_callback("bg-heavy: repairing index(model)")
-        repaired = repair_corpus_summary(repaired)
+        repaired = repair_corpus_summary(repaired, cancel_event=cancel_event)
         changes.append("corpus summary")
 
-    repaired = index_with_current_signals(repaired)
-    repaired = index_with_current_corpus_profile(repaired)
+    repaired = index_with_current_signals(repaired, cancel_event=cancel_event)
+    repaired = index_with_current_corpus_profile(repaired, cancel_event=cancel_event)
     after = index_quality_gate(repaired)
     if not changes:
         if before.get("status") == "pass":
@@ -11881,6 +11908,7 @@ def repair_index_artifacts(
     )
     repaired["repair_history"] = history
     repaired["repair_schema"] = "index-repair-v1"
+    raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
     atomic_write(index_path(index_id), json.dumps(repaired, ensure_ascii=False, indent=2) + "\n")
     return (
         repaired,
@@ -11889,12 +11917,13 @@ def repair_index_artifacts(
     )
 
 
-def repair_indexes_needing_quality(*, limit: int | None = None, quiet: bool = False, phase_callback=None) -> list[str]:
+def repair_indexes_needing_quality(*, limit: int | None = None, quiet: bool = False, phase_callback=None, cancel_event=None) -> list[str]:
     notes = []
     remaining = BACKGROUND_INDEX_REPAIR_LIMIT if limit is None else max(0, int(limit))
     if remaining <= 0:
         return notes
     for index in latest_indexes_by_family():
+        raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
         if remaining <= 0:
             break
         status, _warnings = index_staleness(index)
@@ -11911,13 +11940,17 @@ def repair_indexes_needing_quality(*, limit: int | None = None, quiet: bool = Fa
                         index,
                         limit=remaining,
                         phase_callback=phase_callback,
+                        cancel_event=cancel_event,
                     )
             else:
                 _repaired, changed, note = repair_index_artifacts(
                     index,
                     limit=remaining,
                     phase_callback=phase_callback,
+                    cancel_event=cancel_event,
                 )
+        except WorkPaused:
+            raise
         except Exception as exc:
             notes.append(f"index quality repair failed for {index_id}: {type(exc).__name__}: {exc}")
             continue
@@ -17857,7 +17890,7 @@ def background_study_step(
         ]
         if enrichment_candidates:
             set_phase("study: upgrading indexes", notes=notes)
-            notes.extend(upgrade_indexes_needing_artifacts(limit=max(1, enrich_limit)))
+            notes.extend(upgrade_indexes_needing_artifacts(limit=max(1, enrich_limit), cancel_event=cancel_event))
             catalog = write_context_catalog()
     heavy_notes = refresh_heavy_attached_indexes(
         conv,
@@ -17873,7 +17906,7 @@ def background_study_step(
         cleanup_candidates = index_cleanup_candidates()
         if cleanup_candidates:
             set_phase("bg-light: cleanup(cpu)", notes=notes)
-            cleanup_report = cleanup_superseded_stale_indexes(limit=cleanup_limit)
+            cleanup_report = cleanup_superseded_stale_indexes(limit=cleanup_limit, cancel_event=cancel_event)
             deleted_count = len(cleanup_report.get("deleted", []) or [])
             blocked_count = len(cleanup_report.get("blocked", []) or [])
             if deleted_count:
@@ -17909,6 +17942,7 @@ def background_study_step(
                 limit=repair_limit,
                 quiet=True,
                 phase_callback=lambda phase: set_phase(phase, notes=notes),
+                cancel_event=cancel_event,
             )
             if repair_notes:
                 notes.extend(repair_notes)
@@ -17937,7 +17971,9 @@ def background_study_step(
     if env_flag("MOTOKO_BACKGROUND_PROFILE", False) and profile_refresh_due(catalog):
         set_phase("study: profile", notes=notes)
         try:
-            refresh_profile_dossier()
+            refresh_profile_dossier(cancel_event=cancel_event)
+        except WorkPaused:
+            raise
         except SystemExit as exc:
             notes.append(f"profile refresh skipped: {exc}")
         except Exception as exc:
@@ -20389,11 +20425,14 @@ def index_report_command_request(text: str, conv: dict):
     if primary == "/index-repair":
         selector = body or None
 
-        def run_repair() -> str:
-            _repaired, _changed, note = repair_index_artifacts(load_index(selector))
+        def run_repair(cancel_event=None) -> str:
+            _repaired, _changed, note = repair_index_artifacts(
+                load_index(selector),
+                cancel_event=cancel_event,
+            )
             return note
 
-        return "/index-repair", run_repair
+        return foreground_command_request("Repairing index artifacts...", run_repair)
     if primary == "/tasks":
         return "/tasks", lambda: format_task_candidates_from_chat(conv, body)
     return None
@@ -23967,17 +24006,21 @@ def command_indexes(_args) -> None:
 
 
 def command_index_enrich(args) -> None:
-    if args.all:
-        limit = None if args.limit is None else max(0, args.limit)
-        notes = enrich_indexes_needing_signals(limit=limit)
-        if notes:
-            print("\n".join(notes))
-        else:
-            print("no indexes needed artifact upgrades")
-        return
-    index = load_index(args.index)
-    _enriched, changed, note = enrich_index_signals(index)
-    print(note if changed else note)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during index-enrich command") as cancel_event:
+            if args.all:
+                limit = None if args.limit is None else max(0, args.limit)
+                notes = enrich_indexes_needing_signals(limit=limit, cancel_event=cancel_event)
+                if notes:
+                    print("\n".join(notes))
+                else:
+                    print("no indexes needed artifact upgrades")
+                return
+            index = load_index(args.index)
+            _enriched, changed, note = enrich_index_signals(index, cancel_event=cancel_event)
+            print(note if changed else note)
+    except WorkPaused as exc:
+        print(exc)
 
 
 def command_tasks(args) -> None:
@@ -24019,31 +24062,39 @@ def command_corpus_profile(args) -> None:
 
 
 def command_index_upgrade(args) -> None:
-    if args.all:
-        limit = None if args.limit is None else max(0, args.limit)
-        notes = upgrade_indexes_needing_artifacts(limit=limit)
-        if notes:
-            print("\n".join(notes))
-        else:
-            print("no indexes needed artifact upgrades")
-        return
-    index = load_index(args.index)
-    _upgraded, _changed, note = upgrade_index_artifacts(index)
-    print(note)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during index-upgrade command") as cancel_event:
+            if args.all:
+                limit = None if args.limit is None else max(0, args.limit)
+                notes = upgrade_indexes_needing_artifacts(limit=limit, cancel_event=cancel_event)
+                if notes:
+                    print("\n".join(notes))
+                else:
+                    print("no indexes needed artifact upgrades")
+                return
+            index = load_index(args.index)
+            _upgraded, _changed, note = upgrade_index_artifacts(index, cancel_event=cancel_event)
+            print(note)
+    except WorkPaused as exc:
+        print(exc)
 
 
 def command_index_repair(args) -> None:
     limit = None if args.limit is None else max(0, args.limit)
-    if args.all:
-        notes = repair_indexes_needing_quality(limit=limit)
-        if notes:
-            print("\n".join(notes))
-        else:
-            print("no indexes needed quality repair")
-        return
-    index = load_index(args.index)
-    _repaired, _changed, note = repair_index_artifacts(index, limit=limit)
-    print(note)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during index-repair command") as cancel_event:
+            if args.all:
+                notes = repair_indexes_needing_quality(limit=limit, cancel_event=cancel_event)
+                if notes:
+                    print("\n".join(notes))
+                else:
+                    print("no indexes needed quality repair")
+                return
+            index = load_index(args.index)
+            _repaired, _changed, note = repair_index_artifacts(index, limit=limit, cancel_event=cancel_event)
+            print(note)
+    except WorkPaused as exc:
+        print(exc)
 
 
 def command_index_quality(args) -> None:
@@ -24627,7 +24678,12 @@ def command_profile(args) -> None:
     if args.profile_command in (None, "show"):
         print_profile()
     elif args.profile_command == "refresh":
-        profile = refresh_profile_dossier()
+        try:
+            with foreground_cancel_scope("keyboard interrupt during profile refresh command") as cancel_event:
+                profile = refresh_profile_dossier(cancel_event=cancel_event)
+        except WorkPaused as exc:
+            print(exc)
+            return
         print(f"profile refreshed: {profile.get('updated', '')}")
     elif args.profile_command == "path":
         print(profile_path())
