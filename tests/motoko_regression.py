@@ -28,6 +28,8 @@ if str(REPO_ROOT) not in sys.path:
 from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
+    delete_index_snapshot_artifacts as delete_index_snapshot_artifacts_core,
+    delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
     format_source_lifecycle_report as format_source_lifecycle_report_core,
     index_artifact_dependency_counts as index_artifact_dependency_counts_core,
     json_matching_source_paths as json_matching_source_paths_core,
@@ -9274,6 +9276,24 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
             ],
             load_json=load_json,
         ) == {"vector_store": 1, "missing_kind": 0}
+        deletion_dir = root / "delete-json"
+        deletion_dir.mkdir()
+        (deletion_dir / "drop.json").write_text(
+            json.dumps({"id": "drop", "source_index": "old-index"}) + "\n",
+            encoding="utf-8",
+        )
+        (deletion_dir / "keep.json").write_text(
+            json.dumps({"id": "keep", "source_index": "new-index"}) + "\n",
+            encoding="utf-8",
+        )
+        assert delete_json_artifacts_referencing_index_core(
+            deletion_dir,
+            "old-index",
+            load_json=load_json,
+            unlink_path=lambda path: path.unlink(),
+        ) == 1
+        assert not (deletion_dir / "drop.json").exists()
+        assert (deletion_dir / "keep.json").exists()
 
         records = collect_source_lifecycle_artifact_records_core(
             index_id="old-index",
@@ -9303,21 +9323,66 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
                 }
             ],
         )
-    assert [item["artifact_kind"] for item in records] == [
-        "vector_store",
-        "profile_dossier",
-        "response_feedback",
-    ]
-    assert records[0]["artifact_id"] == "vector-store"
-    assert records[0]["cleanup_policy"] == "delete-derived"
-    assert records[0]["source_index_ids"] == ["old-index"]
-    assert records[0]["source_paths"] == ["/tmp/docs/a.org"]
-    assert records[1]["artifact_id"] == "profile"
-    assert records[1]["source_index_ids"] == ["old-index"]
-    assert records[2]["artifact_id"] == "feedback"
-    assert records[2]["row_count"] == 1
-    assert records[2]["source_paths"] == ["/tmp/docs/a.org"]
-    assert all(item["bytes_estimate"] > 0 for item in records)
+        assert [item["artifact_kind"] for item in records] == [
+            "vector_store",
+            "profile_dossier",
+            "response_feedback",
+        ]
+        assert records[0]["artifact_id"] == "vector-store"
+        assert records[0]["cleanup_policy"] == "delete-derived"
+        assert records[0]["source_index_ids"] == ["old-index"]
+        assert records[0]["source_paths"] == ["/tmp/docs/a.org"]
+        assert records[1]["artifact_id"] == "profile"
+        assert records[1]["source_index_ids"] == ["old-index"]
+        assert records[2]["artifact_id"] == "feedback"
+        assert records[2]["row_count"] == 1
+        assert records[2]["source_paths"] == ["/tmp/docs/a.org"]
+        assert all(item["bytes_estimate"] > 0 for item in records)
+
+        index_file = root / "old-index.json"
+        progress_file = root / "old-index.progress.json"
+        partial_file = root / "old-index.partial.json"
+        chunk_dir = root / "old-index.chunks"
+        chunk_dir.mkdir()
+        (chunk_dir / "1.txt").write_text("chunk text", encoding="utf-8")
+        for path in [index_file, progress_file, partial_file]:
+            path.write_text(json.dumps({"id": path.stem}) + "\n", encoding="utf-8")
+        derived_dir = root / "derived"
+        derived_dir.mkdir()
+        (derived_dir / "derived.json").write_text(
+            json.dumps({"id": "derived", "source_index": "old-index"}) + "\n",
+            encoding="utf-8",
+        )
+        (derived_dir / "unrelated.json").write_text(
+            json.dumps({"id": "unrelated", "source_index": "other-index"}) + "\n",
+            encoding="utf-8",
+        )
+
+        deletion_report = delete_index_snapshot_artifacts_core(
+            {"id": "old-index"},
+            index_path=index_file,
+            progress_path=progress_file,
+            partial_path=partial_file,
+            chunk_dir=chunk_dir,
+            json_artifact_dirs=[{"path": derived_dir, "report_key": "derived_deleted"}],
+            load_json=load_json,
+            path_size=lambda path: path.stat().st_size,
+            tree_size=lambda path: sum(item.stat().st_size for item in path.rglob("*") if item.is_file()),
+            unlink_path=lambda path: path.unlink(),
+            remove_tree=lambda path: shutil.rmtree(path, ignore_errors=True),
+        )
+        assert deletion_report["index_deleted"] is True
+        assert deletion_report["progress_deleted"] is True
+        assert deletion_report["partial_deleted"] is True
+        assert deletion_report["chunk_dir_deleted"] is True
+        assert deletion_report["derived_deleted"] == 1
+        assert deletion_report["bytes"] > 0
+        assert not index_file.exists()
+        assert not progress_file.exists()
+        assert not partial_file.exists()
+        assert not chunk_dir.exists()
+        assert not (derived_dir / "derived.json").exists()
+        assert (derived_dir / "unrelated.json").exists()
 
     index = {
         "id": "old-index",

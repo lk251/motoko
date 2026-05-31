@@ -1566,6 +1566,12 @@ Motoko self-code checkpoint, 2026-05-31:
   compatibility, migration obligations, and source-reprocessing boundaries
   should be visible as deterministic code facts before any model proposes a
   schema or lifecycle change.
+- Artifact lifecycle ownership has continued moving out of the root facade:
+  `motoko_core.artifact_lifecycle` now owns source-lifecycle artifact
+  scanning, index dependency counting, JSON artifact deletion, and the
+  superseded index snapshot deletion report shape. The root executable still
+  supplies explicit state paths and filesystem callbacks, preserving the
+  security boundary while reducing policy spread.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

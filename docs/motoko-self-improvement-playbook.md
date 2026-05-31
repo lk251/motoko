@@ -179,6 +179,9 @@ fresh evidence shows a better target:
    scanning, family-specific rebuild decisions, and cleanup/apply orchestration
    into `motoko_core.artifact_lifecycle` with injected filesystem callbacks,
    tests, and conservative manual-review handling for human-authored state.
+   Current progress: source-lifecycle artifact scanning, index dependency
+   counting, JSON artifact deletion, and superseded index snapshot deletion
+   reports now live in the lifecycle service.
 2. Add finer cooperative cancellation checkpoints for long foreground study,
    index, vector, dossier, and report operations. The job supervisor exists;
    the remaining work is making the long functions yield durable stop/pause

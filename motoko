@@ -451,6 +451,7 @@ from motoko_core.runtime import (  # noqa: E402
 from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
+    delete_index_snapshot_artifacts,
     format_source_lifecycle_report,
     index_artifact_dependency_counts,
     json_paths_referencing_index,
@@ -12294,23 +12295,6 @@ def json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> 
     return json_paths_referencing_index(directory, index_id, load_json=safe_load_json)
 
 
-def delete_json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> int:
-    removed = 0
-    for path in json_artifacts_referencing_index(directory, index_id):
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-            removed += 1
-    return removed
-
-
-def stores_referencing_index(directory: pathlib.Path, index_id: str) -> list[pathlib.Path]:
-    return json_artifacts_referencing_index(directory, index_id)
-
-
-def vector_progress_referencing_index(index_id: str) -> list[pathlib.Path]:
-    return json_artifacts_referencing_index(vector_progress_dir(), index_id)
-
-
 def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
     return index_artifact_dependency_counts(
         index_id,
@@ -12412,58 +12396,30 @@ def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:
 
 def delete_index_snapshot(index: dict) -> dict:
     index_id = str(index.get("id", "")).strip()
-    report = {
-        "index": index_id,
-        "index_deleted": False,
-        "chunk_dir_deleted": False,
-        "progress_deleted": False,
-        "partial_deleted": False,
-        "vector_stores_deleted": 0,
-        "evidence_stores_deleted": 0,
-        "vector_progress_deleted": 0,
-        "topics_deleted": 0,
-        "dossiers_deleted": 0,
-        "retrieval_debug_deleted": 0,
-        "retrieval_evals_deleted": 0,
-        "feedback_evals_deleted": 0,
-        "action_evals_deleted": 0,
-        "model_evals_deleted": 0,
-        "bytes": path_size(index_path(index_id)) + tree_size(indexes_dir() / f"{index_id}.chunks"),
-    }
-    if not index_id:
-        return report
-    for key, path in [
-        ("index_deleted", index_path(index_id)),
-        ("progress_deleted", index_progress_path(index_id)),
-        ("partial_deleted", index_partial_path(index_id)),
-    ]:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-            report[key] = True
-    chunk_dir = indexes_dir() / f"{index_id}.chunks"
-    if chunk_dir.exists():
-        shutil.rmtree(chunk_dir, ignore_errors=True)
-        report["chunk_dir_deleted"] = True
-    for path in stores_referencing_index(vector_stores_dir(), index_id):
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-            report["vector_stores_deleted"] += 1
-    for path in stores_referencing_index(evidence_stores_dir(), index_id):
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-            report["evidence_stores_deleted"] += 1
-    for path in vector_progress_referencing_index(index_id):
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-            report["vector_progress_deleted"] += 1
-    report["topics_deleted"] = delete_json_artifacts_referencing_index(topics_dir(), index_id)
-    report["dossiers_deleted"] = delete_json_artifacts_referencing_index(dossiers_dir(), index_id)
-    report["retrieval_debug_deleted"] = delete_json_artifacts_referencing_index(retrieval_debug_dir(), index_id)
-    report["retrieval_evals_deleted"] = delete_json_artifacts_referencing_index(retrieval_evals_dir(), index_id)
-    report["feedback_evals_deleted"] = delete_json_artifacts_referencing_index(feedback_evals_dir(), index_id)
-    report["action_evals_deleted"] = delete_json_artifacts_referencing_index(action_evals_dir(), index_id)
-    report["model_evals_deleted"] = delete_json_artifacts_referencing_index(model_evals_dir(), index_id)
-    return report
+    return delete_index_snapshot_artifacts(
+        index,
+        index_path=index_path(index_id),
+        progress_path=index_progress_path(index_id),
+        partial_path=index_partial_path(index_id),
+        chunk_dir=indexes_dir() / f"{index_id}.chunks",
+        json_artifact_dirs=[
+            {"path": vector_stores_dir(), "report_key": "vector_stores_deleted"},
+            {"path": evidence_stores_dir(), "report_key": "evidence_stores_deleted"},
+            {"path": vector_progress_dir(), "report_key": "vector_progress_deleted"},
+            {"path": topics_dir(), "report_key": "topics_deleted"},
+            {"path": dossiers_dir(), "report_key": "dossiers_deleted"},
+            {"path": retrieval_debug_dir(), "report_key": "retrieval_debug_deleted"},
+            {"path": retrieval_evals_dir(), "report_key": "retrieval_evals_deleted"},
+            {"path": feedback_evals_dir(), "report_key": "feedback_evals_deleted"},
+            {"path": action_evals_dir(), "report_key": "action_evals_deleted"},
+            {"path": model_evals_dir(), "report_key": "model_evals_deleted"},
+        ],
+        load_json=safe_load_json,
+        path_size=path_size,
+        tree_size=tree_size,
+        unlink_path=lambda path: path.unlink(),
+        remove_tree=lambda path: shutil.rmtree(path, ignore_errors=True),
+    )
 
 
 def invalidate_context_catalog_after_cleanup() -> None:

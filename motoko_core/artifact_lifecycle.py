@@ -166,6 +166,25 @@ def json_paths_referencing_index(
     return rows
 
 
+def delete_json_artifacts_referencing_index(
+    directory: str | pathlib.Path,
+    index_id: str,
+    *,
+    load_json: Callable[[pathlib.Path], object | None],
+    unlink_path: Callable[[pathlib.Path], None],
+) -> int:
+    """Delete JSON artifact files in a directory that reference an index id."""
+
+    removed = 0
+    for path in json_paths_referencing_index(directory, index_id, load_json=load_json):
+        try:
+            unlink_path(path)
+        except FileNotFoundError:
+            continue
+        removed += 1
+    return removed
+
+
 def index_artifact_dependency_counts(
     index_id: str,
     artifact_targets: list[dict],
@@ -232,6 +251,84 @@ def _path_size(path: pathlib.Path, path_size: Callable[[pathlib.Path], int] | No
         return int(path_size(path) or 0)
     except OSError:
         return 0
+
+
+def _tree_size(path: pathlib.Path, tree_size: Callable[[pathlib.Path], int] | None) -> int:
+    if tree_size is None:
+        return 0
+    try:
+        return int(tree_size(path) or 0)
+    except OSError:
+        return 0
+
+
+def delete_index_snapshot_artifacts(
+    index: dict,
+    *,
+    index_path: str | pathlib.Path,
+    progress_path: str | pathlib.Path,
+    partial_path: str | pathlib.Path,
+    chunk_dir: str | pathlib.Path,
+    json_artifact_dirs: list[dict],
+    load_json: Callable[[pathlib.Path], object | None],
+    unlink_path: Callable[[pathlib.Path], None],
+    remove_tree: Callable[[pathlib.Path], None],
+    path_size: Callable[[pathlib.Path], int] | None = None,
+    tree_size: Callable[[pathlib.Path], int] | None = None,
+) -> dict:
+    """Delete a superseded index snapshot and derived JSON artifacts.
+
+    Callers provide concrete paths and filesystem callbacks; this service owns
+    the lifecycle report shape and the family-wise deletion loop.
+    """
+
+    index_id = str(index.get("id", "")).strip()
+    index_path = pathlib.Path(index_path)
+    progress_path = pathlib.Path(progress_path)
+    partial_path = pathlib.Path(partial_path)
+    chunk_dir = pathlib.Path(chunk_dir)
+    report = {
+        "index": index_id,
+        "index_deleted": False,
+        "chunk_dir_deleted": False,
+        "progress_deleted": False,
+        "partial_deleted": False,
+        "bytes": _path_size(index_path, path_size) + _tree_size(chunk_dir, tree_size),
+    }
+    for target in json_artifact_dirs:
+        report_key = str(target.get("report_key", "")).strip()
+        if report_key:
+            report[report_key] = 0
+    if not index_id:
+        return report
+
+    for key, path in [
+        ("index_deleted", index_path),
+        ("progress_deleted", progress_path),
+        ("partial_deleted", partial_path),
+    ]:
+        try:
+            unlink_path(path)
+        except FileNotFoundError:
+            continue
+        report[key] = True
+
+    if chunk_dir.exists():
+        remove_tree(chunk_dir)
+        report["chunk_dir_deleted"] = True
+
+    for target in json_artifact_dirs:
+        report_key = str(target.get("report_key", "")).strip()
+        path = target.get("path", "")
+        if not report_key or not path:
+            continue
+        report[report_key] = delete_json_artifacts_referencing_index(
+            path,
+            index_id,
+            load_json=load_json,
+            unlink_path=unlink_path,
+        )
+    return report
 
 
 def json_artifact_records_for_source_lifecycle(
