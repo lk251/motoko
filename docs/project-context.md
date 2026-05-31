@@ -474,6 +474,11 @@ Current sequencing notes:
   embedding route/model/dimensions/input policy still match. If those keys
   change, discard the partial vector progress and rebuild from source/index
   material.
+- Source lifecycle cleanup should distinguish changed sources from detached
+  sources. Deleted or newly ignored source paths may be cleaned only after a
+  fresh replacement index no longer references them. Changed source paths may
+  be cleaned after a fresh replacement index includes the reprocessed paths,
+  because the replacement proves source reprocessing happened.
 - User feedback should accumulate as private per-realm evaluation data. Store
   ratings and notes under the active user's Motoko state, keep them out of the
   conversation transcript, expose `motoko feedback-eval` as the inspectable

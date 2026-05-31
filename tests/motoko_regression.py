@@ -43,6 +43,8 @@ from motoko_core.artifact_lifecycle import (
     json_references_index as json_references_index_core,
     source_artifact_record as source_artifact_record_core,
     source_lifecycle_affected_paths as source_lifecycle_affected_paths_core,
+    source_lifecycle_path_variants as source_lifecycle_path_variants_core,
+    source_lifecycle_paths_by_status as source_lifecycle_paths_by_status_core,
     source_lifecycle_json_dir_specs as source_lifecycle_json_dir_specs_core,
     source_lifecycle_json_file_specs as source_lifecycle_json_file_specs_core,
     source_lifecycle_jsonl_specs as source_lifecycle_jsonl_specs_core,
@@ -9837,6 +9839,52 @@ def test_source_lifecycle_report_blocks_changed_sources(m):
             m.quiet_model = old_quiet_model
 
 
+def test_source_lifecycle_cleanup_allows_reprocessed_changed_sources(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "a.org"
+        source.write_text("* TODO [#A] Alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            old_index = m.build_document_index(str(docs))
+            old_index["created"] = "2026-05-01T00:00:00+00:00"
+            m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
+            m.atomic_write(
+                m.vector_store_path("vec-changed-source-lifecycle"),
+                json.dumps({"id": "vec-changed-source-lifecycle", "source_index": old_index["id"]}) + "\n",
+            )
+            m.atomic_write(
+                m.evidence_store_path("ev-changed-source-lifecycle"),
+                json.dumps({"id": "ev-changed-source-lifecycle", "source_index": old_index["id"]}) + "\n",
+            )
+
+            source.write_text("* TODO [#A] Alpha\nChanged body\n", encoding="utf-8")
+            new_index = m.build_document_index(str(docs))
+            new_index["created"] = "2026-05-02T00:00:00+00:00"
+            m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
+
+            report = m.source_lifecycle_report_for_index(old_index)
+            plan = report["plan"]
+            assert plan["status"] == "cleanup-ready"
+            assert plan["apply_status"] == "ready"
+            assert plan["source_counts"]["changed"] == 1
+            assert plan["derived_artifact_count"] == 2
+            assert "includes reprocessed changed source" in report["replacement"]["reason"]
+
+            applied = m.source_lifecycle_report_for_index(old_index, apply=True, yes=True)
+            assert applied["applied"]["status"] == "deleted-superseded-index-snapshot"
+            assert not m.index_path(old_index["id"]).exists()
+            assert m.index_path(new_index["id"]).exists()
+            assert not m.vector_store_path("vec-changed-source-lifecycle").exists()
+            assert not m.evidence_store_path("ev-changed-source-lifecycle").exists()
+        finally:
+            m.quiet_model = old_quiet_model
+
+
 def test_artifact_lifecycle_family_specs_are_service_owned(m):
     dependency_specs = dependency_json_artifact_specs_core()
     assert {spec["artifact_kind"] for spec in dependency_specs} >= {
@@ -9894,6 +9942,17 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert "/tmp/docs/a.org" in source_lifecycle_affected_paths_core(
         [{"path": "/tmp/docs/a.org", "status": "ignored"}]
     )
+    assert "/tmp/docs/a.org" in source_lifecycle_path_variants_core("/tmp/docs/a.org")
+    grouped_paths = source_lifecycle_paths_by_status_core(
+        [
+            {"path": "/tmp/docs/a.org", "status": "changed"},
+            {"path": "/tmp/docs/b.org", "status": "ignored"},
+            {"path": "/tmp/docs/c.org", "status": "fresh"},
+        ]
+    )
+    assert "/tmp/docs/a.org" in grouped_paths["changed"]
+    assert "/tmp/docs/b.org" in grouped_paths["ignored"]
+    assert "fresh" not in grouped_paths
     cleanup_candidates = superseded_stale_index_candidates_core(
         [
             {"id": "old-a", "root": "/docs", "glob": "*.org", "created": "2026-05-01T00:00:00+00:00"},
@@ -10273,7 +10332,7 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
         summary=changed_summary,
         artifact_records=artifacts,
         replacement_index={"id": "new-index"},
-        replacement_ready=True,
+        replacement_ready=False,
         replacement_reason="replacement is fresh",
         apply=True,
         yes=True,
@@ -12763,6 +12822,7 @@ def main() -> int:
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
         test_source_lifecycle_report_blocks_changed_sources,
+        test_source_lifecycle_cleanup_allows_reprocessed_changed_sources,
         test_artifact_lifecycle_family_specs_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,

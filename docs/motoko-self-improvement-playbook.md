@@ -342,9 +342,12 @@ Current progress on this backlog:
 - Artifact lifecycle policy has moved another step into
   `motoko_core.artifact_lifecycle`: delete-derived families, manual-review
   families, single-file durable state families, and derived delete-report labels
-  now live in one service-owned declaration. Root code still resolves those
-  families to realm-local paths and performs filesystem mutation through
-  explicit callbacks.
+  now live in one service-owned declaration. Source lifecycle cleanup now
+  distinguishes deleted/ignored detached sources from changed sources that have
+  already been reprocessed into a fresh replacement index, so old derived
+  artifacts can be cleaned after reprocessing instead of staying permanently
+  blocked. Root code still resolves those families to realm-local paths and
+  performs filesystem mutation through explicit callbacks.
 
 Skill work that should usually happen before new code:
 

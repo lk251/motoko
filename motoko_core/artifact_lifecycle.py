@@ -404,20 +404,43 @@ def index_artifact_dependency_counts(
     return counts
 
 
+def source_lifecycle_path_variants(path_text: str) -> set[str]:
+    variants = set()
+    path_text = str(path_text or "").strip()
+    if not path_text:
+        return variants
+    variants.add(path_text)
+    try:
+        variants.add(str(pathlib.Path(path_text).expanduser().resolve()))
+    except OSError:
+        variants.add(str(pathlib.Path(path_text).expanduser()))
+    return variants
+
+
 def source_lifecycle_affected_paths(source_lifecycle: list[dict]) -> set[str]:
     paths = set()
     for item in source_lifecycle:
         if not isinstance(item, dict) or item.get("status") == "fresh":
             continue
+        paths.update(source_lifecycle_path_variants(str(item.get("path", ""))))
+    return paths
+
+
+def source_lifecycle_paths_by_status(source_lifecycle: list[dict]) -> dict[str, set[str]]:
+    """Return affected source path variants grouped by lifecycle status."""
+
+    rows: dict[str, set[str]] = collections.defaultdict(set)
+    for item in source_lifecycle:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status", "") or "").strip()
+        if not status or status == "fresh":
+            continue
         path_text = str(item.get("path", "")).strip()
         if not path_text:
             continue
-        paths.add(path_text)
-        try:
-            paths.add(str(pathlib.Path(path_text).expanduser().resolve()))
-        except OSError:
-            paths.add(str(pathlib.Path(path_text).expanduser()))
-    return paths
+        rows[status].update(source_lifecycle_path_variants(path_text))
+    return dict(rows)
 
 
 def index_file_path_keys(index: dict) -> set[str]:
@@ -871,7 +894,7 @@ def source_lifecycle_cleanup_plan(
         recommended_action = "keep-derived-artifacts"
         apply_status = "no-op"
         apply_reason = "all indexed sources are fresh"
-    elif counts.get("changed"):
+    elif counts.get("changed") and not replacement_ready:
         status = "needs-rebuild"
         recommended_action = "rebuild-index-and-refresh-derived-artifacts"
         apply_status = "blocked"

@@ -467,6 +467,8 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     source_lifecycle_json_dir_specs,
     source_lifecycle_json_file_specs,
     source_lifecycle_jsonl_specs,
+    source_lifecycle_path_variants,
+    source_lifecycle_paths_by_status,
     source_lifecycle_report,
     superseded_stale_index_candidates,
 )
@@ -12560,7 +12562,11 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False, c
     )
 
 
-def source_lifecycle_replacement(index: dict, source_paths: set[str]) -> tuple[dict | None, bool, str]:
+def source_lifecycle_replacement(
+    index: dict,
+    source_paths: set[str],
+    source_lifecycle: list[dict] | None = None,
+) -> tuple[dict | None, bool, str]:
     latest = latest_index_for_family(index, list_indexes())
     if latest is None or latest.get("id") == index.get("id"):
         return None, False, "no newer replacement index for this corpus family"
@@ -12569,9 +12575,32 @@ def source_lifecycle_replacement(index: dict, source_paths: set[str]) -> tuple[d
         warning = f": {'; '.join(latest_warnings[:2])}" if latest_warnings else ""
         return latest, False, f"replacement index is {latest_status}{warning}"
     replacement_paths = index_file_path_keys(latest)
-    still_attached = sorted(path for path in source_paths if path in replacement_paths)
+    by_status = source_lifecycle_paths_by_status(source_lifecycle or []) if source_lifecycle else {}
+    if by_status:
+        detached_paths = set(by_status.get("deleted", set())) | set(by_status.get("ignored", set()))
+        changed_paths = set(by_status.get("changed", set()))
+    else:
+        detached_paths = set(source_paths)
+        changed_paths = set()
+    still_attached = sorted(path for path in detached_paths if path in replacement_paths)
     if still_attached:
-        return latest, False, "replacement index still references detached source path(s)"
+        return latest, False, "replacement index still references deleted or ignored source path(s)"
+    missing_changed = []
+    if source_lifecycle:
+        for row in source_lifecycle:
+            if not isinstance(row, dict) or row.get("status") != "changed":
+                continue
+            path_text = str(row.get("path", "") or "").strip()
+            if path_text and not (source_lifecycle_path_variants(path_text) & replacement_paths):
+                missing_changed.append(path_text)
+    else:
+        missing_changed = sorted(path for path in changed_paths if path not in replacement_paths)
+    if missing_changed:
+        return latest, False, "replacement index does not include reprocessed changed source path(s)"
+    if changed_paths and detached_paths:
+        return latest, True, "replacement index is fresh, includes changed sources, and excludes detached source path(s)"
+    if changed_paths:
+        return latest, True, "replacement index is fresh and includes reprocessed changed source path(s)"
     return latest, True, "replacement index is fresh and does not reference detached source path(s)"
 
 
@@ -12592,7 +12621,11 @@ def source_lifecycle_report_for_index(
     source_paths = source_lifecycle_affected_paths(source_lifecycle)
     raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
     if source_lifecycle:
-        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(index, source_paths)
+        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(
+            index,
+            source_paths,
+            source_lifecycle,
+        )
     else:
         replacement, replacement_ready, replacement_reason = None, False, "all indexed sources are fresh"
     raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
@@ -12796,7 +12829,11 @@ def index_storage_audit() -> dict:
         source_lifecycle = summary.get("source_lifecycle", [])
         source_paths = source_lifecycle_affected_paths(source_lifecycle)
         records = source_lifecycle_artifact_records(str(index.get("id", "")), source_paths)
-        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(index, source_paths)
+        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(
+            index,
+            source_paths,
+            source_lifecycle,
+        )
         cleanup_plan = source_lifecycle_cleanup_plan(
             index_id=str(index.get("id", "")),
             source_lifecycle=source_lifecycle,
