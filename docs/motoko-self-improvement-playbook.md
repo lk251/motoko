@@ -273,6 +273,69 @@ this operational list:
    code validates, records provenance, asks for confirmation when required,
    and applies changes only through typed actions.
 
+## Motoko Repo Improvement Backlog
+
+Use this backlog when Motoko is asked to improve herself after a normal period
+of usage. It is ordered by likely value to intelligence, competence, and craft:
+
+1. Finish artifact lifecycle ownership. Keep moving stale-source detection,
+   rebuild decisions, vector/evidence/dossier invalidation, and conservative
+   cleanup into `motoko_core.artifact_lifecycle` instead of adding more
+   root-facade branches.
+2. Finish cooperative cancellation and durable interruption. The next target is
+   model-backed memory maintenance plus any remaining dossier/report operations
+   that can still block `/stop`, `/pause`, or clean shutdown.
+3. Improve always-fresh context behavior. When background refresh finishes while
+   a TUI session is open, the session should notice fresh indexes, evidence
+   stores, vectors, memories, and dossiers without needing a restart.
+4. Improve incremental vector and evidence refresh diagnostics. Status should
+   say whether a refresh is full, resumed, schema-forced, route-forced, or
+   source-change-only, with concise rows/ETA/progress rather than opaque
+   `vectorizing`.
+5. Tighten conversation persistence. Queued prompts, resumed empty chats,
+   feedback targeting, and deleted-chat artifact cleanup should have focused
+   regression coverage because they directly affect trust in daily use.
+6. Strengthen code intelligence only with deterministic facts that help
+   Motoko edit the right code: command-to-handler-to-test traces, schema
+   constants, artifact-family ownership, route/cancellation call paths, and
+   root-facade hotspots.
+7. Convert feedback into eval seeds. Positive and negative feedback should
+   propose private retrieval fixtures, prompt-packing fixtures, skill patches,
+   or regression tests; it must not silently mutate prompts, ranking, or skills.
+8. Improve Hermes-inspired skill lifecycle craft without importing broad
+   Hermes authority. Useful pieces are progressive disclosure, usage/view/patch
+   counts, pinned skills, recoverable archives, curator reports, support-file
+   organization, and "patch existing skill before creating a new one".
+9. Add a narrow Motoko self-maintenance skill bundle only if skill selection
+   gets noisy in practice. A bundle could load codebase, refactor, retrieval,
+   and agentic-boundary procedures together for Motoko repo work, but it should
+   stay opt-in so normal chats do not pay extra prompt cost.
+10. Use goal loops as review loops first. Good early loops inspect code,
+    retrieve context, run diagnostics, propose typed actions, and stop for
+    review. Mutating autonomous loops remain out of scope until the review loop
+    is boringly reliable.
+
+Skill work that should usually happen before new code:
+
+- Patch `motoko-codebase-maintainer` when code-map/code-query learns a better
+  way to find ownership, tests, schemas, migrations, or command handlers.
+- Patch `motoko-refactor-craft` after each successful service extraction with
+  the reusable recipe, risk, validation gate, and deployment soak note.
+- Patch `motoko-retrieval-maintainer` after each real retrieval failure with
+  the reusable diagnosis and fixture shape.
+- Patch `motoko-agentic-boundary-review` after each action/tool/goal-loop
+  issue with the exact authority check that would have caught it earlier.
+- Create a new skill only when the procedure is repeated, actionable, and not a
+  cleaner patch to one of the umbrella skills. If the durable value is examples
+  or transcripts, add a support file instead of bloating `SKILL.md`.
+
+Hermes Agent remains most useful here as a design reference for procedural
+memory rather than as an authority model. Keep the parts that fit Motoko:
+progressive skill loading, agent-managed skill suggestions, skill usage
+metadata, curator hygiene, and recoverable archives. Keep rejecting the parts
+that do not fit Motoko: broad terminal authority, cross-realm skill stores,
+hidden mutation, dependency-heavy runtime assumptions, and prompt-only security.
+
 ## Refactor Craft
 
 - Characterize behavior with tests before moving live orchestration.
