@@ -17125,12 +17125,15 @@ def context_item_from_dossier(dossier: dict) -> dict:
     }
 
 
-def ranked_index_chunks(index: dict, query: str) -> list[tuple[int, dict, dict, str]]:
+def ranked_index_chunks(index: dict, query: str, *, cancel_event=None) -> list[tuple[int, dict, dict, str]]:
+    raise_if_work_cancelled(cancel_event, "topic dossier interrupted by request", work_kind="topic")
     query_counts = token_counts(query)
     rows = []
     for file_item in index.get("files", []):
+        raise_if_work_cancelled(cancel_event, "topic dossier interrupted by request", work_kind="topic")
         file_signal_text = format_signal_summary(file_item.get("signals") or {}, limit=12)
         for chunk in file_item.get("chunks", []):
+            raise_if_work_cancelled(cancel_event, "topic dossier interrupted by request", work_kind="topic")
             content = read_chunk_content(index, chunk)
             chunk_signal_text = format_signal_summary(chunk.get("signals") or {}, limit=12)
             haystack = "\n".join(
@@ -17197,7 +17200,7 @@ def build_topic_dossier(
                 "warnings_at_build": warnings[:8],
             }
         )
-        for score, file_item, chunk, content in ranked_index_chunks(index, retrieval_query):
+        for score, file_item, chunk, content in ranked_index_chunks(index, retrieval_query, cancel_event=cancel_event):
             selected_rows.append((score, index, file_item, chunk, content))
 
     selected_rows.sort(key=lambda row: row[0], reverse=True)

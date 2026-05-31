@@ -1630,7 +1630,10 @@ Motoko self-code checkpoint, 2026-05-31:
   now receive cancel events through TUI and CLI paths, including
   `/retrieval-debug`, `/retrieval-preview`, `/vector-query`, `/evidence-query`,
   prompt context preparation, retrieval-service hybrid construction, and
-  span-level embedding/rerank selection. This is still not the final
+  span-level embedding/rerank selection. Topic dossier pre-model chunk ranking
+  now also checks the foreground cancel token before and during index scans, so
+  `/stop` no longer has to wait for ranking to finish before the first model
+  call. This is still not the final
   durable-job design; it is the next careful checkpoint toward making all
   visible foreground work interruptible without corrupting indexes, vectors,
   evidence stores, memories, or ledgers.

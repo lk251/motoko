@@ -9575,6 +9575,56 @@ def test_summarize_blocks_cancel_event_raises_work_paused(m):
         raise AssertionError("summarize_blocks should honor a pre-set cancel event")
 
 
+def test_topic_chunk_ranking_honors_cancel_event(m):
+    event = threading.Event()
+    event.set()
+    index = {
+        "id": "idx",
+        "files": [
+            {
+                "path": "/tmp/docs/a.org",
+                "chunks": [{"chunk": 1, "content": "* Alpha\nbody"}],
+            }
+        ],
+    }
+    try:
+        m.ranked_index_chunks(index, "alpha", cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "topic"
+    else:
+        raise AssertionError("topic chunk ranking should honor a pre-set cancel event")
+
+
+def test_topic_dossier_passes_cancel_event_to_chunk_ranking(m):
+    old_load_index = m.load_index
+    old_index_staleness = m.index_staleness
+    old_ranked_index_chunks = m.ranked_index_chunks
+    seen = {}
+    event = threading.Event()
+
+    def fake_ranked_index_chunks(index, query, *, cancel_event=None):
+        seen["cancel_event"] = cancel_event
+        raise m.WorkPaused("topic dossier interrupted by request", work_kind="topic")
+
+    try:
+        m.load_index = lambda _index_id: {"id": "idx", "name": "docs", "root": "/tmp/docs", "files": []}
+        m.index_staleness = lambda _index: ("fresh", [])
+        m.ranked_index_chunks = fake_ranked_index_chunks
+        try:
+            m.build_topic_dossier(["idx"], "alpha", cancel_event=event)
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "topic"
+        else:
+            raise AssertionError("topic dossier should propagate ranking cancellation")
+    finally:
+        m.load_index = old_load_index
+        m.index_staleness = old_index_staleness
+        m.ranked_index_chunks = old_ranked_index_chunks
+
+    assert seen["cancel_event"] is event
+
+
 def test_index_cancel_event_writes_paused_partial(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -13203,6 +13253,8 @@ def main() -> int:
         test_index_model_residency_defer_is_resumable_not_failed,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
         test_summarize_blocks_cancel_event_raises_work_paused,
+        test_topic_chunk_ranking_honors_cancel_event,
+        test_topic_dossier_passes_cancel_event_to_chunk_ranking,
         test_index_cancel_event_writes_paused_partial,
         test_vector_build_cancel_event_stops_before_work,
         test_tui_stop_requests_report_job_cancel,

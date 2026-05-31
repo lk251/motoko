@@ -145,8 +145,10 @@ Motoko repo itself, treat this as the current prepared queue:
    services instead of adding more root-facade special cases.
 5. Add finer cancellation checkpoints for long foreground study, index, vector,
    dossier, and profile operations. The job supervisor is in place, and
-   `/profile-refresh` now forwards foreground cancellation; the remaining craft
-   work is narrowing the long functions so `/stop` and pause feel immediate.
+   `/profile-refresh` now forwards foreground cancellation. Topic dossier
+   pre-model chunk ranking is also cancellable before the first model call; the
+   remaining craft work is narrowing the long functions so `/stop` and pause
+   feel immediate.
 6. Improve curator quality in a Hermes-inspired but Motoko-shaped way:
    usage/patch metadata, loaded-skill patch preference, support-file
    organization, consolidation review notes, and feedback-derived patch
@@ -444,6 +446,31 @@ Prepared improvement list for Motoko's own code work:
   packing check; it does not silently mutate policy.
 - Leave a gate behind every improvement: a focused regression, `self-eval`,
   `action-eval`, retrieval/vector eval, or a documented manual soak check.
+
+Operational packet for future Motoko self-improvement sessions:
+
+1. Inspect first: run `motoko code-map`, then focused `motoko code-query`
+   searches for the command, handler, schema, service module, tests, migration
+   constants, artifact family, and cancellation path involved in the requested
+   change.
+2. Load the narrowest existing procedure: prefer
+   `motoko-codebase-maintainer`, `motoko-refactor-craft`,
+   `motoko-retrieval-maintainer`, or `motoko-agentic-boundary-review` before
+   creating a new skill.
+3. Patch skills only when the lesson is reusable. If the durable value is an
+   example, transcript, checklist, or validation recipe, write a support file
+   instead of expanding `SKILL.md`.
+4. Keep Hermes-inspired ideas in Motoko shape: progressive disclosure,
+   usage/view/patch metadata, curator review, pinned/recoverable archive states,
+   skill-support organization, and patch-first suggestions are valuable. Broad
+   terminal authority, cross-realm skill stores, hidden mutation, and
+   prompt-only security are not.
+5. For every code change, preserve the derived-artifact contract: old artifacts
+   need a deterministic migration, visible source reprocessing, or an explicit
+   documented reason why reuse is unsafe.
+6. For every behavior change, leave a gate: focused regression, deterministic
+   eval, action-eval, self-eval, retrieval/vector eval, or a documented soak
+   check tied to the exact failure class.
 
 ## Refactor Craft
 
