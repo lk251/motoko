@@ -6514,6 +6514,75 @@ def test_tui_blocking_command_records_foreground_job(m):
     assert rows[0]["label"] == "Studying context..."
 
 
+def test_cli_heavy_commands_pass_cancel_events(m):
+    seen = {}
+    old_build_document_index = m.build_document_index
+    old_refresh_vector_stores = m.refresh_vector_stores
+    old_study_query = m.study_query
+    old_load_conversation = m.load_conversation
+
+    def fake_build_document_index(path, pattern, name=None, max_derived_bytes=None, *, cancel_event=None):
+        seen["index"] = cancel_event
+        return {"id": "idx", "name": name or "docs", "root": path, "glob": pattern}
+
+    def fake_refresh_vector_stores(**kwargs):
+        seen["vector_refresh"] = kwargs.get("cancel_event")
+        return {
+            "status": "no-build",
+            "built": 0,
+            "method": kwargs.get("method", ""),
+            "created": "2026-05-31T00:00:00+00:00",
+            "items": [],
+        }
+
+    def fake_study_query(conv, query, *, focus=None, cancel_event=None):
+        seen["study"] = cancel_event
+        return "study ok"
+
+    try:
+        m.build_document_index = fake_build_document_index
+        m.refresh_vector_stores = fake_refresh_vector_stores
+        m.study_query = fake_study_query
+        m.load_conversation = lambda _selector: {"id": "conv", "title": "Conversation", "messages": []}
+        with contextlib.redirect_stdout(io.StringIO()):
+            m.command_index(
+                m.argparse.Namespace(
+                    plan=False,
+                    path="/tmp/docs",
+                    glob=m.AUTO_INDEX_GLOB,
+                    name="docs",
+                    max_derived_bytes=None,
+                )
+            )
+            m.command_vector_refresh(
+                m.argparse.Namespace(
+                    index=None,
+                    force=False,
+                    limit=1,
+                    method=m.EMBEDDING_VECTOR_METHOD,
+                    max_chunks=None,
+                    json=False,
+                )
+            )
+            m.command_study(
+                m.argparse.Namespace(
+                    query=["find", "context"],
+                    focus=None,
+                    conversation="conv",
+                    title=None,
+                )
+            )
+    finally:
+        m.build_document_index = old_build_document_index
+        m.refresh_vector_stores = old_refresh_vector_stores
+        m.study_query = old_study_query
+        m.load_conversation = old_load_conversation
+
+    assert isinstance(seen["index"], threading.Event)
+    assert isinstance(seen["vector_refresh"], threading.Event)
+    assert isinstance(seen["study"], threading.Event)
+
+
 def test_tui_stop_closes_active_model_request(m):
     class Closeable:
         def __init__(self):
@@ -11857,6 +11926,7 @@ def main() -> int:
         test_tui_stop_during_preparing_cancels_before_model_call,
         test_tui_clear_queue_discards_pending_prompts,
         test_tui_blocking_command_records_foreground_job,
+        test_cli_heavy_commands_pass_cancel_events,
         test_tui_stop_closes_active_model_request,
         test_tui_ctrl_c_stops_active_answer_without_exiting,
         test_response_feedback_is_private_and_does_not_pollute_conversation,

@@ -1281,6 +1281,11 @@ Current progress on this stretch:
   supervisor while they run. Remaining foreground work is finer cooperative
   cancellation checkpoints for study/index/vector operations after those APIs
   narrow further.
+- Progress: line-mode foreground study/index/vector/topic/dossier commands now
+  create a cooperative cancel event and convert `Ctrl+C` into a pause request
+  that long operations can observe at durable checkpoints. TUI blocking work
+  already used this shape; this extends the same cancellation path to direct
+  CLI commands.
 
 Completion criteria for this next stretch:
 

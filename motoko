@@ -1641,6 +1641,29 @@ def raise_if_work_cancelled(
     raise WorkPaused(message, work_id=work_id, work_kind=work_kind)
 
 
+@contextlib.contextmanager
+def foreground_cancel_scope(reason: str):
+    cancel_event = threading.Event()
+    restore_signal = threading.current_thread() is threading.main_thread()
+    previous_handler = None
+
+    def request_interrupt(_signum, _frame) -> None:
+        cancel_event.set()
+        request_work_pause(reason)
+        print("\ninterrupt requested; stopping at a durable checkpoint...", file=sys.stderr, flush=True)
+
+    if restore_signal:
+        previous_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, request_interrupt)
+    try:
+        yield cancel_event
+    finally:
+        if restore_signal and previous_handler is not None:
+            signal.signal(signal.SIGINT, previous_handler)
+        if cancel_event.is_set():
+            clear_work_pause_request()
+
+
 def model_call_cancelled(exc: BaseException) -> bool:
     return isinstance(exc, RuntimeError) and str(exc) == "__motoko_stopped__"
 
@@ -23976,7 +23999,14 @@ def command_index(args) -> None:
         print_index_plan(args.path, args.glob)
         return
     try:
-        index = build_document_index(args.path, args.glob, args.name, args.max_derived_bytes)
+        with foreground_cancel_scope("keyboard interrupt during index command") as cancel_event:
+            index = build_document_index(
+                args.path,
+                args.glob,
+                args.name,
+                args.max_derived_bytes,
+                cancel_event=cancel_event,
+            )
     except WorkPaused as exc:
         print(exc)
         return
@@ -23985,7 +24015,8 @@ def command_index(args) -> None:
 
 def command_index_resume(args) -> None:
     try:
-        index = resume_document_index(args.index)
+        with foreground_cancel_scope("keyboard interrupt during index-resume command") as cancel_event:
+            index = resume_document_index(args.index, cancel_event=cancel_event)
     except WorkPaused as exc:
         print(exc)
         return
@@ -23994,7 +24025,8 @@ def command_index_resume(args) -> None:
 
 def command_resume_work(args) -> None:
     try:
-        index = resume_partial_index(args.index)
+        with foreground_cancel_scope("keyboard interrupt during resume-work command") as cancel_event:
+            index = resume_partial_index(args.index, cancel_event=cancel_event)
     except WorkPaused as exc:
         print(exc)
         return
@@ -24205,7 +24237,12 @@ def command_vector_plan(args) -> None:
 
 
 def command_vector_build(args) -> None:
-    store = build_vector_store(args.index, dims=args.dims, method=args.method)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during vector-build command") as cancel_event:
+            store = build_vector_store(args.index, dims=args.dims, method=args.method, cancel_event=cancel_event)
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(store, ensure_ascii=False, indent=2))
     else:
@@ -24213,13 +24250,19 @@ def command_vector_build(args) -> None:
 
 
 def command_vector_refresh(args) -> None:
-    report = refresh_vector_stores(
-        index_id=args.index,
-        force=args.force,
-        limit=args.limit,
-        method=args.method,
-        max_chunks=args.max_chunks,
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during vector-refresh command") as cancel_event:
+            report = refresh_vector_stores(
+                index_id=args.index,
+                force=args.force,
+                limit=args.limit,
+                method=args.method,
+                max_chunks=args.max_chunks,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -24301,22 +24344,34 @@ def command_indexes_text() -> None:
 
 
 def command_topic(args) -> None:
-    topic = build_topic_dossier(
-        [args.index],
-        " ".join(args.query),
-        name=args.name,
-        max_chunks=args.chunks,
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during topic command") as cancel_event:
+            topic = build_topic_dossier(
+                [args.index],
+                " ".join(args.query),
+                name=args.name,
+                max_chunks=args.chunks,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
     print(f"{topic['id']}  {topic.get('name', '')}  {topic.get('query', '')}")
 
 
 def command_deepen(args) -> None:
-    topic = build_topic_dossier(
-        [args.index],
-        " ".join(args.query),
-        name=args.name,
-        max_chunks=TOPIC_MAX_CHUNKS,
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during deepen command") as cancel_event:
+            topic = build_topic_dossier(
+                [args.index],
+                " ".join(args.query),
+                name=args.name,
+                max_chunks=TOPIC_MAX_CHUNKS,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
     print(f"{topic['id']}  {topic.get('name', '')}  {topic.get('query', '')}")
 
 
@@ -24373,10 +24428,16 @@ def command_topic_show(args) -> None:
 
 
 def command_dossier(args) -> None:
-    dossier = build_memory_dossier(
-        " ".join(args.query),
-        name=args.name,
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during dossier command") as cancel_event:
+            dossier = build_memory_dossier(
+                " ".join(args.query),
+                name=args.name,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
     print(f"{dossier['id']}  {dossier.get('name', '')}  {dossier.get('query', '')}")
 
 
@@ -24387,7 +24448,12 @@ def command_study(args) -> None:
     else:
         conv = new_conversation(args.title or f"study: {slug_title(query)}")
         save_conversation(conv)
-    print(study_query(conv, query, focus=args.focus))
+    try:
+        with foreground_cancel_scope("keyboard interrupt during study command") as cancel_event:
+            print(study_query(conv, query, focus=args.focus, cancel_event=cancel_event))
+    except WorkPaused as exc:
+        print(exc)
+        return
     print(f"conversation: {conv.get('title', 'Untitled')} [{conv.get('id', '')}]")
 
 
