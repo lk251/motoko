@@ -8985,6 +8985,78 @@ def test_context_catalog_prefers_latest_index_per_family(m):
         assert [row["id"] for row in ranked] == ["new-index"]
 
 
+def test_prompt_context_uses_current_catalog_not_stale_catalog_file(m):
+    old_cwd = os.getcwd()
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            source = docs / "logbook.org"
+            source.write_text("* TODO Fresh catalog task\n", encoding="utf-8")
+            m.add_allowed_dir(str(docs))
+            os.chdir(docs)
+            stale_catalog = {
+                "updated": "2026-05-01T00:00:00+00:00",
+                "model": "old-model",
+                "endpoint": "old-endpoint",
+                "memory_count": 0,
+                "pinned_memory_count": 0,
+                "conversation_count": 0,
+                "indexes": [
+                    {
+                        "id": "old-index",
+                        "name": "docs",
+                        "root": str(docs.resolve()),
+                        "status": "fresh",
+                        "summary": "old catalog index",
+                    }
+                ],
+                "topics": [],
+                "dossiers": [],
+            }
+            m.atomic_write(m.context_catalog_path(), json.dumps(stale_catalog, ensure_ascii=False, indent=2) + "\n")
+            index = {
+                "id": "new-catalog-index",
+                "name": "docs",
+                "root": str(docs.resolve()),
+                "glob": m.AUTO_INDEX_GLOB,
+                "created": "2026-05-24T13:00:00+00:00",
+                "corpus_summary": "fresh catalog index",
+                "files": [
+                    {
+                        "path": str(source.resolve()),
+                        "source_fingerprint": m.source_fingerprint(source),
+                        "chunks": [],
+                    }
+                ],
+            }
+            m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+            conv = m.new_conversation("Catalog freshness")
+
+            package, values = m.build_prompt_context_package(conv, "logbook")
+
+            assert "new-catalog-index" in values["catalog_text"]
+            assert "old-index" not in values["catalog_text"]
+            catalog_source = next(source for source in package.sources if source.get("kind") == "context-catalog")
+            assert catalog_source["updated"] != stale_catalog["updated"]
+            saved_catalog = json.loads(m.context_catalog_path().read_text(encoding="utf-8"))
+            assert saved_catalog["indexes"][0]["id"] == "old-index"
+    finally:
+        os.chdir(old_cwd)
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
     old_cwd = os.getcwd()
     old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
@@ -12750,6 +12822,7 @@ def main() -> int:
         test_list_indexes_ignores_progress_files,
         test_superseded_partials_do_not_look_unfinished,
         test_context_catalog_prefers_latest_index_per_family,
+        test_prompt_context_uses_current_catalog_not_stale_catalog_file,
         test_index_resume_after_model_timeout,
         test_index_model_residency_defer_is_resumable_not_failed,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,

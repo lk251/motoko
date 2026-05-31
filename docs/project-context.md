@@ -207,7 +207,8 @@ Current UI direction:
   advance to a newer same-family index, recover from a cleaned-up old snapshot
   using stored root/name/glob metadata, and refresh stored status/summary
   fields; topic and memory-dossier attachments refresh their visible metadata
-  from the current artifact file.
+  from the current artifact file. Prompt-time catalog text is rebuilt from
+  current state rather than trusting an older persisted context-catalog file.
 - Query-focused memory dossiers should be available when Javier wants Motoko to
   study a subject across saved memories and prior conversations before
   continuing the chat.

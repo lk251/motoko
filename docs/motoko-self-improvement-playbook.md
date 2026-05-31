@@ -331,9 +331,10 @@ Current progress on this backlog:
   records now also carry the corpus glob, can recover to the latest same
   root/name/glob index if an old snapshot was cleaned up, and refresh stored
   index/topic/dossier summaries from current artifact files before prompt
-  construction. The next improvement is doing the same explicitly for evidence,
-  vector, memory, and profile attachment summaries wherever a long-lived TUI
-  view caches them.
+  construction. Prompt-time catalog text is now rebuilt from current
+  user-owned state instead of trusting an older persisted catalog file. The
+  next improvement is doing the same explicitly for evidence, vector, memory,
+  and profile attachment summaries wherever a long-lived TUI view caches them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh should

@@ -10636,6 +10636,18 @@ def read_context_catalog() -> dict | None:
     return safe_load_json(context_catalog_path())
 
 
+def prompt_context_catalog() -> dict:
+    """Return a current context inventory for prompt construction.
+
+    The persisted context catalog is useful for status displays and background
+    job handoff, but chat prompt construction should not depend on a stale file
+    when newly materialized indexes, topics, or dossiers are already present in
+    the current user's Motoko state.
+    """
+
+    return build_context_catalog()
+
+
 def format_context_catalog(catalog: dict | None = None, *, project_roots: set[str] | None = None) -> str:
     catalog = catalog or read_context_catalog() or build_context_catalog()
     project_roots = project_roots or set()
@@ -18674,7 +18686,7 @@ def build_prompt_context_package(
             )
         )
     scope_text = project_scope_note(project_scope, scope_lines) if scope_lines else ""
-    catalog = read_context_catalog() or build_context_catalog()
+    catalog = prompt_context_catalog()
     catalog_text = format_context_catalog(catalog, project_roots=project_roots)
     personality_text, personality_file, personality_exists = load_personality()
     identity_text = format_identity()
