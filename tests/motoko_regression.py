@@ -3776,6 +3776,43 @@ def test_core_context_sufficiency_note_is_injectable(m):
     assert "dossier-1" not in note
 
 
+def test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass(m):
+    plan = m.plan_retrieval_sufficiency_expansion(
+        "according to plan.org, what is the next task?",
+        [{"kind": "memory"}],
+        [
+            {
+                "item": {"kind": "index", "id": "idx-1"},
+                "score": 1,
+                "reason": "current-project document index",
+            }
+        ],
+        grounding_query_words={"according", "file"},
+        task_query_words={"task"},
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"memory", "index"},
+        min_score=1,
+    )
+
+    assert plan["schema"] == "retrieval-sufficiency-plan-v1"
+    assert plan["status"] == "expand"
+    assert plan["selected"]["kind"] == "index"
+    assert plan["selected"]["id"] == "idx-1"
+    assert plan["strong_source_count"] == 0
+
+    sufficient = m.plan_retrieval_sufficiency_expansion(
+        "according to plan.org",
+        [{"kind": "chunk"}],
+        [{"item": {"kind": "index", "id": "idx-1"}, "score": 1}],
+        grounding_query_words={"according"},
+        task_query_words=set(),
+        strong_source_kinds={"chunk"},
+        context_source_kinds={"index"},
+        min_score=1,
+    )
+    assert sufficient["status"] == "sufficient"
+
+
 def test_core_retrieval_preview_formatting_is_injectable(m):
     prompt = "Intro\n\nAttached documents and dossiers:\nEvidence block\n\nAvailable private context catalog:\nCatalog"
     attached = m.extract_prompt_section_core(
@@ -3807,6 +3844,43 @@ def test_core_retrieval_preview_formatting_is_injectable(m):
     assert "Context plan: 10/100 chars (ok)" in report
     assert "1  chunk  /tmp/plan.org" in report
     assert "Evidence block" in report
+
+
+def test_prompt_context_runs_bounded_retrieval_sufficiency_pass(m):
+    old_cwd = os.getcwd()
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "plan.org").write_text(
+            "* TODO [#A] Alpha plan\nThe next task is calibrating the RaceFocus wind cue.\n",
+            encoding="utf-8",
+        )
+        m.add_allowed_dir(str(docs))
+        old_quiet_model = m.quiet_model
+        try:
+            os.chdir(docs)
+            m.quiet_model = lambda *args, **kwargs: "Plan corpus summary."
+            m.build_document_index(str(docs))
+            conv = m.new_conversation("Sufficiency")
+            conv["id"] = "sufficiency"
+            m.save_conversation(conv)
+
+            prompt, sources = m.build_system_prompt_and_sources(
+                conv,
+                "according to plan.org, what is the next task?",
+            )
+
+            assert "Retrieval sufficiency planner:" in prompt
+            assert "calibrating the RaceFocus wind cue" in prompt
+            assert any(source.get("kind") == "retrieval-sufficiency" for source in sources)
+            assert any(source.get("kind") == "chunk" for source in sources)
+            assert not conv.get("context_items")
+            report = m.format_sources(sources)
+            assert "retrieval sufficiency" in report
+            assert "bounded extra retrieval pass" in report
+        finally:
+            m.quiet_model = old_quiet_model
+            os.chdir(old_cwd)
 
 
 def test_core_retrieval_reports_are_injectable(m):
@@ -11337,6 +11411,8 @@ def main() -> int:
         test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_eval_replays_private_feedback_fixtures,
         test_retrieval_preview_shows_context_without_model_call,
+        test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass,
+        test_prompt_context_runs_bounded_retrieval_sufficiency_pass,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,
         test_vector_plan_reports_storage_and_readiness_gates,

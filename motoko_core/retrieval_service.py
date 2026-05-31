@@ -18,6 +18,7 @@ from motoko_core.retrieval import (
     query_date_mentions,
     query_path_match_boost,
     query_path_mentions,
+    query_needs_grounded_sources_core,
     query_requested_recent_section_count,
     repo_context_text_and_source,
     retrieval_haystack_terms,
@@ -37,6 +38,7 @@ from motoko_core.skills import ORG_STRUCTURAL_HANDLER, ORG_TEMPORAL_HANDLER
 
 RETRIEVAL_SERVICE_SCHEMA = "retrieval-service-v1"
 CONTEXT_PACKAGE_SCHEMA = "context-package-v1"
+RETRIEVAL_SUFFICIENCY_SCHEMA = "retrieval-sufficiency-plan-v1"
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,77 @@ class RetrievalPreviewResult:
 class VectorQueryResult:
     report: dict
     diagnostics: dict = field(default_factory=dict)
+
+
+def plan_retrieval_sufficiency_expansion(
+    query: str,
+    sources: list[dict],
+    candidates: list[dict],
+    *,
+    grounding_query_words: set[str],
+    task_query_words: set[str],
+    strong_source_kinds: set[str],
+    context_source_kinds: set[str],
+    min_score: int = 1,
+) -> dict:
+    """Choose one bounded extra retrieval pass when prompt context is thin.
+
+    This is deliberately a planner, not an agent loop. It only inspects source
+    kinds and pre-ranked candidate context items supplied by the caller. The
+    caller still owns allowlists, project scoping, and rendering the selected
+    item into prompt context.
+    """
+
+    clean_sources = [source for source in sources if isinstance(source, dict)]
+    kinds = [str(source.get("kind", "unknown")) for source in clean_sources]
+    strong_count = sum(1 for kind in kinds if kind in strong_source_kinds)
+    context_count = sum(1 for kind in kinds if kind in context_source_kinds)
+    needs_grounding = query_needs_grounded_sources_core(
+        query,
+        grounding_query_words=grounding_query_words,
+        task_query_words=task_query_words,
+    )
+    plan = {
+        "schema": RETRIEVAL_SUFFICIENCY_SCHEMA,
+        "kind": "retrieval-sufficiency",
+        "status": "not-needed",
+        "needs_grounding": needs_grounding,
+        "strong_source_count": strong_count,
+        "context_source_count": context_count,
+        "candidate_count": len(candidates),
+        "selected": None,
+        "reason": "question does not appear to require external grounding",
+    }
+    if not needs_grounding:
+        return plan
+    if strong_count:
+        plan["status"] = "sufficient"
+        plan["reason"] = "selected context already has excerpt-level evidence"
+        return plan
+    for candidate in candidates:
+        score = int(candidate.get("score", 0) or 0)
+        if score < min_score:
+            continue
+        item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+        if not item.get("kind") or not item.get("id"):
+            continue
+        selected = {
+            "kind": item.get("kind", ""),
+            "id": item.get("id", ""),
+            "score": score,
+            "reason": candidate.get("reason", ""),
+        }
+        plan.update(
+            {
+                "status": "expand",
+                "selected": selected,
+                "reason": "grounded query had no excerpt-level evidence; run one bounded extra retrieval pass",
+            }
+        )
+        return plan
+    plan["status"] = "no-candidate"
+    plan["reason"] = "grounded query had no excerpt-level evidence and no project-scoped stored context candidate"
+    return plan
 
 
 def build_context_package(

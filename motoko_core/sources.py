@@ -115,6 +115,22 @@ def format_sources(sources: list[dict]) -> str:
                 )
             for warning in source.get("warnings", [])[:3]:
                 lines.append(f"     warning: {warning}")
+        elif kind == "retrieval-sufficiency":
+            lines.append(
+                f"{idx:3d}  retrieval sufficiency  {source.get('status', 'unknown')}  "
+                f"{source.get('selected_kind', '')} {source.get('selected_id', '')}".rstrip()
+            )
+            lines.append(f"     why: {source.get('reason', '')}")
+            if source.get("selected_reason"):
+                lines.append(
+                    f"     selected: {source.get('selected_reason', '')}; "
+                    f"score {source.get('selected_score', 0)}"
+                )
+            lines.append(
+                f"     initial: strong {source.get('strong_source_count', 0)}  "
+                f"context {source.get('context_source_count', 0)}  "
+                f"candidates {source.get('candidate_count', 0)}"
+            )
         elif kind == "personality":
             lines.append(
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "

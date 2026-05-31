@@ -1134,10 +1134,15 @@ visible immediately after `/study`.
 
 Motoko can already select from attached indexes, evidence stores, vectors,
 memories, recent conversations, and deterministic skill handlers before an
-answer. A later bounded sufficiency planner should let her run an extra
-retrieval pass when the first context window is clearly thin, but that should
-remain code-owned, source-visible, and limited rather than a hidden autonomous
-loop.
+answer. The bounded sufficiency planner can now run one deterministic extra
+retrieval pass when a grounded question has no excerpt-level evidence in the
+initial context window and a project-scoped stored context item is available.
+This pass does not attach or mutate the conversation and does not make a
+generative synthesis call; it may still use configured embedding/rerank
+retrieval workers when the normal hybrid retrieval path uses them. It appears
+in `/sources` as `retrieval-sufficiency`. Future work may make this planner
+richer, but it should remain code-owned, source-visible, and limited rather
+than a hidden autonomous loop.
 
 Motoko also runs quiet after-answer maintenance. Periodically, after enough
 messages have accumulated, she proposes high-confidence durable memories to
