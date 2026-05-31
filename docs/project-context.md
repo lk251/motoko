@@ -1292,6 +1292,12 @@ Current progress on this stretch:
   that long operations can observe at durable checkpoints. TUI blocking work
   already used this shape; this extends the same cancellation path to direct
   CLI commands.
+- Progress: retrieval report/query cancellation now reaches the work that may
+  call local embedding or rerank models. `/retrieval-debug`,
+  `/retrieval-preview`, `/vector-query`, and `/evidence-query` carry cancel
+  events through CLI and TUI report paths into the retrieval service, vector
+  query helper, evidence query helper, prompt-context preparation, and
+  span-level model scoring.
 - Progress: vector refresh status now reports a content-free refresh mode and
   cause (`full missing`, `resumed checkpoint`, `incremental source-change`,
   `reuse-only`, `rebuild schema/route`) plus reuse/new row counts before the
@@ -1599,10 +1605,14 @@ Motoko self-code checkpoint, 2026-05-31:
   cancellation through CLI/background/model-call paths. Model-backed memory
   maintenance now carries cancellation through queued proposal, helper
   subprocess, title, skill-suggestion, and compaction paths, and interrupted
-  memory proposals stay retryable. This is still not the final durable-job
-  design; it is the next careful checkpoint toward making all visible
-  foreground work interruptible without corrupting indexes, vectors, evidence
-  stores, memories, or ledgers.
+  memory proposals stay retryable. Retrieval/vector/evidence report queries
+  now receive cancel events through TUI and CLI paths, including
+  `/retrieval-debug`, `/retrieval-preview`, `/vector-query`, `/evidence-query`,
+  prompt context preparation, retrieval-service hybrid construction, and
+  span-level embedding/rerank selection. This is still not the final
+  durable-job design; it is the next careful checkpoint toward making all
+  visible foreground work interruptible without corrupting indexes, vectors,
+  evidence stores, memories, or ledgers.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

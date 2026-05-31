@@ -35,6 +35,7 @@ from motoko_core.retrieval_planner import (
     plan_has_handler,
     retrieval_plan_source,
 )
+from motoko_core.model_io import raise_if_cancelled
 from motoko_core.skills import ORG_STRUCTURAL_HANDLER, ORG_TEMPORAL_HANDLER
 
 
@@ -354,6 +355,11 @@ class HybridRetrievalEnvironment:
     evidence_context_limit: int
     vector_query_limit: int
     embedding_vector_method: str
+    cancel_event: object | None = None
+
+
+def _raise_if_cancelled(env: HybridRetrievalEnvironment) -> None:
+    raise_if_cancelled(env.cancel_event)
 
 
 def rerank_hybrid_candidates_with_environment(
@@ -362,8 +368,10 @@ def rerank_hybrid_candidates_with_environment(
     candidates: dict[tuple[str, str], dict],
     env: HybridRetrievalEnvironment,
 ) -> tuple[list[dict], dict]:
+    _raise_if_cancelled(env)
     rows = list(candidates.values())
     for row in rows:
+        _raise_if_cancelled(env)
         row["hybrid_score"] = round(hybrid_candidate_base_score(row), 6)
     rows.sort(key=lambda row: (row.get("hybrid_score", 0), hybrid_candidate_guard_bonus(row)), reverse=True)
     report = {
@@ -380,9 +388,14 @@ def rerank_hybrid_candidates_with_environment(
         report["warnings"].append("hybrid rerank fallback: no configured /v1/rerank route")
         return rows, report
     rerank_rows = rows[: min(len(rows), env.max_rerank_candidates)]
-    documents = [env.hybrid_candidate_document(index, row, query) for row in rerank_rows]
+    documents = []
+    for row in rerank_rows:
+        _raise_if_cancelled(env)
+        documents.append(env.hybrid_candidate_document(index, row, query))
     try:
+        _raise_if_cancelled(env)
         scores, route_info = env.rerank_documents(query, documents)
+        _raise_if_cancelled(env)
     except SystemExit as exc:
         report["rerank_fallback"] = True
         report["warnings"].append(f"hybrid rerank fallback: {str(exc).splitlines()[0][:220]}")
@@ -471,6 +484,7 @@ def _temporal_evidence_rows(
     *,
     retrieval_plan: dict | None = None,
 ) -> list[dict]:
+    _raise_if_cancelled(env)
     exact_dates = set(query_date_mentions(query))
     recent_count = query_requested_recent_section_count(query)
     source_scoped_latest = plan_has_handler(retrieval_plan or {}, ORG_TEMPORAL_HANDLER)
@@ -480,6 +494,7 @@ def _temporal_evidence_rows(
     query_counts = token_counts(query)
     path_mentions = query_path_mentions(query)
     for file_item in index.get("files", []):
+        _raise_if_cancelled(env)
         path = file_item.get("path", "")
         path_boost = query_path_match_boost(query, path)
         if path_mentions and path_boost <= 0:
@@ -490,8 +505,10 @@ def _temporal_evidence_rows(
         if not file_match and not exact_dates:
             continue
         for chunk in file_item.get("chunks", []):
+            _raise_if_cancelled(env)
             content = env.read_chunk_content(index, chunk)
             for span in org_dated_section_spans(content):
+                _raise_if_cancelled(env)
                 date = str(span.get("date", ""))
                 if not date:
                     continue
@@ -633,11 +650,20 @@ def _row_matches_structural_filters(row: dict, query: str, filters: dict) -> tup
     return True, score
 
 
-def _org_structural_evidence_rows(store: dict, query: str, plan: dict, *, limit: int) -> tuple[list[dict], list[str]]:
+def _org_structural_evidence_rows(
+    store: dict,
+    query: str,
+    plan: dict,
+    *,
+    limit: int,
+    cancel_event=None,
+) -> tuple[list[dict], list[str]]:
+    raise_if_cancelled(cancel_event)
     filters = _structural_filters(plan)
     query_counts = token_counts(query)
     rows = []
     for row in store.get("rows", []) or []:
+        raise_if_cancelled(cancel_event)
         if not isinstance(row, dict):
             continue
         matched, structured = _row_matches_structural_filters(row, query, filters)
@@ -877,6 +903,7 @@ def code_locator_score(path: str, content: str, summary: str, query: str, terms:
 
 
 def code_locator_rows(index: dict, query: str, env: HybridRetrievalEnvironment) -> list[dict]:
+    _raise_if_cancelled(env)
     if not query_wants_code_locator(query):
         return []
     terms = code_locator_terms(query)
@@ -884,9 +911,11 @@ def code_locator_rows(index: dict, query: str, env: HybridRetrievalEnvironment) 
         return []
     rows = []
     for file_item in index.get("files", []):
+        _raise_if_cancelled(env)
         path = str(file_item.get("path", "") or "")
         summary = str(file_item.get("summary", "") or "")
         for chunk in file_item.get("chunks", []):
+            _raise_if_cancelled(env)
             content = env.read_chunk_content(index, chunk)
             if not code_like_path_or_content(path, content):
                 continue
@@ -944,6 +973,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     source records; it does not write observability or admin-owned logs.
     """
 
+    _raise_if_cancelled(env)
     query_counts = token_counts(query)
     top_files, top_chunks, max_retrieval_chars = env.retrieval_limits(query)
     index_status, index_warnings = env.index_staleness(index)
@@ -952,6 +982,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     file_rows = []
     chunk_rows = []
     for file_item in index.get("files", []):
+        _raise_if_cancelled(env)
         file_signal_text = env.format_signal_summary(file_item.get("signals") or {}, limit=12)
         file_score = score_text(
             query_counts,
@@ -960,6 +991,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         file_score += env.task_signal_boost(query, file_item.get("signals") or {})
         chunk_path_boost = 0
         for chunk in file_item.get("chunks", []):
+            _raise_if_cancelled(env)
             content = env.read_chunk_content(index, chunk)
             score_parts = env.retrieval_score_parts(
                 query,
@@ -984,11 +1016,14 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     if not lexical_candidates:
         lexical_candidates = chunk_rows[: min(2, len(chunk_rows))]
     for score, file_item, chunk, score_parts in lexical_candidates:
+        _raise_if_cancelled(env)
         add_hybrid_candidate(candidates, file_item, chunk, "lexical", score, score_parts)
+    _raise_if_cancelled(env)
     env.add_structured_task_candidates(index, query, candidates)
     lookup = _chunk_lookup(index)
     code_rows = code_locator_rows(index, query, env)
     for row in code_rows:
+        _raise_if_cancelled(env)
         found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
         if not found:
             continue
@@ -998,6 +1033,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     temporal_rows = _temporal_evidence_rows(index, query, env, retrieval_plan=retrieval_plan)
     temporal_dates = sorted({str(row.get("date", "")) for row in temporal_rows if row.get("date")}, reverse=True)
     for row in temporal_rows:
+        _raise_if_cancelled(env)
         found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
         if not found:
             continue
@@ -1012,17 +1048,20 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     structural_candidate_keys: set[tuple[str, str]] = set()
     if env.evidence_enabled() and plan_has_handler(retrieval_plan, ORG_STRUCTURAL_HANDLER):
         try:
+            _raise_if_cancelled(env)
             evidence_store = env.evidence_store_for_retrieval(index)
             structural_rows, structural_filters = _org_structural_evidence_rows(
                 evidence_store,
                 query,
                 retrieval_plan,
                 limit=max(top_chunks * 4, env.evidence_context_limit * 3),
+                cancel_event=env.cancel_event,
             )
         except SystemExit as exc:
             structural_warning = str(exc).splitlines()[0][:240]
         else:
             for row in structural_rows:
+                _raise_if_cancelled(env)
                 found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
                 if not found:
                     continue
@@ -1042,6 +1081,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     evidence_warning = ""
     if env.evidence_enabled():
         try:
+            _raise_if_cancelled(env)
             if evidence_store is None:
                 evidence_store = env.evidence_store_for_retrieval(index)
             evidence_report = env.query_evidence_store(
@@ -1049,10 +1089,12 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                 query,
                 limit=max(top_chunks * 3, env.evidence_query_limit),
             )
+            _raise_if_cancelled(env)
         except SystemExit as exc:
             evidence_warning = str(exc).splitlines()[0][:240]
         else:
             for row in evidence_report.get("rows", [])[: max(top_chunks * 2, env.evidence_context_limit)]:
+                _raise_if_cancelled(env)
                 found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
                 if not found:
                     continue
@@ -1062,9 +1104,11 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     vector_report = None
     vector_warning = ""
     if env.vector_enabled():
+        _raise_if_cancelled(env)
         vector_store = env.latest_vector_store_for_index(index, method=env.embedding_vector_method, fresh_only=True)
         if vector_store is not None:
             try:
+                _raise_if_cancelled(env)
                 vector_report = env.query_vector_store_for_retrieval(
                     vector_store,
                     query,
@@ -1072,10 +1116,12 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                     check_freshness=False,
                     rerank=False,
                 )
+                _raise_if_cancelled(env)
             except SystemExit as exc:
                 vector_warning = str(exc).splitlines()[0][:240]
             else:
                 for row in vector_report.get("rows", [])[: env.max_rerank_candidates]:
+                    _raise_if_cancelled(env)
                     found = lookup.get((row.get("path", ""), str(row.get("chunk", ""))))
                     if not found:
                         continue
@@ -1095,6 +1141,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
             if key in structural_candidate_keys
         }
     selected_candidates, hybrid_report = rerank_hybrid_candidates_with_environment(index, query, rerank_candidates, env)
+    _raise_if_cancelled(env)
     selected_candidate_rows = _selected_candidates_with_required_temporal_dates(
         selected_candidates,
         limit=top_chunks,
@@ -1293,6 +1340,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     if selected_files:
         parts.append("Relevant file summaries:")
         for file_item in selected_files:
+            _raise_if_cancelled(env)
             file_signal_text = env.format_signal_summary(file_item.get("signals") or {}, limit=12)
             signal_block = f"\nStructured signals:\n{file_signal_text}" if file_signal_text else ""
             parts.append(
@@ -1313,6 +1361,7 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
         span_model_uses = 0
         span_model_limit = env.span_model_chunk_limit()
         for _score, file_item, chunk, retrieval_method, retrieval_details in selected_chunks:
+            _raise_if_cancelled(env)
             content = env.read_chunk_content(index, chunk)
             remaining = max_retrieval_chars - used
             if remaining <= 0:
@@ -1386,21 +1435,23 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
                 }
             )
     debug_row_limit = max(50, top_files * 8, top_chunks * 8, env.max_rerank_candidates)
-    debug_files = [
-        _debug_file_row(index, query, query_counts, file_item, env)
-        for _score, file_item in file_rows[:debug_row_limit]
-    ]
-    debug_chunks = [
-        _debug_chunk_row(
-            index,
-            query_counts,
-            file_item,
-            chunk,
-            env.read_chunk_content(index, chunk),
-            score_parts,
+    debug_files = []
+    for _score, file_item in file_rows[:debug_row_limit]:
+        _raise_if_cancelled(env)
+        debug_files.append(_debug_file_row(index, query, query_counts, file_item, env))
+    debug_chunks = []
+    for _score, file_item, chunk, score_parts in chunk_rows[:debug_row_limit]:
+        _raise_if_cancelled(env)
+        debug_chunks.append(
+            _debug_chunk_row(
+                index,
+                query_counts,
+                file_item,
+                chunk,
+                env.read_chunk_content(index, chunk),
+                score_parts,
+            )
         )
-        for _score, file_item, chunk, score_parts in chunk_rows[:debug_row_limit]
-    ]
     debug_index = {
         "id": index.get("id", ""),
         "name": index.get("name", ""),
@@ -1699,22 +1750,29 @@ class RetrievalService:
         store_id: str | None = None,
         limit: int | None = None,
         rerank: bool = False,
+        cancel_event=None,
     ) -> VectorQueryResult:
+        raise_if_cancelled(cancel_event)
         if self._query_vector_store is None:
             raise SystemExit("vector query is not configured")
         if store is None:
             if store_id:
                 if self.load_vector_store is None:
                     raise SystemExit("vector store loading is not configured")
+                raise_if_cancelled(cancel_event)
                 store = self.load_vector_store(store_id)
             else:
                 if self.latest_vector_store is None:
                     raise SystemExit("latest vector store lookup is not configured")
+                raise_if_cancelled(cancel_event)
                 store = self.latest_vector_store()
         kwargs = {"rerank": rerank}
         if limit is not None:
             kwargs["limit"] = limit
+        if cancel_event is not None:
+            kwargs["cancel_event"] = cancel_event
         report = self._query_vector_store(store, query, **kwargs)
+        raise_if_cancelled(cancel_event)
         report = dict(report)
         report["retrieval_service_schema"] = RETRIEVAL_SERVICE_SCHEMA
         report_store = report.get("store") if isinstance(report.get("store"), dict) else {}

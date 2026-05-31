@@ -195,9 +195,14 @@ fresh evidence shows a better target:
    injected cancellation checkpoints before materialization or deletion. Index
    artifact enrich/upgrade, quality repair, profile refresh, and model-backed
    memory maintenance now carry cancellation through CLI/background/model-call
-   paths. Queued memory proposals remain retryable when interrupted. Continue
-   this work by adding checkpoints inside any remaining dossier/report
-   operations that still lack cooperative cancellation.
+   paths. Queued memory proposals remain retryable when interrupted.
+   Retrieval/vector/evidence report queries now also receive cancel events
+   through TUI and CLI paths, including `/retrieval-debug`,
+   `/retrieval-preview`, `/vector-query`, `/evidence-query`, prompt context
+   preparation, span embedding/rerank selection, and retrieval-service hybrid
+   report construction. Continue this work by adding checkpoints inside any
+   remaining topic, memory-dossier, profile/report, or non-index context lane
+   operation that still lacks cooperative cancellation.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or
@@ -285,7 +290,9 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
    root-facade branches.
 2. Finish cooperative cancellation and durable interruption. Model-backed
    memory maintenance now cooperatively cancels and leaves queued proposals
-   retryable. The next target is any remaining dossier/report operation that
+   retryable. Retrieval/debug/vector/evidence report queries now carry cancel
+   events through the service/model-call path. The next target is any remaining
+   topic, memory-dossier, profile/report, or non-index context operation that
    can still block `/stop`, `/pause`, or clean shutdown.
 3. Improve always-fresh context behavior. When background refresh finishes while
    a TUI session is open, the session should notice fresh indexes, evidence

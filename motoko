@@ -4808,11 +4808,12 @@ def retrieval_file_haystack(file_item: dict) -> str:
     return "\n".join([file_item.get("path", ""), file_item.get("summary", ""), file_signal_text])
 
 
-def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict], list[str]]:
+def model_score_evidence_spans(query: str, spans: list[dict], *, cancel_event=None) -> tuple[list[dict], list[str]]:
     warnings = []
     rows = [dict(row) for row in spans]
     if not rows:
         return rows, warnings
+    raise_if_work_cancelled(cancel_event, "retrieval report interrupted by request", work_kind="retrieval")
     by_parent = {}
     for row in rows:
         key = (
@@ -4835,11 +4836,13 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
         )
         try:
             vectors, route_info = embed_texts_for_retrieval(
-                [model_query] + [str(row.get("model_text", "")) for row in embed_rows]
+                [model_query] + [str(row.get("model_text", "")) for row in embed_rows],
+                cancel_event=cancel_event,
             )
         except SystemExit as exc:
             warnings.append(f"span embedding skipped: {str(exc).splitlines()[0][:220]}")
         else:
+            raise_if_work_cancelled(cancel_event, "retrieval report interrupted by request", work_kind="retrieval")
             query_vector = vectors[0] if vectors else []
             for row, vector in zip(embed_rows, vectors[1:]):
                 vector_score = vector_similarity(query_vector, vector)
@@ -4875,10 +4878,12 @@ def model_score_evidence_spans(query: str, spans: list[dict]) -> tuple[list[dict
             scores, route_info = rerank_documents_for_retrieval(
                 model_query,
                 [str(row.get("model_text", "")) for row in rerank_rows],
+                cancel_event=cancel_event,
             )
         except SystemExit as exc:
             warnings.append(f"span rerank skipped: {str(exc).splitlines()[0][:220]}")
         else:
+            raise_if_work_cancelled(cancel_event, "retrieval report interrupted by request", work_kind="retrieval")
             for row, score in zip(rerank_rows, scores):
                 row["span_rerank_score"] = round(float(score), 6)
                 row["span_rerank_route"] = route_info.get("catalog_route") or route_info.get("route", "")
@@ -4952,18 +4957,37 @@ def query_aware_content_selection(
     max_chars: int,
     *,
     use_models: bool = False,
+    cancel_event=None,
 ) -> dict:
+    raise_if_work_cancelled(cancel_event, "retrieval report interrupted by request", work_kind="retrieval")
     return core_query_aware_content_selection(
         query,
         content,
         max_chars,
         use_models=use_models,
-        model_scorer=model_score_evidence_spans,
+        model_scorer=lambda model_query, spans: model_score_evidence_spans(
+            model_query,
+            spans,
+            cancel_event=cancel_event,
+        ),
     )
 
 
-def query_aware_content_excerpt(query: str, content: str, max_chars: int, *, use_models: bool = False) -> str:
-    return query_aware_content_selection(query, content, max_chars, use_models=use_models).get("excerpt", "")
+def query_aware_content_excerpt(
+    query: str,
+    content: str,
+    max_chars: int,
+    *,
+    use_models: bool = False,
+    cancel_event=None,
+) -> str:
+    return query_aware_content_selection(
+        query,
+        content,
+        max_chars,
+        use_models=use_models,
+        cancel_event=cancel_event,
+    ).get("excerpt", "")
 
 
 def retrieval_chunk_haystack(file_item: dict, chunk: dict, content: str, query: str = "") -> str:
@@ -5088,10 +5112,12 @@ def run_retrieval_debug(
     conv: dict | None = None,
     index_ids: list[str] | None = None,
     limit: int = 8,
+    cancel_event=None,
 ) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("usage: retrieval-debug QUERY")
+    raise_if_work_cancelled(cancel_event, "retrieval debug interrupted by request", work_kind="retrieval")
     if conv is not None and not index_ids:
         sync_attached_indexes_to_latest(conv)
     limit = max(1, min(int(limit or 8), 50))
@@ -5109,17 +5135,20 @@ def run_retrieval_debug(
         "indexes": [],
     }
     for index in indexes:
+        raise_if_work_cancelled(cancel_event, "retrieval debug interrupted by request", work_kind="retrieval")
         try:
-            retrieval_result = retrieve_index_result(index, query)
+            retrieval_result = retrieve_index_result(index, query, cancel_event=cancel_event)
         except SystemExit as exc:
             status, warnings = index_staleness(index)
-            file_rows = [
-                retrieval_debug_file_row(index, query, query_counts, file_item)
-                for file_item in index.get("files", [])
-            ]
+            file_rows = []
+            for file_item in index.get("files", []):
+                raise_if_work_cancelled(cancel_event, "retrieval debug interrupted by request", work_kind="retrieval")
+                file_rows.append(retrieval_debug_file_row(index, query, query_counts, file_item))
             chunk_rows = []
             for file_item in index.get("files", []):
+                raise_if_work_cancelled(cancel_event, "retrieval debug interrupted by request", work_kind="retrieval")
                 for chunk in file_item.get("chunks", []):
+                    raise_if_work_cancelled(cancel_event, "retrieval debug interrupted by request", work_kind="retrieval")
                     chunk_rows.append(retrieval_debug_chunk_row(index, query, query_counts, file_item, chunk))
             file_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
             chunk_rows.sort(key=lambda row: row.get("total", 0), reverse=True)
@@ -13504,14 +13533,16 @@ def evidence_score_parts(store: dict, query: str, query_counts: collections.Coun
     }
 
 
-def query_evidence_store(store: dict, query: str, *, limit: int = EVIDENCE_QUERY_LIMIT) -> dict:
+def query_evidence_store(store: dict, query: str, *, limit: int = EVIDENCE_QUERY_LIMIT, cancel_event=None) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("usage: evidence-query QUERY")
+    raise_if_work_cancelled(cancel_event, "evidence query interrupted by request", work_kind="evidence")
     limit = max(1, min(int(limit or EVIDENCE_QUERY_LIMIT), 100))
     query_counts = token_counts(query)
     rows = []
     for row in store.get("rows", []):
+        raise_if_work_cancelled(cancel_event, "evidence query interrupted by request", work_kind="evidence")
         if not isinstance(row, dict):
             continue
         parts = evidence_score_parts(store, query, query_counts, row)
@@ -14056,23 +14087,30 @@ def retrieval_model_socket_timeout() -> tuple[int, int]:
     return retrieval_model_timeout_seconds(), retrieval_socket_activation_timeout_seconds()
 
 
-def rerank_documents_for_retrieval(query: str, documents: list[str]) -> tuple[list[float], dict]:
+def rerank_documents_for_retrieval(query: str, documents: list[str], *, cancel_event=None) -> tuple[list[float], dict]:
     timeout, socket_timeout = retrieval_model_socket_timeout()
     return rerank_documents(
         query,
         documents,
         timeout=timeout,
         socket_activation_min_timeout=socket_timeout,
+        cancel_event=cancel_event,
     )
 
 
-def embed_texts_for_retrieval(texts: list[str], *, route_id: str | None = None) -> tuple[list[list[float]], dict]:
+def embed_texts_for_retrieval(
+    texts: list[str],
+    *,
+    route_id: str | None = None,
+    cancel_event=None,
+) -> tuple[list[list[float]], dict]:
     timeout, socket_timeout = retrieval_model_socket_timeout()
     return embed_texts(
         texts,
         route_id=route_id,
         timeout=timeout,
         socket_activation_min_timeout=socket_timeout,
+        cancel_event=cancel_event,
     )
 
 
@@ -15418,10 +15456,12 @@ def query_vector_store(
     rerank: bool = False,
     model_timeout: float = MODEL_TIMEOUT_SECONDS,
     socket_activation_min_timeout: float | None = None,
+    cancel_event=None,
 ) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("usage: vector-query QUERY")
+    raise_if_work_cancelled(cancel_event, "vector query interrupted by request", work_kind="vector")
     limit = max(1, min(int(limit or VECTOR_QUERY_LIMIT), 50))
     method = str(store.get("method") or LEXICAL_VECTOR_METHOD)
     if method == EMBEDDING_VECTOR_METHOD:
@@ -15431,7 +15471,9 @@ def query_vector_store(
             route_id=route.get("catalog_route") or None,
             timeout=model_timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
+            cancel_event=cancel_event,
         )
+        raise_if_work_cancelled(cancel_event, "vector query interrupted by request", work_kind="vector")
         query_vector = query_vectors[0] if query_vectors else []
     else:
         dims = int(store.get("dims", DEFAULT_LEXICAL_VECTOR_DIMS) or DEFAULT_LEXICAL_VECTOR_DIMS)
@@ -15439,6 +15481,7 @@ def query_vector_store(
     query_counts = token_counts(query)
     rows = []
     for row in store.get("rows", []):
+        raise_if_work_cancelled(cancel_event, "vector query interrupted by request", work_kind="vector")
         if not isinstance(row, dict):
             continue
         vector_score = vector_similarity(query_vector, row.get("vector"))
@@ -15503,12 +15546,15 @@ def query_vector_store(
         candidates = rows[: min(len(rows), max(limit, RERANK_CANDIDATE_LIMIT))]
         source_index, lookup = vector_store_chunk_lookup(store)
         documents = [vector_query_document_text(source_index, lookup, row, query=query) for row in candidates]
+        raise_if_work_cancelled(cancel_event, "vector query interrupted by request", work_kind="vector")
         rerank_scores, rerank_route = rerank_documents(
             query,
             documents,
             timeout=model_timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
+            cancel_event=cancel_event,
         )
+        raise_if_work_cancelled(cancel_event, "vector query interrupted by request", work_kind="vector")
         for row, rerank_score in zip(candidates, rerank_scores):
             row["rerank_score"] = round(rerank_score, 6)
             row["score"] = round((float(row.get("score", 0)) * 0.2) + (float(rerank_score) * 1000))
@@ -15544,9 +15590,11 @@ def query_vector_store_for_retrieval(
     limit: int,
     check_freshness: bool = False,
     rerank: bool | None = None,
+    cancel_event=None,
 ) -> dict:
     rerank = env_flag("MOTOKO_VECTOR_RERANK", True) if rerank is None else bool(rerank)
     model_timeout, socket_timeout = retrieval_model_socket_timeout()
+    raise_if_work_cancelled(cancel_event, "vector retrieval interrupted by request", work_kind="retrieval")
     if rerank and not local_model_routes_for_capability(
         kind="reranker",
         tasks=RERANKER_TASKS,
@@ -15560,6 +15608,7 @@ def query_vector_store_for_retrieval(
             rerank=False,
             model_timeout=model_timeout,
             socket_activation_min_timeout=socket_timeout,
+            cancel_event=cancel_event,
         )
         fallback["rerank_fallback"] = True
         fallback["warnings"] = ["rerank fallback: no configured /v1/rerank route"] + list(
@@ -15575,10 +15624,12 @@ def query_vector_store_for_retrieval(
             rerank=rerank,
             model_timeout=model_timeout,
             socket_activation_min_timeout=socket_timeout,
+            cancel_event=cancel_event,
         )
     except SystemExit as exc:
         if not rerank:
             raise
+        raise_if_work_cancelled(cancel_event, "vector retrieval interrupted by request", work_kind="retrieval")
         fallback = query_vector_store(
             store,
             query,
@@ -15587,6 +15638,7 @@ def query_vector_store_for_retrieval(
             rerank=False,
             model_timeout=model_timeout,
             socket_activation_min_timeout=socket_timeout,
+            cancel_event=cancel_event,
         )
         warning = f"rerank fallback: {str(exc).splitlines()[0][:220]}"
         fallback["rerank_fallback"] = True
@@ -18130,11 +18182,22 @@ def add_structured_task_candidates(index: dict, query: str, candidates: dict[tup
         )
 
 
-def rerank_hybrid_candidates(index: dict, query: str, candidates: dict[tuple[str, str], dict]) -> tuple[list[dict], dict]:
-    return rerank_hybrid_candidates_with_environment(index, query, candidates, hybrid_retrieval_environment())
+def rerank_hybrid_candidates(
+    index: dict,
+    query: str,
+    candidates: dict[tuple[str, str], dict],
+    *,
+    cancel_event=None,
+) -> tuple[list[dict], dict]:
+    return rerank_hybrid_candidates_with_environment(
+        index,
+        query,
+        candidates,
+        hybrid_retrieval_environment(cancel_event=cancel_event),
+    )
 
 
-def hybrid_retrieval_environment() -> HybridRetrievalEnvironment:
+def hybrid_retrieval_environment(*, cancel_event=None) -> HybridRetrievalEnvironment:
     return HybridRetrievalEnvironment(
         retrieval_limits=retrieval_limits,
         index_staleness=index_staleness,
@@ -18149,29 +18212,50 @@ def hybrid_retrieval_environment() -> HybridRetrievalEnvironment:
         add_structured_task_candidates=add_structured_task_candidates,
         evidence_enabled=lambda: env_flag("MOTOKO_EVIDENCE_RETRIEVAL", True),
         evidence_store_for_retrieval=evidence_store_for_retrieval,
-        query_evidence_store=query_evidence_store,
+        query_evidence_store=lambda store, query, **kwargs: query_evidence_store(
+            store,
+            query,
+            cancel_event=cancel_event,
+            **kwargs,
+        ),
         vector_enabled=lambda: env_flag("MOTOKO_VECTOR_RETRIEVAL", True),
         latest_vector_store_for_index=latest_vector_store_for_index,
-        query_vector_store_for_retrieval=query_vector_store_for_retrieval,
+        query_vector_store_for_retrieval=lambda store, query, **kwargs: query_vector_store_for_retrieval(
+            store,
+            query,
+            cancel_event=cancel_event,
+            **kwargs,
+        ),
         hybrid_rerank_enabled=lambda: env_flag("MOTOKO_VECTOR_RERANK", True),
         hybrid_rerank_available=lambda: bool(
             local_model_routes_for_capability(kind="reranker", tasks=RERANKER_TASKS, endpoint_path="/v1/rerank")
         ),
-        rerank_documents=rerank_documents_for_retrieval,
+        rerank_documents=lambda query, documents: rerank_documents_for_retrieval(
+            query,
+            documents,
+            cancel_event=cancel_event,
+        ),
         hybrid_candidate_document=lambda index, candidate, query: hybrid_candidate_document(index, candidate, query=query),
         wants_deep_context=wants_deep_context,
         file_staleness=file_staleness,
         span_model_chunk_limit=span_model_chunk_limit,
-        query_aware_content_selection=query_aware_content_selection,
+        query_aware_content_selection=lambda query, content, max_chars, **kwargs: query_aware_content_selection(
+            query,
+            content,
+            max_chars,
+            cancel_event=cancel_event,
+            **kwargs,
+        ),
         max_rerank_candidates=RERANK_CANDIDATE_LIMIT,
         evidence_query_limit=EVIDENCE_QUERY_LIMIT,
         evidence_context_limit=EVIDENCE_CONTEXT_LIMIT,
         vector_query_limit=VECTOR_QUERY_LIMIT,
         embedding_vector_method=EMBEDDING_VECTOR_METHOD,
+        cancel_event=cancel_event,
     )
 
 
-def make_retrieval_service() -> RetrievalService:
+def make_retrieval_service(*, cancel_event=None) -> RetrievalService:
     return RetrievalService(
         load_index=load_index,
         retrieve_index_query=lambda _index, _query: ("", []),
@@ -18183,16 +18267,16 @@ def make_retrieval_service() -> RetrievalService:
         load_vector_store=load_vector_store,
         latest_vector_store=latest_vector_store,
         query_vector_store=query_vector_store,
-        hybrid_environment=hybrid_retrieval_environment(),
+        hybrid_environment=hybrid_retrieval_environment(cancel_event=cancel_event),
     )
 
 
-def retrieve_index_result(index: dict, query: str):
-    return make_retrieval_service().retrieve_index(index, query)
+def retrieve_index_result(index: dict, query: str, *, cancel_event=None):
+    return make_retrieval_service(cancel_event=cancel_event).retrieve_index(index, query)
 
 
-def retrieve_from_index(index: dict, query: str) -> tuple[str, list[dict]]:
-    result = retrieve_index_result(index, query)
+def retrieve_from_index(index: dict, query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
+    result = retrieve_index_result(index, query, cancel_event=cancel_event)
     return result.text, result.sources
 
 
@@ -18203,13 +18287,15 @@ def query_vector_result(
     store_id: str | None = None,
     limit: int | None = None,
     rerank: bool = False,
+    cancel_event=None,
 ):
-    return make_retrieval_service().query_vector(
+    return make_retrieval_service(cancel_event=cancel_event).query_vector(
         query,
         store=store,
         store_id=store_id,
         limit=limit,
         rerank=rerank,
+        cancel_event=cancel_event,
     )
 
 
@@ -18316,8 +18402,8 @@ def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
     )
 
 
-def render_context_with_sources(items: list[dict], query: str = "") -> tuple[str, list[dict]]:
-    result = make_retrieval_service().render_attached_context(items, query)
+def render_context_with_sources(items: list[dict], query: str = "", *, cancel_event=None) -> tuple[str, list[dict]]:
+    result = make_retrieval_service(cancel_event=cancel_event).render_attached_context(items, query)
     return result.text, result.sources
 
 
@@ -18418,13 +18504,17 @@ def retrieval_sufficiency_expansion(
     sources: list[dict],
     project_scope: dict,
     context_selection: dict,
+    *,
+    cancel_event=None,
 ) -> tuple[str, list[dict], dict]:
+    raise_if_work_cancelled(cancel_event, "retrieval sufficiency interrupted by request", work_kind="retrieval")
     candidates = retrieval_sufficiency_candidates(
         query,
         project_scope,
         context_selection.get("scoped_items", []),
     )
-    expansion = make_retrieval_service().build_sufficiency_expansion(
+    raise_if_work_cancelled(cancel_event, "retrieval sufficiency interrupted by request", work_kind="retrieval")
+    expansion = make_retrieval_service(cancel_event=cancel_event).build_sufficiency_expansion(
         query,
         sources,
         candidates,
@@ -18457,7 +18547,9 @@ def build_prompt_context_package(
     query: str = "",
     *,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> tuple[object, dict]:
+    raise_if_work_cancelled(cancel_event, "context preparation interrupted by request", work_kind="retrieval")
     sync_attached_indexes_to_latest(conv)
     project_scope = project_scope or project_scope_for_request(conv, query)
     project_roots = project_scope_roots(project_scope)
@@ -18468,8 +18560,14 @@ def build_prompt_context_package(
     skill_text, skill_sources = render_skills_with_sources(query)
     codebase_text, codebase_sources = render_motoko_codebase_context(query)
     retrieval_query = context_query_text(conv, query)
+    raise_if_work_cancelled(cancel_event, "context preparation interrupted by request", work_kind="retrieval")
     context_selection = scoped_context_selection(conv, retrieval_query, project_scope)
-    context_text, context_sources = render_context_with_sources(context_selection["scoped_items"], retrieval_query)
+    context_text, context_sources = render_context_with_sources(
+        context_selection["scoped_items"],
+        retrieval_query,
+        cancel_event=cancel_event,
+    )
+    raise_if_work_cancelled(cancel_event, "context preparation interrupted by request", work_kind="retrieval")
     sufficiency_text, sufficiency_sources, _sufficiency_plan = retrieval_sufficiency_expansion(
         retrieval_query,
         profile_sources
@@ -18480,6 +18578,7 @@ def build_prompt_context_package(
         + context_sources,
         project_scope,
         context_selection,
+        cancel_event=cancel_event,
     )
     scope_lines = []
     scope_sources = []
@@ -18599,8 +18698,14 @@ def build_system_prompt_and_sources(
     query: str = "",
     *,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> tuple[str, list[dict]]:
-    context_package, context_values = build_prompt_context_package(conv, query, project_scope=project_scope)
+    context_package, context_values = build_prompt_context_package(
+        conv,
+        query,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
     identity = context_values["identity"]
     personality_text = context_values["personality_text"]
     profile_text = context_values["profile_text"]
@@ -18702,12 +18807,19 @@ def format_retrieval_preview(
     *,
     max_chars: int = RETRIEVAL_PREVIEW_CHARS,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> str:
     query = query.strip() or context_query_text(conv, conv.get("title", ""))
     if not query.strip():
         raise SystemExit("usage: /retrieval-preview QUERY")
+    raise_if_work_cancelled(cancel_event, "retrieval preview interrupted by request", work_kind="retrieval")
     project_scope = project_scope or project_scope_for_request(conv, query)
-    context_package, _context_values = build_prompt_context_package(conv, query, project_scope=project_scope)
+    context_package, _context_values = build_prompt_context_package(
+        conv,
+        query,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
     sources = list(context_package.sources)
     audit = answer_grounding_audit(query, "", sources)
     preview = build_retrieval_preview_result(query, context_package, audit=audit)
@@ -18751,8 +18863,14 @@ def build_messages(
     query: str = "",
     *,
     project_scope: dict | None = None,
+    cancel_event=None,
 ) -> tuple[list[dict], list[dict]]:
-    prompt, sources = build_system_prompt_and_sources(conv, query, project_scope=project_scope)
+    prompt, sources = build_system_prompt_and_sources(
+        conv,
+        query,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
     messages = [{"role": "system", "content": prompt}]
     messages.extend(current_conversation_messages_for_model(conv))
     return messages, sources
@@ -20404,10 +20522,16 @@ def report_command_request(text: str, conv: dict):
         return "/action-eval", lambda: format_action_eval_report(run_action_eval())
     if primary == "/retrieval-debug":
         query = body or context_query_text(conv, conv.get("title", ""))
-        return "/retrieval-debug", lambda: format_retrieval_debug_report(run_retrieval_debug(query, conv=conv))
+        return "/retrieval-debug", lambda cancel_event=None: format_retrieval_debug_report(
+            run_retrieval_debug(query, conv=conv, cancel_event=cancel_event)
+        )
     if primary == "/retrieval-preview":
         query = body or context_query_text(conv, conv.get("title", ""))
-        return "/retrieval-preview", lambda: format_retrieval_preview(conv, query)
+        return "/retrieval-preview", lambda cancel_event=None: format_retrieval_preview(
+            conv,
+            query,
+            cancel_event=cancel_event,
+        )
     if primary == "/code-map" and not body:
         return "/code-map", format_motoko_code_map
     if primary == "/code-query":
@@ -20449,7 +20573,8 @@ def evidence_command_request(text: str, conv: dict):
         query = body or context_query_text(conv, conv.get("title", ""))
         project_scope = project_scope_for_request(conv, query)
 
-        def run_query() -> str:
+        def run_query(cancel_event=None) -> str:
+            raise_if_work_cancelled(cancel_event, "evidence query interrupted by request", work_kind="evidence")
             index_ids = attached_index_ids(conv, project_scope=project_scope)
             if index_ids:
                 index = load_index_exact(index_ids[0])
@@ -20458,8 +20583,9 @@ def evidence_command_request(text: str, conv: dict):
             store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(
                 index,
                 write=False,
+                cancel_event=cancel_event,
             )
-            return format_evidence_query_report(query_evidence_store(store, query))
+            return format_evidence_query_report(query_evidence_store(store, query, cancel_event=cancel_event))
 
         return "/evidence-query", run_query
     return None
@@ -20501,7 +20627,9 @@ def vector_command_request(text: str, conv: dict):
     if primary == "/vector-query":
         query, rerank = parse_vector_query_input(body)
         query = query or context_query_text(conv, conv.get("title", ""))
-        return "/vector-query", lambda: format_vector_query_report(query_vector_result(query, rerank=rerank).report)
+        return "/vector-query", lambda cancel_event=None: format_vector_query_report(
+            query_vector_result(query, rerank=rerank, cancel_event=cancel_event).report
+        )
     if primary == "/vector-eval" and not body:
         return "/vector-eval", lambda: format_vector_eval_report(run_vector_eval())
     return None
@@ -22555,7 +22683,12 @@ class MotokoTui:
                             f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})",
                         )
                     )
-                messages, sources = build_messages(self.conv, user_text, project_scope=project_scope)
+                messages, sources = build_messages(
+                    self.conv,
+                    user_text,
+                    project_scope=project_scope,
+                    cancel_event=cancel_event,
+                )
                 raise_if_cancelled(cancel_event)
                 selected_route, _governor = model_route_for_request(MODEL_ROUTE_CHAT, messages)
                 if route_kv_offload_disabled(selected_route):
@@ -23502,15 +23635,31 @@ def chat_loop(conv: dict) -> None:
         if explicit_saved:
             print(f"sys memory saved from this prompt ({explicit_saved})")
         print("\n" + assistant_label("Motoko "), end="", flush=True)
-        messages, sources = build_messages(conv, user_text, project_scope=project_scope)
-        reply = call_model(
-            messages,
-            source_count=len(sources),
-            slot_cache_context={
-                "conversation_id": conv.get("id", ""),
-                "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,
-            },
-        )
+        try:
+            with foreground_cancel_scope("keyboard interrupt during chat answer") as cancel_event:
+                messages, sources = build_messages(
+                    conv,
+                    user_text,
+                    project_scope=project_scope,
+                    cancel_event=cancel_event,
+                )
+                reply = call_model(
+                    messages,
+                    source_count=len(sources),
+                    slot_cache_context={
+                        "conversation_id": conv.get("id", ""),
+                        "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,
+                    },
+                    cancel_event=cancel_event,
+                )
+        except WorkPaused as exc:
+            print(f"\nsys {exc}")
+            continue
+        except RuntimeError as exc:
+            if model_call_cancelled(exc):
+                print("\nsys work interrupted by request")
+                continue
+            raise
         conv["last_sources"] = sources_with_answer_audit(user_text, reply, sources)
         conv["messages"].append({"role": "assistant", "content": reply})
         save_conversation(conv)
@@ -24481,14 +24630,29 @@ def command_evidence_refresh(args) -> None:
 
 def command_evidence_query(args) -> None:
     query = " ".join(args.query)
-    if args.store:
-        store = load_evidence_store(args.store)
-    elif args.index:
-        index = load_index(args.index)
-        store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(index, write=False)
-    else:
-        store = latest_evidence_store()
-    report = query_evidence_store(store, query, limit=args.limit)
+    try:
+        with foreground_cancel_scope("keyboard interrupt during evidence-query command") as cancel_event:
+            if args.store:
+                store = load_evidence_store(args.store)
+            elif args.index:
+                index = load_index(args.index)
+                store = latest_evidence_store_for_index(index, fresh_only=True) or build_evidence_store_from_index(
+                    index,
+                    write=False,
+                    cancel_event=cancel_event,
+                )
+            else:
+                store = latest_evidence_store()
+            report = query_evidence_store(store, query, limit=args.limit, cancel_event=cancel_event)
+    except WorkPaused as exc:
+        print(exc)
+        return
+    except RuntimeError as exc:
+        paused = work_cancelled_from_model(exc, "evidence query interrupted by request", work_kind="evidence")
+        if paused is not None:
+            print(paused)
+            return
+        raise
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -24561,12 +24725,24 @@ def command_vector_doctor(args) -> None:
 
 
 def command_vector_query(args) -> None:
-    report = query_vector_result(
-        " ".join(args.query),
-        store_id=args.store,
-        limit=args.limit,
-        rerank=args.rerank,
-    ).report
+    try:
+        with foreground_cancel_scope("keyboard interrupt during vector-query command") as cancel_event:
+            report = query_vector_result(
+                " ".join(args.query),
+                store_id=args.store,
+                limit=args.limit,
+                rerank=args.rerank,
+                cancel_event=cancel_event,
+            ).report
+    except WorkPaused as exc:
+        print(exc)
+        return
+    except RuntimeError as exc:
+        paused = work_cancelled_from_model(exc, "vector query interrupted by request", work_kind="vector")
+        if paused is not None:
+            print(paused)
+            return
+        raise
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
@@ -25114,11 +25290,23 @@ def command_retrieval_eval(args) -> None:
 
 
 def command_retrieval_debug(args) -> None:
-    report = run_retrieval_debug(
-        " ".join(args.query),
-        index_ids=args.index,
-        limit=args.limit,
-    )
+    try:
+        with foreground_cancel_scope("keyboard interrupt during retrieval-debug command") as cancel_event:
+            report = run_retrieval_debug(
+                " ".join(args.query),
+                index_ids=args.index,
+                limit=args.limit,
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
+    except RuntimeError as exc:
+        paused = work_cancelled_from_model(exc, "retrieval debug interrupted by request", work_kind="retrieval")
+        if paused is not None:
+            print(paused)
+            return
+        raise
     if args.write:
         save_retrieval_debug_report(report)
     if args.json:
@@ -25150,7 +25338,24 @@ def command_retrieval_preview(args) -> None:
         conversation_id=args.conversation,
         index_ids=args.index,
     )
-    print_report(format_retrieval_preview(conv, query, max_chars=max(1000, args.max_chars)))
+    try:
+        with foreground_cancel_scope("keyboard interrupt during retrieval-preview command") as cancel_event:
+            text = format_retrieval_preview(
+                conv,
+                query,
+                max_chars=max(1000, args.max_chars),
+                cancel_event=cancel_event,
+            )
+    except WorkPaused as exc:
+        print(exc)
+        return
+    except RuntimeError as exc:
+        paused = work_cancelled_from_model(exc, "retrieval preview interrupted by request", work_kind="retrieval")
+        if paused is not None:
+            print(paused)
+            return
+        raise
+    print_report(text)
 
 
 def command_identity(args) -> None:

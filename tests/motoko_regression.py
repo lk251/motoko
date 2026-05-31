@@ -6363,8 +6363,8 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         try:
             m.default_vector_index = lambda conv_arg, project_scope=None: {"id": "idx"}
             m.latest_evidence_store_for_index = lambda index, fresh_only=True: {"id": "store", "index": index["id"]}
-            m.build_evidence_store_from_index = lambda index, write=False: {"id": "built-store", "index": index["id"]}
-            m.query_evidence_store = lambda store, query: {"store": store, "query": query}
+            m.build_evidence_store_from_index = lambda index, write=False, **_kwargs: {"id": "built-store", "index": index["id"]}
+            m.query_evidence_store = lambda store, query, **_kwargs: {"store": store, "query": query}
             m.format_evidence_query_report = lambda report: f"evidence query: {report['query']}"
             ui.handle_command("/evidence-query texere")
             deadline = time.monotonic() + 2
@@ -6387,7 +6387,7 @@ def test_tui_report_commands_do_not_persist_system_output(m):
         old_format_vector_query_report = m.format_vector_query_report
         try:
             m.latest_vector_store = lambda: {"id": "vector-store"}
-            m.query_vector_store = lambda store, query, limit=None, rerank=False: {
+            m.query_vector_store = lambda store, query, limit=None, rerank=False, **_kwargs: {
                 "store": store,
                 "query": query,
                 "rerank": rerank,
@@ -9335,6 +9335,108 @@ def test_tui_stop_requests_report_job_cancel(m):
         assert event.is_set()
         assert "stop requested" in ui.status
         assert not ui.pending_prompts
+
+
+def test_report_query_commands_pass_cancel_events(m):
+    with isolated_state():
+        conv = m.new_conversation("Report cancellation")
+        seen = {}
+        old_run_retrieval_debug = m.run_retrieval_debug
+        old_query_vector_result = m.query_vector_result
+        old_default_vector_index = m.default_vector_index
+        old_latest_evidence_store_for_index = m.latest_evidence_store_for_index
+        old_query_evidence_store = m.query_evidence_store
+
+        class FakeVectorResult:
+            report = {
+                "query": "alpha",
+                "store_id": "vec",
+                "method": m.LEXICAL_VECTOR_METHOD,
+                "rows": [],
+            }
+
+        def fake_run_retrieval_debug(query, *, conv=None, cancel_event=None, **_kwargs):
+            seen["retrieval_debug"] = cancel_event
+            return {"schema": m.RETRIEVAL_DEBUG_SCHEMA_VERSION, "query": query, "indexes": []}
+
+        def fake_query_vector_result(query, *, cancel_event=None, **_kwargs):
+            seen["vector_query"] = cancel_event
+            return FakeVectorResult()
+
+        def fake_default_vector_index(*_args, **_kwargs):
+            return {"id": "idx", "name": "docs", "root": "/tmp/docs", "files": []}
+
+        def fake_latest_evidence_store_for_index(_index, *, fresh_only=False):
+            return {"id": "ev", "rows": [], "source_index": {"id": "idx"}, "path": ""}
+
+        def fake_query_evidence_store(_store, _query, *, cancel_event=None, **_kwargs):
+            seen["evidence_query"] = cancel_event
+            return {
+                "schema": m.EVIDENCE_QUERY_SCHEMA_VERSION,
+                "query": _query,
+                "store_id": "ev",
+                "source_index": {"id": "idx"},
+                "freshness": "fresh",
+                "warnings": [],
+                "rows": [],
+            }
+
+        try:
+            m.run_retrieval_debug = fake_run_retrieval_debug
+            m.query_vector_result = fake_query_vector_result
+            m.default_vector_index = fake_default_vector_index
+            m.latest_evidence_store_for_index = fake_latest_evidence_store_for_index
+            m.query_evidence_store = fake_query_evidence_store
+
+            event = threading.Event()
+            retrieval = m.report_command_request("/retrieval-debug alpha", conv)
+            assert retrieval is not None
+            m.run_command_callable(retrieval[1], cancel_event=event)
+            vector = m.vector_command_request("/vector-query alpha", conv)
+            assert vector is not None
+            m.run_command_callable(vector[1], cancel_event=event)
+            evidence = m.evidence_command_request("/evidence-query alpha", conv)
+            assert evidence is not None
+            m.run_command_callable(evidence[1], cancel_event=event)
+
+            assert seen == {
+                "retrieval_debug": event,
+                "vector_query": event,
+                "evidence_query": event,
+            }
+        finally:
+            m.run_retrieval_debug = old_run_retrieval_debug
+            m.query_vector_result = old_query_vector_result
+            m.default_vector_index = old_default_vector_index
+            m.latest_evidence_store_for_index = old_latest_evidence_store_for_index
+            m.query_evidence_store = old_query_evidence_store
+
+
+def test_report_query_helpers_stop_when_pre_cancelled(m):
+    event = threading.Event()
+    event.set()
+    store = {
+        "id": "store",
+        "method": m.LEXICAL_VECTOR_METHOD,
+        "dims": 8,
+        "rows": [{"id": "row", "vector": [1.0] + [0.0] * 7, "summary": "alpha"}],
+    }
+    evidence_store = {
+        "id": "ev",
+        "rows": [{"kind": "org_day", "path": "/tmp/log.org", "text": "alpha"}],
+    }
+    checks = [
+        lambda: m.run_retrieval_debug("alpha", cancel_event=event),
+        lambda: m.query_vector_store(store, "alpha", cancel_event=event),
+        lambda: m.query_evidence_store(evidence_store, "alpha", cancel_event=event),
+    ]
+    for check in checks:
+        try:
+            check()
+        except m.WorkPaused as exc:
+            assert exc.work_kind in {"retrieval", "vector", "evidence"}
+        else:
+            raise AssertionError("pre-cancelled report helper should raise WorkPaused")
 
 
 def test_org_task_signals_drive_retrieval(m):
@@ -12528,6 +12630,8 @@ def main() -> int:
         test_index_cancel_event_writes_paused_partial,
         test_vector_build_cancel_event_stops_before_work,
         test_tui_stop_requests_report_job_cancel,
+        test_report_query_commands_pass_cancel_events,
+        test_report_query_helpers_stop_when_pre_cancelled,
         test_org_task_signals_drive_retrieval,
         test_index_health_reports_new_files,
         test_index_signal_enrichment_upgrades_legacy_index,
