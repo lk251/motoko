@@ -1660,10 +1660,11 @@ artifacts reference the old index or source paths, whether a newer replacement
 index is ready, and which artifacts need manual review. The only automatic
 apply path is intentionally narrow: `motoko source-lifecycle INDEX_ID --apply
 --yes` deletes a stale superseded index snapshot and its derived vector,
-evidence, dossier, retrieval-debug, retrieval-eval, and feedback-eval artifacts
-after a fresh replacement index exists. Motoko does not automatically delete
-durable conversations, memories, profile dossiers, or raw feedback just because
-they mention a removed source; those remain review signals.
+evidence, dossier, retrieval-debug, retrieval-eval, feedback-eval, action-eval,
+and model-eval artifacts after a fresh replacement index exists. Motoko does
+not automatically delete durable conversations, memories, profile dossiers, raw
+feedback, action ledgers, or goal-loop records just because they mention a
+removed source; those remain review signals.
 
 Use `motoko evidence-build [INDEX_ID]` or `/evidence-build [INDEX_ID]` to build
 a deterministic hierarchical evidence store for an index. Evidence stores live

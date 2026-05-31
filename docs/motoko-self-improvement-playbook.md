@@ -96,7 +96,8 @@ proposing code changes:
    surfaces.
 6. Make artifact lifecycle behavior coherent across every derived family:
    indexes, repairs, evidence rows, vector stores, dossiers, retrieval/debug
-   reports, feedback evals, memories, and skill-support artifacts.
+   reports, feedback/action/model evals, memories, action/goal ledgers, and
+   skill-support artifacts.
 7. Treat user feedback as private eval seed material. Feedback should suggest
    tests, skill patches, support files, or retrieval fixtures; it must not
    silently rewrite retrieval policy or prompts.

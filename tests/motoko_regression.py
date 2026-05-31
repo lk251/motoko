@@ -9120,6 +9120,35 @@ def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m
                 m.topic_path("topic-source-lifecycle-apply"),
                 json.dumps({"id": "topic-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
             )
+            m.atomic_write(
+                m.action_eval_path("action-source-lifecycle-apply"),
+                json.dumps({"id": "action-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
+            )
+            m.atomic_write(
+                m.model_eval_path("model-source-lifecycle-apply"),
+                json.dumps({"id": "model-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
+            )
+            m.atomic_write(
+                m.goal_run_path("goal-source-lifecycle-apply"),
+                json.dumps(
+                    {
+                        "id": "goal-source-lifecycle-apply",
+                        "source_index": old_index["id"],
+                        "sources": [{"path": str(source)}],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+            m.append_jsonl(
+                m.action_ledger_path(),
+                {
+                    "schema": "motoko-action-ledger-v1",
+                    "id": "action-ledger-source-lifecycle-apply",
+                    "source_index": old_index["id"],
+                    "path": str(source),
+                },
+            )
             m.append_jsonl(
                 m.response_feedback_path(),
                 {
@@ -9139,8 +9168,13 @@ def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m
             assert plan["status"] == "cleanup-ready"
             assert plan["apply_status"] == "ready"
             assert plan["source_counts"]["ignored"] == 1
-            assert plan["derived_artifact_count"] == 3
-            assert plan["manual_review_artifact_count"] == 1
+            affected = {(item["kind"], item["policy"]): item["count"] for item in plan["affected_artifacts"]}
+            assert affected[("action_eval", "delete-derived")] == 1
+            assert affected[("model_eval", "delete-derived")] == 1
+            assert affected[("action_ledger", "manual-review")] == 1
+            assert affected[("goal_run", "manual-review")] == 1
+            assert plan["derived_artifact_count"] == 5
+            assert plan["manual_review_artifact_count"] == 3
             assert m.response_feedback_path().exists()
 
             applied = m.source_lifecycle_report_for_index(old_index, apply=True, yes=True)
@@ -9150,8 +9184,12 @@ def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m
             assert not m.vector_store_path("vec-source-lifecycle-apply").exists()
             assert not m.evidence_store_path("ev-source-lifecycle-apply").exists()
             assert not m.topic_path("topic-source-lifecycle-apply").exists()
+            assert not m.action_eval_path("action-source-lifecycle-apply").exists()
+            assert not m.model_eval_path("model-source-lifecycle-apply").exists()
+            assert m.goal_run_path("goal-source-lifecycle-apply").exists()
             assert m.response_feedback_path().exists()
             assert m.read_jsonl(m.response_feedback_path())[0]["id"] == "feedback-source-lifecycle-apply"
+            assert m.read_jsonl(m.action_ledger_path())[0]["id"] == "action-ledger-source-lifecycle-apply"
         finally:
             m.quiet_model = old_quiet_model
 

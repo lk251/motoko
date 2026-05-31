@@ -1246,10 +1246,11 @@ Current progress on this stretch:
   stale-superseded index cleanup decision/apply loop and a broader
   source-lifecycle report for changed, deleted, or newly ignored indexed
   sources. The report fans out across vectors, evidence stores, dossiers,
-  retrieval/debug/eval artifacts, raw feedback, memories, profiles, and
-  conversations. Apply remains conservative: it deletes only stale superseded
-  index snapshots and rebuildable derived artifacts after a fresh replacement
-  index exists, while durable human signal stays manual-review.
+  retrieval/debug/eval artifacts, action/model eval artifacts, raw feedback,
+  memories, profiles, conversations, action ledgers, and goal-loop records.
+  Apply remains conservative: it deletes only stale superseded index snapshots
+  and rebuildable derived artifacts after a fresh replacement index exists,
+  while durable human signal stays manual-review.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,

@@ -12343,6 +12343,8 @@ def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
         "retrieval_debug": len(json_artifacts_referencing_index(retrieval_debug_dir(), index_id)),
         "retrieval_eval": len(json_artifacts_referencing_index(retrieval_evals_dir(), index_id)),
         "feedback_eval": len(json_artifacts_referencing_index(feedback_evals_dir(), index_id)),
+        "action_eval": len(json_artifacts_referencing_index(action_evals_dir(), index_id)),
+        "model_eval": len(json_artifacts_referencing_index(model_evals_dir(), index_id)),
     }
 
 
@@ -12516,6 +12518,10 @@ def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> 
         (retrieval_debug_dir(), "retrieval_debug", "delete-derived"),
         (retrieval_evals_dir(), "retrieval_eval", "delete-derived"),
         (feedback_evals_dir(), "feedback_eval", "delete-derived"),
+        (action_evals_dir(), "action_eval", "delete-derived"),
+        (model_evals_dir(), "model_eval", "delete-derived"),
+        (goal_loops_dir(), "goal_loop", "manual-review"),
+        (goal_runs_dir(), "goal_run", "manual-review"),
     ]:
         records.extend(
             json_artifact_records_for_source_lifecycle(
@@ -12528,6 +12534,7 @@ def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> 
         )
     for path, artifact_kind in [
         (response_feedback_path(), "response_feedback"),
+        (action_ledger_path(), "action_ledger"),
         (memories_path(), "memory"),
         (memory_proposal_queue_path(), "memory_proposal"),
         (study_jobs_path(), "study_job"),
@@ -12541,6 +12548,27 @@ def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> 
         )
         if record is not None:
             records.append(record)
+    for path, artifact_kind in [
+        (skill_suggestions_path(), "skill_suggestion"),
+        (skill_lifecycle_path(), "skill_lifecycle"),
+    ]:
+        data = safe_load_json(path)
+        if data is None:
+            continue
+        references_index = json_references_index(data, index_id)
+        matched_paths = sorted(json_matching_source_paths(data, source_paths))
+        if not references_index and not matched_paths:
+            continue
+        records.append(
+            source_artifact_record(
+                artifact_id=artifact_kind,
+                artifact_kind=artifact_kind,
+                state_path=path,
+                cleanup_policy="manual-review",
+                source_index_ids=[index_id] if references_index else [],
+                source_paths=matched_paths,
+            )
+        )
     profile = safe_load_json(profile_path())
     if profile is not None:
         references_index = json_references_index(profile, index_id)
@@ -12602,6 +12630,8 @@ def delete_index_snapshot(index: dict) -> dict:
         "retrieval_debug_deleted": 0,
         "retrieval_evals_deleted": 0,
         "feedback_evals_deleted": 0,
+        "action_evals_deleted": 0,
+        "model_evals_deleted": 0,
         "bytes": path_size(index_path(index_id)) + tree_size(indexes_dir() / f"{index_id}.chunks"),
     }
     if not index_id:
@@ -12635,6 +12665,8 @@ def delete_index_snapshot(index: dict) -> dict:
     report["retrieval_debug_deleted"] = delete_json_artifacts_referencing_index(retrieval_debug_dir(), index_id)
     report["retrieval_evals_deleted"] = delete_json_artifacts_referencing_index(retrieval_evals_dir(), index_id)
     report["feedback_evals_deleted"] = delete_json_artifacts_referencing_index(feedback_evals_dir(), index_id)
+    report["action_evals_deleted"] = delete_json_artifacts_referencing_index(action_evals_dir(), index_id)
+    report["model_evals_deleted"] = delete_json_artifacts_referencing_index(model_evals_dir(), index_id)
     return report
 
 
@@ -12688,6 +12720,8 @@ def format_index_cleanup_report(report: dict) -> str:
             ("retrieval_debug_deleted", "retrieval-debug"),
             ("retrieval_evals_deleted", "retrieval-evals"),
             ("feedback_evals_deleted", "feedback-evals"),
+            ("action_evals_deleted", "action-evals"),
+            ("model_evals_deleted", "model-evals"),
         ]:
             if item.get(key):
                 extras.append(f"{label}:{item.get(key)}")
@@ -12850,6 +12884,8 @@ def format_source_lifecycle_report(report: dict) -> str:
                 ("retrieval_debug_deleted", "retrieval-debug"),
                 ("retrieval_evals_deleted", "retrieval-evals"),
                 ("feedback_evals_deleted", "feedback-evals"),
+                ("action_evals_deleted", "action-evals"),
+                ("model_evals_deleted", "model-evals"),
             ]:
                 if deleted.get(key):
                     extras.append(f"{label}:{deleted.get(key)}")
