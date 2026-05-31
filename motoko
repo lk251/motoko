@@ -19151,7 +19151,7 @@ HELP_SECTIONS = [
 
 STARTUP_TIPS_LINES = [
     "Tips: ask normally from the relevant directory; /sources checks grounding.",
-    "Use /feedback up|down|ok NOTE after important answers; /retrieval-debug QUERY diagnoses failures.",
+    "Use feedback up NOTE or /feedback up|down|ok NOTE after important answers; /retrieval-debug QUERY diagnoses failures.",
     "Use /skill review after reusable workflows; /skill curator suggest and /skill suggestions handle review-first learning.",
     "Use /bg-now to force catch-up work; /vector-doctor explains vectorizing parallelism and low-GPU symptoms.",
     "Evals are health checks after updates or suspicious answers, not daily chores. /tips opens the guide.",
@@ -19174,7 +19174,7 @@ def format_tips() -> str:
         "  Use /study QUERY for deliberate deeper analysis, and /tasks QUERY for Org task planning.",
         "",
         "Feedback:",
-        "  Use /feedback up|down|ok NOTE, or /up NOTE and /down NOTE, after answers that matter.",
+        "  Use feedback up NOTE, /feedback up|down|ok NOTE, or /up NOTE and /down NOTE after answers that matter.",
         "  Good notes name the missing file/date/project, stale artifact, wrong assumption, or behavior that worked.",
         "  Feedback stays in this user's Motoko state and does not become chat transcript text.",
         "",
@@ -21215,6 +21215,9 @@ class MotokoTui:
 
     def submit_text(self, text: str) -> None:
         if text.startswith("/"):
+            self.handle_command(text)
+            return
+        if is_feedback_command(text):
             self.handle_command(text)
             return
         if self.cwd_index_offer is not None and text.strip().lower() in {"y", "yes", "n", "no"}:

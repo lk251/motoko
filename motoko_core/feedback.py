@@ -33,7 +33,7 @@ def normalize_feedback_rating(rating: str) -> str:
     }
     normalized = aliases.get(value)
     if normalized is None:
-        raise SystemExit("usage: /feedback up|down|ok [note]")
+        raise SystemExit("usage: feedback up|down|ok [note]")
     return normalized
 
 
@@ -276,7 +276,7 @@ def format_feedback_eval_report(report: dict) -> str:
 
 
 def is_feedback_command(text: str) -> bool:
-    return command_matches_any(text, ("/feedback", "/up", "/down"))
+    return command_matches_any(text, ("/feedback", "/up", "/down", "feedback"))
 
 
 def parse_feedback_command(text: str) -> tuple[str, str]:
@@ -286,9 +286,9 @@ def parse_feedback_command(text: str) -> tuple[str, str]:
         return "up", body
     if primary == "/down":
         return "down", body
-    if primary != "/feedback":
+    if primary not in {"/feedback", "feedback"}:
         raise SystemExit("usage: /feedback up|down|ok [note]")
     if not body:
-        raise SystemExit("usage: /feedback up|down|ok [note]")
+        raise SystemExit("usage: feedback up|down|ok [note]")
     parts = body.split(maxsplit=1)
     return parts[0], parts[1] if len(parts) > 1 else ""

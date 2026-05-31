@@ -455,9 +455,10 @@ The normal daily loop is:
    to see the packed context without calling a model.
 5. Use `/study QUERY` for deliberate deeper analysis and `/tasks QUERY` for
    Org task planning.
-6. Record concise feedback with `/feedback up|down|ok NOTE`, or the shorthand
-   `/up NOTE` and `/down NOTE`. Good notes name the missing file, date,
-   project, stale artifact, wrong assumption, or behavior that worked.
+6. Record concise feedback with `feedback up NOTE`,
+   `/feedback up|down|ok NOTE`, or the shorthand `/up NOTE` and `/down NOTE`.
+   Good notes name the missing file, date, project, stale artifact, wrong
+   assumption, or behavior that worked.
 
 Feedback stays in the current user's Motoko state, not in the conversation
 transcript. It becomes useful evaluation material through `/feedback-eval` or
@@ -1716,13 +1717,13 @@ Set `MOTOKO_SPAN_MODEL_INPUT_CHARS=N` or
 `MOTOKO_SPAN_MODEL_MAX_SUBSPANS_PER_PARENT=N` only when diagnosing worker
 context limits.
 
-Use `/feedback up|down|ok [TEXT]` after an answer to record whether it helped
-and what was wrong or right. The shorthand commands `/up [TEXT]` and
-`/down [TEXT]` do the same thing. Feedback is written to the current user's
-Motoko state as `response-feedback.jsonl`; it is not appended to the
-conversation transcript. This is intended as a future training/evaluation
-signal for retrieval, rerank, prompt, and answer-quality improvements, not as
-an immediate unreviewed self-tuning mechanism.
+Use `feedback up [TEXT]` or `/feedback up|down|ok [TEXT]` after an answer to
+record whether it helped and what was wrong or right. The shorthand commands
+`/up [TEXT]` and `/down [TEXT]` do the same thing. Feedback is written to the
+current user's Motoko state as `response-feedback.jsonl`; it is not appended
+to the conversation transcript. This is intended as a future
+training/evaluation signal for retrieval, rerank, prompt, and answer-quality
+improvements, not as an immediate unreviewed self-tuning mechanism.
 Use `motoko feedback-eval` or `/feedback-eval` to turn those private rows into
 inspectable eval fixtures. Downvotes become `needs-review` fixtures with focus
 tags such as recall, ranking, evidence, staleness, prompt use, or synthesis

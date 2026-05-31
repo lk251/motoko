@@ -5,6 +5,9 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Plain `feedback up|down|ok NOTE` now records private feedback on the last
+  Motoko answer just like `/feedback` or `/up`, and the TUI treats it as a
+  command instead of queueing it as a chat prompt during active work.
 - Improved the report-first skill curator. Curator reports now hide raw
   feedback notes by default, while `motoko skill curator --suggest` can queue
   content-safe support-file plans for oversized skills and consolidation review

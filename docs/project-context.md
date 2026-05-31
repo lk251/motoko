@@ -788,10 +788,10 @@ Current implementation progress:
   `/retrieval-preview`, `/identity`, and `/permissions` use the same resolver
   in TUI and line mode. State-changing command families still stay in explicit
   dispatch until they can be moved behind focused tests.
-- Step 9 now also centralizes feedback command detection around exact slash
-  command primaries (`/feedback`, `/up`, `/down`) so the TUI and line mode no
-  longer duplicate prefix checks, and near-miss commands cannot be parsed as
-  feedback by accident.
+- Step 9 now also centralizes feedback command detection around exact command
+  primaries (`/feedback`, `/up`, `/down`, and plain `feedback`) so the TUI and
+  line mode no longer duplicate prefix checks, and near-miss commands cannot
+  be parsed as feedback by accident.
 - Step 9 now also shares evidence report-command dispatch for
   `/evidence-build`, `/evidence-refresh`, and `/evidence-query`, so those
   report-style commands use the same request builder in the TUI and line mode
@@ -851,7 +851,8 @@ Current implementation progress:
   attachment are no longer duplicated with line mode.
 - Step 9 now also has shared conversation lifecycle helpers for starting,
   resuming, deleting, and banner-formatting chats, plus a shared private
-  feedback command request for `/feedback`, `/up`, and `/down`.
+  feedback command request for `/feedback`, `/up`, `/down`, and plain
+  `feedback up|down|ok`.
 - Step 9 now routes `/help` through the shared report-command path. The
   remaining explicit TUI/line-mode slash branches are session/control commands
   whose behavior is intentionally UI-specific: menu display, exit, new/resume,

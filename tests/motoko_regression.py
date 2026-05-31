@@ -8990,6 +8990,40 @@ def test_feedback_command_request_records_private_feedback(m):
         assert rows[0]["rating"] == "down"
         assert rows[0]["note"] == "missed source"
 
+        plain = m.shared_command_request("feedback up excellent answer", conv)
+        assert plain is not None
+        plain_label, plain_run = plain
+        assert plain_label == "/feedback"
+        assert "feedback saved" in plain_run()
+        rows = m.read_jsonl(m.response_feedback_path())
+        assert rows[1]["rating"] == "up"
+        assert rows[1]["note"] == "excellent answer"
+
+
+def test_tui_feedback_plain_command_is_not_queued_during_active_work(m):
+    with isolated_state():
+        conv = m.new_conversation("Feedback plain command")
+        conv["messages"] = [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "answer"},
+        ]
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.cwd_index_offer = None
+        ui.cwd_indexing = True
+        ui.study_running = True
+        ui.study_status = "bg-heavy: vectorizing(model)"
+        ui.generating = False
+        ui.pending_prompts = m.collections.deque()
+        handled = []
+        ui.handle_command = handled.append
+
+        m.MotokoTui.submit_text(ui, "feedback up excellent answer")
+
+        assert handled == ["feedback up excellent answer"]
+        assert not ui.pending_prompts
+        assert not conv.get("queued_prompts")
+
 
 def test_help_uses_shared_report_command_request(m):
     with isolated_state():
@@ -10866,6 +10900,8 @@ def main() -> int:
         test_tui_stop_closes_active_model_request,
         test_tui_ctrl_c_stops_active_answer_without_exiting,
         test_response_feedback_is_private_and_does_not_pollute_conversation,
+        test_feedback_command_request_records_private_feedback,
+        test_tui_feedback_plain_command_is_not_queued_during_active_work,
         test_feedback_eval_exports_private_retrieval_fixtures,
         test_retrieval_eval_replays_private_feedback_fixtures,
         test_retrieval_preview_shows_context_without_model_call,
