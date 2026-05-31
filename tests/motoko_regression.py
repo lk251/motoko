@@ -9026,6 +9026,15 @@ def test_index_change_summary_reports_source_lifecycle_decisions(m):
                 m.evidence_store_path("ev-source-lifecycle"),
                 json.dumps({"id": "ev-source-lifecycle", "source_index": index["id"]}) + "\n",
             )
+            m.append_jsonl(
+                m.action_ledger_path(),
+                {
+                    "schema": "motoko-action-ledger-v1",
+                    "id": "action-ledger-source-lifecycle",
+                    "source_index": index["id"],
+                    "path": str(source),
+                },
+            )
 
             source.write_text("* TODO [#A] Alpha\nUpdated body\n", encoding="utf-8")
             summary = m.index_change_summary(index)
@@ -9054,8 +9063,14 @@ def test_index_change_summary_reports_source_lifecycle_decisions(m):
 
             audit = m.index_storage_audit()
             assert audit["source_lifecycle_plans"]
+            audit_plan = audit["source_lifecycle_plans"][0]
+            assert audit_plan["derived_artifact_count"] == 2
+            assert audit_plan["manual_review_artifact_count"] == 1
+            assert audit_plan["apply_status"] == "blocked"
             assert any(item["kind"] == "source-lifecycle-work" for item in audit["blocked_cleanup"])
-            assert "source lifecycle work:" in m.format_index_storage_audit(audit)
+            audit_text = m.format_index_storage_audit(audit)
+            assert "source lifecycle work:" in audit_text
+            assert "2 derived artifact(s), 1 manual-review artifact(s)" in audit_text
         finally:
             m.quiet_model = old_quiet_model
 

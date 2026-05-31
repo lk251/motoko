@@ -13079,14 +13079,34 @@ def index_storage_audit() -> dict:
         plan = summary.get("artifact_lifecycle_plan") or {}
         if plan.get("status") != "needs-work":
             continue
+        source_lifecycle = summary.get("source_lifecycle", [])
+        source_paths = source_lifecycle_affected_paths(source_lifecycle)
+        records = source_lifecycle_artifact_records(str(index.get("id", "")), source_paths)
+        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(index, source_paths)
+        cleanup_plan = source_lifecycle_cleanup_plan(
+            index_id=str(index.get("id", "")),
+            source_lifecycle=source_lifecycle,
+            artifact_records=records,
+            replacement_index_id=str((replacement or {}).get("id", "")),
+            replacement_ready=replacement_ready,
+        )
         source_lifecycle_plans.append(
             {
                 "index": index.get("id", ""),
                 "name": index.get("name", ""),
                 "root": index.get("root", ""),
-                "source_counts": plan.get("source_counts", {}),
-                "recommended_action": plan.get("recommended_action", ""),
-                "affected_artifacts": plan.get("affected_artifacts", []),
+                "source_counts": cleanup_plan.get("source_counts", {}),
+                "recommended_action": cleanup_plan.get("recommended_action", ""),
+                "apply_status": cleanup_plan.get("apply_status", ""),
+                "apply_reason": cleanup_plan.get("apply_reason", ""),
+                "replacement_index": cleanup_plan.get("replacement_index", ""),
+                "replacement_ready": cleanup_plan.get("replacement_ready", False),
+                "replacement_reason": replacement_reason,
+                "derived_artifact_count": cleanup_plan.get("derived_artifact_count", 0),
+                "manual_review_artifact_count": cleanup_plan.get("manual_review_artifact_count", 0),
+                "derived_bytes": cleanup_plan.get("derived_bytes", 0),
+                "manual_review_bytes": cleanup_plan.get("manual_review_bytes", 0),
+                "affected_artifacts": cleanup_plan.get("affected_artifacts", []),
             }
         )
     safe_cleanup = []

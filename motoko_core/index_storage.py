@@ -107,10 +107,18 @@ def format_index_storage_audit(audit: dict) -> str:
         for plan in audit.get("source_lifecycle_plans", [])[:8]:
             counts = plan.get("source_counts", {}) or {}
             count_text = ", ".join(f"{key} {value}" for key, value in sorted(counts.items()))
-            affected = sum(_safe_int(item.get("count")) for item in plan.get("affected_artifacts", []) or [])
+            derived = _safe_int(plan.get("derived_artifact_count"))
+            manual = _safe_int(plan.get("manual_review_artifact_count"))
+            if not derived and not manual:
+                derived = sum(_safe_int(item.get("count")) for item in plan.get("affected_artifacts", []) or [])
+            artifact_parts = [f"{derived} derived artifact(s)"]
+            if manual:
+                artifact_parts.append(f"{manual} manual-review artifact(s)")
+            apply_status = str(plan.get("apply_status", "")).strip()
+            apply_part = f"; apply {apply_status}" if apply_status else ""
             lines.append(
                 f"- {plan.get('index', '')}: {count_text or 'source changes'}; "
-                f"{affected} derived artifact(s); {plan.get('recommended_action', '')}"
+                f"{', '.join(artifact_parts)}; {plan.get('recommended_action', '')}{apply_part}"
             )
     if audit.get("missing_duplicate_targets"):
         lines.append("")

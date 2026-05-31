@@ -1644,8 +1644,9 @@ Use `motoko index-storage` or `/index-storage` to audit the derived index store
 before cleanup or vector-store work. The report shows complete and partial
 indexes, duplicate reference chunks, unique stored chunk bodies, logical corpus
 bytes versus physical stored bytes, missing duplicate targets, orphan chunk
-files, and cleanup opportunities. `motoko index-cleanup` is a dry-run; add
-`--yes` to apply it. `/index-cleanup` is also a dry-run, and
+files, cleanup opportunities, and source-lifecycle work with derived-vs-manual
+review artifact counts. `motoko index-cleanup` is a dry-run; add `--yes` to
+apply it. `/index-cleanup` is also a dry-run, and
 `/index-cleanup yes` applies one bounded cleanup pass. Cleanup is
 conservative: it deletes only stale superseded index snapshots after a newer
 fresh index exists for the same corpus family, and it first materializes any

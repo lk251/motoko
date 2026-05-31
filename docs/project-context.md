@@ -1199,8 +1199,8 @@ Current progress on this stretch:
 - Complete: feedback rows can be replayed as private retrieval-eval fixtures.
 - Complete: index health reports source lifecycle decisions for changed,
   deleted, and ignored indexed files.
-- Complete: source lifecycle plans count dependent derived artifacts and
-  surface rebuild-first work in `index-storage`.
+- Complete: source lifecycle plans count dependent derived and manual-review
+  artifacts and surface rebuild-first work in `index-storage`.
 - Progress: prompt-level lane packing and context-plan source accounting now
   use a service-returned `context-package-v1` record. Remaining context work is
   narrower: final prompt wording and excerpt/snippet choice across non-index
