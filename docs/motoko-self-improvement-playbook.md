@@ -204,9 +204,12 @@ fresh evidence shows a better target:
    through TUI and CLI paths, including `/retrieval-debug`,
    `/retrieval-preview`, `/vector-query`, `/evidence-query`, prompt context
    preparation, span embedding/rerank selection, and retrieval-service hybrid
-   report construction. Continue this work by adding checkpoints inside any
-   remaining topic, memory-dossier, profile/report, or non-index context lane
-   operation that still lacks cooperative cancellation.
+   report construction. `index-storage` audits now also run inside a
+   foreground cancel scope and check cancellation during index, partial,
+   duplicate-reference, orphan-chunk, and source-lifecycle scans. Continue this
+   work by adding checkpoints inside any remaining topic, memory-dossier,
+   profile/report, or non-index context lane operation that still lacks
+   cooperative cancellation.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or
@@ -295,9 +298,11 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
 2. Finish cooperative cancellation and durable interruption. Model-backed
    memory maintenance now cooperatively cancels and leaves queued proposals
    retryable. Retrieval/debug/vector/evidence report queries now carry cancel
-   events through the service/model-call path. The next target is any remaining
-   topic, memory-dossier, profile/report, or non-index context operation that
-   can still block `/stop`, `/pause`, or clean shutdown.
+   events through the service/model-call path, and `index-storage` audits now
+   accept the same foreground cancel token while scanning stored indexes and
+   derived artifacts. The next target is any remaining topic, memory-dossier,
+   profile/report, or non-index context operation that can still block `/stop`,
+   `/pause`, or clean shutdown.
 3. Improve always-fresh context behavior. When background refresh finishes while
    a TUI session is open, the session should notice fresh indexes, evidence
    stores, vectors, memories, and dossiers without needing a restart.

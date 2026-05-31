@@ -7222,6 +7222,19 @@ def test_index_storage_audit_reports_duplicates_and_cleanup_plan(m):
         assert "safe cleanup plan:" in text
 
 
+def test_index_storage_audit_honors_cancel_event(m):
+    with isolated_state():
+        event = threading.Event()
+        event.set()
+        try:
+            m.index_storage_audit(cancel_event=event)
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "index-storage"
+            assert "interrupted" in str(exc)
+        else:
+            raise AssertionError("index storage audit should honor a pre-set cancel event")
+
+
 def test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -9728,6 +9741,7 @@ def test_report_query_commands_pass_cancel_events(m):
         old_default_vector_index = m.default_vector_index
         old_latest_evidence_store_for_index = m.latest_evidence_store_for_index
         old_query_evidence_store = m.query_evidence_store
+        old_index_storage_audit = m.index_storage_audit
 
         class FakeVectorResult:
             report = {
@@ -9763,12 +9777,44 @@ def test_report_query_commands_pass_cancel_events(m):
                 "rows": [],
             }
 
+        def fake_index_storage_audit(*, cancel_event=None):
+            seen["index_storage"] = cancel_event
+            return {
+                "schema": m.INDEX_STORAGE_AUDIT_SCHEMA_VERSION,
+                "created": m.now(),
+                "index_count": 0,
+                "latest_index_families": 0,
+                "older_complete_indexes": 0,
+                "partial_count": 0,
+                "resumable_partial_count": 0,
+                "superseded_partial_count": 0,
+                "total_chunks": 0,
+                "stored_chunks": 0,
+                "duplicate_reference_chunks": 0,
+                "stored_body_duplicates": 0,
+                "unique_stored_bodies": 0,
+                "logical_content_bytes": 0,
+                "physical_stored_content_bytes": 0,
+                "unique_stored_content_bytes": 0,
+                "duplicate_reference_bytes": 0,
+                "duplicate_reference_bytes_with_target": 0,
+                "estimated_dedup_saved_bytes": 0,
+                "missing_duplicate_target_count": 0,
+                "missing_stored_chunk_count": 0,
+                "orphan_chunk_file_count": 0,
+                "orphan_chunk_file_bytes": 0,
+                "rows": [],
+                "safe_cleanup": [],
+                "blocked_cleanup": [],
+            }
+
         try:
             m.run_retrieval_debug = fake_run_retrieval_debug
             m.query_vector_result = fake_query_vector_result
             m.default_vector_index = fake_default_vector_index
             m.latest_evidence_store_for_index = fake_latest_evidence_store_for_index
             m.query_evidence_store = fake_query_evidence_store
+            m.index_storage_audit = fake_index_storage_audit
 
             event = threading.Event()
             retrieval = m.report_command_request("/retrieval-debug alpha", conv)
@@ -9780,11 +9826,15 @@ def test_report_query_commands_pass_cancel_events(m):
             evidence = m.evidence_command_request("/evidence-query alpha", conv)
             assert evidence is not None
             m.run_command_callable(evidence[1], cancel_event=event)
+            storage = m.index_report_command_request("/index-storage", conv)
+            assert storage is not None
+            m.run_command_callable(storage[1], cancel_event=event)
 
             assert seen == {
                 "retrieval_debug": event,
                 "vector_query": event,
                 "evidence_query": event,
+                "index_storage": event,
             }
         finally:
             m.run_retrieval_debug = old_run_retrieval_debug
@@ -9792,6 +9842,7 @@ def test_report_query_commands_pass_cancel_events(m):
             m.default_vector_index = old_default_vector_index
             m.latest_evidence_store_for_index = old_latest_evidence_store_for_index
             m.query_evidence_store = old_query_evidence_store
+            m.index_storage_audit = old_index_storage_audit
 
 
 def test_report_query_helpers_stop_when_pre_cancelled(m):
@@ -13222,6 +13273,7 @@ def main() -> int:
         test_retrieval_service_builds_sufficiency_expansion,
         test_prompt_context_runs_bounded_retrieval_sufficiency_pass,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
+        test_index_storage_audit_honors_cancel_event,
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,

@@ -12957,7 +12957,8 @@ def index_storage_scan_record(
     return row
 
 
-def index_storage_audit() -> dict:
+def index_storage_audit(*, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
     indexes = list_indexes()
     partials = list_partial_indexes()
     resumable_partial_ids = {partial.get("id", "") for partial in list_resumable_partial_indexes()}
@@ -12969,6 +12970,7 @@ def index_storage_audit() -> dict:
     duplicate_refs: list[dict] = []
     rows = []
     for index in indexes:
+        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
         row = index_storage_scan_record(
             index,
             record_kind="index",
@@ -12980,6 +12982,7 @@ def index_storage_audit() -> dict:
         row["latest_for_family"] = index.get("id", "") in latest_ids
         rows.append(row)
     for partial in partials:
+        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
         row = index_storage_scan_record(
             partial,
             record_kind="partial",
@@ -12995,6 +12998,7 @@ def index_storage_audit() -> dict:
     missing_duplicate_refs = []
     duplicate_reference_bytes_with_target = 0
     for ref in duplicate_refs:
+        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
         digest = ref.get("content_sha256", "")
         targets = [
             target
@@ -13009,9 +13013,11 @@ def index_storage_audit() -> dict:
 
     orphan_files = []
     for data_dir in indexes_dir().glob("*.chunks"):
+        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
         if not data_dir.is_dir():
             continue
         for path in data_dir.rglob("*.txt"):
+            raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
             try:
                 resolved = path.resolve()
             except OSError:
@@ -13029,6 +13035,7 @@ def index_storage_audit() -> dict:
     stale_superseded_indexes = index_cleanup_candidates(indexes)
     source_lifecycle_plans = []
     for index in indexes:
+        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
         summary = index_change_summary(index)
         plan = summary.get("artifact_lifecycle_plan") or {}
         if plan.get("status") != "needs-work":
@@ -13055,6 +13062,7 @@ def index_storage_audit() -> dict:
                 replacement_reason=replacement_reason,
             )
         )
+    raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
     cleanup_sections = index_storage_cleanup_sections(
         stale_superseded_indexes=stale_superseded_indexes,
         superseded_partial_count=len(superseded_partials),
@@ -20965,7 +20973,9 @@ def index_report_command_request(text: str, conv: dict):
         selector = body or None
         return "/index-quality", lambda: format_index_quality_gate(index_quality_gate(load_index(selector)))
     if primary == "/index-storage" and not body:
-        return "/index-storage", lambda: format_index_storage_audit(index_storage_audit())
+        return "/index-storage", lambda cancel_event=None: format_index_storage_audit(
+            index_storage_audit(cancel_event=cancel_event)
+        )
     if primary == "/index-cleanup":
         apply_cleanup = body in {"yes", "--yes", "apply"}
         return foreground_command_request(
@@ -24804,7 +24814,12 @@ def command_index_quality(args) -> None:
 
 
 def command_index_storage(args) -> None:
-    audit = index_storage_audit()
+    try:
+        with foreground_cancel_scope("keyboard interrupt during index-storage command") as cancel_event:
+            audit = index_storage_audit(cancel_event=cancel_event)
+    except WorkPaused as exc:
+        print(exc)
+        return
     if args.json:
         print(json.dumps(audit, ensure_ascii=False, indent=2))
     else:
