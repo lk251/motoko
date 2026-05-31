@@ -28,6 +28,10 @@ if str(REPO_ROOT) not in sys.path:
 from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
     format_source_lifecycle_report as format_source_lifecycle_report_core,
+    json_matching_source_paths as json_matching_source_paths_core,
+    json_references_index as json_references_index_core,
+    source_artifact_record as source_artifact_record_core,
+    source_lifecycle_affected_paths as source_lifecycle_affected_paths_core,
     source_lifecycle_report as build_source_lifecycle_report,
 )
 
@@ -9130,6 +9134,23 @@ def test_source_lifecycle_report_blocks_changed_sources(m):
 
 
 def test_source_lifecycle_report_service_owns_apply_decision(_m):
+    assert json_references_index_core({"context_items": [{"kind": "index", "id": "old-index"}]}, "old-index")
+    assert json_matching_source_paths_core({"sources": ["/tmp/docs/a.org"]}, {"/tmp/docs/a.org"}) == {
+        "/tmp/docs/a.org"
+    }
+    assert "/tmp/docs/a.org" in source_lifecycle_affected_paths_core(
+        [{"path": "/tmp/docs/a.org", "status": "ignored"}]
+    )
+    record = source_artifact_record_core(
+        artifact_id="artifact",
+        artifact_kind="vector_store",
+        state_path="/tmp/state/artifact.json",
+        cleanup_policy="delete-derived",
+        bytes_estimate=42,
+    )
+    assert record["bytes_estimate"] == 42
+    assert record["cleanup_policy"] == "delete-derived"
+
     index = {
         "id": "old-index",
         "name": "docs",

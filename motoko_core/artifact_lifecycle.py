@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import collections
+import pathlib
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -83,6 +84,104 @@ def source_lifecycle_state(*, path: str, exists: bool, ignored: bool, fingerprin
         "path": path,
         "status": status,
         "recommended_action": action,
+    }
+
+
+def json_references_index(value, index_id: str) -> bool:
+    if not index_id:
+        return False
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {
+                "index",
+                "index_id",
+                "source_index",
+                "source_index_id",
+                "created_by_index_id",
+                "source_fingerprint_index",
+            }:
+                if str(item) == index_id:
+                    return True
+                if isinstance(item, dict) and str(item.get("id", "")) == index_id:
+                    return True
+            if key in {"indexes", "index_ids", "source_indexes", "source_index_ids"} and isinstance(item, list):
+                if any(
+                    str(row) == index_id
+                    or (isinstance(row, dict) and str(row.get("id", "")) == index_id)
+                    for row in item
+                ):
+                    return True
+            if key == "context_items" and isinstance(item, list):
+                if any(
+                    isinstance(row, dict)
+                    and row.get("kind") == "index"
+                    and str(row.get("id", "")) == index_id
+                    for row in item
+                ):
+                    return True
+            if json_references_index(item, index_id):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(json_references_index(item, index_id) for item in value)
+    return False
+
+
+def json_matching_source_paths(value, source_paths: set[str]) -> set[str]:
+    matches: set[str] = set()
+    if not source_paths:
+        return matches
+    if isinstance(value, dict):
+        for item in value.values():
+            matches.update(json_matching_source_paths(item, source_paths))
+        return matches
+    if isinstance(value, list):
+        for item in value:
+            matches.update(json_matching_source_paths(item, source_paths))
+        return matches
+    if isinstance(value, str):
+        for source_path in source_paths:
+            if source_path and (value == source_path or source_path in value):
+                matches.add(source_path)
+    return matches
+
+
+def source_lifecycle_affected_paths(source_lifecycle: list[dict]) -> set[str]:
+    paths = set()
+    for item in source_lifecycle:
+        if not isinstance(item, dict) or item.get("status") == "fresh":
+            continue
+        path_text = str(item.get("path", "")).strip()
+        if not path_text:
+            continue
+        paths.add(path_text)
+        try:
+            paths.add(str(pathlib.Path(path_text).expanduser().resolve()))
+        except OSError:
+            paths.add(str(pathlib.Path(path_text).expanduser()))
+    return paths
+
+
+def source_artifact_record(
+    *,
+    artifact_id: str,
+    artifact_kind: str,
+    state_path: str | pathlib.Path,
+    cleanup_policy: str,
+    source_index_ids: list[str] | None = None,
+    source_paths: list[str] | None = None,
+    row_count: int = 0,
+    bytes_estimate: int = 0,
+) -> dict:
+    return {
+        "artifact_id": artifact_id,
+        "artifact_kind": artifact_kind,
+        "state_path": str(state_path),
+        "cleanup_policy": cleanup_policy,
+        "source_index_ids": source_index_ids or [],
+        "source_paths": source_paths or [],
+        "row_count": row_count,
+        "bytes_estimate": int(bytes_estimate or 0),
     }
 
 

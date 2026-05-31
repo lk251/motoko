@@ -1255,6 +1255,11 @@ Current progress on this stretch:
   report shape, formatter, and ready/blocked/apply decision flow through
   injected filesystem callbacks. The root facade still gathers source
   freshness, replacement-index facts, artifact records, and delete callbacks.
+- Progress: lifecycle ownership has moved another step inward:
+  `motoko_core.artifact_lifecycle` also owns the pure source-path matching,
+  index-reference detection, affected-source expansion, and normalized
+  artifact-record shape used by the root facade's family-specific state
+  scanner.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,
