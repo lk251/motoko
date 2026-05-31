@@ -163,6 +163,72 @@ Motoko repo itself, treat this as the current prepared queue:
     `action-eval` for authority behavior, retrieval evals for context changes,
     and `nix flake check` before committing.
 
+## Prepared Improvement Queue, 2026-05-31
+
+Motoko is ready for practical self-code assistance, but she should approach her
+own repo as an evidence-gathering assistant rather than as an unconstrained
+agent. The next high-value improvements should be selected in this order unless
+fresh evidence shows a better target:
+
+1. Finish artifact lifecycle ownership. Continue moving derived-artifact
+   scanning, family-specific rebuild decisions, and cleanup/apply orchestration
+   into `motoko_core.artifact_lifecycle` with injected filesystem callbacks,
+   tests, and conservative manual-review handling for human-authored state.
+2. Add finer cooperative cancellation checkpoints for long foreground study,
+   index, vector, dossier, and report operations. The job supervisor exists;
+   the remaining work is making the long functions yield durable stop/pause
+   points without corrupting indexes, vectors, memories, or ledgers.
+3. Improve code-intelligence precision. Extend `motoko code-map` and
+   `motoko code-query` only with deterministic facts that help Motoko find the
+   right implementation, test, schema, command handler, module boundary, or
+   migration before proposing a change.
+4. Keep skill learning review-first. Patch the existing umbrella skills before
+   creating narrow new skills. Use support files for examples, debugging
+   transcripts, validation checklists, and reusable design recipes that would
+   make a skill body too large.
+5. Build Hermes-inspired skill lifecycle craft without importing Hermes'
+   broad authority. Useful ideas are usage counts, view/use/patch timestamps,
+   pinned skills, recoverable archive states, curator reports, support-file
+   organization, and consolidation suggestions. Motoko must keep code-level
+   guards: bundled or built-in skills must not be silently mutated by a model,
+   and curator output should remain review-first until explicitly accepted.
+6. Convert user feedback into private eval seed material. `/feedback up`,
+   `/feedback down`, and diagnostic notes should propose retrieval fixtures,
+   skill patches, support files, or focused regressions; they should not
+   silently rewrite ranking, prompts, skills, or files.
+7. Use goal loops as inspectable review tools first. Prefer
+   `model_readonly` or `model_confirmed` loops that retrieve, audit, and
+   propose typed actions under budget, then stop for review. Do not widen into
+   broad autonomous terminal/tool authority without a separate design review.
+8. Preserve the root-facade shrink discipline. Extract a subsystem only when
+   the target module gains clearer ownership, focused tests, and a smaller
+   public API. Do not move code just to move code.
+
+Candidate self-improvement skill work:
+
+- Patch `motoko-refactor-craft` with lessons from each successful service
+  extraction: characterization first, injected callbacks at side-effect
+  boundaries, migration or reprocess path for derived artifacts, and soak
+  checks after deployment.
+- Patch `motoko-retrieval-maintainer` when a real answer failure teaches a new
+  reusable diagnosis across recall, ranking, stale data, chunk/span selection,
+  prompt packing, or final synthesis.
+- Patch `motoko-agentic-boundary-review` whenever script tools, project writes,
+  goal loops, worktrees, route scheduling, or approval flows reveal a reusable
+  safety check.
+- Keep `motoko-codebase-maintainer` focused on deterministic code lookup:
+  command-to-handler-to-test traces, module/service ownership, schemas,
+  migrations, and likely validation commands.
+
+Hermes Agent remains useful inspiration, especially its progressive skill
+disclosure, agent-managed procedural memory, curator usage metadata, pinned
+skills, recoverable archives, and periodic skill hygiene. The relevant lesson
+for Motoko is not "copy the tool runtime"; it is "make reusable procedure
+durable, inspectable, and maintained." Current public Hermes discussions also
+reinforce why Motoko needs code-level guards, not only prompt instructions:
+curator or background-review agents must not be able to silently alter
+protected skills, bundled skills, project files, or cross-realm state.
+
 ## Refactor Craft
 
 - Characterize behavior with tests before moving live orchestration.
