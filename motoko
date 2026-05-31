@@ -453,15 +453,20 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     collect_source_lifecycle_artifact_records,
     delete_index_snapshot_artifacts,
+    dependency_json_artifact_specs,
     format_index_cleanup_report,
     format_source_lifecycle_report,
     index_artifact_dependency_counts,
     index_file_path_keys,
     index_source_lifecycle_scan,
+    index_snapshot_delete_specs,
     json_paths_referencing_index,
     source_lifecycle_affected_paths,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
+    source_lifecycle_json_dir_specs,
+    source_lifecycle_json_file_specs,
+    source_lifecycle_jsonl_specs,
     source_lifecycle_report,
     superseded_stale_index_candidates,
 )
@@ -12395,21 +12400,51 @@ def json_artifacts_referencing_index(directory: pathlib.Path, index_id: str) -> 
     return json_paths_referencing_index(directory, index_id, load_json=safe_load_json)
 
 
+def artifact_lifecycle_path_for_key(key: str) -> pathlib.Path | None:
+    resolvers = {
+        "vector_stores": vector_stores_dir,
+        "evidence_stores": evidence_stores_dir,
+        "vector_progress": vector_progress_dir,
+        "topics": topics_dir,
+        "dossiers": dossiers_dir,
+        "retrieval_debug": retrieval_debug_dir,
+        "retrieval_evals": retrieval_evals_dir,
+        "feedback_evals": feedback_evals_dir,
+        "action_evals": action_evals_dir,
+        "model_evals": model_evals_dir,
+        "goal_loops": goal_loops_dir,
+        "goal_runs": goal_runs_dir,
+        "conversations": conversations_dir,
+        "response_feedback": response_feedback_path,
+        "action_ledger": action_ledger_path,
+        "memories": memories_path,
+        "memory_proposal_queue": memory_proposal_queue_path,
+        "study_jobs": study_jobs_path,
+        "skill_suggestions": skill_suggestions_path,
+        "skill_lifecycle": skill_lifecycle_path,
+        "profile": profile_path,
+    }
+    resolver = resolvers.get(str(key or ""))
+    return resolver() if resolver is not None else None
+
+
+def resolve_artifact_lifecycle_specs(specs: list[dict]) -> list[dict]:
+    resolved = []
+    for spec in specs:
+        key = str(spec.get("path_key", "")).strip()
+        path = artifact_lifecycle_path_for_key(key)
+        if path is None:
+            continue
+        item = {name: value for name, value in spec.items() if name != "path_key"}
+        item["path"] = path
+        resolved.append(item)
+    return resolved
+
+
 def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
     return index_artifact_dependency_counts(
         index_id,
-        [
-            {"path": vector_stores_dir(), "artifact_kind": "vector_store"},
-            {"path": evidence_stores_dir(), "artifact_kind": "evidence_store"},
-            {"path": vector_progress_dir(), "artifact_kind": "vector_progress"},
-            {"path": topics_dir(), "artifact_kind": "topic_dossier"},
-            {"path": dossiers_dir(), "artifact_kind": "memory_dossier"},
-            {"path": retrieval_debug_dir(), "artifact_kind": "retrieval_debug"},
-            {"path": retrieval_evals_dir(), "artifact_kind": "retrieval_eval"},
-            {"path": feedback_evals_dir(), "artifact_kind": "feedback_eval"},
-            {"path": action_evals_dir(), "artifact_kind": "action_eval"},
-            {"path": model_evals_dir(), "artifact_kind": "model_eval"},
-        ],
+        resolve_artifact_lifecycle_specs(dependency_json_artifact_specs()),
         load_json=safe_load_json,
     )
 
@@ -12420,52 +12455,9 @@ def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> 
         source_paths=source_paths,
         load_json=safe_load_json,
         path_size=path_size,
-        json_dirs=[
-            {"path": vector_stores_dir(), "artifact_kind": "vector_store", "cleanup_policy": "delete-derived"},
-            {"path": evidence_stores_dir(), "artifact_kind": "evidence_store", "cleanup_policy": "delete-derived"},
-            {"path": vector_progress_dir(), "artifact_kind": "vector_progress", "cleanup_policy": "delete-derived"},
-            {"path": topics_dir(), "artifact_kind": "topic_dossier", "cleanup_policy": "delete-derived"},
-            {"path": dossiers_dir(), "artifact_kind": "memory_dossier", "cleanup_policy": "delete-derived"},
-            {"path": retrieval_debug_dir(), "artifact_kind": "retrieval_debug", "cleanup_policy": "delete-derived"},
-            {"path": retrieval_evals_dir(), "artifact_kind": "retrieval_eval", "cleanup_policy": "delete-derived"},
-            {"path": feedback_evals_dir(), "artifact_kind": "feedback_eval", "cleanup_policy": "delete-derived"},
-            {"path": action_evals_dir(), "artifact_kind": "action_eval", "cleanup_policy": "delete-derived"},
-            {"path": model_evals_dir(), "artifact_kind": "model_eval", "cleanup_policy": "delete-derived"},
-            {"path": goal_loops_dir(), "artifact_kind": "goal_loop", "cleanup_policy": "manual-review"},
-            {"path": goal_runs_dir(), "artifact_kind": "goal_run", "cleanup_policy": "manual-review"},
-            {"path": conversations_dir(), "artifact_kind": "conversation", "cleanup_policy": "manual-review"},
-        ],
-        jsonl_files=[
-            {"path": response_feedback_path(), "artifact_kind": "response_feedback", "cleanup_policy": "manual-review"},
-            {"path": action_ledger_path(), "artifact_kind": "action_ledger", "cleanup_policy": "manual-review"},
-            {"path": memories_path(), "artifact_kind": "memory", "cleanup_policy": "manual-review"},
-            {
-                "path": memory_proposal_queue_path(),
-                "artifact_kind": "memory_proposal",
-                "cleanup_policy": "manual-review",
-            },
-            {"path": study_jobs_path(), "artifact_kind": "study_job", "cleanup_policy": "manual-review"},
-        ],
-        json_files=[
-            {
-                "path": skill_suggestions_path(),
-                "artifact_id": "skill_suggestion",
-                "artifact_kind": "skill_suggestion",
-                "cleanup_policy": "manual-review",
-            },
-            {
-                "path": skill_lifecycle_path(),
-                "artifact_id": "skill_lifecycle",
-                "artifact_kind": "skill_lifecycle",
-                "cleanup_policy": "manual-review",
-            },
-            {
-                "path": profile_path(),
-                "artifact_id": "profile",
-                "artifact_kind": "profile_dossier",
-                "cleanup_policy": "manual-review",
-            },
-        ],
+        json_dirs=resolve_artifact_lifecycle_specs(source_lifecycle_json_dir_specs()),
+        jsonl_files=resolve_artifact_lifecycle_specs(source_lifecycle_jsonl_specs()),
+        json_files=resolve_artifact_lifecycle_specs(source_lifecycle_json_file_specs()),
     )
 
 
@@ -12491,18 +12483,7 @@ def delete_index_snapshot(index: dict) -> dict:
         progress_path=index_progress_path(index_id),
         partial_path=index_partial_path(index_id),
         chunk_dir=indexes_dir() / f"{index_id}.chunks",
-        json_artifact_dirs=[
-            {"path": vector_stores_dir(), "report_key": "vector_stores_deleted"},
-            {"path": evidence_stores_dir(), "report_key": "evidence_stores_deleted"},
-            {"path": vector_progress_dir(), "report_key": "vector_progress_deleted"},
-            {"path": topics_dir(), "report_key": "topics_deleted"},
-            {"path": dossiers_dir(), "report_key": "dossiers_deleted"},
-            {"path": retrieval_debug_dir(), "report_key": "retrieval_debug_deleted"},
-            {"path": retrieval_evals_dir(), "report_key": "retrieval_evals_deleted"},
-            {"path": feedback_evals_dir(), "report_key": "feedback_evals_deleted"},
-            {"path": action_evals_dir(), "report_key": "action_evals_deleted"},
-            {"path": model_evals_dir(), "report_key": "model_evals_deleted"},
-        ],
+        json_artifact_dirs=resolve_artifact_lifecycle_specs(index_snapshot_delete_specs()),
         load_json=safe_load_json,
         path_size=path_size,
         tree_size=tree_size,

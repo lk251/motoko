@@ -325,6 +325,12 @@ Current progress on this backlog:
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh should
   get the same treatment if its status becomes ambiguous in practice.
+- Artifact lifecycle policy has moved another step into
+  `motoko_core.artifact_lifecycle`: delete-derived families, manual-review
+  families, single-file durable state families, and derived delete-report labels
+  now live in one service-owned declaration. Root code still resolves those
+  families to realm-local paths and performs filesystem mutation through
+  explicit callbacks.
 
 Skill work that should usually happen before new code:
 

@@ -31,7 +31,10 @@ from motoko_core.artifact_lifecycle import (
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
     delete_index_snapshot_artifacts as delete_index_snapshot_artifacts_core,
     delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
+    dependency_json_artifact_specs as dependency_json_artifact_specs_core,
+    derived_delete_report_labels as derived_delete_report_labels_core,
     format_source_lifecycle_report as format_source_lifecycle_report_core,
+    index_snapshot_delete_specs as index_snapshot_delete_specs_core,
     index_artifact_dependency_counts as index_artifact_dependency_counts_core,
     index_file_path_keys as index_file_path_keys_core,
     index_source_lifecycle_scan as index_source_lifecycle_scan_core,
@@ -40,6 +43,9 @@ from motoko_core.artifact_lifecycle import (
     json_references_index as json_references_index_core,
     source_artifact_record as source_artifact_record_core,
     source_lifecycle_affected_paths as source_lifecycle_affected_paths_core,
+    source_lifecycle_json_dir_specs as source_lifecycle_json_dir_specs_core,
+    source_lifecycle_json_file_specs as source_lifecycle_json_file_specs_core,
+    source_lifecycle_jsonl_specs as source_lifecycle_jsonl_specs_core,
     source_lifecycle_report as build_source_lifecycle_report,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
@@ -9411,6 +9417,55 @@ def test_source_lifecycle_report_blocks_changed_sources(m):
             m.quiet_model = old_quiet_model
 
 
+def test_artifact_lifecycle_family_specs_are_service_owned(m):
+    dependency_specs = dependency_json_artifact_specs_core()
+    assert {spec["artifact_kind"] for spec in dependency_specs} >= {
+        "vector_store",
+        "evidence_store",
+        "vector_progress",
+        "feedback_eval",
+        "model_eval",
+    }
+    assert all("path_key" in spec and "path" not in spec for spec in dependency_specs)
+
+    json_dir_specs = source_lifecycle_json_dir_specs_core()
+    assert {spec["cleanup_policy"] for spec in json_dir_specs} == {"delete-derived", "manual-review"}
+    assert any(spec["artifact_kind"] == "conversation" for spec in json_dir_specs)
+    assert any(spec["artifact_kind"] == "topic_dossier" for spec in json_dir_specs)
+
+    jsonl_specs = source_lifecycle_jsonl_specs_core()
+    assert {spec["artifact_kind"] for spec in jsonl_specs} >= {
+        "response_feedback",
+        "action_ledger",
+        "memory_proposal",
+        "study_job",
+    }
+    json_file_specs = source_lifecycle_json_file_specs_core()
+    assert {spec["artifact_kind"] for spec in json_file_specs} >= {
+        "skill_suggestion",
+        "skill_lifecycle",
+        "profile_dossier",
+    }
+
+    delete_specs = index_snapshot_delete_specs_core()
+    assert ("vector_progress_deleted", "vector-progress") in derived_delete_report_labels_core()
+    assert {spec["report_key"] for spec in delete_specs} >= {
+        "vector_stores_deleted",
+        "evidence_stores_deleted",
+        "vector_progress_deleted",
+    }
+
+    with isolated_state() as tmp:
+        resolved = m.resolve_artifact_lifecycle_specs(dependency_specs)
+        assert len(resolved) == len(dependency_specs)
+        assert all("path" in spec and "path_key" not in spec for spec in resolved)
+        assert {spec["artifact_kind"] for spec in resolved} == {
+            spec["artifact_kind"] for spec in dependency_specs
+        }
+        assert not (tmp / "state" / "goal-loops").exists()
+        assert not (tmp / "state" / "conversations").exists()
+
+
 def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert json_references_index_core({"context_items": [{"kind": "index", "id": "old-index"}]}, "old-index")
     assert json_matching_source_paths_core({"sources": ["/tmp/docs/a.org"]}, {"/tmp/docs/a.org"}) == {
@@ -12282,6 +12337,7 @@ def main() -> int:
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
         test_source_lifecycle_report_blocks_changed_sources,
+        test_artifact_lifecycle_family_specs_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,

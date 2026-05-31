@@ -19,6 +19,202 @@ SOURCE_LIFECYCLE_PLAN_SCHEMA = "source-lifecycle-plan-v1"
 SOURCE_LIFECYCLE_REPORT_SCHEMA = "source-lifecycle-report-v1"
 
 
+DERIVED_JSON_ARTIFACT_FAMILIES: tuple[dict, ...] = (
+    {
+        "path_key": "vector_stores",
+        "artifact_kind": "vector_store",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "vector_stores_deleted",
+        "report_label": "vector",
+    },
+    {
+        "path_key": "evidence_stores",
+        "artifact_kind": "evidence_store",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "evidence_stores_deleted",
+        "report_label": "evidence",
+    },
+    {
+        "path_key": "vector_progress",
+        "artifact_kind": "vector_progress",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "vector_progress_deleted",
+        "report_label": "vector-progress",
+    },
+    {
+        "path_key": "topics",
+        "artifact_kind": "topic_dossier",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "topics_deleted",
+        "report_label": "topics",
+    },
+    {
+        "path_key": "dossiers",
+        "artifact_kind": "memory_dossier",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "dossiers_deleted",
+        "report_label": "dossiers",
+    },
+    {
+        "path_key": "retrieval_debug",
+        "artifact_kind": "retrieval_debug",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "retrieval_debug_deleted",
+        "report_label": "retrieval-debug",
+    },
+    {
+        "path_key": "retrieval_evals",
+        "artifact_kind": "retrieval_eval",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "retrieval_evals_deleted",
+        "report_label": "retrieval-evals",
+    },
+    {
+        "path_key": "feedback_evals",
+        "artifact_kind": "feedback_eval",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "feedback_evals_deleted",
+        "report_label": "feedback-evals",
+    },
+    {
+        "path_key": "action_evals",
+        "artifact_kind": "action_eval",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "action_evals_deleted",
+        "report_label": "action-evals",
+    },
+    {
+        "path_key": "model_evals",
+        "artifact_kind": "model_eval",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "model_evals_deleted",
+        "report_label": "model-evals",
+    },
+)
+
+MANUAL_JSON_ARTIFACT_FAMILIES: tuple[dict, ...] = (
+    {
+        "path_key": "goal_loops",
+        "artifact_kind": "goal_loop",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "goal_runs",
+        "artifact_kind": "goal_run",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "conversations",
+        "artifact_kind": "conversation",
+        "cleanup_policy": "manual-review",
+    },
+)
+
+MANUAL_JSONL_ARTIFACT_FAMILIES: tuple[dict, ...] = (
+    {
+        "path_key": "response_feedback",
+        "artifact_kind": "response_feedback",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "action_ledger",
+        "artifact_kind": "action_ledger",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "memories",
+        "artifact_kind": "memory",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "memory_proposal_queue",
+        "artifact_kind": "memory_proposal",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "study_jobs",
+        "artifact_kind": "study_job",
+        "cleanup_policy": "manual-review",
+    },
+)
+
+MANUAL_JSON_FILE_ARTIFACT_FAMILIES: tuple[dict, ...] = (
+    {
+        "path_key": "skill_suggestions",
+        "artifact_id": "skill_suggestion",
+        "artifact_kind": "skill_suggestion",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "skill_lifecycle",
+        "artifact_id": "skill_lifecycle",
+        "artifact_kind": "skill_lifecycle",
+        "cleanup_policy": "manual-review",
+    },
+    {
+        "path_key": "profile",
+        "artifact_id": "profile",
+        "artifact_kind": "profile_dossier",
+        "cleanup_policy": "manual-review",
+    },
+)
+
+
+def _copy_specs(specs: tuple[dict, ...]) -> list[dict]:
+    return [dict(spec) for spec in specs]
+
+
+def dependency_json_artifact_specs() -> list[dict]:
+    """Return JSON artifact families that block old index cleanup."""
+
+    return [
+        {
+            "path_key": spec["path_key"],
+            "artifact_kind": spec["artifact_kind"],
+        }
+        for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+    ]
+
+
+def source_lifecycle_json_dir_specs() -> list[dict]:
+    """Return JSON directory families scanned for source lifecycle reports."""
+
+    return _copy_specs(DERIVED_JSON_ARTIFACT_FAMILIES) + _copy_specs(MANUAL_JSON_ARTIFACT_FAMILIES)
+
+
+def source_lifecycle_jsonl_specs() -> list[dict]:
+    """Return JSONL ledgers scanned for source lifecycle manual-review records."""
+
+    return _copy_specs(MANUAL_JSONL_ARTIFACT_FAMILIES)
+
+
+def source_lifecycle_json_file_specs() -> list[dict]:
+    """Return single JSON state files scanned for source lifecycle reports."""
+
+    return _copy_specs(MANUAL_JSON_FILE_ARTIFACT_FAMILIES)
+
+
+def index_snapshot_delete_specs() -> list[dict]:
+    """Return derived JSON families deleted with superseded index snapshots."""
+
+    return [
+        {
+            "path_key": spec["path_key"],
+            "report_key": spec["delete_report_key"],
+        }
+        for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+    ]
+
+
+def derived_delete_report_labels() -> list[tuple[str, str]]:
+    """Return report keys and human labels for derived cleanup summaries."""
+
+    return [
+        (str(spec["delete_report_key"]), str(spec["report_label"]))
+        for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+    ]
+
+
 @dataclass(frozen=True)
 class ArtifactCleanupDecision:
     artifact_id: str
@@ -856,17 +1052,7 @@ def format_source_lifecycle_report(report: dict) -> str:
         deleted = applied.get("deleted") or {}
         if deleted:
             extras = []
-            for key, label in [
-                ("vector_stores_deleted", "vector"),
-                ("evidence_stores_deleted", "evidence"),
-                ("topics_deleted", "topics"),
-                ("dossiers_deleted", "dossiers"),
-                ("retrieval_debug_deleted", "retrieval-debug"),
-                ("retrieval_evals_deleted", "retrieval-evals"),
-                ("feedback_evals_deleted", "feedback-evals"),
-                ("action_evals_deleted", "action-evals"),
-                ("model_evals_deleted", "model-evals"),
-            ]:
+            for key, label in derived_delete_report_labels():
                 if deleted.get(key):
                     extras.append(f"{label}:{deleted.get(key)}")
             lines.append(
@@ -1051,18 +1237,7 @@ def format_index_cleanup_report(report: dict) -> str:
             f"{human_bytes(item.get('bytes', 0))}"
         )
         extras = []
-        for key, label in [
-            ("vector_stores_deleted", "vector"),
-            ("evidence_stores_deleted", "evidence"),
-            ("vector_progress_deleted", "vector-progress"),
-            ("topics_deleted", "topics"),
-            ("dossiers_deleted", "dossiers"),
-            ("retrieval_debug_deleted", "retrieval-debug"),
-            ("retrieval_evals_deleted", "retrieval-evals"),
-            ("feedback_evals_deleted", "feedback-evals"),
-            ("action_evals_deleted", "action-evals"),
-            ("model_evals_deleted", "model-evals"),
-        ]:
+        for key, label in derived_delete_report_labels():
             if item.get(key):
                 extras.append(f"{label}:{item.get(key)}")
         if extras:

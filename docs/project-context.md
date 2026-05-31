@@ -1269,6 +1269,12 @@ Current progress on this stretch:
   `motoko_core.artifact_lifecycle`. The service now owns JSON artifact
   reference matching and per-family dependency counts through injected JSON
   loaders, while root deletion still stays behind explicit facade callbacks.
+- Progress: artifact-family cleanup policy is now service-owned. The lifecycle
+  service declares the delete-derived JSON families, manual-review JSON/JSONL
+  families, single-file durable state families, and derived delete report
+  labels. The root facade maps those policy keys to realm-local paths and
+  filesystem callbacks, so adding a new derived family should touch one policy
+  table instead of three parallel root-script lists.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,
@@ -1579,10 +1585,11 @@ Motoko self-code checkpoint, 2026-05-31:
   `motoko_core.artifact_lifecycle` now owns source-lifecycle artifact
   scanning, index dependency counting, JSON artifact deletion, superseded
   index snapshot deletion, index cleanup report formatting, source lifecycle
-  classification, and stale superseded-index candidate selection. The root
-  executable still supplies explicit state paths, corpus candidates,
-  staleness checks, and filesystem callbacks, preserving the security boundary
-  while reducing policy spread.
+  classification, stale superseded-index candidate selection, and the
+  artifact-family cleanup policy tables for delete-derived and manual-review
+  state. The root executable still supplies explicit state paths, corpus
+  candidates, staleness checks, and filesystem callbacks, preserving the
+  security boundary while reducing policy spread.
 - Foreground cancellation coverage has expanded beyond active chat answers:
   evidence build/refresh, index cleanup, source-lifecycle reports, and
   `bg-now` now receive cooperative cancel events in both CLI and slash-command
