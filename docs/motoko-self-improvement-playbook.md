@@ -332,9 +332,11 @@ Current progress on this backlog:
   root/name/glob index if an old snapshot was cleaned up, and refresh stored
   index/topic/dossier summaries from current artifact files before prompt
   construction. Prompt-time catalog text is now rebuilt from current
-  user-owned state instead of trusting an older persisted catalog file. The
-  next improvement is doing the same explicitly for evidence, vector, memory,
-  and profile attachment summaries wherever a long-lived TUI view caches them.
+  user-owned state instead of trusting an older persisted catalog file, and
+  current evidence/vector store ids, row counts, freshness, and vector refresh
+  metadata are surfaced alongside each index. The next improvement is doing
+  the same explicitly for any remaining memory/profile summaries wherever a
+  long-lived TUI view caches them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts and ETA. Evidence refresh should
@@ -375,6 +377,61 @@ progressive skill loading, agent-managed skill suggestions, skill usage
 metadata, curator hygiene, and recoverable archives. Keep rejecting the parts
 that do not fit Motoko: broad terminal authority, cross-realm skill stores,
 hidden mutation, dependency-heavy runtime assumptions, and prompt-only security.
+
+## Bird's-Eye State, 2026-05-31
+
+Motoko is past the fragile prototype stage. The core shape now exists:
+realm-local model routes, hybrid lexical/structured/evidence/vector retrieval,
+reranking, source citations, feedback records, action/goal ledgers, review-first
+skills, self-code lookup, artifact lifecycle reports, resumable background work,
+and a TTY-first interface. The work is not finished, but the remaining roadmap
+is mostly about making the existing architecture boringly reliable and easier
+for Motoko herself to inspect before editing.
+
+The most important unfinished implementation tracks are:
+
+1. Artifact lifecycle ownership: keep moving stale-source detection,
+   rebuild/upgrade decisions, derived-family cleanup, and source reprocessing
+   into service-owned code with injected filesystem callbacks.
+2. Cooperative cancellation and durable interruption: finish checkpoints in any
+   long topic, dossier, profile, report, memory, vector, evidence, or indexing
+   path that can still make `/stop`, `/pause`, or shutdown feel delayed.
+3. Always-fresh context: finish remaining cached-memory/profile surfaces so
+   open sessions notice new artifacts without restart.
+4. Conversation persistence trust: cover queued prompts, resumed empty chats,
+   feedback targeting, rename/delete cleanup, and deleted-chat artifact cleanup
+   with focused regressions.
+5. Skill lifecycle craft: make learned skills useful through support files,
+   curator reports, usage metadata, pinned/recoverable states, and patch-first
+   suggestions, while keeping unknown scripts inert until reviewed.
+6. Goal loops as review loops: use loops to retrieve, inspect, audit, and
+   propose typed actions before considering broader autonomous mutation.
+
+Prepared improvement list for Motoko's own code work:
+
+- Build a self-code session by first querying code facts, not by guessing:
+  `motoko code-map`, then `motoko code-query` for command handlers, tests,
+  schemas, migration constants, artifact families, and service boundaries.
+- Use or patch the umbrella skills before creating narrow skills:
+  `motoko-codebase-maintainer`, `motoko-refactor-craft`,
+  `motoko-retrieval-maintainer`, and `motoko-agentic-boundary-review`.
+- Turn repeated successful repairs into durable procedure: if a change saves
+  tokens, reduces errors, improves reliability, or preserves Motoko-specific
+  craft, add a skill support file or a review-first curator suggestion.
+- For retrieval failures, classify the fault first: recall, ranking, stale
+  source, chunk/span selection, prompt packing, final synthesis, or lifecycle
+  freshness. Then add a fixture or diagnostic that catches that class again.
+- For refactors, use the Swiss-watch recipe: characterize current behavior,
+  extract pure helpers, introduce a narrow service boundary, inject side
+  effects, preserve migrations/reprocess paths, validate, and commit.
+- For skills/tools/actions, keep Hermes-inspired procedural memory but not
+  Hermes-style broad authority. Scripts stay inert until scanned, approved, and
+  bound to typed action records with validators and ledgers.
+- Treat `/feedback` as private eval seed material. A good feedback-driven
+  improvement proposes a test, retrieval fixture, support file, or prompt
+  packing check; it does not silently mutate policy.
+- Leave a gate behind every improvement: a focused regression, `self-eval`,
+  `action-eval`, retrieval/vector eval, or a documented manual soak check.
 
 ## Refactor Craft
 

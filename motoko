@@ -10719,21 +10719,76 @@ def load_dossier_if_exists(dossier_id: str) -> dict | None:
     return None
 
 
+def artifact_store_freshness_summary(store: dict, checker) -> tuple[str, list[str]]:
+    try:
+        status, warnings = checker(store)
+    except SystemExit as exc:
+        return "unknown", [compact_text(str(exc), 180)]
+    return str(status or "unknown"), [compact_text(str(warning), 180) for warning in (warnings or [])[:2]]
+
+
+def latest_catalog_vector_store_for_index(index: dict, vector_stores: list[dict]) -> dict | None:
+    for store in vector_stores:
+        if vector_store_matches_index(store, index, method=EMBEDDING_VECTOR_METHOD):
+            return store
+    for store in vector_stores:
+        if vector_store_matches_index(store, index, method=None):
+            return store
+    return None
+
+
+def context_catalog_retrieval_artifacts(
+    index: dict,
+    *,
+    evidence_stores: list[dict],
+    vector_stores: list[dict],
+) -> dict:
+    artifacts = {}
+    evidence_store = next((store for store in evidence_stores if evidence_store_matches_index(store, index)), None)
+    if evidence_store:
+        status, warnings = artifact_store_freshness_summary(evidence_store, evidence_store_freshness)
+        artifacts["evidence_store"] = {
+            "id": evidence_store.get("id", ""),
+            "schema": evidence_store.get("schema", ""),
+            "row_count": evidence_store.get("row_count", len(evidence_store.get("rows", []))),
+            "status": status,
+            "warnings": warnings,
+        }
+    vector_store = latest_catalog_vector_store_for_index(index, vector_stores)
+    if vector_store:
+        status, warnings = artifact_store_freshness_summary(vector_store, vector_store_freshness)
+        artifacts["vector_store"] = {
+            "id": vector_store.get("id", ""),
+            "schema": vector_store.get("schema", ""),
+            "method": vector_store.get("method", ""),
+            "row_count": vector_store.get("row_count", len(vector_store.get("rows", []))),
+            "status": status,
+            "warnings": warnings,
+            "reused_rows": vector_store.get("embedding_reused_rows", 0),
+            "embedded_rows": vector_store.get("embedding_embedded_rows", 0),
+            "refresh_mode": vector_store.get("embedding_refresh_mode", ""),
+            "refresh_cause": vector_store.get("embedding_refresh_cause", ""),
+        }
+    return artifacts
+
+
 def build_context_catalog() -> dict:
+    evidence_stores = list_evidence_stores()
+    vector_stores = list_vector_stores()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
         status, warnings = index_staleness(index)
-        indexes.append(
-            {
-                "id": index.get("id", ""),
-                "name": index.get("name", ""),
-                "root": index.get("root", ""),
-                "status": status,
-                "warnings": warnings[:4],
-                "summary": compact_text(index.get("corpus_summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
-                "corpus_profile": compact_text(corpus_profile_text(index), CONTEXT_CATALOG_SUMMARY_CHARS),
-            }
-        )
+        item = {
+            "id": index.get("id", ""),
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "status": status,
+            "warnings": warnings[:4],
+            "summary": compact_text(index.get("corpus_summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
+            "corpus_profile": compact_text(corpus_profile_text(index), CONTEXT_CATALOG_SUMMARY_CHARS),
+        }
+        item.update(context_catalog_retrieval_artifacts(index, evidence_stores=evidence_stores, vector_stores=vector_stores))
+        indexes.append(item)
     topics = []
     for topic in list_topics()[:CONTEXT_CATALOG_DOSSIER_LIMIT]:
         topics.append(
@@ -10825,10 +10880,30 @@ def format_context_catalog(catalog: dict | None = None, *, project_roots: set[st
         lines.append("available document indexes:")
         for item in indexes[:6]:
             warning = f" warnings={'; '.join(item.get('warnings', []))}" if item.get("warnings") else ""
+            artifact_parts = []
+            evidence_store = item.get("evidence_store") if isinstance(item.get("evidence_store"), dict) else {}
+            if evidence_store.get("id"):
+                artifact_parts.append(
+                    f"evidence={evidence_store.get('id')} rows={evidence_store.get('row_count', 0)} "
+                    f"status={evidence_store.get('status', 'unknown')}"
+                )
+            vector_store = item.get("vector_store") if isinstance(item.get("vector_store"), dict) else {}
+            if vector_store.get("id"):
+                vector_detail = (
+                    f"vector={vector_store.get('id')} method={vector_store.get('method', '')} "
+                    f"rows={vector_store.get('row_count', 0)} status={vector_store.get('status', 'unknown')}"
+                )
+                if vector_store.get("refresh_mode") or vector_store.get("refresh_cause"):
+                    vector_detail += (
+                        f" refresh={vector_store.get('refresh_mode', '')}"
+                        f"/{vector_store.get('refresh_cause', '')}"
+                    )
+                artifact_parts.append(vector_detail)
+            artifact_text = f" artifacts={'; '.join(artifact_parts)}" if artifact_parts else ""
             lines.append(
                 f"- index:{item.get('id')} {item.get('name')} root={item.get('root')} "
                 f"status={item.get('status')}{warning} summary={item.get('summary')} "
-                f"profile={item.get('corpus_profile', '')}"
+                f"profile={item.get('corpus_profile', '')}{artifact_text}"
             )
     return "\n".join(lines)
 

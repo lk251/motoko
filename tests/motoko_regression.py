@@ -9070,6 +9070,79 @@ def test_prompt_context_uses_current_catalog_not_stale_catalog_file(m):
             os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
+def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "logbook.org"
+        source.write_text("* TODO Fresh catalog artifact task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "20260524-130000-artcat",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-24T13:00:00+00:00",
+            "corpus_summary": "fresh artifact-aware catalog index",
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        evidence_store = {
+            "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
+            "id": "evidence-current",
+            "evidence_input_schema": m.EVIDENCE_INPUT_SCHEMA_VERSION,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.evidence_store_source_fingerprint(index),
+            },
+            "rows": [],
+            "row_count": 7,
+        }
+        vector_store = {
+            "schema": m.VECTOR_STORE_SCHEMA_VERSION,
+            "id": "vector-current",
+            "method": m.LEXICAL_VECTOR_METHOD,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.vector_store_source_fingerprint(index),
+            },
+            "rows": [],
+            "row_count": 11,
+        }
+        m.atomic_write(m.evidence_store_path(evidence_store["id"]), json.dumps(evidence_store, ensure_ascii=False, indent=2) + "\n")
+        m.atomic_write(m.vector_store_path(vector_store["id"]), json.dumps(vector_store, ensure_ascii=False, indent=2) + "\n")
+
+        catalog = m.build_context_catalog()
+        catalog_index = next(row for row in catalog["indexes"] if row["id"] == index["id"])
+        assert catalog_index["evidence_store"]["id"] == "evidence-current"
+        assert catalog_index["evidence_store"]["row_count"] == 7
+        assert catalog_index["evidence_store"]["status"] == "fresh"
+        assert catalog_index["vector_store"]["id"] == "vector-current"
+        assert catalog_index["vector_store"]["row_count"] == 11
+        assert catalog_index["vector_store"]["status"] == "fresh"
+
+        text = m.format_context_catalog(catalog, project_roots={str(docs.resolve())})
+        assert "evidence=evidence-current rows=7 status=fresh" in text
+        assert "vector=vector-current method=lexical" in text
+        assert "rows=11 status=fresh" in text
+
+
 def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
     old_cwd = os.getcwd()
     old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
