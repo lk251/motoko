@@ -288,7 +288,7 @@ def test_heavy_index_refresh_replaces_attached_index(m):
     old_build = m.build_document_index
     phases = []
     try:
-        def fake_build(path, pattern, name=None, max_derived_bytes=None, progress_callback=None):
+        def fake_build(path, pattern, name=None, max_derived_bytes=None, progress_callback=None, cancel_event=None):
             if progress_callback is not None:
                 progress_callback(
                     {
@@ -442,7 +442,7 @@ def test_bg_now_attaches_current_directory_index_and_runs_manual_step(m):
     old_background_step = m.background_study_step
     old_cwd = pathlib.Path.cwd()
     try:
-        def fake_background_step(conv_arg, phase_callback=None, *, manual=False):
+        def fake_background_step(conv_arg, phase_callback=None, *, manual=False, cancel_event=None):
             seen["manual"] = manual
             seen["context_items"] = list(conv_arg.get("context_items", []))
             if phase_callback is not None:

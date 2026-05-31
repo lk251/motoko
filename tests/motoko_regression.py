@@ -3490,7 +3490,16 @@ def test_summary_reductions_fan_out_across_worker_routes(m):
             "description": m.MODEL_ROUTE_DESCRIPTIONS.get(route, ""),
         }
 
-    def fake_summarize_text(label, text, instruction, *, timeout=m.MODEL_TIMEOUT_SECONDS, route=m.MODEL_ROUTE_CHAT, prompt_version="summary-v1"):
+    def fake_summarize_text(
+        label,
+        text,
+        instruction,
+        *,
+        timeout=m.MODEL_TIMEOUT_SECONDS,
+        route=m.MODEL_ROUTE_CHAT,
+        prompt_version="summary-v1",
+        cancel_event=None,
+    ):
         nonlocal active, max_active
         with lock:
             active += 1
@@ -8474,6 +8483,112 @@ def test_index_pause_resume_rescans_new_files_without_overwriting_chunks(m):
             m.quiet_model = old_quiet_model
 
 
+def test_summarize_blocks_cancel_event_raises_work_paused(m):
+    event = threading.Event()
+    event.set()
+    try:
+        m.summarize_blocks("cancelled", ["alpha"], "summarize", cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "summarizing"
+    else:
+        raise AssertionError("summarize_blocks should honor a pre-set cancel event")
+
+
+def test_index_cancel_event_writes_paused_partial(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        (docs / "a.org").write_text("* TODO Alpha\nalpha body\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        event = threading.Event()
+        event.set()
+        try:
+            m.build_document_index(str(docs), cancel_event=event)
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "index"
+        else:
+            raise AssertionError("index build should pause when its cancel event is set")
+
+        partials = m.list_partial_indexes()
+        assert len(partials) == 1
+        partial = partials[0]
+        assert partial["status"] == "paused"
+        assert partial["completed_files"] == 0
+        progress = m.read_index_progress(partial["id"])
+        assert progress is not None
+        assert progress["status"] == "paused"
+
+
+def test_vector_build_cancel_event_stops_before_work(m):
+    with isolated_state() as tmp:
+        source = tmp / "doc.txt"
+        source.write_text("alpha", encoding="utf-8")
+        index = {
+            "id": "vector-cancel-index",
+            "name": "docs",
+            "root": str(tmp),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": m.now(),
+            "files": [
+                {
+                    "path": str(source),
+                    "summary": "alpha",
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "summary": "alpha",
+                            "content": "alpha",
+                            "content_sha256": m.sha256_hex(b"alpha"),
+                        }
+                    ],
+                }
+            ],
+        }
+        event = threading.Event()
+        event.set()
+        try:
+            m.build_vector_store_from_index(
+                index,
+                method=m.LEXICAL_VECTOR_METHOD,
+                write=False,
+                cancel_event=event,
+            )
+        except m.WorkPaused as exc:
+            assert exc.work_kind == "vector"
+        else:
+            raise AssertionError("vector build should honor a pre-set cancel event")
+
+
+def test_tui_stop_requests_report_job_cancel(m):
+    with isolated_state():
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = m.new_conversation("Stop report")
+        ui.messages = []
+        ui.pending_prompts = m.collections.deque(["queued prompt"])
+        ui.generating = False
+        ui.report_running = 1
+        ui.maintaining = False
+        ui.study_running = False
+        ui.cwd_indexing = False
+        ui.status = "ready"
+        ui.scroll = 0
+        ui.dirty = False
+        ui.jobs = m.JobSupervisor()
+        event = threading.Event()
+        job = ui.jobs.begin(kind="report", lane="cpu", label="slow report", cancel_event=event)
+
+        assert ui.stop_active_answer()
+
+        snapshot = ui.jobs.snapshots(include_done=False)[0]
+        assert snapshot["job_id"] == job.job_id
+        assert snapshot["status"] == "stop-requested"
+        assert event.is_set()
+        assert "stop requested" in ui.status
+        assert not ui.pending_prompts
+
+
 def test_org_task_signals_drive_retrieval(m):
     old_cwd = os.getcwd()
     with isolated_state() as tmp:
@@ -11097,6 +11212,10 @@ def main() -> int:
         test_index_resume_after_model_timeout,
         test_index_model_residency_defer_is_resumable_not_failed,
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
+        test_summarize_blocks_cancel_event_raises_work_paused,
+        test_index_cancel_event_writes_paused_partial,
+        test_vector_build_cancel_event_stops_before_work,
+        test_tui_stop_requests_report_job_cancel,
         test_org_task_signals_drive_retrieval,
         test_index_health_reports_new_files,
         test_index_signal_enrichment_upgrades_legacy_index,

@@ -16,6 +16,7 @@ import datetime as _dt
 import hashlib
 import http.client
 import io
+import inspect
 import json
 import os
 import pathlib
@@ -1588,6 +1589,50 @@ def clear_work_pause_request() -> None:
 
 def work_pause_requested() -> bool:
     return read_work_pause_request() is not None
+
+
+def work_cancel_requested(cancel_event) -> bool:
+    return bool(cancel_event is not None and cancel_event.is_set())
+
+
+def raise_if_work_cancelled(
+    cancel_event,
+    message: str = "work interrupted by request",
+    *,
+    work_id: str = "",
+    work_kind: str = "work",
+) -> None:
+    if not work_cancel_requested(cancel_event):
+        return
+    clear_work_pause_request()
+    raise WorkPaused(message, work_id=work_id, work_kind=work_kind)
+
+
+def model_call_cancelled(exc: BaseException) -> bool:
+    return isinstance(exc, RuntimeError) and str(exc) == "__motoko_stopped__"
+
+
+def work_cancelled_from_model(
+    exc: BaseException,
+    message: str = "work interrupted by request",
+    *,
+    work_id: str = "",
+    work_kind: str = "work",
+) -> WorkPaused | None:
+    if not model_call_cancelled(exc):
+        return None
+    clear_work_pause_request()
+    return WorkPaused(message, work_id=work_id, work_kind=work_kind)
+
+
+def run_command_callable(func, *, cancel_event=None):
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return func()
+    if "cancel_event" in signature.parameters:
+        return func(cancel_event=cancel_event)
+    return func()
 
 
 def read_index_progress(index_id: str) -> dict | None:
@@ -11678,6 +11723,7 @@ def quiet_model(
     json_schema=None,
     grammar: str | None = None,
     reasoning_preset: str | None = None,
+    cancel_event=None,
 ) -> str:
     return call_model(
         messages,
@@ -11690,6 +11736,7 @@ def quiet_model(
         json_schema=json_schema,
         grammar=grammar,
         reasoning_preset=reasoning_preset,
+        cancel_event=cancel_event,
     ).strip()
 
 
@@ -11701,7 +11748,9 @@ def summarize_text(
     timeout: float = MODEL_TIMEOUT_SECONDS,
     route: str = MODEL_ROUTE_CHAT,
     prompt_version: str = "summary-v1",
+    cancel_event=None,
 ) -> str:
+    raise_if_cancelled(cancel_event)
     clipped = text[:SUMMARY_INPUT_CHARS]
     prompt = textwrap.dedent(
         f"""
@@ -11744,6 +11793,7 @@ def summarize_text(
         timeout=timeout,
         route=route_info["route"],
         sampling_preset=sampling_preset,
+        cancel_event=cancel_event,
     )
     if cache_key:
         write_model_output_cache(
@@ -13968,6 +14018,7 @@ def rerank_documents(
     route_id: str | None = None,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     socket_activation_min_timeout: float | None = None,
+    cancel_event=None,
 ) -> tuple[list[float], dict]:
     if not documents:
         return [], reranker_route_info(route_id)
@@ -13979,6 +14030,7 @@ def rerank_documents(
         "top_n": len(documents),
     }
     try:
+        raise_if_cancelled(cancel_event)
         prepare_route_residency_for_request(route_info)
     except RouteResidencyBusy as exc:
         raise SystemExit(f"rerank request deferred: {exc}") from exc
@@ -13988,10 +14040,15 @@ def rerank_documents(
             payload,
             timeout=timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
+            cancel_event=cancel_event,
             prepare_residency=False,
         ) as resp:
+            raise_if_cancelled(cancel_event)
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+            raise_if_cancelled(cancel_event)
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("__motoko_stopped__") from exc
         hint = local_model_verify_hint(route_info)
         raise SystemExit(model_request_failure_detail("rerank request failed", exc, hint)) from exc
     try:
@@ -14007,6 +14064,7 @@ def embed_texts(
     route_id: str | None = None,
     timeout: float = MODEL_TIMEOUT_SECONDS,
     socket_activation_min_timeout: float | None = None,
+    cancel_event=None,
 ) -> tuple[list[list[float]], dict]:
     if not texts:
         return [], embedding_route_info(route_id)
@@ -14017,6 +14075,7 @@ def embed_texts(
         "encoding_format": "float",
     }
     try:
+        raise_if_cancelled(cancel_event)
         prepare_route_residency_for_request(route_info)
     except RouteResidencyBusy as exc:
         raise SystemExit(f"embedding request deferred: {exc}") from exc
@@ -14026,10 +14085,15 @@ def embed_texts(
             payload,
             timeout=timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
+            cancel_event=cancel_event,
             prepare_residency=False,
         ) as resp:
+            raise_if_cancelled(cancel_event)
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
+            raise_if_cancelled(cancel_event)
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("__motoko_stopped__") from exc
         hint = local_model_verify_hint(route_info)
         raise SystemExit(model_request_failure_detail("embedding request failed", exc, hint)) from exc
     try:
@@ -14328,7 +14392,9 @@ def build_vector_store_from_index(
     store_id: str | None = None,
     write: bool = True,
     progress_callback=None,
+    cancel_event=None,
 ) -> dict:
+    raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
     method = resolve_vector_method(method)
     if method == EMBEDDING_VECTOR_METHOD:
         return build_embedding_vector_store_from_index(
@@ -14336,13 +14402,16 @@ def build_vector_store_from_index(
             store_id=store_id,
             write=write,
             progress_callback=progress_callback,
+            cancel_event=cancel_event,
         )
     dims = max(8, int(dims or DEFAULT_LEXICAL_VECTOR_DIMS))
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
     rows = []
     for file_item in index.get("files", []):
+        raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
         for chunk in file_item.get("chunks", []):
+            raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
             text = vector_store_row_text(index, file_item, chunk)
             vector = lexical_sparse_vector(text, dims=dims)
             if not vector:
@@ -14444,9 +14513,10 @@ def build_vector_store(
     *,
     dims: int = DEFAULT_LEXICAL_VECTOR_DIMS,
     method: str = VECTOR_METHOD_AUTO,
+    cancel_event=None,
 ) -> dict:
     index = load_index(index_id) if index_id else default_vector_index()
-    return build_vector_store_from_index(index, dims=dims, method=method)
+    return build_vector_store_from_index(index, dims=dims, method=method, cancel_event=cancel_event)
 
 
 def vector_refresh_candidates(
@@ -14485,7 +14555,9 @@ def refresh_vector_stores(
     method: str = EMBEDDING_VECTOR_METHOD,
     max_chunks: int | None = None,
     phase_callback=None,
+    cancel_event=None,
 ) -> dict:
+    raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
     method = resolve_vector_method(method)
     limit = max(1, int(limit or 1))
     report = {
@@ -14503,6 +14575,7 @@ def refresh_vector_stores(
         max_chunks=max_chunks,
     )
     for index, reason in candidates:
+        raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
         if built >= limit:
             break
         item = {
@@ -14527,6 +14600,7 @@ def refresh_vector_stores(
                 index,
                 method=method,
                 progress_callback=phase_callback,
+                cancel_event=cancel_event,
             )
         except WorkPaused as exc:
             item["status"] = "paused"
@@ -14637,7 +14711,9 @@ def build_embedding_vector_store_from_index(
     store_id: str | None = None,
     write: bool = True,
     progress_callback=None,
+    cancel_event=None,
 ) -> dict:
+    raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
     route_info = embedding_route_info()
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
@@ -14646,7 +14722,9 @@ def build_embedding_vector_store_from_index(
     route_dims = int(route_info.get("embedding_dimensions") or 0)
     candidates = []
     for file_item in index.get("files", []):
+        raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
         for chunk in file_item.get("chunks", []):
+            raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
             for row_id, text, row_meta in vector_embedding_input_rows(index, file_item, chunk):
                 if text.strip():
                     candidates.append((row_id, file_item, chunk, text, row_meta))
@@ -14855,11 +14933,12 @@ def build_embedding_vector_store_from_index(
         }
         atomic_write(progress_path, json.dumps(progress, ensure_ascii=False, indent=2) + "\n")
 
-    def pause_vectorization() -> None:
+    def pause_vectorization(message: str | None = None) -> None:
         write_progress()
         clear_work_pause_request()
         raise WorkPaused(
-            f"vectorization paused at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}",
+            message
+            or f"vectorization paused at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}",
             work_id=progress_id,
             work_kind="vector",
         )
@@ -14868,6 +14947,7 @@ def build_embedding_vector_store_from_index(
         embeddings, embedded_route = embed_texts(
             [text for _row_id, _file_item, _chunk, text, _row_meta in batch],
             route_id=route_id or None,
+            cancel_event=cancel_event,
         )
         rows = []
         for (_row_id, file_item, chunk, _text, row_meta), vector in zip(batch, embeddings):
@@ -14919,6 +14999,8 @@ def build_embedding_vector_store_from_index(
             def submit_next() -> bool:
                 if failure is not None:
                     return False
+                if work_cancel_requested(cancel_event):
+                    return False
                 if work_pause_requested():
                     return False
                 try:
@@ -14931,12 +15013,25 @@ def build_embedding_vector_store_from_index(
             for _slot in range(run_parallelism):
                 submit_next()
             if not futures and run_batches:
+                if work_cancel_requested(cancel_event):
+                    pause_vectorization(
+                        f"vectorization interrupted at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}"
+                    )
                 pause_vectorization()
             while futures:
+                if work_cancel_requested(cancel_event):
+                    for future in futures:
+                        future.cancel()
+                    pause_vectorization(
+                        f"vectorization interrupted at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}"
+                    )
                 done, _pending = concurrent.futures.wait(
                     futures,
+                    timeout=0.1,
                     return_when=concurrent.futures.FIRST_COMPLETED,
                 )
+                if not done:
+                    continue
                 for future in done:
                     _offset, _batch = futures.pop(future)
                     try:
@@ -14944,6 +15039,13 @@ def build_embedding_vector_store_from_index(
                     except SystemExit as exc:
                         if failure is None:
                             failure = exc
+                    except RuntimeError as exc:
+                        if model_call_cancelled(exc):
+                            pause_vectorization(
+                                f"vectorization interrupted at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}"
+                            )
+                        if failure is None:
+                            failure = SystemExit(f"embedding request failed: {exc}")
                     except Exception as exc:  # pragma: no cover - defensive around worker threads.
                         if failure is None:
                             failure = SystemExit(f"embedding request failed: {exc}")
@@ -14954,6 +15056,12 @@ def build_embedding_vector_store_from_index(
                 raise failure
 
     while True:
+        raise_if_work_cancelled(
+            cancel_event,
+            f"vectorization interrupted at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}",
+            work_id=progress_id,
+            work_kind="vector",
+        )
         pending_batches = current_pending_batches()
         if not pending_batches:
             break
@@ -14985,6 +15093,10 @@ def build_embedding_vector_store_from_index(
                 continue
         else:
             for _offset, batch in pending_batches:
+                if work_cancel_requested(cancel_event):
+                    pause_vectorization(
+                        f"vectorization interrupted at durable checkpoint; resume with motoko vector-refresh {index.get('id', '')}"
+                    )
                 if work_pause_requested():
                     pause_vectorization()
                 new_rows, embedded_route = embed_batch(batch)
@@ -15726,7 +15838,9 @@ def summarize_and_store_chunk(
     progress: dict | None = None,
     progress_callback=None,
     model_timeout: float = MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> dict | None:
+    raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
     content = content.strip()
     if not content:
         return None
@@ -15747,14 +15861,21 @@ def summarize_and_store_chunk(
     if progress is not None:
         progress["current_chunk"] = chunk_idx
     index_progress_begin_model(progress, "summarizing chunk", label, progress_callback, route=MODEL_ROUTE_INDEX_CHUNK)
-    summary = summarize_text(
-        label,
-        content[:SUMMARY_INPUT_CHARS],
-        "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
-        timeout=model_timeout,
-        route=MODEL_ROUTE_INDEX_CHUNK,
-        prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
-    )
+    try:
+        summary = summarize_text(
+            label,
+            content[:SUMMARY_INPUT_CHARS],
+            "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
+            timeout=model_timeout,
+            route=MODEL_ROUTE_INDEX_CHUNK,
+            prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
+            cancel_event=cancel_event,
+        )
+    except RuntimeError as exc:
+        paused = work_cancelled_from_model(exc, "indexing interrupted by request", work_kind="index")
+        if paused is not None:
+            raise paused
+        raise
     index_progress_finish_model(progress, progress_callback, chunk_done=True)
     relpath, content_bytes = write_index_chunk(index_id, ordinal, chunk_idx, content, budget, path)
     item = {
@@ -15789,7 +15910,9 @@ def stream_index_file(
     progress: dict | None = None,
     progress_callback=None,
     model_timeout: float = MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> tuple[dict, list[dict], int]:
+    raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
     stat = path.stat()
     digest = hashlib.sha256()
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -15800,6 +15923,7 @@ def stream_index_file(
 
     def emit(text: str) -> None:
         nonlocal chunk_idx, derived_content_bytes
+        raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
         chunk = text.strip()
         if not chunk:
             return
@@ -15815,6 +15939,7 @@ def stream_index_file(
             progress,
             progress_callback,
             model_timeout,
+            cancel_event,
         )
         if item is not None:
             derived_content_bytes += item.get("stored_content_bytes", item.get("content_bytes", 0))
@@ -15822,6 +15947,7 @@ def stream_index_file(
 
     with path.open("rb") as fh:
         for raw in iter(lambda: fh.read(1024 * 1024), b""):
+            raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
             digest.update(raw)
             buffer += decoder.decode(raw)
             while len(buffer) >= INDEX_CHUNK_CHARS:
@@ -15945,7 +16071,9 @@ def summarize_blocks(
     route: str = MODEL_ROUTE_CHAT,
     prompt_version: str = "summary-v1",
     preplanned_calls: int = 1,
+    cancel_event=None,
 ) -> str:
+    raise_if_work_cancelled(cancel_event, f"{phase} interrupted by request", work_kind=phase)
     pending = [block.strip() for block in blocks if block.strip()]
     estimated_calls = estimate_summary_block_calls(pending)
     show_foreground_progress = progress is None and sys.stdout.isatty()
@@ -15970,19 +16098,28 @@ def summarize_blocks(
         callback=progress_callback,
     )
     if not pending:
+        raise_if_work_cancelled(cancel_event, f"{phase} interrupted by request", work_kind=phase)
         index_progress_begin_model(progress, phase, label, progress_callback, route=route)
-        result = summarize_text(
-            label,
-            "",
-            instruction,
-            timeout=timeout,
-            route=route,
-            prompt_version=prompt_version,
-        )
+        try:
+            result = summarize_text(
+                label,
+                "",
+                instruction,
+                timeout=timeout,
+                route=route,
+                prompt_version=prompt_version,
+                cancel_event=cancel_event,
+            )
+        except RuntimeError as exc:
+            paused = work_cancelled_from_model(exc, f"{phase} interrupted by request", work_kind=phase)
+            if paused is not None:
+                raise paused
+            raise
         index_progress_finish_model(progress, progress_callback)
         return result
 
     def summarize_with_progress(model_label: str, text: str, model_instruction: str, call_route: str = route) -> str:
+        raise_if_work_cancelled(cancel_event, f"{phase} interrupted by request", work_kind=phase)
         if work_pause_requested():
             clear_work_pause_request()
             raise WorkPaused(f"{phase} paused by request", work_kind=phase)
@@ -15993,14 +16130,21 @@ def summarize_blocks(
         spinner = ThinkingSpinner(enabled=show_foreground_progress)
         try:
             spinner.start()
-            result = summarize_text(
-                model_label,
-                text,
-                model_instruction,
-                timeout=timeout,
-                route=call_route,
-                prompt_version=prompt_version,
-            )
+            try:
+                result = summarize_text(
+                    model_label,
+                    text,
+                    model_instruction,
+                    timeout=timeout,
+                    route=call_route,
+                    prompt_version=prompt_version,
+                    cancel_event=cancel_event,
+                )
+            except RuntimeError as exc:
+                paused = work_cancelled_from_model(exc, f"{phase} interrupted by request", work_kind=phase)
+                if paused is not None:
+                    raise paused
+                raise
         finally:
             spinner.stop()
         index_progress_finish_model(progress, progress_callback)
@@ -16032,6 +16176,7 @@ def summarize_blocks(
         if not can_parallelize:
             reduced = []
             for idx, model_label, text in jobs:
+                raise_if_work_cancelled(cancel_event, f"{phase} interrupted by request", work_kind=phase)
                 call_route = slots[(idx - 1) % len(slots)] if slots else route
                 print(f"  reducing {model_label}", flush=True)
                 reduced.append(
@@ -16059,15 +16204,28 @@ def summarize_blocks(
                     call_route,
                 )
                 futures[future] = (idx, model_label)
-            for future in concurrent.futures.as_completed(futures):
-                idx, model_label = futures[future]
-                reduced[idx - 1] = future.result()
-                if show_foreground_progress:
-                    print(f"  completed {model_label}", flush=True)
+            while futures:
+                if work_cancel_requested(cancel_event):
+                    for future in futures:
+                        future.cancel()
+                    raise_if_work_cancelled(cancel_event, f"{phase} interrupted by request", work_kind=phase)
+                done, _pending = concurrent.futures.wait(
+                    futures,
+                    timeout=0.1,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+                for future in done:
+                    idx, model_label = futures.pop(future)
+                    reduced[idx - 1] = future.result()
+                    if show_foreground_progress:
+                        print(f"  completed {model_label}", flush=True)
         return [item or "" for item in reduced]
 
     round_no = 1
     while True:
+        raise_if_work_cancelled(cancel_event, f"{phase} interrupted by request", work_kind=phase)
         combined = "\n\n".join(pending)
         if len(combined) <= SUMMARY_INPUT_CHARS or len(pending) == 1 or round_no > 8:
             return summarize_with_progress(label, combined, instruction)
@@ -16089,7 +16247,9 @@ def index_file(
     progress: dict | None = None,
     progress_callback=None,
     model_timeout: float = MODEL_TIMEOUT_SECONDS,
+    cancel_event=None,
 ) -> dict:
+    raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
     fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(
         path,
         index_id,
@@ -16099,6 +16259,7 @@ def index_file(
         progress,
         progress_callback,
         model_timeout,
+        cancel_event,
     )
 
     print(f"  summarizing file {path}", flush=True)
@@ -16114,6 +16275,7 @@ def index_file(
         route=MODEL_ROUTE_INDEX_FILE,
         prompt_version=FILE_SUMMARY_SCHEMA_VERSION,
         preplanned_calls=(progress or {}).get("_file_summary_estimates", {}).get(str(path), 1),
+        cancel_event=cancel_event,
     )
     index_progress_finish_file(progress, progress_callback)
     item = {
@@ -16253,6 +16415,7 @@ def build_document_index(
     name: str | None = None,
     max_derived_bytes: str | None = None,
     progress_callback=None,
+    cancel_event=None,
 ) -> dict:
     require_permission("index")
     root = pathlib.Path(path).expanduser().resolve()
@@ -16281,6 +16444,12 @@ def build_document_index(
         print(f"Duplicate-aware indexing: {len(existing_chunks)} existing chunk(s) available for reuse.")
     try:
         for idx, candidate in enumerate(candidates, 1):
+            raise_if_work_cancelled(
+                cancel_event,
+                f"indexing interrupted at durable checkpoint; resume with motoko index-resume {index_id}",
+                work_id=index_id,
+                work_kind="index",
+            )
             try:
                 print(f"[{idx}/{len(candidates)}] indexing {candidate}", flush=True)
                 index_progress_begin_file(progress, candidate, idx, progress_callback)
@@ -16294,6 +16463,7 @@ def build_document_index(
                         progress,
                         progress_callback,
                         INDEX_MODEL_TIMEOUT_SECONDS,
+                        cancel_event,
                     )
                 )
                 write_partial_index(
@@ -16339,6 +16509,12 @@ def build_document_index(
             progress=progress,
             progress_callback=progress_callback,
         )
+        raise_if_work_cancelled(
+            cancel_event,
+            f"indexing interrupted at durable checkpoint; resume with motoko index-resume {index_id}",
+            work_id=index_id,
+            work_kind="index",
+        )
         print("  summarizing corpus", flush=True)
         corpus_summary = summarize_blocks(
             str(root),
@@ -16351,6 +16527,7 @@ def build_document_index(
             route=MODEL_ROUTE_INDEX_CORPUS,
             prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
             preplanned_calls=estimate_corpus_summary_calls(len(files)),
+            cancel_event=cancel_event,
         )
         index = document_index_record(
             index_id=index_id,
@@ -16371,7 +16548,23 @@ def build_document_index(
         finish_index_progress(progress, "completed", progress_callback)
         print(f"index saved: {index_id}")
         return index
-    except WorkPaused:
+    except WorkPaused as exc:
+        write_partial_index(
+            document_index_record(
+                index_id=index_id,
+                root=root,
+                pattern=pattern,
+                name=name,
+                created=created,
+                budget=budget,
+                files=files,
+                candidates=candidates,
+                selection_policy=selection_policy,
+            ),
+            status="paused",
+            error=str(exc),
+        )
+        finish_index_progress(progress, "paused", progress_callback, error=str(exc))
         raise
     except BaseException as exc:
         deferred = model_request_deferred_by_residency(exc)
@@ -16402,13 +16595,21 @@ def build_document_index_quiet(
     name: str | None = None,
     max_derived_bytes: str | None = None,
     progress_callback=None,
+    cancel_event=None,
 ) -> dict:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-        return build_document_index(path, pattern, name, max_derived_bytes, progress_callback)
+        return build_document_index(
+            path,
+            pattern,
+            name,
+            max_derived_bytes,
+            progress_callback,
+            cancel_event=cancel_event,
+        )
 
 
-def resume_document_index(index_id: str, progress_callback=None) -> dict:
+def resume_document_index(index_id: str, progress_callback=None, cancel_event=None) -> dict:
     partial = load_partial_index(index_id)
     require_permission("index")
     clear_work_pause_request()
@@ -16472,6 +16673,12 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
     used_ordinals = index_file_ordinals(files)
     try:
         for candidate_position, candidate in enumerate(candidates, 1):
+            raise_if_work_cancelled(
+                cancel_event,
+                f"indexing interrupted at durable checkpoint; resume with motoko index-resume {index_id}",
+                work_id=index_id,
+                work_kind="index",
+            )
             candidate_key = str(candidate.resolve())
             existing = completed_by_path.get(candidate_key)
             if existing is not None:
@@ -16495,6 +16702,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
                     progress,
                     progress_callback,
                     INDEX_MODEL_TIMEOUT_SECONDS,
+                    cancel_event,
                 )
                 files.append(item)
                 completed_by_path[candidate_key] = item
@@ -16540,6 +16748,12 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
             progress=progress,
             progress_callback=progress_callback,
         )
+        raise_if_work_cancelled(
+            cancel_event,
+            f"indexing interrupted at durable checkpoint; resume with motoko index-resume {index_id}",
+            work_id=index_id,
+            work_kind="index",
+        )
         print("  summarizing corpus", flush=True)
         corpus_summary = summarize_blocks(
             str(root),
@@ -16552,6 +16766,7 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
             route=MODEL_ROUTE_INDEX_CORPUS,
             prompt_version=CORPUS_SUMMARY_SCHEMA_VERSION,
             preplanned_calls=estimate_corpus_summary_calls(len(files)),
+            cancel_event=cancel_event,
         )
         index = document_index_record(
             index_id=index_id,
@@ -16572,7 +16787,23 @@ def resume_document_index(index_id: str, progress_callback=None) -> dict:
         finish_index_progress(progress, "completed", progress_callback)
         print(f"index saved: {index_id}")
         return index
-    except WorkPaused:
+    except WorkPaused as exc:
+        write_partial_index(
+            document_index_record(
+                index_id=index_id,
+                root=root,
+                pattern=pattern,
+                name=name,
+                created=created,
+                budget=budget,
+                files=files,
+                candidates=candidates,
+                selection_policy=selection_policy,
+            ),
+            status="paused",
+            error=str(exc),
+        )
+        finish_index_progress(progress, "paused", progress_callback, error=str(exc))
         raise
     except BaseException as exc:
         deferred = model_request_deferred_by_residency(exc)
@@ -16684,6 +16915,7 @@ def build_topic_dossier(
     retrieval_query: str | None = None,
     focus: str | None = None,
     owner_conversation_id: str = "",
+    cancel_event=None,
 ) -> dict:
     query = query.strip()
     if not query:
@@ -16696,6 +16928,7 @@ def build_topic_dossier(
     selected_rows = []
     source_indexes = []
     for index_id in index_ids:
+        raise_if_work_cancelled(cancel_event, "topic dossier interrupted by request", work_kind="topic")
         index = load_index(index_id)
         status, warnings = index_staleness(index)
         source_indexes.append(
@@ -16720,6 +16953,7 @@ def build_topic_dossier(
     evidence = []
     blocks = []
     for score, index, file_item, chunk, content in selected_rows:
+        raise_if_work_cancelled(cancel_event, "topic dossier interrupted by request", work_kind="topic")
         excerpt = query_aware_content_excerpt(retrieval_query, content, TOPIC_EXCERPT_CHARS)
         evidence_item = {
             "index": index.get("id", ""),
@@ -16764,6 +16998,7 @@ def build_topic_dossier(
         ).strip(),
         route=MODEL_ROUTE_TOPIC,
         prompt_version=TOPIC_DOSSIER_SCHEMA_VERSION,
+        cancel_event=cancel_event,
     )
     evidence_source = "\n\n".join(
         f"{item.get('index', '')}:{item.get('path', '')}:{item.get('chunk', '')}:{item.get('excerpt_sha256', '')}"
@@ -16795,7 +17030,7 @@ def build_topic_dossier(
     return topic
 
 
-def build_memory_dossier(query: str, *, name: str | None = None, owner_conversation_id: str = "") -> dict:
+def build_memory_dossier(query: str, *, name: str | None = None, owner_conversation_id: str = "", cancel_event=None) -> dict:
     query = query.strip()
     if not query:
         raise SystemExit("dossier query is empty")
@@ -16823,12 +17058,14 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
     blocks = []
     used = 0
 
+    raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
     if profile:
         profile_text = profile.get("text", "")[:MEMORY_DOSSIER_EXCERPT_CHARS]
         blocks.append(f"Profile dossier updated {profile.get('updated', '')}:\n{profile_text}")
         used += len(blocks[-1])
 
     for row in memories:
+        raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
         if used >= MEMORY_DOSSIER_MAX_SOURCE_CHARS:
             break
         text = row.get("text", "")[:MEMORY_DOSSIER_EXCERPT_CHARS]
@@ -16852,6 +17089,7 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
         used += len(block)
 
     for row in conversations:
+        raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
         if used >= MEMORY_DOSSIER_MAX_SOURCE_CHARS:
             break
         recall = conversation_recall_text(row)[:MEMORY_DOSSIER_EXCERPT_CHARS]
@@ -16894,6 +17132,7 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
         ).strip(),
         route=MODEL_ROUTE_MEMORY,
         prompt_version=MEMORY_DOSSIER_SCHEMA_VERSION,
+        cancel_event=cancel_event,
     )
     memory_source_rows = [
         item.get("id", "") + ":" + item.get("excerpt", "")
@@ -17212,15 +17451,18 @@ def refresh_heavy_attached_indexes(
     phase_callback=None,
     *,
     ignore_cooldown: bool = False,
+    cancel_event=None,
 ) -> list[str]:
     if not env_flag("MOTOKO_BACKGROUND_HEAVY_INDEX", True):
         return []
+    raise_if_work_cancelled(cancel_event, "background study paused by request", work_kind="study")
     if work_pause_requested():
         return ["heavy index refresh paused by request"]
     state = read_heavy_study_state()
     notes = []
     available_indexes = list_indexes()
     for item in list(conv.get("context_items", [])):
+        raise_if_work_cancelled(cancel_event, "background study paused by request", work_kind="study")
         if item.get("kind") != "index" or not item.get("id"):
             continue
         try:
@@ -17261,6 +17503,7 @@ def refresh_heavy_attached_indexes(
                 index.get("glob") or AUTO_INDEX_GLOB,
                 index.get("name", ""),
                 progress_callback=on_progress,
+                cancel_event=cancel_event,
             )
             replace_attached_index(conv, index.get("id", ""), refreshed)
         except WorkPaused as exc:
@@ -17389,28 +17632,30 @@ def cwd_learning_offer_text(plan: dict) -> str:
     )
 
 
-def build_cwd_learning_index(plan: dict, *, progress_callback=None, quiet: bool = False) -> dict:
+def build_cwd_learning_index(plan: dict, *, progress_callback=None, quiet: bool = False, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "cwd indexing interrupted by request", work_kind="index")
     partials = plan.get("partials") or []
     if partials:
         index_id = str(partials[0].get("id", "")).strip()
         if quiet:
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-                return resume_document_index(index_id, progress_callback=progress_callback)
-        return resume_document_index(index_id, progress_callback=progress_callback)
+                return resume_document_index(index_id, progress_callback=progress_callback, cancel_event=cancel_event)
+        return resume_document_index(index_id, progress_callback=progress_callback, cancel_event=cancel_event)
     builder = build_document_index_quiet if quiet else build_document_index
     return builder(
         str(plan["root"]),
         plan["glob"],
         plan["root"].name or str(plan["root"]),
         progress_callback=progress_callback,
+        cancel_event=cancel_event,
     )
 
 
-def resume_partial_index(index_id: str | None = None, *, progress_callback=None) -> dict:
+def resume_partial_index(index_id: str | None = None, *, progress_callback=None, cancel_event=None) -> dict:
     partial = select_partial_index(index_id)
     clear_work_pause_request()
-    return resume_document_index(str(partial.get("id", "")), progress_callback=progress_callback)
+    return resume_document_index(str(partial.get("id", "")), progress_callback=progress_callback, cancel_event=cancel_event)
 
 
 def unfinished_work_notice(limit: int = 3) -> str:
@@ -17553,19 +17798,22 @@ def study_retrieval_query(query: str, focus: str | None) -> str:
     return query
 
 
-def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
+def study_query(conv: dict, query: str, *, focus: str | None = None, cancel_event=None) -> str:
     query = query.strip()
     if not query:
         raise SystemExit("usage: /study QUERY")
+    raise_if_work_cancelled(cancel_event, "study interrupted by request", work_kind="study")
     retrieval_query = study_retrieval_query(query, focus)
     project_scope = project_scope_for_request(conv, retrieval_query)
     topic_limit = min(TOPIC_DEFAULT_CHUNKS, 8) if focus == "recent" else TOPIC_DEFAULT_CHUNKS
 
     topic = maybe_attach_relevant_existing_topic(conv, retrieval_query, project_scope=project_scope)
+    raise_if_work_cancelled(cancel_event, "study interrupted by request", work_kind="study")
     if topic:
         return f"attached existing topic dossier: {topic.get('id')} ({topic.get('name', '')})"
 
     dossier = maybe_attach_relevant_existing_dossier(conv, retrieval_query, project_scope=project_scope)
+    raise_if_work_cancelled(cancel_event, "study interrupted by request", work_kind="study")
     if dossier:
         return f"attached existing memory dossier: {dossier.get('id')} ({dossier.get('name', '')})"
 
@@ -17578,6 +17826,7 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
             retrieval_query=retrieval_query,
             focus=focus,
             owner_conversation_id=str(conv.get("id", "")),
+            cancel_event=cancel_event,
         )
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from attached index(es): {topic.get('id')}"
@@ -17591,11 +17840,16 @@ def study_query(conv: dict, query: str, *, focus: str | None = None) -> str:
             retrieval_query=retrieval_query,
             focus=focus,
             owner_conversation_id=str(conv.get("id", "")),
+            cancel_event=cancel_event,
         )
         attach_context_item(conv, context_item_from_topic(topic))
         return f"built topic dossier from index {index.get('id')}: {topic.get('id')}"
 
-    dossier = build_memory_dossier(retrieval_query, owner_conversation_id=str(conv.get("id", "")))
+    dossier = build_memory_dossier(
+        retrieval_query,
+        owner_conversation_id=str(conv.get("id", "")),
+        cancel_event=cancel_event,
+    )
     attach_context_item(conv, context_item_from_dossier(dossier))
     return f"built memory dossier: {dossier.get('id')}"
 
@@ -17662,7 +17916,9 @@ def background_study_step(
     phase_callback=None,
     *,
     manual: bool = False,
+    cancel_event=None,
 ) -> list[str]:
+    raise_if_work_cancelled(cancel_event, "background study paused by request", work_kind="study")
     job_id = study_job_id()
     previous_state = read_study_state()
     previous_job = previous_state.get("job_id") if study_state_incomplete(previous_state) else None
@@ -17682,6 +17938,7 @@ def background_study_step(
         append_study_job_event(job_id, "phase", phase=phase, notes=notes or [])
         if phase_callback is not None:
             phase_callback(phase)
+        raise_if_work_cancelled(cancel_event, "background study paused by request", work_id=job_id, work_kind="study")
         if work_pause_requested():
             pause_notes = (notes or []) + ["background study paused by request"]
             state = {
@@ -17730,6 +17987,7 @@ def background_study_step(
         conv,
         phase_callback=lambda phase: set_phase(phase, notes=notes),
         ignore_cooldown=manual,
+        cancel_event=cancel_event,
     )
     if heavy_notes:
         notes.extend(heavy_notes)
@@ -17786,6 +18044,7 @@ def background_study_step(
                 limit=vector_limit,
                 method=EMBEDDING_VECTOR_METHOD,
                 phase_callback=lambda phase: set_phase(phase, notes=notes),
+                cancel_event=cancel_event,
             )
         except SystemExit as exc:
             notes.append(f"vector refresh skipped: {exc}")
@@ -18722,6 +18981,7 @@ def call_model(
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
     slot_cache_context: dict | None = None,
+    cancel_event=None,
 ) -> str:
     route_info, governor = model_route_for_request(route, messages)
     effective_sampling_preset = selected_sampling_preset(
@@ -18752,6 +19012,7 @@ def call_model(
     if not effective_reasoning_preset:
         reasoning = apply_chat_reasoning_payload(payload, route_info)
     try:
+        raise_if_cancelled(cancel_event)
         prepare_route_residency_for_request(route_info)
     except RouteResidencyBusy as exc:
         raise SystemExit(f"model request deferred: {exc}") from exc
@@ -18786,16 +19047,24 @@ def call_model(
     spinner = ThinkingSpinner(enabled=echo)
     try:
         spinner.start()
-        with open_model_response(route_info, payload, timeout=timeout, prepare_residency=False) as resp:
+        with open_model_response(
+            route_info,
+            payload,
+            timeout=timeout,
+            cancel_event=cancel_event,
+            prepare_residency=False,
+        ) as resp:
             if stream:
-                reply = read_streaming_response(resp, echo=echo, spinner=spinner)
+                reply = read_streaming_response(resp, echo=echo, spinner=spinner, cancel_event=cancel_event)
                 if slot_context is not None:
                     slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
                     add_slot_cache_to_model_call_record(record, slot_context)
                 finish_model_call_record(record, started=started, completion_text=reply)
                 return reply
             spinner.stop()
+            raise_if_cancelled(cancel_event)
             reply = read_json_response(resp)
+            raise_if_cancelled(cancel_event)
             if slot_context is not None:
                 slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
                 add_slot_cache_to_model_call_record(record, slot_context)
@@ -18803,6 +19072,8 @@ def call_model(
             return reply
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         finish_model_call_record(record, started=started, error=exc)
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("__motoko_stopped__") from exc
         hint = local_model_verify_hint(route_info)
         raise SystemExit(model_request_failure_detail("model request failed", exc, hint)) from exc
     except BaseException as exc:
@@ -19250,9 +19521,10 @@ def read_streaming_response(
     *,
     echo: bool = True,
     spinner: ThinkingSpinner | None = None,
+    cancel_event=None,
 ) -> str:
     collected = []
-    for raw in resp:
+    for raw in iter_cancelable_response_lines(resp, cancel_event):
         done, content = parse_openai_stream_line(raw)
         if done:
             break
@@ -19939,16 +20211,23 @@ def vector_command_request(text: str, conv: dict):
         selector = body or None
         return (
             "/vector-build",
-            lambda: format_vector_store(
-                build_vector_store(selector) if selector else build_vector_store_from_index(default_vector_index(conv))
+            lambda cancel_event=None: format_vector_store(
+                build_vector_store(selector, cancel_event=cancel_event)
+                if selector
+                else build_vector_store_from_index(default_vector_index(conv), cancel_event=cancel_event)
             ),
         )
     if primary == "/vector-refresh":
         selector = body or None
         return (
             "/vector-refresh",
-            lambda: format_vector_refresh_report(
-                refresh_vector_stores(index_id=selector, limit=1, method=EMBEDDING_VECTOR_METHOD)
+            lambda cancel_event=None: format_vector_refresh_report(
+                refresh_vector_stores(
+                    index_id=selector,
+                    limit=1,
+                    method=EMBEDDING_VECTOR_METHOD,
+                    cancel_event=cancel_event,
+                )
             ),
         )
     if primary == "/vector-doctor":
@@ -20439,55 +20718,55 @@ def feedback_command_request(text: str, conv: dict):
     return "/feedback", run_feedback
 
 
-def attach_index_from_path_text(conv: dict, path: str) -> str:
+def attach_index_from_path_text(conv: dict, path: str, *, cancel_event=None) -> str:
     if not path:
         raise SystemExit("usage: /index PATH")
-    index = build_document_index(path, AUTO_INDEX_GLOB)
+    index = build_document_index(path, AUTO_INDEX_GLOB, cancel_event=cancel_event)
     conv.setdefault("context_items", []).append(context_item_from_index(index))
     save_conversation(conv)
     return f"attached index: {index['id']}"
 
 
-def attach_index_from_resume_text(conv: dict, index_id: str) -> str:
+def attach_index_from_resume_text(conv: dict, index_id: str, *, cancel_event=None) -> str:
     if not index_id:
         raise SystemExit("usage: /index-resume INDEX_ID")
-    index = resume_document_index(index_id)
+    index = resume_document_index(index_id, cancel_event=cancel_event)
     conv.setdefault("context_items", []).append(context_item_from_index(index))
     save_conversation(conv)
     return f"attached index: {index['id']}"
 
 
-def attach_resumed_work_text(conv: dict, index_id: str | None = None) -> str:
-    index = resume_partial_index(index_id)
+def attach_resumed_work_text(conv: dict, index_id: str | None = None, *, cancel_event=None) -> str:
+    index = resume_partial_index(index_id, cancel_event=cancel_event)
     conv.setdefault("context_items", []).append(context_item_from_index(index))
     save_conversation(conv)
     return f"attached index: {index['id']}"
 
 
-def attach_topic_from_body_text(conv: dict, body: str) -> str:
-    topic = build_topic_from_chat(conv, body)
+def attach_topic_from_body_text(conv: dict, body: str, *, cancel_event=None) -> str:
+    topic = build_topic_from_chat(conv, body, cancel_event=cancel_event)
     conv.setdefault("context_items", []).append(context_item_from_topic(topic))
     save_conversation(conv)
     return f"attached topic: {topic['id']}"
 
 
-def attach_deep_topic_from_body_text(conv: dict, body: str) -> str:
-    topic = deepen_topic_from_chat(conv, body)
+def attach_deep_topic_from_body_text(conv: dict, body: str, *, cancel_event=None) -> str:
+    topic = deepen_topic_from_chat(conv, body, cancel_event=cancel_event)
     conv.setdefault("context_items", []).append(context_item_from_topic(topic))
     save_conversation(conv)
     return f"attached deep topic: {topic['id']}"
 
 
-def attach_dossier_from_body_text(conv: dict, body: str) -> str:
-    dossier = build_dossier_from_chat(conv, body)
+def attach_dossier_from_body_text(conv: dict, body: str, *, cancel_event=None) -> str:
+    dossier = build_dossier_from_chat(conv, body, cancel_event=cancel_event)
     conv.setdefault("context_items", []).append(context_item_from_dossier(dossier))
     save_conversation(conv)
     return f"attached dossier: {dossier['id']}"
 
 
-def study_from_body_text(conv: dict, body: str) -> str:
+def study_from_body_text(conv: dict, body: str, *, cancel_event=None) -> str:
     query, focus = parse_study_directive(body)
-    return study_query(conv, query, focus=focus)
+    return study_query(conv, query, focus=focus, cancel_event=cancel_event)
 
 
 def current_project_index_already_attached(conv: dict, root: pathlib.Path, pattern: str) -> bool:
@@ -20540,11 +20819,13 @@ def run_background_now_text(
     attach_current_project: bool = True,
     phase_callback=None,
     save_result: bool = True,
+    cancel_event=None,
 ) -> str:
     notes = []
+    raise_if_work_cancelled(cancel_event, "background catch-up interrupted by request", work_kind="study")
     if attach_current_project:
         notes.extend(attach_current_project_index_for_background(conv))
-    notes.extend(background_study_step(conv, phase_callback=phase_callback, manual=True))
+    notes.extend(background_study_step(conv, phase_callback=phase_callback, manual=True, cancel_event=cancel_event))
     if save_result:
         save_conversation(conv)
     return format_background_now_report(notes)
@@ -20576,28 +20857,32 @@ def blocking_command_request(text: str, conv: dict):
     if primary == "/profile-refresh" and not body:
         return foreground_command_request("Refreshing profile dossier...", refresh_profile_dossier_text)
     if primary == "/study":
-        return foreground_command_request("Studying context...", lambda: study_from_body_text(conv, body))
+        return foreground_command_request("Studying context...", lambda cancel_event=None: study_from_body_text(conv, body, cancel_event=cancel_event))
     if primary == "/bg-now" and not body:
         return foreground_command_request(
             "Running background catch-up...",
-            lambda: run_background_now_text(conv, phase_callback=print_background_phase),
+            lambda cancel_event=None: run_background_now_text(
+                conv,
+                phase_callback=print_background_phase,
+                cancel_event=cancel_event,
+            ),
         )
     if primary == "/compact" and not body:
         return foreground_command_request("Compacting conversation...", lambda: compact_conversation_text(conv))
     if primary == "/memorize" and not body:
         return foreground_command_request("Running memory proposal...", lambda: memorize_conversation(conv))
     if primary == "/index" and body:
-        return foreground_command_request("Building document index...", lambda: attach_index_from_path_text(conv, body))
+        return foreground_command_request("Building document index...", lambda cancel_event=None: attach_index_from_path_text(conv, body, cancel_event=cancel_event))
     if primary == "/index-resume":
-        return foreground_command_request("Resuming document index...", lambda: attach_index_from_resume_text(conv, body))
+        return foreground_command_request("Resuming document index...", lambda cancel_event=None: attach_index_from_resume_text(conv, body, cancel_event=cancel_event))
     if primary == "/resume-work":
-        return foreground_command_request("Resuming Motoko work...", lambda: attach_resumed_work_text(conv, body or None))
+        return foreground_command_request("Resuming Motoko work...", lambda cancel_event=None: attach_resumed_work_text(conv, body or None, cancel_event=cancel_event))
     if primary == "/topic":
-        return foreground_command_request("Building topic dossier...", lambda: attach_topic_from_body_text(conv, body))
+        return foreground_command_request("Building topic dossier...", lambda cancel_event=None: attach_topic_from_body_text(conv, body, cancel_event=cancel_event))
     if primary == "/deepen":
-        return foreground_command_request("Building deep topic dossier...", lambda: attach_deep_topic_from_body_text(conv, body))
+        return foreground_command_request("Building deep topic dossier...", lambda cancel_event=None: attach_deep_topic_from_body_text(conv, body, cancel_event=cancel_event))
     if primary == "/dossier":
-        return foreground_command_request("Building memory dossier...", lambda: attach_dossier_from_body_text(conv, body))
+        return foreground_command_request("Building memory dossier...", lambda cancel_event=None: attach_dossier_from_body_text(conv, body, cancel_event=cancel_event))
     return None
 
 
@@ -20681,14 +20966,14 @@ def format_task_candidates_from_chat(conv: dict, query: str = "", *, project_sco
     return "\n".join(lines)
 
 
-def build_topic_from_chat(conv: dict, text: str) -> dict:
+def build_topic_from_chat(conv: dict, text: str, *, cancel_event=None) -> dict:
     owner = str(conv.get("id", ""))
     body = text.strip()
     project_scope = project_scope_for_request(conv, body)
     if not body and sys.stdin.isatty():
         index = load_index(None)
         query = input(style("topic query> ", "turquoise")).strip()
-        return build_topic_dossier([index["id"]], query, owner_conversation_id=owner)
+        return build_topic_dossier([index["id"]], query, owner_conversation_id=owner, cancel_event=cancel_event)
     if not body:
         raise SystemExit("usage: /topic [INDEX_ID] QUERY")
     parts = body.split(maxsplit=1)
@@ -20698,15 +20983,15 @@ def build_topic_from_chat(conv: dict, text: str) -> dict:
         except SystemExit:
             pass
         else:
-            return build_topic_dossier([parts[0]], parts[1], owner_conversation_id=owner)
+            return build_topic_dossier([parts[0]], parts[1], owner_conversation_id=owner, cancel_event=cancel_event)
 
     index_ids = attached_index_ids(conv, project_scope=project_scope)
     if not index_ids:
         raise SystemExit("attach an index first or use: /topic INDEX_ID QUERY")
-    return build_topic_dossier(index_ids, body, owner_conversation_id=owner)
+    return build_topic_dossier(index_ids, body, owner_conversation_id=owner, cancel_event=cancel_event)
 
 
-def deepen_topic_from_chat(conv: dict, text: str) -> dict:
+def deepen_topic_from_chat(conv: dict, text: str, *, cancel_event=None) -> dict:
     owner = str(conv.get("id", ""))
     body = text.strip()
     project_scope = project_scope_for_request(conv, body)
@@ -20719,18 +21004,18 @@ def deepen_topic_from_chat(conv: dict, text: str) -> dict:
         except SystemExit:
             pass
         else:
-            return build_topic_dossier([parts[0]], parts[1], max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner)
+            return build_topic_dossier([parts[0]], parts[1], max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner, cancel_event=cancel_event)
     index_ids = attached_index_ids(conv, project_scope=project_scope)
     if not index_ids:
         raise SystemExit("attach an index first or use: /deepen INDEX_ID QUERY")
-    return build_topic_dossier(index_ids, body, max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner)
+    return build_topic_dossier(index_ids, body, max_chunks=TOPIC_MAX_CHUNKS, owner_conversation_id=owner, cancel_event=cancel_event)
 
 
-def build_dossier_from_chat(conv: dict, text: str) -> dict:
+def build_dossier_from_chat(conv: dict, text: str, *, cancel_event=None) -> dict:
     query = text.strip()
     if not query:
         raise SystemExit("usage: /dossier QUERY")
-    return build_memory_dossier(query, owner_conversation_id=str(conv.get("id", "")))
+    return build_memory_dossier(query, owner_conversation_id=str(conv.get("id", "")), cancel_event=cancel_event)
 
 
 def bounded_output(text: str, max_chars: int = REPO_COMMAND_OUTPUT_CHARS) -> str:
@@ -21219,6 +21504,7 @@ class MotokoTui:
 
     def stop_active_answer(self) -> bool:
         discarded = self.clear_queued_prompts()
+        stopped_work = 0
         if self.generating:
             jobs = getattr(self, "jobs", None)
             if jobs is not None:
@@ -21228,6 +21514,19 @@ class MotokoTui:
             self.answer_phase = "stopping"
             self.answer_phase_started_monotonic = time.monotonic()
             note = "stopping current answer"
+            if discarded:
+                note += f"; discarded {discarded} queued prompt(s)"
+            self.status = note
+            self.append("system", note)
+            return True
+        jobs = getattr(self, "jobs", None)
+        if jobs is not None:
+            stopped_work += jobs.request_stop_by_kind("report")
+            stopped_work += jobs.request_stop_by_kind("cwd-index")
+            stopped_work += jobs.request_stop_by_kind("maintenance")
+        if stopped_work:
+            request_work_pause("manual TUI stop command")
+            note = f"stop requested for {stopped_work} active job(s)"
             if discarded:
                 note += f"; discarded {discarded} queued prompt(s)"
             self.status = note
@@ -21710,6 +22009,7 @@ class MotokoTui:
         self.study_phase_started = time.monotonic()
         self.study_phase_updated = self.study_phase_started
         self.index_progress = None
+        cancel_event = threading.Event()
 
         def worker() -> None:
             try:
@@ -21717,6 +22017,7 @@ class MotokoTui:
                     plan,
                     progress_callback=lambda progress: self.put_event(("cwd_index_progress", progress)),
                     quiet=True,
+                    cancel_event=cancel_event,
                 )
                 attach_context_item(self.conv, context_item_from_index(index))
                 self.put_event(("cwd_index_done", index.get("id", "")))
@@ -21732,6 +22033,7 @@ class MotokoTui:
             lane="large-model",
             label="corpus learning",
             target=worker,
+            cancel_event=cancel_event,
         )
 
     def request_pause(self) -> None:
@@ -21742,6 +22044,12 @@ class MotokoTui:
         request_work_pause("manual TUI command")
         if self.generating:
             self.cancel_event.set()
+        jobs = getattr(self, "jobs", None)
+        if jobs is not None:
+            for kind in ("answer", "report", "cwd-index", "maintenance"):
+                for snapshot in jobs.snapshots(include_done=False):
+                    if snapshot.get("kind") == kind:
+                        jobs.request_pause(str(snapshot.get("job_id", "")))
         self.status = "pause requested; waiting for checkpoint"
         self.append(
             "system",
@@ -21756,35 +22064,70 @@ class MotokoTui:
         self.report_running += 1
         self.report_status = label
         self.dirty = True
+        cancel_event = threading.Event()
 
         def worker() -> None:
             try:
-                text = func()
+                text = run_command_callable(func, cancel_event=cancel_event)
                 self.put_event(("report_done", token, label, str(text).strip() or "(no output)"))
+            except WorkPaused as exc:
+                self.put_event(("report_done", token, label, str(exc).strip() or "work paused"))
+            except RuntimeError as exc:
+                if model_call_cancelled(exc):
+                    self.put_event(("report_done", token, label, "work stopped"))
+                else:
+                    self.put_event(("report_error", token, label, f"{type(exc).__name__}: {exc}"))
             except SystemExit as exc:
                 self.put_event(("report_error", token, label, str(exc)))
             except Exception as exc:
                 self.put_event(("report_error", token, label, f"{type(exc).__name__}: {exc}"))
 
-        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(kind="report", lane="cpu", label=label, target=worker)
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
+            kind="report",
+            lane="cpu",
+            label=label,
+            target=worker,
+            cancel_event=cancel_event,
+        )
 
     def run_blocking_command(self, label: str, func) -> None:
         if self.generating:
             self.append("system", "Finish or wait for the current answer before running this blocking command.")
             return
         post_message: tuple[str, str] | None = None
+        cancel_event = threading.Event()
         job = getattr(self, "jobs", LIVE_JOB_SUPERVISOR).begin(
             kind="foreground",
             lane="cpu",
             label=label,
+            cancel_event=cancel_event,
         )
         job_status = JOB_STATUS_COMPLETED
         job_error = ""
+        old_sigint = None
+        installed_sigint_handler = False
         self.restore_for_blocking()
         try:
+            if threading.current_thread() is threading.main_thread():
+                old_sigint = signal.getsignal(signal.SIGINT)
+
+                def foreground_sigint(_signum, _frame):
+                    cancel_event.set()
+                    request_work_pause("keyboard interrupt during foreground command")
+                    print()
+                    print(
+                        style(
+                            "Interrupt requested; waiting for the next durable checkpoint...",
+                            "yellow",
+                        ),
+                        flush=True,
+                    )
+
+                signal.signal(signal.SIGINT, foreground_sigint)
+                installed_sigint_handler = True
             print()
             print(style(label, "turquoise", "bold"))
-            result = func()
+            result = run_command_callable(func, cancel_event=cancel_event)
             if result:
                 print_report(str(result))
             print(style("Done. Returning to Motoko TUI.", "green"))
@@ -21792,6 +22135,17 @@ class MotokoTui:
             text = str(exc)
             print(style(text, "yellow"))
             post_message = ("system", text)
+        except RuntimeError as exc:
+            if not model_call_cancelled(exc):
+                job_status = JOB_STATUS_FAILED
+                job_error = type(exc).__name__
+                text = f"{type(exc).__name__}: {exc}"
+                print(style(text, "red"))
+                post_message = ("error", text)
+            else:
+                text = "work interrupted by request"
+                print(style(text, "yellow"))
+                post_message = ("system", text)
         except SystemExit as exc:
             job_status = JOB_STATUS_FAILED
             job_error = "SystemExit"
@@ -21805,12 +22159,15 @@ class MotokoTui:
             print(style(text, "red"))
             post_message = ("error", text)
         except KeyboardInterrupt:
+            cancel_event.set()
             request_work_pause("keyboard interrupt during blocking command")
             text = "Interrupted. Pause requested; unfinished work can resume from the next durable checkpoint if one exists."
             print()
             print(style(text, "yellow"))
             post_message = ("system", text)
         finally:
+            if installed_sigint_handler:
+                signal.signal(signal.SIGINT, old_sigint)
             getattr(self, "jobs", LIVE_JOB_SUPERVISOR).finish(
                 job.job_id,
                 status=job_status,
