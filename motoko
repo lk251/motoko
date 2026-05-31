@@ -12421,6 +12421,9 @@ def invalidate_context_catalog_after_cleanup() -> None:
 
 
 def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False, cancel_event=None) -> dict:
+    def check_cancelled() -> None:
+        raise_if_work_cancelled(cancel_event, "index cleanup interrupted by request", work_kind="index-cleanup")
+
     raise_if_work_cancelled(cancel_event, "index cleanup interrupted by request", work_kind="index-cleanup")
     candidates = index_cleanup_candidates()
     raise_if_work_cancelled(cancel_event, "index cleanup interrupted by request", work_kind="index-cleanup")
@@ -12435,6 +12438,7 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False, c
         latest_missing_artifacts=index_artifact_warnings,
         delete_snapshot=delete_index_snapshot,
         invalidate_catalog=invalidate_context_catalog_after_cleanup,
+        check_cancelled=check_cancelled,
     )
 
 
@@ -12460,6 +12464,9 @@ def source_lifecycle_report_for_index(
     yes: bool = False,
     cancel_event=None,
 ) -> dict:
+    def check_cancelled() -> None:
+        raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
+
     raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
     index_id = str(index.get("id", "")).strip()
     summary = index_change_summary(index)
@@ -12486,6 +12493,7 @@ def source_lifecycle_report_for_index(
         yes=yes,
         delete_snapshot=delete_index_snapshot,
         invalidate_catalog=invalidate_context_catalog_after_cleanup,
+        check_cancelled=check_cancelled,
     )
 
 

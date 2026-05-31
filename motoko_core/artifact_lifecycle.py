@@ -727,6 +727,7 @@ def source_lifecycle_report(
     yes: bool = False,
     delete_snapshot: Callable[[dict], dict] | None = None,
     invalidate_catalog: Callable[[], None] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> dict:
     """Build and optionally apply a source lifecycle cleanup report.
 
@@ -735,6 +736,8 @@ def source_lifecycle_report(
     """
 
     index_id = str(index.get("id", "")).strip()
+    if check_cancelled is not None:
+        check_cancelled()
     source_lifecycle = [
         row for row in summary.get("source_lifecycle", []) or [] if isinstance(row, dict)
     ]
@@ -771,6 +774,8 @@ def source_lifecycle_report(
     }
     if not apply:
         return report
+    if check_cancelled is not None:
+        check_cancelled()
     if not yes:
         raise SystemExit("refusing source lifecycle cleanup without --yes")
     if plan.get("apply_status") != "ready":
@@ -785,7 +790,11 @@ def source_lifecycle_report(
             "reason": "source lifecycle cleanup has no deletion callback",
         }
         return report
+    if check_cancelled is not None:
+        check_cancelled()
     deletion = delete_snapshot(index)
+    if check_cancelled is not None:
+        check_cancelled()
     if invalidate_catalog is not None:
         invalidate_catalog()
     report["applied"] = {
@@ -884,6 +893,7 @@ def cleanup_superseded_index_candidates(
     latest_missing_artifacts: Callable[[dict], list[str]],
     delete_snapshot: Callable[[dict], dict],
     invalidate_catalog: Callable[[], None] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> dict:
     """Apply lifecycle decisions for stale superseded index candidates.
 
@@ -895,8 +905,12 @@ def cleanup_superseded_index_candidates(
     selected = candidates if limit == 0 else candidates[:limit]
     latest_ids = {str(row.get("latest", {}).get("id", "")) for row in selected}
     materialized = []
+    if check_cancelled is not None:
+        check_cancelled()
     if not dry_run:
         for latest_id in sorted(latest_ids):
+            if check_cancelled is not None:
+                check_cancelled()
             if not latest_id:
                 continue
             try:
@@ -909,6 +923,8 @@ def cleanup_superseded_index_candidates(
     deleted = []
     blocked = []
     for row in selected:
+        if check_cancelled is not None:
+            check_cancelled()
         index = row.get("index", {})
         index_id = str(index.get("id", ""))
         latest_id = str(row.get("latest", {}).get("id", ""))
@@ -955,7 +971,11 @@ def cleanup_superseded_index_candidates(
                 }
             )
             continue
+        if check_cancelled is not None:
+            check_cancelled()
         deleted_item = delete_snapshot(index)
+        if check_cancelled is not None:
+            check_cancelled()
         deleted_item["lifecycle"] = decision.to_dict()
         deleted.append(deleted_item)
     if not dry_run and deleted and invalidate_catalog is not None:

@@ -27,6 +27,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from motoko_core import slot_cache as slot_cache_core
 from motoko_core.artifact_lifecycle import (
+    cleanup_superseded_index_candidates as cleanup_superseded_index_candidates_core,
     collect_source_lifecycle_artifact_records as collect_source_lifecycle_artifact_records_core,
     delete_index_snapshot_artifacts as delete_index_snapshot_artifacts_core,
     delete_json_artifacts_referencing_index as delete_json_artifacts_referencing_index_core,
@@ -9323,6 +9324,30 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert cleanup_candidates[0]["latest"]["id"] == "new-a"
     assert cleanup_candidates[0]["warnings"] == ["older index"]
     assert cleanup_candidates[0]["bytes"] == 64
+    cleanup_cancel_calls = {"count": 0}
+    cleanup_deleted = []
+
+    def cleanup_cancel_before_delete():
+        cleanup_cancel_calls["count"] += 1
+        if cleanup_cancel_calls["count"] >= 4:
+            raise RuntimeError("cancelled cleanup")
+
+    try:
+        cleanup_superseded_index_candidates_core(
+            cleanup_candidates,
+            schema="index-cleanup-v1",
+            created="2026-05-31T00:00:00+00:00",
+            dry_run=False,
+            load_latest=lambda _latest_id: {"id": "new-a"},
+            materialize_latest=lambda _latest: {"changed": False, "missing_chunks": 0},
+            latest_missing_artifacts=lambda _latest: [],
+            delete_snapshot=lambda index: cleanup_deleted.append(index["id"]) or {"index": index["id"]},
+            check_cancelled=cleanup_cancel_before_delete,
+        )
+        raise AssertionError("cleanup cancellation should stop before deletion")
+    except RuntimeError as exc:
+        assert "cancelled cleanup" in str(exc)
+    assert cleanup_deleted == []
     with tempfile.TemporaryDirectory() as source_tmp:
         source_root = pathlib.Path(source_tmp)
         kept = source_root / "kept.org"
@@ -9585,6 +9610,32 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert dry_run["plan"]["derived_artifact_count"] == 1
     assert dry_run["plan"]["manual_review_artifact_count"] == 1
     assert deleted == []
+
+    lifecycle_cancel_calls = {"count": 0}
+    lifecycle_deleted = []
+
+    def lifecycle_cancel_before_delete():
+        lifecycle_cancel_calls["count"] += 1
+        if lifecycle_cancel_calls["count"] >= 3:
+            raise RuntimeError("cancelled source lifecycle")
+
+    try:
+        build_source_lifecycle_report(
+            index=index,
+            summary=summary,
+            artifact_records=artifacts,
+            replacement_index={"id": "new-index"},
+            replacement_ready=True,
+            replacement_reason="replacement is fresh",
+            apply=True,
+            yes=True,
+            delete_snapshot=lambda item: lifecycle_deleted.append(item["id"]) or {"index": item["id"]},
+            check_cancelled=lifecycle_cancel_before_delete,
+        )
+        raise AssertionError("source lifecycle cancellation should stop before deletion")
+    except RuntimeError as exc:
+        assert "cancelled source lifecycle" in str(exc)
+    assert lifecycle_deleted == []
 
     try:
         build_source_lifecycle_report(

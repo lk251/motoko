@@ -191,8 +191,10 @@ fresh evidence shows a better target:
    Current progress: active chat answers, queued prompts, foreground
    index/vector/study paths, evidence build/refresh, index cleanup,
    source-lifecycle reports, and `bg-now` now pass cancel events through their
-   CLI or slash-command paths. Continue this work by adding checkpoints inside
-   remaining model-backed dossier, repair, memory, and profile operations.
+   CLI or slash-command paths. Lifecycle apply/report helpers now also accept
+   injected cancellation checkpoints before materialization or deletion.
+   Continue this work by adding checkpoints inside remaining model-backed
+   dossier, repair, memory, and profile operations.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or
