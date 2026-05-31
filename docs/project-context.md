@@ -305,8 +305,11 @@ Current UI direction:
 - Keep the composer visually close to the chat body; avoid fixed separator
   lines unless a future terminal architecture clearly needs them.
 - The TUI uses a Codex-style append-only transcript with a bottom composer and
-  status area. Normal terminal scrollback should show chat history; only the
-  composer/status/live-answer area should be redrawn in place.
+  status area. Normal terminal scrollback should show chat history. Stable
+  completed answer lines should append through the transcript/scrollback path;
+  the bottom frame should keep only live phase, input, suggestions, and status
+  controls. When temporary UI such as slash suggestions shrinks, exposed rows
+  should be repainted from the transcript tail rather than left blank.
 - Background memory work should report the actual phase and recover cleanly
   from interruption instead of leaving an indefinite spinner.
 - The TUI should not show a spinner by default. Legacy line-mode spinners are

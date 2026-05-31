@@ -281,6 +281,15 @@ def main() -> int:
     )
     assert anchored.startswith("\033[8;1H\033[J\033[8;1H")
     assert anchored.endswith("\033[8;4H\033[?25h")
+    restored = bottom_area_absolute_sequence(
+        ["> prompt", "status"],
+        cursor_row=0,
+        cursor_col=4,
+        height=8,
+        previous_rows=5,
+        restore_lines=["old one", "old two", "old three"],
+    )
+    assert "\033[4;1H\033[J\033[4;1H\rold one\033[K\n\rold two\033[K\n\rold three\033[K" in restored
     supervisor = JobSupervisor(clock=lambda: 10.0, id_factory=lambda: "job-1")
     job = supervisor.begin(kind="answer", lane="large-model", label="chat answer")
     supervisor.update(job.job_id, progress={"batch": 1}, checkpoint={"durable": True})
@@ -353,6 +362,12 @@ def main() -> int:
             assert "resize redraw probe" in first
             assert "checking pty dimensions" in first
             assert "─" not in first
+
+            ui.input_buffer = ""
+            ui.cursor = 0
+            ui.render(force=True)
+            cleared_dropdown = read_available(master_fd)
+            assert "checking pty dimensions" in cleared_dropdown
 
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72

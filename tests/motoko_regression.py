@@ -5247,12 +5247,15 @@ def test_tui_role_markers_working_and_worked_line(m):
         assert "checking source excerpts" in rows[2]
         assert rows[3].startswith("Worked for 6m 32s ")
         assert "─" in rows[3]
-        ui.events.append(("token", "A"))
+        ui.events.append(("token", "token-fragment"))
         ui.drain_events()
         assert ui.answer_phase == "answering"
         rows = [m.strip_ansi(row) for row in ui.body_display(60) if row.strip()]
         assert rows[2].startswith("● Answering ")
         assert "checking source excerpts" not in rows[2]
+        live_rows = [m.strip_ansi(row) for row in ui.live_answer_display(60) if row.strip()]
+        assert live_rows[0].startswith("● Answering ")
+        assert all("token-fragment" not in row for row in live_rows)
 
 
 def test_tui_alt_backspace_deletes_previous_word(m):
@@ -5414,6 +5417,41 @@ def test_tui_append_renderer_keeps_transcript_in_scrollback(m):
         assert "first prompt" not in second
         assert "first answer" not in second
         assert "draft" in second
+
+
+def test_tui_active_answer_streams_stable_lines_to_scrollback(m):
+    with isolated_state():
+        captured = []
+        ui = object.__new__(m.MotokoTui)
+        ui.messages = []
+        ui.answer_entry = {
+            "role": "assistant",
+            "content": "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu",
+        }
+        ui.generating = True
+        ui.rendered_message_ids = set()
+        ui.bottom_rows_rendered = 1
+        ui.bottom_cursor_row_offset = 0
+        ui.bottom_frame_key = None
+        ui.answer_stream_width = 0
+        ui.answer_stream_emitted_lines = 0
+        ui.write = captured.append
+
+        ui.sync_active_answer_transcript(24, 10, reserved_rows=2)
+
+        first = m.strip_ansi("".join(captured))
+        assert "\033[1;8r" in "".join(captured)
+        assert "alpha" in first
+        assert ui.answer_stream_emitted_lines > 0
+
+        captured.clear()
+        ui.sync_active_answer_transcript(24, 10, reserved_rows=2)
+        assert captured == []
+
+        ui.sync_active_answer_transcript(24, 10, reserved_rows=2, final=True)
+        final = m.strip_ansi("".join(captured))
+        assert "lambda" in final or "mu" in final
+        assert id(ui.answer_entry) in ui.rendered_message_ids
 
 
 def test_tui_seed_messages_renders_full_saved_history_without_redundant_banner(m):
@@ -10886,6 +10924,7 @@ def main() -> int:
         test_tui_vector_status_reports_stale_progress,
         test_vector_progress_phase_is_content_free_and_finalizing,
         test_tui_append_renderer_keeps_transcript_in_scrollback,
+        test_tui_active_answer_streams_stable_lines_to_scrollback,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
         test_conversation_delete_removes_owned_derived_artifacts,

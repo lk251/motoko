@@ -316,6 +316,7 @@ def bottom_area_absolute_sequence(
     cursor_col: int,
     height: int,
     previous_rows: int = 0,
+    restore_lines: list[str] | None = None,
 ) -> str:
     """Render the bottom prompt/status frame without trusting cursor history."""
     if not lines:
@@ -327,7 +328,16 @@ def bottom_area_absolute_sequence(
     frame_start = max(1, height - len(visible_rows) + 1)
     target_row = min(height, frame_start + max(0, min(cursor_row, len(visible_rows) - 1)))
     target_col = max(1, int(cursor_col or 1))
-    parts = [f"\033[{clear_start};1H\033[J", f"\033[{frame_start};1H"]
+    parts = [f"\033[{clear_start};1H\033[J"]
+    exposed_rows = max(0, frame_start - clear_start)
+    if restore_lines and exposed_rows:
+        rows = ([""] * exposed_rows + restore_lines[-exposed_rows:])[-exposed_rows:]
+        parts.append(f"\033[{clear_start};1H")
+        for idx, line in enumerate(rows):
+            parts.append(f"\r{line}\033[K")
+            if idx + 1 < exposed_rows:
+                parts.append("\n")
+    parts.append(f"\033[{frame_start};1H")
     for idx, line in enumerate(visible_rows):
         parts.append(f"\r{line}\033[K")
         if idx + 1 < len(visible_rows):

@@ -396,10 +396,12 @@ The conversation is an append-only transcript, so normal terminal scrollback in
 TTY, Sway, Foot, or tmux shows chat history instead of old full-screen redraw
 frames. The composer and status area redraw at the bottom, `/` opens command
 suggestions, arrow keys move through suggestions, Enter accepts a selection,
-and typed text remains available while Motoko streams an answer. There is no
-fixed separator between the chat body and the composer. The TUI prints a short,
-non-persistent startup tip block; `/tips`, `/help`, `/status`, and `/sources`
-are the inspectable places for details.
+and typed text remains available while Motoko streams an answer. Stable
+completed answer lines are appended through the normal transcript/scrollback
+path; the bottom frame keeps only live phase, input, suggestions, and status
+controls. There is no fixed separator between the chat body and the composer.
+The TUI prints a short, non-persistent startup tip block; `/tips`, `/help`,
+`/status`, and `/sources` are the inspectable places for details.
 Use `/stop` to stop the current answer and discard any prompts queued behind
 it. Use `/clear-queue` to discard queued prompts without stopping the active
 answer.

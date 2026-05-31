@@ -20729,6 +20729,8 @@ class MotokoTui:
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
         self.answer_reasoning = ""
+        self.answer_stream_width = 0
+        self.answer_stream_emitted_lines = 0
         self.kv_notice_started_monotonic = 0.0
         self.kv_notice_until_monotonic = 0.0
         self.active_model_lock = threading.Lock()
@@ -21514,6 +21516,8 @@ class MotokoTui:
         self.answer_phase_started_monotonic = now
         self.answer_phase = "preparing"
         self.answer_reasoning = ""
+        self.answer_stream_width = 0
+        self.answer_stream_emitted_lines = 0
         chat_route = model_route(MODEL_ROUTE_CHAT)
         if endpoint_is_unix(chat_route.get("endpoint", "")):
             self.status = f"model queued/loading on {chat_route['route']} socket; you can type the next prompt below"
@@ -21634,6 +21638,7 @@ class MotokoTui:
                 self.conv["last_sources"] = sources
                 self.conv["messages"].append({"role": "assistant", "content": reply})
                 save_conversation(self.conv)
+                self.flush_active_answer_transcript(reply)
                 self.generating = False
                 self.answer_phase = ""
                 self.answer_reasoning = ""
@@ -21659,6 +21664,7 @@ class MotokoTui:
                     elif self.answer_entry in self.messages:
                         self.messages.remove(self.answer_entry)
                 if partial:
+                    self.flush_active_answer_transcript(partial.rstrip() + "\n\n[stopped]")
                     self.conv["messages"].append(
                         {"role": "assistant", "content": partial.rstrip() + "\n\n[stopped]"}
                     )
@@ -22088,6 +22094,8 @@ class MotokoTui:
         else:
             bottom_frame = self.bottom_area_frame(content_width, height)
             self.sync_transcript(content_width, height, reserved_rows=len(bottom_frame[0]))
+            if self.generating:
+                self.sync_active_answer_transcript(content_width, height, reserved_rows=len(bottom_frame[0]))
             self.draw_bottom_area(content_width, height, force=force, frame=bottom_frame)
         self.last_render = time.monotonic()
         self.dirty = False
@@ -22176,18 +22184,36 @@ class MotokoTui:
         frame_key = (width, height, tuple(lines), cursor_row, cursor_col)
         if not force and frame_key == getattr(self, "bottom_frame_key", None):
             return
+        previous_rows = int(getattr(self, "bottom_rows_rendered", 0) or 0)
+        restore_lines = []
+        if previous_rows > len(lines):
+            restore_lines = self.transcript_tail_lines(width, previous_rows - len(lines))
         self.write(
             render_bottom_area_absolute_sequence(
                 lines,
                 cursor_row=cursor_row,
                 cursor_col=cursor_col,
                 height=height,
-                previous_rows=int(getattr(self, "bottom_rows_rendered", 0) or 0),
+                previous_rows=previous_rows,
+                restore_lines=restore_lines,
             )
         )
         self.bottom_rows_rendered = len(lines)
         self.bottom_cursor_row_offset = cursor_row
         self.bottom_frame_key = frame_key
+
+    def transcript_tail_lines(self, width: int, count: int) -> list[str]:
+        count = max(0, int(count or 0))
+        if not count:
+            return []
+        rows = []
+        for entry in getattr(self, "messages", []):
+            if entry is self.answer_entry and self.generating:
+                continue
+            rows.extend(self.message_display_lines(entry, width))
+        if not rows:
+            return [""] * count
+        return ([""] * count + rows)[-count:]
 
     def sync_transcript(self, width: int, height: int, *, reserved_rows: int = 1) -> None:
         if not hasattr(self, "rendered_message_ids"):
@@ -22206,12 +22232,57 @@ class MotokoTui:
         self.clear_bottom_area()
         self.write(render_transcript_append_sequence(rows, height=height, reserved_rows=reserved_rows))
 
+    def sync_active_answer_transcript(
+        self,
+        width: int,
+        height: int,
+        *,
+        reserved_rows: int = 1,
+        final: bool = False,
+    ) -> None:
+        if self.answer_entry is None or not str(self.answer_entry.get("content", "")):
+            return
+        lines = self.message_display_lines(self.answer_entry, width, active_answer=False)
+        target_count = len(lines) if final else max(0, len(lines) - 2)
+        if self.answer_stream_width and self.answer_stream_width != width:
+            self.answer_stream_emitted_lines = min(self.answer_stream_emitted_lines, target_count)
+        self.answer_stream_width = width
+        start = max(0, min(self.answer_stream_emitted_lines, target_count))
+        rows = lines[start:target_count]
+        if rows:
+            self.clear_bottom_area()
+            self.write(render_transcript_append_sequence(rows, height=height, reserved_rows=reserved_rows))
+            self.answer_stream_emitted_lines = target_count
+        if final:
+            self.rendered_message_ids.add(id(self.answer_entry))
+
+    def flush_active_answer_transcript(self, content: str | None = None) -> None:
+        if self.answer_entry is None:
+            return
+        if not hasattr(self, "stdout_fd"):
+            return
+        if content is not None:
+            self.answer_entry["content"] = content
+        size = self.terminal_size()
+        width = max(40, size.columns)
+        height = max(12, size.lines)
+        content_width = max(20, width - 1)
+        bottom_frame = self.bottom_area_frame(content_width, height)
+        self.sync_active_answer_transcript(
+            content_width,
+            height,
+            reserved_rows=len(bottom_frame[0]),
+            final=True,
+        )
+
     def live_answer_display(self, width: int) -> list[str]:
         if self.answer_entry is None or not self.generating:
             return []
         phase_started = self.answer_phase_started_monotonic or self.answer_started_monotonic or time.monotonic()
+        status_entry = dict(self.answer_entry)
+        status_entry["content"] = ""
         return render_live_answer_display_lines(
-            self.answer_entry,
+            status_entry,
             width,
             assistant_color=assistant_color(),
             answer_phase=getattr(self, "answer_phase", ""),
@@ -22278,10 +22349,16 @@ class MotokoTui:
         return fixed_prompt_input_display(self.input_buffer, self.cursor, width)
 
     def terminal_size(self) -> os.terminal_size:
+        fd = getattr(self, "stdout_fd", None)
         try:
-            return os.get_terminal_size(self.stdout_fd)
+            if fd is not None:
+                return os.get_terminal_size(fd)
         except OSError:
+            pass
+        try:
             return shutil.get_terminal_size((80, 24))
+        except OSError:
+            return os.terminal_size((80, 24))
 
 
 def chat_loop(conv: dict) -> None:

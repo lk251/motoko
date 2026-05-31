@@ -5,6 +5,11 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Fixed destructive TUI bottom-frame redraws. Active answers now stream stable
+  completed lines into the real terminal transcript, the bottom frame keeps
+  only the live phase/input/status controls, and shrinking slash-command
+  suggestions repaints the exposed transcript rows instead of leaving blank
+  holes.
 - Plain `feedback up|down|ok NOTE` now records private feedback on the last
   Motoko answer just like `/feedback` or `/up`, and the TUI treats it as a
   command instead of queueing it as a chat prompt during active work.
