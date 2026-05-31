@@ -114,6 +114,52 @@ proposing code changes:
     `self-eval`, `action-eval`, retrieval/vector eval, or a documented manual
     soak check that would catch the same failure next time.
 
+## Next Self-Improvement Brief
+
+When today's work is deployed and Motoko is asked to reason about improving the
+Motoko repo itself, treat this as the current prepared queue:
+
+1. Start every self-code session by running or retrieving `motoko code-map` and
+   a focused `motoko code-query QUERY`; do not let the model infer command
+   handlers, tests, or module ownership from memory alone.
+2. Use the existing self-improvement umbrella skills first:
+   `motoko-codebase-maintainer`, `motoko-refactor-craft`,
+   `motoko-retrieval-maintainer`, and `motoko-agentic-boundary-review`. Patch
+   or add support files to these before creating narrow duplicate skills.
+3. Improve code intelligence before broader agency. The next useful code-map
+   upgrades are command-to-handler-to-test traces, simple import/call
+   relationships, root-facade hotspot reports, and service-boundary maps. These
+   would make Motoko better at finding the right code before proposing changes.
+4. Finish artifact lifecycle ownership. Source lifecycle now plans and formats
+   cleanup conservatively, but future work should keep moving artifact fanout,
+   rebuild decisions, and family-specific cleanup into a tested lifecycle
+   service instead of adding more root-facade special cases.
+5. Add finer cancellation checkpoints for long foreground study, index, vector,
+   and dossier operations. The job supervisor is in place; the remaining craft
+   work is narrowing the long functions so `/stop` and pause feel immediate.
+6. Improve curator quality in a Hermes-inspired but Motoko-shaped way:
+   usage/patch metadata, loaded-skill patch preference, support-file
+   organization, consolidation review notes, and feedback-derived patch
+   proposals should remain review-first and content-safe by default.
+7. Use goal loops as review tools before mutation tools. Prefer
+   `model_readonly` loops for "inspect, retrieve, audit, propose" work over
+   any broader autonomous act/observe loop. `model_confirmed` runs should still
+   stop for explicit `goal apply`.
+8. Build new skills only from repeated, proven procedures. A candidate skill
+   should save tokens, reduce errors, improve reliability, or preserve
+   Motoko-specific craft. If the knowledge is mostly examples, put it in
+   `references/`; if it is a reusable bounded operation, design an inert
+   `scripts/` support file and a separate reviewed tool contract.
+9. Keep borrowing only the parts of Hermes Agent that fit Motoko: progressive
+   disclosure, procedural skill memory, support files, curator reports, usage
+   metadata, and review-first skill management. Do not copy broad terminal
+   authority, cross-profile skill stores, hidden autonomous mutation, or
+   dependency-heavy runtime machinery.
+10. After any self-improvement change, run the relevant gate: focused
+    regression tests for code behavior, `self-eval` for self-code readiness,
+    `action-eval` for authority behavior, retrieval evals for context changes,
+    and `nix flake check` before committing.
+
 ## Refactor Craft
 
 - Characterize behavior with tests before moving live orchestration.

@@ -1575,7 +1575,12 @@ Motoko self-improvement list prepared for future work:
 
 For long self-improvement work, use
 `docs/motoko-self-improvement-playbook.md` as the operating checklist before
-making code changes.
+making code changes. The playbook now also contains a "Next Self-Improvement
+Brief" for future Motoko self-code sessions: start from deterministic
+`code-map`/`code-query`, use the existing umbrella skills before creating
+duplicates, improve code intelligence and artifact lifecycle ownership before
+broader agency, keep curator changes review-first, and use goal loops as
+inspectable review/proposal tools before mutation tools.
 
 ## Agentic Capability Design Gate
 
