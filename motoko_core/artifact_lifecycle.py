@@ -12,6 +12,7 @@ from motoko_core.text import human_bytes
 
 
 ARTIFACT_LIFECYCLE_SCHEMA = "artifact-lifecycle-v1"
+INDEX_CLEANUP_SCHEMA = "index-cleanup-v1"
 SOURCE_LIFECYCLE_PLAN_SCHEMA = "source-lifecycle-plan-v1"
 SOURCE_LIFECYCLE_REPORT_SCHEMA = "source-lifecycle-report-v1"
 
@@ -886,3 +887,51 @@ def cleanup_superseded_index_candidates(
         "deleted": deleted,
         "blocked": blocked,
     }
+
+
+def format_index_cleanup_report(report: dict) -> str:
+    lines = [
+        f"index cleanup: {report.get('schema', INDEX_CLEANUP_SCHEMA)}",
+        f"created: {report.get('created', '')}",
+        f"mode: {'dry-run' if report.get('dry_run') else 'apply'}",
+        f"candidates: {report.get('candidate_count', 0)} selected: {report.get('selected_count', 0)}",
+    ]
+    for item in report.get("materialized", []):
+        lines.append(
+            f"- materialized latest {item.get('index', '')}: "
+            f"{item.get('materialized_chunks', 0)} chunk(s), {human_bytes(item.get('materialized_bytes', 0))}"
+        )
+        if item.get("missing_chunks"):
+            lines.append(f"  warning: {item.get('missing_chunks', 0)} duplicate chunk(s) still missing source text")
+    for item in report.get("deleted", []):
+        status = item.get("status", "deleted")
+        lines.append(
+            f"- {status}: {item.get('index', '')} "
+            f"{human_bytes(item.get('bytes', 0))}"
+        )
+        extras = []
+        for key, label in [
+            ("vector_stores_deleted", "vector"),
+            ("evidence_stores_deleted", "evidence"),
+            ("vector_progress_deleted", "vector-progress"),
+            ("topics_deleted", "topics"),
+            ("dossiers_deleted", "dossiers"),
+            ("retrieval_debug_deleted", "retrieval-debug"),
+            ("retrieval_evals_deleted", "retrieval-evals"),
+            ("feedback_evals_deleted", "feedback-evals"),
+            ("action_evals_deleted", "action-evals"),
+            ("model_evals_deleted", "model-evals"),
+        ]:
+            if item.get(key):
+                extras.append(f"{label}:{item.get(key)}")
+        if extras:
+            lines.append("  derived deleted: " + ", ".join(extras))
+        for warning in item.get("warnings", [])[:3]:
+            lines.append(f"  warning: {warning}")
+    for item in report.get("blocked", []):
+        lines.append(f"- blocked: {item.get('index', '')} {item.get('reason', '')}".rstrip())
+        for warning in item.get("warnings", [])[:3]:
+            lines.append(f"  warning: {warning}")
+    if not report.get("deleted") and not report.get("blocked") and not report.get("materialized"):
+        lines.append("no stale superseded index artifacts were safe to clean")
+    return "\n".join(lines)
