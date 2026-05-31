@@ -731,14 +731,18 @@ motoko skill restore NAME
 This adapts the useful Hermes-style skill-library maintenance idea while
 keeping Motoko's version reversible, realm-local, and non-autonomous. The
 curator report can also point out large skills that may deserve support files,
-possible consolidation groups, and recent feedback rows that may indicate a
-skill should be patched. `motoko skill curator --suggest` turns the concrete
-curator candidates into ordinary pending `skill_manage` suggestions. They are
-still review-first: inspect them with `motoko skill suggestion ID`, then accept
-or reject them explicitly. Curator reports hide raw feedback notes by default.
-Suggestion candidates can add content-safe support-file plans for oversized
-skills and consolidation review notes for overlapping learned skills; accepting
-those suggestions still goes through the normal explicit skill-management path.
+possible consolidation groups, stale unused learned skills that may deserve
+archive review, and recent feedback rows that may indicate a skill should be
+patched. `motoko skill curator --suggest` turns the concrete curator candidates
+into ordinary pending `skill_manage` suggestions. They are still review-first:
+inspect them with `motoko skill suggestion ID`, then accept or reject them
+explicitly. Curator reports hide raw feedback notes by default. Suggestion
+candidates can add content-safe support-file plans for oversized skills,
+consolidation review notes for overlapping learned skills, and
+`archive-review.md` notes for stale unused skills; accepting those suggestions
+still goes through the normal explicit skill-management path. Motoko does not
+archive anything until the user explicitly runs `motoko skill archive NAME
+--yes`.
 
 Current `motoko-skill-v3` skills can declare a kind, trigger hints, handler,
 allowed effects, support files, and inert script-tool metadata. Prompt-only

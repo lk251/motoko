@@ -9825,6 +9825,49 @@ def test_skill_curator_creates_consolidation_support_suggestion(m):
         assert "overlap terms" in consolidation["file_content"]
 
 
+def test_skill_curator_creates_stale_unused_archive_review_suggestion(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "dormant-retrieval-trick",
+            description="Dormant retrieval trick",
+            body="Use a one-off retrieval trick only if it still proves useful.",
+        )
+        row = m.core_load_skill(m.skills_dir(), "dormant-retrieval-trick")
+        path = pathlib.Path(row["path"])
+        text = path.read_text(encoding="utf-8")
+        text = text.replace(
+            row["created_at"],
+            "2026-01-01T00:00:00+00:00",
+            1,
+        ).replace(
+            row["updated_at"],
+            "2026-01-01T00:00:00+00:00",
+            1,
+        )
+        path.write_text(text, encoding="utf-8")
+
+        report = m.skill_curator_report_text()
+        assert "stale unused skills that may deserve archive review:" in report
+        assert "dormant-retrieval-trick" in report
+
+        candidates = m.curator_skill_suggestion_candidates()
+        archive_review = next(row for row in candidates if row.get("file_path") == "references/archive-review.md")
+        assert archive_review["action"] == "write_file"
+        assert archive_review["target_skill"] == "dormant-retrieval-trick"
+        assert "does not archive anything by itself" in archive_review["file_content"]
+        assert "motoko skill archive dormant-retrieval-trick --yes" in archive_review["file_content"]
+        assert "curator-stale-unused-skill" in archive_review["signals"]
+
+        queued = m.curator_skill_suggestions_text()
+        assert "skill curator: 1 pending suggestion" in queued
+        suggestions = m.list_skill_suggestions(status="pending")
+        assert len(suggestions) == 1
+        accepted = m.accept_skill_suggestion_text(suggestions[0]["id"])
+        assert "skill accepted: dormant-retrieval-trick" in accepted
+        support = m.format_skill_support_file("dormant-retrieval-trick", "references/archive-review.md")
+        assert "Archive review for dormant-retrieval-trick" in support
+
+
 def write_demo_tool(m, skill_name="tool-backed-skill"):
     m.learn_skill_text(
         skill_name,
@@ -11350,6 +11393,7 @@ def main() -> int:
         test_skill_curator_creates_loaded_skill_patch_suggestion,
         test_skill_curator_creates_support_file_plan_for_large_skill,
         test_skill_curator_creates_consolidation_support_suggestion,
+        test_skill_curator_creates_stale_unused_archive_review_suggestion,
     ]
     for test in tests:
         test(m)

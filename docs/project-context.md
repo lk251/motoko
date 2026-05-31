@@ -1302,13 +1302,18 @@ Remaining follow-up items from this stretch:
   automatic mutation or broader execution authority.
 - Curator usefulness checkpoint: the report also surfaces large skills that
   may deserve support files, possible consolidation groups based on shared
-  trigger/description terms, and recent non-positive feedback rows that match
-  active skill topics. These are still suggestions only.
+  trigger/description terms, stale unused learned skills that may deserve
+  archive review, and recent non-positive feedback rows that match active
+  skill topics. These are still suggestions only.
 - Curator suggestion checkpoint: `motoko skill curator --suggest` can now
   convert concrete curator candidates into pending review-first `skill_manage`
   suggestions. Current candidates come from non-positive feedback rows that
-  match active skills, or from repeatedly selected skills that have never been
-  patched. Patches still require explicit inspection and acceptance.
+  match active skills, repeatedly selected skills that have never been patched,
+  oversized skills with no support files, overlapping learned skills, and
+  stale unused learned skills. Stale unused skills get an `archive-review.md`
+  support-file note first; Motoko never archives a skill unless the user later
+  runs the explicit archive command. Patches and support-file writes still
+  require explicit inspection and acceptance.
 - Next stretch after the lifecycle target: improve umbrella-skill
   consolidation and support-file workflows, then connect richer feedback/eval
   rows to higher-quality patch proposals. Keep the path report-first until real
@@ -1337,10 +1342,11 @@ Skill Curator v2 roadmap:
   pass the existing metadata, fingerprint, typed-action, and approval gates.
 - Curator v2 checkpoint: reports should stay content-safe by default and hide
   raw feedback notes. Concrete review-first suggestions can now create
-  support-file organization plans for oversized skills and consolidation
-  review notes for overlapping learned skills. These remain pending
-  `skill_manage` suggestions until the user explicitly inspects and accepts
-  them.
+  support-file organization plans for oversized skills, consolidation review
+  notes for overlapping learned skills, and archive-review notes for stale
+  unused learned skills. These remain pending `skill_manage` suggestions until
+  the user explicitly inspects and accepts them, and archive-review notes do
+  not archive anything by themselves.
 - Vector refresh diagnostics checkpoint: use `motoko vector-doctor [INDEX_ID]`
   or `/vector-doctor [INDEX_ID]` before assuming low VRAM/watts means Motoko is
   under-parallelized. The report compares candidate rows, batch size,

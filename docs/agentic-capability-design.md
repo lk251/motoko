@@ -908,14 +908,18 @@ Skill lifecycle checkpoint, 2026-05-30:
 - This intentionally adapts Hermes Agent's curator direction without adopting
   automatic mutation, broad deletion, or new execution authority.
 - The curator report also now flags large skills that may deserve support
-  files, possible consolidation groups, and recent non-positive feedback rows
-  whose terms match active skills. These remain report-only hints.
+  files, possible consolidation groups, stale unused learned skills that may
+  deserve archive review, and recent non-positive feedback rows whose terms
+  match active skills. These remain report-only hints.
 - `motoko skill curator --suggest` can convert concrete curator candidates into
   pending review-first `skill_manage` suggestions. Current deterministic
-  candidates come from non-positive feedback rows that match active skills, or
-  from repeatedly selected skills that have not yet been patched. The command
-  writes only pending suggestions; accepting a patch still goes through the
-  existing validators.
+  candidates come from non-positive feedback rows that match active skills,
+  repeatedly selected skills that have not yet been patched, support-file
+  opportunities, overlapping learned skills, and stale unused learned skills.
+  Stale unused skills receive an `archive-review.md` support-file suggestion;
+  the curator does not archive them. The command writes only pending
+  suggestions; accepting a suggestion still goes through the existing
+  validators.
 
 Skill/handler checkpoint, 2026-05-31:
 
@@ -954,7 +958,9 @@ Next long stretch after skill lifecycle:
 
 - Improve curator usefulness without auto-application: improve
   umbrella/consolidation workflows and connect richer feedback/eval rows to
-  higher-quality patch proposals.
+  higher-quality patch proposals. The stale-unused archive-review path is now
+  implemented as review-first support-file guidance, so the next curator work
+  should focus on better consolidation quality and feedback-derived patches.
 - Use the structured proposal lane as the only enabled path for
   script-assisted project mutation. Raw script writes, network, arbitrary
   terminal, and service control remain future reviewed gates.
