@@ -6075,7 +6075,7 @@ def test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt(m):
 
 
 def test_conversation_delete_removes_owned_derived_artifacts(m):
-    with isolated_state():
+    with isolated_state() as tmp:
         conv = m.new_conversation("Delete Me")
         conv["id"] = "delete-me"
         conv["messages"] = [{"role": "user", "content": "remember this"}]
@@ -6098,8 +6098,56 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         m.atomic_write(m.topic_path("topic-keep"), json.dumps({"id": "topic-keep", "owner_conversation_id": "keep-me"}) + "\n")
         m.atomic_write(m.dossier_path("dossier-delete"), json.dumps({"id": "dossier-delete", "source_conversations": [{"id": "delete-me"}]}) + "\n")
         m.atomic_write(m.dossier_path("dossier-keep"), json.dumps({"id": "dossier-keep", "source_conversations": [{"id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.vector_store_path("vec-delete"), json.dumps({"rows": [{"conversation_id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.vector_store_path("vec-keep"), json.dumps({"rows": [{"conversation_id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.evidence_store_path("evidence-delete"), json.dumps({"rows": [{"conversation_id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.evidence_store_path("evidence-keep"), json.dumps({"rows": [{"conversation_id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.vector_progress_path("progress-delete"), json.dumps({"conversation_id": "delete-me"}) + "\n")
+        m.atomic_write(m.vector_progress_path("progress-keep"), json.dumps({"conversation_id": "keep-me"}) + "\n")
+        m.atomic_write(m.retrieval_debug_path("debug-delete"), json.dumps({"project_scope": {"conversation_id": "delete-me"}}) + "\n")
+        m.atomic_write(m.retrieval_debug_path("debug-keep"), json.dumps({"project_scope": {"conversation_id": "keep-me"}}) + "\n")
+        m.atomic_write(m.retrieval_eval_path("retrieval-eval-delete"), json.dumps({"feedback_fixtures": [{"conversation_id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.retrieval_eval_path("retrieval-eval-keep"), json.dumps({"feedback_fixtures": [{"conversation_id": "keep-me"}]}) + "\n")
         m.atomic_write(m.feedback_eval_path("eval-delete"), json.dumps({"fixtures": [{"conversation_id": "delete-me"}]}) + "\n")
         m.atomic_write(m.feedback_eval_path("eval-keep"), json.dumps({"fixtures": [{"conversation_id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.action_eval_path("action-eval-delete"), json.dumps({"fixtures": [{"conversation_id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.action_eval_path("action-eval-keep"), json.dumps({"fixtures": [{"conversation_id": "keep-me"}]}) + "\n")
+        m.atomic_write(m.model_eval_path("model-eval-delete"), json.dumps({"fixtures": [{"conversation_id": "delete-me"}]}) + "\n")
+        m.atomic_write(m.model_eval_path("model-eval-keep"), json.dumps({"fixtures": [{"conversation_id": "keep-me"}]}) + "\n")
+        m.write_skill_suggestion_state(
+            {
+                "schema": m.SKILL_SUGGESTION_SCHEMA_VERSION,
+                "suggestions": [
+                    {"id": "skill-delete", "conversation_id": "delete-me"},
+                    {"id": "skill-keep", "conversation_id": "keep-me"},
+                ],
+            }
+        )
+        slot_root = tmp / "slots"
+        slot_root.mkdir()
+        (slot_root / "delete.slot").write_text("delete slot", encoding="utf-8")
+        (slot_root / "keep.slot").write_text("keep slot", encoding="utf-8")
+        m.atomic_write(
+            m.slot_cache_manifest_path(),
+            json.dumps(
+                {
+                    "schema": "slot-kv-cache-manifest-v1",
+                    "records": [
+                        {
+                            "conversation_id": "delete-me",
+                            "slot_save_path_declared": str(slot_root),
+                            "filename": "delete.slot",
+                        },
+                        {
+                            "conversation_id": "keep-me",
+                            "slot_save_path_declared": str(slot_root),
+                            "filename": "keep.slot",
+                        },
+                    ],
+                }
+            )
+            + "\n",
+        )
         m.atomic_write(m.profile_path(), json.dumps({"conversation_ids": ["delete-me"]}) + "\n")
         m.write_maintenance_state({"job_id": "maint-delete", "conversation_id": "delete-me", "status": "running"})
         m.write_study_state({"conversation_id": "delete-me", "status": "running"})
@@ -6113,7 +6161,17 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert report["study_job_events_deleted"] == 1
         assert report["topics_deleted"] == 1
         assert report["dossiers_deleted"] == 1
+        assert report["vector_stores_deleted"] == 1
+        assert report["evidence_stores_deleted"] == 1
+        assert report["vector_progress_deleted"] == 1
+        assert report["retrieval_debug_deleted"] == 1
+        assert report["retrieval_evals_deleted"] == 1
         assert report["feedback_evals_deleted"] == 1
+        assert report["action_evals_deleted"] == 1
+        assert report["model_evals_deleted"] == 1
+        assert report["skill_suggestions_deleted"] == 1
+        assert report["slot_cache_records_deleted"] == 1
+        assert report["slot_cache_files_deleted"] == 1
         assert not m.conversation_path("delete-me").exists()
         assert m.conversation_path("keep-me").exists()
         assert [row["id"] for row in m.read_memory_rows()] == ["mem-keep"]
@@ -6123,8 +6181,26 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert m.topic_path("topic-keep").exists()
         assert not m.dossier_path("dossier-delete").exists()
         assert m.dossier_path("dossier-keep").exists()
+        assert not m.vector_store_path("vec-delete").exists()
+        assert m.vector_store_path("vec-keep").exists()
+        assert not m.evidence_store_path("evidence-delete").exists()
+        assert m.evidence_store_path("evidence-keep").exists()
+        assert not m.vector_progress_path("progress-delete").exists()
+        assert m.vector_progress_path("progress-keep").exists()
+        assert not m.retrieval_debug_path("debug-delete").exists()
+        assert m.retrieval_debug_path("debug-keep").exists()
+        assert not m.retrieval_eval_path("retrieval-eval-delete").exists()
+        assert m.retrieval_eval_path("retrieval-eval-keep").exists()
         assert not m.feedback_eval_path("eval-delete").exists()
         assert m.feedback_eval_path("eval-keep").exists()
+        assert not m.action_eval_path("action-eval-delete").exists()
+        assert m.action_eval_path("action-eval-keep").exists()
+        assert not m.model_eval_path("model-eval-delete").exists()
+        assert m.model_eval_path("model-eval-keep").exists()
+        assert [row["id"] for row in m.read_skill_suggestion_state()["suggestions"]] == ["skill-keep"]
+        assert not (slot_root / "delete.slot").exists()
+        assert (slot_root / "keep.slot").exists()
+        assert [row["conversation_id"] for row in m.read_slot_cache_manifest()["records"]] == ["keep-me"]
         assert not m.profile_path().exists()
         assert m.read_maintenance_state() is None
         assert m.read_study_state() is None

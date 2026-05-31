@@ -2912,7 +2912,18 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         "study_job_events_deleted": 0,
         "topics_deleted": 0,
         "dossiers_deleted": 0,
+        "vector_stores_deleted": 0,
+        "evidence_stores_deleted": 0,
+        "vector_progress_deleted": 0,
+        "retrieval_debug_deleted": 0,
+        "retrieval_evals_deleted": 0,
         "feedback_evals_deleted": 0,
+        "action_evals_deleted": 0,
+        "model_evals_deleted": 0,
+        "skill_suggestions_deleted": 0,
+        "slot_cache_records_deleted": 0,
+        "slot_cache_files_deleted": 0,
+        "slot_cache_service_owned_records": 0,
         "profile_deleted": False,
         "maintenance_deleted": False,
         "study_state_deleted": False,
@@ -2930,9 +2941,30 @@ def delete_conversation_and_artifacts(conv: dict) -> dict:
         conversation_id,
     )
     report["study_job_events_deleted"] = rewrite_jsonl_without_conversation(study_jobs_path(), conversation_id)
-    report["topics_deleted"] = delete_json_artifacts_referencing_conversation(topics_dir(), conversation_id)
-    report["dossiers_deleted"] = delete_json_artifacts_referencing_conversation(dossiers_dir(), conversation_id)
-    report["feedback_evals_deleted"] = delete_json_artifacts_referencing_conversation(feedback_evals_dir(), conversation_id)
+
+    for spec in index_snapshot_delete_specs():
+        path = artifact_lifecycle_path_for_key(str(spec.get("path_key", "")))
+        report_key = str(spec.get("report_key", "")).strip()
+        if not path or not report_key:
+            continue
+        report[report_key] = delete_json_artifacts_referencing_conversation(path, conversation_id)
+
+    skill_state = read_skill_suggestion_state()
+    skill_rows = skill_state.get("suggestions", [])
+    if isinstance(skill_rows, list):
+        kept_skill_rows, report["skill_suggestions_deleted"] = filter_json_rows_without_conversation(
+            [row for row in skill_rows if isinstance(row, dict)],
+            conversation_id,
+        )
+        if report["skill_suggestions_deleted"]:
+            skill_state["suggestions"] = kept_skill_rows
+            write_skill_suggestion_state(skill_state)
+
+    if slot_cache_manifest_path().exists():
+        slot_report = clear_slot_cache_records(conversation_id=conversation_id, yes=True)
+        report["slot_cache_records_deleted"] = int(slot_report.get("records_removed", 0) or 0)
+        report["slot_cache_files_deleted"] = int(slot_report.get("files_deleted", 0) or 0)
+        report["slot_cache_service_owned_records"] = int(slot_report.get("service_owned_records", 0) or 0)
 
     profile = safe_load_json(profile_path())
     if profile is not None and json_references_conversation(profile, conversation_id):

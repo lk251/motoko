@@ -199,6 +199,27 @@ def format_conversation_delete_report(report: dict) -> str:
         f"memory dossiers deleted: {report.get('dossiers_deleted', 0)}",
         f"feedback evals deleted: {report.get('feedback_evals_deleted', 0)}",
     ]
+    for key, label in [
+        ("vector_stores_deleted", "vector stores"),
+        ("evidence_stores_deleted", "evidence stores"),
+        ("vector_progress_deleted", "vector progress"),
+        ("retrieval_debug_deleted", "retrieval debug reports"),
+        ("retrieval_evals_deleted", "retrieval evals"),
+        ("action_evals_deleted", "action evals"),
+        ("model_evals_deleted", "model evals"),
+        ("skill_suggestions_deleted", "skill suggestions"),
+    ]:
+        if report.get(key):
+            lines.append(f"{label} deleted: {report.get(key, 0)}")
+    if report.get("slot_cache_records_deleted") or report.get("slot_cache_service_owned_records"):
+        lines.append(
+            f"slot/KV cache records cleared: {report.get('slot_cache_records_deleted', 0)}"
+            f" ({report.get('slot_cache_files_deleted', 0)} file(s) deleted)"
+        )
+    if report.get("slot_cache_service_owned_records"):
+        lines.append(
+            f"slot/KV cache records needing service GC: {report.get('slot_cache_service_owned_records', 0)}"
+        )
     flags = []
     for key, label in [
         ("profile_deleted", "profile dossier"),

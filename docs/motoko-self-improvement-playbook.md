@@ -372,10 +372,14 @@ Current progress on this backlog:
   this curator/eval implementation and its regression coverage.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
-  rename/delete helpers, and owned derived-artifact cleanup. Feedback targeting
-  now pairs the rated assistant answer with the nearest prior user prompt, so
-  `/up` or `/down` used while a newer prompt is preparing does not attach the
-  wrong query to the private feedback fixture.
+  rename/delete helpers, and owned derived-artifact cleanup. Deleted
+  conversations now fan out through newer derived artifact families such as
+  vector stores, evidence stores, vector progress, retrieval debug/eval
+  reports, feedback evals, action evals, model evals, skill suggestions, and
+  conversation-specific slot/KV cache records. Feedback targeting now pairs the
+  rated assistant answer with the nearest prior user prompt, so `/up` or
+  `/down` used while a newer prompt is preparing does not attach the wrong
+  query to the private feedback fixture.
 
 Skill work that should usually happen before new code:
 
