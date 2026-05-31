@@ -126,10 +126,13 @@ Motoko repo itself, treat this as the current prepared queue:
    `motoko-codebase-maintainer`, `motoko-refactor-craft`,
    `motoko-retrieval-maintainer`, and `motoko-agentic-boundary-review`. Patch
    or add support files to these before creating narrow duplicate skills.
-3. Improve code intelligence before broader agency. The next useful code-map
-   upgrades are command-to-handler-to-test traces, simple import/call
-   relationships, root-facade hotspot reports, and service-boundary maps. These
-   would make Motoko better at finding the right code before proposing changes.
+3. Improve code intelligence before broader agency. The first version of this
+   upgrade now exists: `motoko code-map` reports command-to-handler-to-test
+   traces, simple resolved call edges, root-facade hotspots, and
+   `motoko_core` service-boundary maps; `motoko code-query QUERY` can retrieve
+   those rows for focused self-improvement context. Future work should refine
+   relationship precision and add new deterministic facts only when they help
+   Motoko find the right code before proposing changes.
 4. Finish artifact lifecycle ownership. Source lifecycle now plans and formats
    cleanup conservatively, but future work should keep moving artifact fanout,
    rebuild decisions, and family-specific cleanup into a tested lifecycle

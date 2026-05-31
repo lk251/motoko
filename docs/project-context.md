@@ -1536,6 +1536,11 @@ Motoko self-code checkpoint, 2026-05-31:
   usefulness, self-code skill activation, self-improvement umbrella-skill
   presence/selection, clean built-in skill scans, and scanner detection of a
   synthetic risky script.
+- Code intelligence has begun the next planned self-improvement upgrade:
+  code-map/code-query now include command-to-handler-to-test traces, simple
+  resolved call edges, root-facade hotspots, and `motoko_core`
+  service-boundary summaries so Motoko can locate implementation, ownership,
+  and likely tests before proposing changes.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

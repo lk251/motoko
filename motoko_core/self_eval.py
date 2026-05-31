@@ -98,6 +98,41 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"commands": summary.get("commands", 0), "handlers": summary.get("command_handlers", 0)},
         )
     )
+    traces = code_map.get("command_traces", []) if isinstance(code_map.get("command_traces"), list) else []
+    source_lifecycle_trace = next((row for row in traces if row.get("command") == "source-lifecycle"), {})
+    checks.append(
+        _check(
+            "code_map_command_traces_link_tests",
+            bool(source_lifecycle_trace.get("handler_found")) and bool(source_lifecycle_trace.get("tests")),
+            (
+                f"traces={summary.get('command_traces', 0)} "
+                f"traced_tests={summary.get('command_traces_with_tests', 0)}"
+            ),
+            evidence={
+                "source_lifecycle_handler": source_lifecycle_trace.get("handler", ""),
+                "source_lifecycle_tests": [
+                    row.get("name", "") for row in source_lifecycle_trace.get("tests", [])[:3]
+                ],
+            },
+        )
+    )
+    checks.append(
+        _check(
+            "code_map_relationships_present",
+            int(summary.get("resolved_call_edges", 0) or 0) > 0
+            and int(summary.get("service_boundaries", 0) or 0) > 0
+            and bool(summary.get("root_hotspots")),
+            (
+                f"edges={summary.get('resolved_call_edges', 0)} "
+                f"services={summary.get('service_boundaries', 0)} "
+                f"hotspots={len(summary.get('root_hotspots', []) or [])}"
+            ),
+            evidence={
+                "top_hotspot": (summary.get("root_hotspots") or [{}])[0].get("qualname", ""),
+                "top_service": (code_map.get("service_boundaries") or [{}])[0].get("path", ""),
+            },
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(
@@ -113,6 +148,21 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
                 "top_command": (code_query.get("commands") or [{}])[0].get("command", ""),
                 "top_symbol": (code_query.get("symbols") or [{}])[0].get("qualname", ""),
                 "top_test": (code_query.get("tests") or [{}])[0].get("name", ""),
+            },
+        )
+    )
+    lifecycle_query = query_code_map(code_map, "source lifecycle command handler tests", limit=8)
+    checks.append(
+        _check(
+            "code_query_finds_traces_and_services",
+            bool(lifecycle_query.get("command_traces")) and bool(lifecycle_query.get("service_boundaries")),
+            (
+                f"traces={len(lifecycle_query.get('command_traces', []))} "
+                f"services={len(lifecycle_query.get('service_boundaries', []))}"
+            ),
+            evidence={
+                "top_trace": (lifecycle_query.get("command_traces") or [{}])[0].get("command", ""),
+                "top_service": (lifecycle_query.get("service_boundaries") or [{}])[0].get("path", ""),
             },
         )
     )

@@ -831,22 +831,26 @@ motoko self-eval
 
 `motoko code-map` builds a deterministic map of the current Motoko checkout:
 Python files, functions, classes, argparse commands, handlers, imports, tests,
-largest files, and parser warnings. `motoko code-query QUERY` ranks commands,
-symbols, tests, and files against a query. Ordinary chat questions about
-Motoko's own codebase can activate the same built-in handler and include a
-bounded code-query report in prompt context. Longer self-improvement work
+largest files, parser warnings, command-to-handler-to-test traces, resolved
+call edges, root-facade hotspots, and `motoko_core` service-boundary summaries.
+`motoko code-query QUERY` ranks commands, command traces, symbols, call edges,
+service boundaries, tests, and files against a query. Ordinary chat questions
+about Motoko's own codebase can activate the same built-in handler and include
+a bounded code-query report in prompt context. Longer self-improvement work
 should follow `docs/motoko-self-improvement-playbook.md`, which captures the
 current craft checklist for repo understanding, skill/tool hygiene, retrieval
 diagnosis, refactor boundaries, validation, and deployment soak checks.
 
 `motoko self-eval` is a deterministic no-model readiness check for Motoko
 self-improvement. It verifies that the code map parses, code-query finds
-commands/symbols/tests, the built-in self-code skill activates for Motoko
-refactor questions, self-improvement umbrella skills are present and selected
-for representative queries, built-in skills scan cleanly, the scanner catches a
-synthetic risky script, and the self-improvement docs are present. Use it after
-changes to the skill/codebase self-improvement path or before trusting Motoko
-to help plan her own refactor.
+commands/symbols/tests, command traces link handlers to tests, code-map
+relationships expose call edges, service boundaries, and root hotspots, the
+built-in self-code skill activates for Motoko refactor questions,
+self-improvement umbrella skills are present and selected for representative
+queries, built-in skills scan cleanly, the scanner catches a synthetic risky
+script, and the self-improvement docs are present. Use it after changes to the
+skill/codebase self-improvement path or before trusting Motoko to help plan her
+own refactor.
 
 Project-file mutation uses a separate code-owned action kind,
 `project_file_write`, not arbitrary script side effects. `motoko action apply
