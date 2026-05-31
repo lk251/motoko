@@ -7,11 +7,13 @@ only handlers and effects listed here can influence Motoko behavior.
 PROMPT_ONLY_HANDLER = "prompt_only"
 ORG_TEMPORAL_HANDLER = "builtin:org_temporal_latest_entries"
 ORG_STRUCTURAL_HANDLER = "builtin:org_structural_query"
+MOTOKO_CODEBASE_HANDLER = "builtin:motoko_codebase_query"
 
 PROMPT_CONTEXT_EFFECT = "prompt_context"
 RETRIEVAL_PLAN_EFFECT = "retrieval_plan"
 SOURCE_SCOPED_EVIDENCE_EFFECT = "source_scoped_evidence"
 STRUCTURED_ORG_EVIDENCE_EFFECT = "structured_org_evidence"
+CODE_INTELLIGENCE_EFFECT = "code_intelligence"
 
 SUPPORTED_SKILL_HANDLERS = {
     PROMPT_ONLY_HANDLER: {
@@ -29,6 +31,11 @@ SUPPORTED_SKILL_HANDLERS = {
         "allowed_effects": [RETRIEVAL_PLAN_EFFECT, STRUCTURED_ORG_EVIDENCE_EFFECT],
         "description": "Deterministic Org heading, tag, TODO, priority, and date retrieval.",
     },
+    MOTOKO_CODEBASE_HANDLER: {
+        "kind": "codebase",
+        "allowed_effects": [PROMPT_CONTEXT_EFFECT, CODE_INTELLIGENCE_EFFECT],
+        "description": "Deterministic Motoko source-code map and symbol lookup.",
+    },
 }
 
 SUPPORTED_SKILL_EFFECTS = {
@@ -36,6 +43,7 @@ SUPPORTED_SKILL_EFFECTS = {
     RETRIEVAL_PLAN_EFFECT,
     SOURCE_SCOPED_EVIDENCE_EFFECT,
     STRUCTURED_ORG_EVIDENCE_EFFECT,
+    CODE_INTELLIGENCE_EFFECT,
 }
 
 

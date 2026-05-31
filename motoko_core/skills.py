@@ -7,6 +7,8 @@ import pathlib
 import re
 
 from motoko_core.skill_registry import (
+    CODE_INTELLIGENCE_EFFECT,
+    MOTOKO_CODEBASE_HANDLER,
     ORG_STRUCTURAL_HANDLER,
     ORG_TEMPORAL_HANDLER,
     PROMPT_CONTEXT_EFFECT,
@@ -39,6 +41,7 @@ DEFAULT_SKILL_HANDLER = PROMPT_ONLY_HANDLER
 DEFAULT_SKILL_EFFECTS = [PROMPT_CONTEXT_EFFECT]
 ORG_STRUCTURAL_SKILL = "org-structural-query"
 ORG_TEMPORAL_SKILL = "org-temporal-retrieval"
+MOTOKO_CODEBASE_SKILL = "motoko-codebase-maintainer"
 ALLOWED_SKILL_SUPPORT_DIRS = {"references", "templates", "scripts"}
 
 BUILTIN_SKILLS = [
@@ -114,6 +117,47 @@ BUILTIN_SKILLS = [
                 "- Return bounded, cited excerpts so the final answer can explain what matched and where.",
                 "",
                 "This skill activates the built-in deterministic retrieval handler for Org structure queries.",
+            ]
+        ),
+    },
+    {
+        "schema": SKILL_SCHEMA,
+        "name": MOTOKO_CODEBASE_SKILL,
+        "slug": MOTOKO_CODEBASE_SKILL,
+        "description": "Maintain and improve Motoko using deterministic source-code intelligence",
+        "version": "3",
+        "kind": "codebase",
+        "triggers": [
+            "improve Motoko",
+            "refactor Motoko",
+            "find a Motoko command implementation",
+            "trace Motoko tests or source ownership",
+            "prepare Motoko to improve herself",
+        ],
+        "handler": MOTOKO_CODEBASE_HANDLER,
+        "allowed_effects": [PROMPT_CONTEXT_EFFECT, CODE_INTELLIGENCE_EFFECT],
+        "support_files": [],
+        "security": "builtin deterministic code-intelligence handler; no script execution",
+        "source_schema": SKILL_SCHEMA,
+        "created_at": "2026-05-31T00:00:00+00:00",
+        "updated_at": "2026-05-31T00:00:00+00:00",
+        "source": "builtin",
+        "builtin": True,
+        "path": "builtin:motoko-codebase-maintainer",
+        "body": "\n".join(
+            [
+                "When improving Motoko herself, treat repository understanding as a deterministic code-intelligence task before model synthesis.",
+                "",
+                "Procedure:",
+                "- Read AGENTS.md, docs/project-context.md, docs/agentic-capability-design.md, and relevant docs before architectural or authority changes.",
+                "- Use motoko code-map for a repo overview and motoko code-query QUERY to find commands, handlers, symbols, tests, and ownership boundaries.",
+                "- Prefer existing modules in motoko_core over adding more root-facade orchestration.",
+                "- Keep changes stdlib-only, realm-local, inspectable, and covered by regression/eval tests.",
+                "- For skills/tools, preserve the review-first planner boundary: models may propose, Motoko validators decide, and mutating actions require explicit confirmation.",
+                "- For derived artifacts, include schema/provenance and either deterministic migration or source reprocessing through visible resumable work.",
+                "- Run py_compile, focused tests, git diff --check, and nix flake check before committing.",
+                "",
+                "This skill activates deterministic Motoko codebase lookup for self-improvement queries.",
             ]
         ),
     },

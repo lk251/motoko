@@ -664,6 +664,7 @@ motoko skill patch NAME --old "old text" --new "new text"
 motoko skill write-file NAME references/file.md --content "supporting detail"
 motoko skill remove-file NAME references/file.md --yes
 motoko skill tools NAME
+motoko skill scan [NAME]
 motoko skill approve-tool NAME TOOL --yes
 motoko skill curator
 motoko skill curator --suggest
@@ -756,6 +757,11 @@ natural-language queries rather than user-facing mini-languages:
   source-linked Org evidence rows, and pass those rows into the normal final
   answer with `/sources` provenance. Slash commands are inspection and
   debugging surfaces; ordinary chat should be enough for this class of query.
+- `motoko-codebase-maintainer` handles Motoko self-improvement questions about
+  her own source code. It activates deterministic source-code lookup over the
+  Motoko checkout, mapping commands, symbols, tests, imports, and large files
+  before the final model is asked to reason about refactors or implementation
+  work.
 
 Handlers and effects are allowlisted in Motoko's code. Unknown or model-suggested
 handler names degrade to `prompt_only`, and unsupported effects are discarded.
@@ -792,6 +798,27 @@ requires confirmation. Executable script tools are treated as having the
 `external_process` effect even when old metadata omits it, so approvals show
 the actual authority being granted; script tools cannot declare
 `prompt_only`.
+
+`motoko skill scan [NAME]` is the static review surface for learned skills and
+support scripts. It is conservative and report-first: it flags prompt-injection
+phrases, destructive shell patterns, subprocess/network/secret/path signals,
+and risky Python imports or calls. Scanner findings do not approve or execute
+anything; they exist so external, community, or self-created skills can be
+reviewed before trust expands.
+
+Motoko codebase intelligence is available without a model call:
+
+```bash
+motoko code-map
+motoko code-query "skill planner command implementation"
+```
+
+`motoko code-map` builds a deterministic map of the current Motoko checkout:
+Python files, functions, classes, argparse commands, handlers, imports, tests,
+largest files, and parser warnings. `motoko code-query QUERY` ranks commands,
+symbols, tests, and files against a query. Ordinary chat questions about
+Motoko's own codebase can activate the same built-in handler and include a
+bounded code-query report in prompt context.
 
 Project-file mutation uses a separate code-owned action kind,
 `project_file_write`, not arbitrary script side effects. `motoko action apply

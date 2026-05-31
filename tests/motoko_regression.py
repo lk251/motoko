@@ -800,6 +800,66 @@ def test_skill_plan_shows_prompt_and_retrieval_selection(m):
         _label, run = report
         assert "racefocus-response-style" in run()
 
+        codebase = m.format_skill_plan("How should Motoko refactor its codebase command handlers?")
+        assert "motoko-codebase-maintainer" in codebase
+        assert "builtin:motoko_codebase_query" in codebase
+        assert "codebase intent:" in codebase
+
+
+def test_motoko_codebase_context_and_commands_are_deterministic(m):
+    with isolated_state():
+        code_map = m.motoko_code_map()
+        assert code_map["schema"] == "motoko-code-intel-v1"
+        assert any(row.get("path") == "motoko" for row in code_map.get("files", []))
+        query = m.motoko_code_query("Motoko skill plan command implementation tests")
+        assert query["schema"] == "motoko-code-query-v1"
+        assert query["symbols"] or query["commands"] or query["tests"]
+        rendered = m.format_motoko_code_query("Motoko skill plan command implementation tests")
+        assert "Motoko code query:" in rendered
+        assert "symbols:" in rendered
+
+        context_text, sources = m.render_motoko_codebase_context(
+            "How should Motoko refactor its codebase command handlers?"
+        )
+        assert "Motoko code query:" in context_text
+        assert any(row.get("kind") == "motoko-codebase" for row in sources)
+
+        conv = m.new_conversation("Code query")
+        command = m.shared_command_request("/code-query Motoko skill command implementation", conv)
+        assert command is not None
+        assert command.kind == m.COMMAND_KIND_REPORT
+        _label, run = command
+        assert "Motoko code query:" in run()
+
+
+def test_skill_scan_reports_script_risks(m):
+    with isolated_state():
+        m.learn_skill_text(
+            "risky-skill",
+            description="Risky skill",
+            body="Use the helper in scripts/clean.py after review.",
+        )
+        m.manage_skill_text(
+            action="write_file",
+            name="risky-skill",
+            file_path="scripts/clean.py",
+            file_content="import subprocess\nsubprocess.run(['true'])\n",
+        )
+        report = m.skill_scan_report("risky-skill")
+        assert report["status"] == "review"
+        text = m.format_skill_scan("risky-skill")
+        assert "subprocess_import" in text
+        assert "subprocess_call" in text
+
+        suite = m.format_skill_scan()
+        assert "risky-skill" in suite
+        conv = m.new_conversation("Skill scan")
+        command = m.shared_command_request("/skill scan risky-skill", conv)
+        assert command is not None
+        assert command.kind == m.COMMAND_KIND_REPORT
+        _label, run = command
+        assert "skill scan: risky-skill" in run()
+
 
 def test_skill_review_signal_recognizes_skill_candidate_language(m):
     with isolated_state():
@@ -11262,6 +11322,8 @@ def main() -> int:
         test_procedural_skill_commands,
         test_skill_lifecycle_records_usage_and_archive_restore,
         test_skill_lifecycle_commands_are_realm_local,
+        test_motoko_codebase_context_and_commands_are_deterministic,
+        test_skill_scan_reports_script_risks,
         test_skill_curator_creates_feedback_patch_suggestion,
         test_skill_curator_creates_loaded_skill_patch_suggestion,
         test_skill_curator_creates_support_file_plan_for_large_skill,

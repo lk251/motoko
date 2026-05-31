@@ -932,6 +932,20 @@ Skill/handler checkpoint, 2026-05-31:
   when the procedure should affect a subsystem, code-owned handlers/tools do
   bounded deterministic work, and learned changes remain review-first.
 
+Self-code and static scan checkpoint, 2026-05-31:
+
+- Added `motoko-codebase-maintainer`, a built-in codebase skill backed by the
+  code-owned `builtin:motoko_codebase_query` handler. It uses deterministic
+  Motoko source-code maps and code queries as bounded context for ordinary
+  chat questions about Motoko's own implementation, commands, tests,
+  refactors, and self-improvement.
+- Added `motoko code-map`, `motoko code-query QUERY`, `/code-map`, and
+  `/code-query QUERY` as no-model inspection surfaces over Motoko's own
+  checkout.
+- Added `motoko skill scan [NAME]` and `/skill scan [NAME]` as a conservative
+  static scanner for learned skills and support scripts. It is report-first
+  and does not grant approval or execution authority.
+
 Next long stretch after skill lifecycle:
 
 - Improve curator usefulness without auto-application: improve

@@ -15,6 +15,8 @@ from motoko_core.retrieval import (
 )
 from motoko_core.skills import (
     BUILTIN_SKILLS,
+    MOTOKO_CODEBASE_HANDLER,
+    MOTOKO_CODEBASE_SKILL,
     ORG_STRUCTURAL_HANDLER,
     ORG_STRUCTURAL_SKILL,
     ORG_TEMPORAL_HANDLER,
@@ -120,6 +122,18 @@ def query_wants_org_structural_context(query: str) -> bool:
     )
 
 
+def query_wants_motoko_codebase_context(query: str) -> bool:
+    text = str(query or "").lower()
+    if "motoko" not in text:
+        return False
+    return bool(
+        re.search(
+            r"\b(code|codebase|repo|repository|source|implementation|command|handler|function|class|test|tests|refactor|facade|module|self[- ]?improv)",
+            text,
+        )
+    )
+
+
 def query_org_structural_flags(query: str) -> dict:
     text = str(query or "").lower()
     return {
@@ -163,6 +177,7 @@ def build_retrieval_plan(query: str, *, skills: list[dict] | None = None) -> dic
             "org_todo_states": query_org_todo_states(query),
             "org_priorities": query_org_priorities(query),
             "org_structural_flags": query_org_structural_flags(query),
+            "motoko_codebase": query_wants_motoko_codebase_context(query),
         },
         "activated_skills": [],
         "handlers": [],
@@ -214,6 +229,23 @@ def build_retrieval_plan(query: str, *, skills: list[dict] | None = None) -> dic
             "path_mentions": path_mentions,
             "handler": activation["handler"],
         }
+    codebase_skill = catalog.get(MOTOKO_CODEBASE_SKILL)
+    if codebase_skill and query_wants_motoko_codebase_context(query):
+        activation = {
+            "name": codebase_skill.get("name", MOTOKO_CODEBASE_SKILL),
+            "slug": codebase_skill.get("slug", MOTOKO_CODEBASE_SKILL),
+            "kind": codebase_skill.get("kind", "codebase"),
+            "handler": codebase_skill.get("handler", MOTOKO_CODEBASE_HANDLER),
+            "allowed_effects": codebase_skill.get("allowed_effects", []),
+            "reason": "query asks for deterministic Motoko source-code understanding",
+        }
+        plan["status"] = "active"
+        plan["activated_skills"].append(activation)
+        plan["handlers"].append(activation["handler"])
+        plan["codebase"] = {
+            "mode": "motoko_codebase_query",
+            "handler": activation["handler"],
+        }
     return plan
 
 
@@ -236,5 +268,6 @@ def retrieval_plan_source(plan: dict) -> dict | None:
         "handlers": [handler for handler in plan.get("handlers", []) if handler],
         "temporal": plan.get("temporal", {}),
         "structural": plan.get("structural", {}),
+        "codebase": plan.get("codebase", {}),
         "warnings": plan.get("warnings", [])[:8],
     }

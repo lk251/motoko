@@ -1388,6 +1388,10 @@ efficiency. The likely shape is:
   Hermes' broader tool runtime. Specifically consider turning the
   source-code locator retrieval path into a built-in skill/tool candidate once
   the deterministic retrieval primitive has proven useful.
+  The Motoko-specific first slice now exists as `motoko code-map`,
+  `motoko code-query QUERY`, and the built-in
+  `motoko-codebase-maintainer` skill; it is deterministic, report-first, and
+  intentionally narrower than a general code agent.
 - improve deduplication and boilerplate handling through hashing,
   normalized-text comparison, simhash/minhash-style fingerprints, email
   quote/signature stripping, and later embedding similarity if an embedding
@@ -1478,6 +1482,47 @@ prompt so Motoko prefers patching the skill that was actually in play. The
 local Motoko review heuristic is whether the action would save tokens, reduce
 errors, improve reliability, or encode project-specific craft; do not present
 that sentence as an upstream Hermes quote.
+
+Motoko self-code checkpoint, 2026-05-31:
+
+- Added deterministic Motoko code-intelligence surfaces: `motoko code-map`,
+  `motoko code-query QUERY`, `/code-map`, and `/code-query QUERY`. The map
+  extracts Python files, functions, classes, imports, argparse command names,
+  command handlers, tests, largest files, and parse warnings without a model
+  call.
+- Added the built-in `motoko-codebase-maintainer` skill backed by the
+  `builtin:motoko_codebase_query` handler. Queries about Motoko's own
+  implementation, commands, tests, refactors, or self-improvement can now
+  activate a bounded code-query context before final synthesis.
+- Added `motoko skill scan [NAME]` and `/skill scan [NAME]` as the first
+  static skill/script review surface. It is conservative and report-first,
+  flagging prompt-injection text, destructive shell patterns,
+  subprocess/network/secret/path signals, and risky Python imports or calls
+  before external, community, or self-created skills are trusted further.
+- This completes the first practical version of "Motoko can inspect her own
+  code before proposing improvements." It does not replace Codex-level
+  engineering review, tests, commits, or user approval; it gives Motoko better
+  local evidence and safer procedural scaffolding.
+
+Motoko self-improvement list prepared for future work:
+
+1. Use `motoko code-query` before answering architectural or refactor
+   questions about Motoko's implementation.
+2. Use `motoko skill scan` before approving new script-backed skills or
+   importing community skills.
+3. Prefer improving existing built-in handlers or umbrella skills before
+   creating narrow duplicate learned skills.
+4. Convert repeated successful debugging procedures into reviewed skill
+   suggestions with support files when the procedure needs examples,
+   checklists, templates, or scripts.
+5. Keep self-improvement evals close to behavior: retrieval/debug fixtures for
+   context failures, action-eval for authority failures, and regression tests
+   for every new command or handler.
+6. Continue shrinking the root facade only when an extracted module gets clear
+   ownership, tests, and a simpler public API.
+7. Treat reflection as inspectable audits and review records, not hidden
+   rumination: what evidence was used, what failed, what should be patched,
+   and which eval would catch it next time.
 
 ## Agentic Capability Design Gate
 
