@@ -1322,8 +1322,10 @@ Current progress on this stretch:
   incremental vectorization is inspectable after completion.
 - Progress: long-lived TUI sessions now refresh attached index references after
   background study completion, complementing the existing prompt-time resync.
-  Fresh evidence/vector/dossier attachment summaries are still candidates for
-  the next always-fresh context pass.
+  `/status` also builds its context-catalog line from current user-owned state
+  instead of trusting an older persisted catalog file. Fresh
+  evidence/vector/dossier attachment summaries are still candidates for the
+  next always-fresh context pass.
 
 Completion criteria for this next stretch:
 

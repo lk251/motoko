@@ -20849,7 +20849,7 @@ def format_status(conv: dict | None = None) -> str:
     index_jobs = active_index_progress()
     partial_indexes = list_resumable_partial_indexes()
     superseded_partial_indexes = list_superseded_partial_indexes()
-    catalog = read_context_catalog()
+    catalog = prompt_context_catalog()
     selected_memories = ranked_memories(conv=conv, query="", limit=MEMORY_RETRIEVAL_LIMIT) if conv else []
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
     context_items = conv.get("context_items", []) if conv else []

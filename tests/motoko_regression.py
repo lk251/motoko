@@ -9254,6 +9254,38 @@ def test_prompt_context_uses_current_catalog_not_stale_catalog_file(m):
             os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
+def test_status_uses_current_catalog_even_without_persisted_catalog(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "notes.org"
+        source.write_text("* TODO Fresh status task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "status-current-index",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-31T12:00:00+00:00",
+            "corpus_summary": "fresh status catalog index",
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        assert not m.context_catalog_path().exists()
+
+        status = m.format_status()
+
+        assert "context catalog: updated " in status
+        assert "context catalog: not built" not in status
+        assert not m.context_catalog_path().exists()
+
+
 def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -13617,6 +13649,7 @@ def main() -> int:
         test_superseded_partials_do_not_look_unfinished,
         test_context_catalog_prefers_latest_index_per_family,
         test_prompt_context_uses_current_catalog_not_stale_catalog_file,
+        test_status_uses_current_catalog_even_without_persisted_catalog,
         test_context_catalog_reports_current_evidence_and_vector_artifacts,
         test_context_catalog_reports_current_memory_and_profile_freshness,
         test_index_resume_after_model_timeout,

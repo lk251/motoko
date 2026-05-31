@@ -1218,7 +1218,11 @@ context influenced a response instead of sounding like she has unbounded hidden
 knowledge.
 
 `/status` prints the current model endpoint, state paths, memory/index/topic
-counts, and the amount of context attached to the active conversation.
+counts, and the amount of context attached to the active conversation. Its
+context-catalog line is generated from current user-owned state instead of
+trusting an older persisted catalog file, so newly materialized indexes,
+vectors, evidence stores, memories, and profile metadata can show up without a
+restart.
 `/diagnose` and `motoko diagnose --safe` are the privacy-preserving companion
 for job trouble: they show content-free lane/job state, row/batch counters,
 elapsed/ETA, stale/finalizing classifications, and route service state without
