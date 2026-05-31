@@ -403,6 +403,11 @@ are the inspectable places for details.
 Use `/stop` to stop the current answer and discard any prompts queued behind
 it. Use `/clear-queue` to discard queued prompts without stopping the active
 answer.
+Prompts queued behind active answers or visible `bg-heavy` work are saved on
+the conversation record before they are processed. If Motoko exits or the
+terminal closes first, the queued prompts are restored into input history and
+continue when the conversation is resumed. Empty saved chats are omitted from
+conversation lists unless they still contain queued prompts.
 If the raw terminal UI is not available or you want the older behavior, use
 `motoko chat --line` or set `MOTOKO_TUI=0`.
 

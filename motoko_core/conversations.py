@@ -38,6 +38,12 @@ def make_conversation_record(
 def conversation_has_chat_content(conv: dict) -> bool:
     if str(conv.get("summary", "")).strip():
         return True
+    queued_prompts = conv.get("queued_prompts", [])
+    for queued in queued_prompts if isinstance(queued_prompts, list) else []:
+        if isinstance(queued, dict) and str(queued.get("content", "")).strip():
+            return True
+        if isinstance(queued, str) and queued.strip():
+            return True
     messages = conv.get("messages", [])
     for msg in messages if isinstance(messages, list) else []:
         if isinstance(msg, dict) and str(msg.get("content", "")).strip():
@@ -74,8 +80,57 @@ def list_conversation_records(directory: pathlib.Path) -> list[dict]:
             conv = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
+        if not conversation_has_chat_content(conv):
+            continue
         rows.append(conv)
     return rows
+
+
+def queued_prompt_texts(conv: dict) -> list[str]:
+    texts = []
+    queued = conv.get("queued_prompts", [])
+    for row in queued if isinstance(queued, list) else []:
+        if isinstance(row, dict):
+            text = str(row.get("content", "") or "").strip()
+        else:
+            text = str(row or "").strip()
+        if text:
+            texts.append(text)
+    return texts
+
+
+def append_queued_prompt_record(conv: dict, text: str, *, created: str) -> bool:
+    text = str(text or "").strip()
+    if not text:
+        return False
+    conv.setdefault("queued_prompts", []).append({"content": text, "created": created})
+    return True
+
+
+def clear_queued_prompt_records(conv: dict) -> int:
+    count = len(queued_prompt_texts(conv))
+    if count:
+        conv["queued_prompts"] = []
+    return count
+
+
+def pop_queued_prompt_record(conv: dict, expected_text: str | None = None) -> str | None:
+    queued = conv.get("queued_prompts", [])
+    if not isinstance(queued, list) or not queued:
+        return None
+    expected = str(expected_text or "").strip()
+    selected_idx = 0
+    if expected:
+        for idx, row in enumerate(queued):
+            text = str(row.get("content", "") if isinstance(row, dict) else row).strip()
+            if text == expected:
+                selected_idx = idx
+                break
+    row = queued.pop(selected_idx)
+    conv["queued_prompts"] = queued
+    if isinstance(row, dict):
+        return str(row.get("content", "") or "").strip() or None
+    return str(row or "").strip() or None
 
 
 def json_references_conversation(value, conversation_id: str) -> bool:

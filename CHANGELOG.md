@@ -5,6 +5,11 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Queued TUI prompts are now durable conversation state. Prompts typed while an
+  answer or `bg-heavy` job is active are saved immediately, restored into input
+  history after restart, processed when the blocking work clears, and removed
+  from the durable queue only when processing begins. Empty saved chats are now
+  omitted from conversation lists unless they contain queued prompts.
 - Added a built-in `org-structural-query` skill and deterministic
   `builtin:org_structural_query` retrieval handler. Natural-language questions
   such as "show me everything tagged RaceFocus" can now select source-linked

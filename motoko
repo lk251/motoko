@@ -353,6 +353,8 @@ from motoko_core.corpus_selection import (  # noqa: E402
     source_selection_mode,
 )
 from motoko_core.conversations import (  # noqa: E402
+    append_queued_prompt_record,
+    clear_queued_prompt_records,
     close_conversation_record,
     conversation_has_chat_content,
     conversation_recall_text as core_conversation_recall_text,
@@ -363,6 +365,8 @@ from motoko_core.conversations import (  # noqa: E402
     json_references_conversation,
     list_conversation_records,
     make_conversation_record,
+    pop_queued_prompt_record,
+    queued_prompt_texts,
     rank_recent_conversation_rows,
     render_recent_conversations_with_sources_core,
     rename_conversation_record,
@@ -20540,7 +20544,7 @@ class MotokoTui:
         self.study_phase_updated = self.study_phase_started
         self.last_input_at = time.monotonic()
         self.cancel_event = threading.Event()
-        self.pending_prompts: collections.deque[str] = collections.deque()
+        self.pending_prompts: collections.deque[str] = collections.deque(queued_prompt_texts(conv))
         self.answer_entry: dict | None = None
         self.answer_started_monotonic = 0.0
         self.answer_phase_started_monotonic = 0.0
@@ -20564,6 +20568,8 @@ class MotokoTui:
         self.index_progress: dict | None = None
         self.messages = self.seed_messages(conv)
         self.append("system", startup_tips_text())
+        for queued_text in list(self.pending_prompts):
+            self.append("queued", queued_text)
         self.resume_maintenance_on_start, resume_note = resume_interrupted_maintenance(conv)
         if resume_note:
             self.append("system", resume_note)
@@ -20585,7 +20591,10 @@ class MotokoTui:
         return rows
 
     def seed_input_history(self, conv: dict) -> list[str]:
-        return seed_input_history_from_messages(conv.get("messages", []), limit=200)
+        history = seed_input_history_from_messages(conv.get("messages", []), limit=200)
+        for text in queued_prompt_texts(conv):
+            history = remember_input_history_entry(history, text, limit=200)
+        return history
 
     def remember_input_history(self, text: str) -> None:
         self.history = remember_input_history_entry(self.history, text, limit=200)
@@ -20594,7 +20603,30 @@ class MotokoTui:
         count = len(self.pending_prompts)
         if count:
             self.pending_prompts.clear()
-        return count
+        persisted = 0
+        conv = getattr(self, "conv", None)
+        if isinstance(conv, dict):
+            persisted = clear_queued_prompt_records(conv)
+            if persisted:
+                save_conversation(conv)
+        return max(count, persisted)
+
+    def queue_prompt(self, text: str, status: str) -> None:
+        text = text.strip()
+        if not text:
+            return
+        self.pending_prompts.append(text)
+        append_queued_prompt_record(self.conv, text, created=now())
+        save_conversation(self.conv)
+        self.append("queued", text)
+        self.status = status
+
+    def pop_next_queued_prompt(self) -> str | None:
+        text = self.pending_prompts.popleft() if self.pending_prompts else None
+        persisted = pop_queued_prompt_record(self.conv, text)
+        if persisted is not None or text is not None:
+            save_conversation(self.conv)
+        return text or persisted
 
     def set_active_model_connection(self, conn) -> None:
         lock = getattr(self, "active_model_lock", None)
@@ -20690,6 +20722,10 @@ class MotokoTui:
             if self.resume_maintenance_on_start:
                 self.resume_maintenance_on_start = False
                 self.start_maintenance(resumed=True)
+            elif self.pending_prompts:
+                next_prompt = self.pop_next_queued_prompt()
+                if next_prompt:
+                    self.start_generation(next_prompt)
             while self.running:
                 self.drain_events()
                 now_ts = time.monotonic()
@@ -21005,14 +21041,10 @@ class MotokoTui:
             self.handle_cwd_index_answer(text)
             return
         if self.cwd_indexing or (self.study_running and self.study_status.startswith("bg-heavy:")):
-            self.pending_prompts.append(text)
-            self.append("queued", text)
-            self.status = "prompt queued behind bg-heavy work"
+            self.queue_prompt(text, "prompt queued behind bg-heavy work")
             return
         if self.generating:
-            self.pending_prompts.append(text)
-            self.append("queued", text)
-            self.status = "prompt queued behind current answer"
+            self.queue_prompt(text, "prompt queued behind current answer")
             return
         self.start_generation(text)
 
@@ -21430,8 +21462,9 @@ class MotokoTui:
                 self.answer_phase_started_monotonic = 0.0
                 changed = True
                 if self.pending_prompts:
-                    next_prompt = self.pending_prompts.popleft()
-                    self.start_generation(next_prompt)
+                    next_prompt = self.pop_next_queued_prompt()
+                    if next_prompt:
+                        self.start_generation(next_prompt)
                 else:
                     self.start_maintenance()
             elif kind == "stopped":
@@ -21499,6 +21532,10 @@ class MotokoTui:
                 self.maintenance_status = ""
                 if notes:
                     self.append("system", "; ".join(notes))
+                if self.pending_prompts and not self.generating:
+                    next_prompt = self.pop_next_queued_prompt()
+                    if next_prompt:
+                        self.start_generation(next_prompt)
                 changed = True
             elif kind == "maintenance_error":
                 self.maintaining = False
@@ -21529,8 +21566,9 @@ class MotokoTui:
                 self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
                 self.study_status = "study: idle"
                 if self.pending_prompts and not self.generating and not self.maintaining:
-                    next_prompt = self.pending_prompts.popleft()
-                    self.start_generation(next_prompt)
+                    next_prompt = self.pop_next_queued_prompt()
+                    if next_prompt:
+                        self.start_generation(next_prompt)
                 changed = True
             elif kind == "study_error":
                 if self.cwd_indexing:
@@ -21555,8 +21593,9 @@ class MotokoTui:
                 self.study_status = "study: idle"
                 self.append("system", f"learned corpus index: {index_id}")
                 if self.pending_prompts and not self.generating and not self.maintaining:
-                    next_prompt = self.pending_prompts.popleft()
-                    self.start_generation(next_prompt)
+                    next_prompt = self.pop_next_queued_prompt()
+                    if next_prompt:
+                        self.start_generation(next_prompt)
                 changed = True
             elif kind == "cwd_index_paused":
                 self.cwd_indexing = False

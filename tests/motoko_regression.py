@@ -5629,6 +5629,23 @@ def test_close_conversation_prunes_empty_chats(m):
         assert m.conversation_path("kept-chat").exists()
 
 
+def test_list_conversations_omits_empty_chats_but_keeps_queued_prompts(m):
+    with isolated_state():
+        empty = m.new_conversation("Empty")
+        empty["id"] = "empty-chat"
+        m.save_conversation(empty)
+
+        queued = m.new_conversation("Queued")
+        queued["id"] = "queued-chat"
+        m.append_queued_prompt_record(queued, "run this after bg-heavy work", created=m.now())
+        m.save_conversation(queued)
+
+        rows = m.list_conversations()
+        ids = [row.get("id") for row in rows]
+        assert "empty-chat" not in ids
+        assert "queued-chat" in ids
+
+
 def test_tui_report_commands_do_not_persist_system_output(m):
     with isolated_state():
         conv = m.new_conversation("Reports")
@@ -5969,6 +5986,36 @@ def test_tui_prompt_is_saved_before_context_preparation(m):
             release_build.set()
             m.build_messages = old_build_messages
             m.call_model_with_callback = old_call_model
+
+
+def test_tui_queued_prompt_is_durable_and_history_seeded(m):
+    with isolated_state():
+        conv = m.new_conversation("Queued prompt")
+        conv["id"] = "queued-prompt"
+        write_conversation(m, conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.pending_prompts = m.collections.deque()
+
+        ui.queue_prompt("queued behind active work", "prompt queued")
+
+        saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved["queued_prompts"][0]["content"] == "queued behind active work"
+        assert ui.pending_prompts[0] == "queued behind active work"
+        assert any(row.get("role") == "queued" for row in ui.messages)
+
+        history = m.MotokoTui.seed_input_history(ui, saved)
+        assert history[-1] == "queued behind active work"
+
+        popped = ui.pop_next_queued_prompt()
+        assert popped == "queued behind active work"
+        saved_after = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved_after.get("queued_prompts") == []
 
 
 def test_tui_stop_during_preparing_cancels_before_model_call(m):
@@ -10684,9 +10731,11 @@ def main() -> int:
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
         test_conversation_delete_removes_owned_derived_artifacts,
+        test_list_conversations_omits_empty_chats_but_keeps_queued_prompts,
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,
         test_tui_prompt_is_saved_before_context_preparation,
+        test_tui_queued_prompt_is_durable_and_history_seeded,
         test_tui_stop_during_preparing_cancels_before_model_call,
         test_tui_clear_queue_discards_pending_prompts,
         test_tui_blocking_command_records_foreground_job,
