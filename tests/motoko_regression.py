@@ -49,6 +49,7 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_json_dir_specs as source_lifecycle_json_dir_specs_core,
     source_lifecycle_json_file_specs as source_lifecycle_json_file_specs_core,
     source_lifecycle_jsonl_specs as source_lifecycle_jsonl_specs_core,
+    source_lifecycle_replacement_readiness as source_lifecycle_replacement_readiness_core,
     source_lifecycle_report as build_source_lifecycle_report,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
@@ -10117,6 +10118,35 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert "/tmp/docs/a.org" in grouped_paths["changed"]
     assert "/tmp/docs/b.org" in grouped_paths["ignored"]
     assert "fresh" not in grouped_paths
+    replacement, ready, reason = source_lifecycle_replacement_readiness_core(
+        index={"id": "old-index"},
+        latest_index={
+            "id": "new-index",
+            "files": [{"path": "/tmp/docs/a.org"}],
+        },
+        latest_status="fresh",
+        source_lifecycle=[
+            {"path": "/tmp/docs/a.org", "status": "changed"},
+            {"path": "/tmp/docs/b.org", "status": "ignored"},
+        ],
+    )
+    assert replacement["id"] == "new-index"
+    assert ready is True
+    assert "includes changed sources" in reason
+    _replacement, ready, reason = source_lifecycle_replacement_readiness_core(
+        index={"id": "old-index"},
+        latest_index={
+            "id": "new-index",
+            "files": [{"path": "/tmp/docs/b.org"}],
+        },
+        latest_status="fresh",
+        source_lifecycle=[
+            {"path": "/tmp/docs/a.org", "status": "changed"},
+            {"path": "/tmp/docs/b.org", "status": "ignored"},
+        ],
+    )
+    assert ready is False
+    assert "deleted or ignored" in reason
     cleanup_candidates = superseded_stale_index_candidates_core(
         [
             {"id": "old-a", "root": "/docs", "glob": "*.org", "created": "2026-05-01T00:00:00+00:00"},
@@ -11139,6 +11169,30 @@ def test_blocking_command_request_studies_context(m):
             assert run() == f"{conv['id']} tomorrow recent"
         finally:
             m.study_query = old_study_query
+
+
+def test_blocking_profile_refresh_passes_cancel_event(m):
+    with isolated_state():
+        conv = m.new_conversation("Profile refresh")
+        old_refresh_profile_dossier = m.refresh_profile_dossier
+        seen = {}
+
+        def fake_refresh_profile_dossier(*, cancel_event=None):
+            seen["cancel_event"] = cancel_event
+            return {"updated": "2026-05-31T00:00:00+00:00"}
+
+        try:
+            m.refresh_profile_dossier = fake_refresh_profile_dossier
+            request = m.blocking_command_request("/profile-refresh", conv)
+            assert request is not None
+            label, run = request
+            assert label == "Refreshing profile dossier..."
+            event = threading.Event()
+            assert "profile refreshed:" in m.run_command_callable(run, cancel_event=event)
+        finally:
+            m.refresh_profile_dossier = old_refresh_profile_dossier
+
+        assert seen["cancel_event"] is event
 
 
 def test_cwd_indexing_ignores_light_study_done(m):
@@ -13152,6 +13206,7 @@ def main() -> int:
         test_index_signal_enrichment_skips_active_index,
         test_repo_context_item,
         test_retrieval_service_renders_attached_context_without_generic_callback,
+        test_blocking_profile_refresh_passes_cancel_event,
         test_cwd_indexing_ignores_light_study_done,
         test_color_survives_quiet_index_redirect,
         test_live_command_request_metadata,

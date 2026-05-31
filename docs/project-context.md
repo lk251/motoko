@@ -1622,8 +1622,9 @@ Motoko self-code checkpoint, 2026-05-31:
   paths. Lifecycle apply/report helpers also accept injected cancellation
   checkpoints before materialization or deletion. Index artifact
   enrich/upgrade, quality repair, and profile refresh now also carry
-  cancellation through CLI/background/model-call paths. Model-backed memory
-  maintenance now carries cancellation through queued proposal, helper
+  cancellation through CLI/background/model-call paths; the `/profile-refresh`
+  slash-command wrapper also forwards the foreground cancel token. Model-backed
+  memory maintenance now carries cancellation through queued proposal, helper
   subprocess, title, skill-suggestion, and compaction paths, and interrupted
   memory proposals stay retryable. Retrieval/vector/evidence report queries
   now receive cancel events through TUI and CLI paths, including
@@ -1659,6 +1660,14 @@ Bird's-eye status on 2026-05-31:
   herself: lifecycle fanout, cancellation/job supervision, code-query quality,
   curated skill/support-file maintenance, feedback-to-eval flow, and narrow
   goal-loop review behavior.
+
+Lifecycle ownership checkpoint on 2026-05-31:
+
+- Replacement-readiness policy for changed, deleted, or ignored source files now
+  lives in `motoko_core.artifact_lifecycle` as service-owned lifecycle logic.
+  The root executable still discovers the latest same-family index and computes
+  its freshness, but the tested service decides whether that replacement safely
+  includes changed sources and excludes detached sources.
 
 Motoko self-improvement list prepared for future work:
 

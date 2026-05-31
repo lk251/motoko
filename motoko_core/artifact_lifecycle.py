@@ -450,6 +450,52 @@ def source_lifecycle_paths_by_status(source_lifecycle: list[dict]) -> dict[str, 
     return dict(rows)
 
 
+def source_lifecycle_replacement_readiness(
+    *,
+    index: dict,
+    latest_index: dict | None,
+    latest_status: str,
+    latest_warnings: list[str] | None = None,
+    source_paths: set[str] | None = None,
+    source_lifecycle: list[dict] | None = None,
+) -> tuple[dict | None, bool, str]:
+    """Decide whether a newer index can safely replace a stale source snapshot."""
+
+    if latest_index is None or latest_index.get("id") == index.get("id"):
+        return None, False, "no newer replacement index for this corpus family"
+    if latest_status != "fresh":
+        warning = f": {'; '.join((latest_warnings or [])[:2])}" if latest_warnings else ""
+        return latest_index, False, f"replacement index is {latest_status}{warning}"
+    replacement_paths = index_file_path_keys(latest_index)
+    by_status = source_lifecycle_paths_by_status(source_lifecycle or []) if source_lifecycle else {}
+    if by_status:
+        detached_paths = set(by_status.get("deleted", set())) | set(by_status.get("ignored", set()))
+        changed_paths = set(by_status.get("changed", set()))
+    else:
+        detached_paths = set(source_paths or set())
+        changed_paths = set()
+    still_attached = sorted(path for path in detached_paths if path in replacement_paths)
+    if still_attached:
+        return latest_index, False, "replacement index still references deleted or ignored source path(s)"
+    missing_changed = []
+    if source_lifecycle:
+        for row in source_lifecycle:
+            if not isinstance(row, dict) or row.get("status") != "changed":
+                continue
+            path_text = str(row.get("path", "") or "").strip()
+            if path_text and not (source_lifecycle_path_variants(path_text) & replacement_paths):
+                missing_changed.append(path_text)
+    else:
+        missing_changed = sorted(path for path in changed_paths if path not in replacement_paths)
+    if missing_changed:
+        return latest_index, False, "replacement index does not include reprocessed changed source path(s)"
+    if changed_paths and detached_paths:
+        return latest_index, True, "replacement index is fresh, includes changed sources, and excludes detached source path(s)"
+    if changed_paths:
+        return latest_index, True, "replacement index is fresh and includes reprocessed changed source path(s)"
+    return latest_index, True, "replacement index is fresh and does not reference detached source path(s)"
+
+
 def index_file_path_keys(index: dict) -> set[str]:
     """Return normalized path keys for files recorded in an index."""
 

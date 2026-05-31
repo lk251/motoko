@@ -139,11 +139,13 @@ Motoko repo itself, treat this as the current prepared queue:
    relationship precision and add new deterministic facts only when they help
    Motoko find the right code before proposing changes.
 4. Finish artifact lifecycle ownership. Source lifecycle now plans and formats
-   cleanup conservatively, but future work should keep moving artifact fanout,
-   rebuild decisions, and family-specific cleanup into a tested lifecycle
-   service instead of adding more root-facade special cases.
+   cleanup conservatively, and replacement-readiness policy is now service-owned.
+   Future work should keep moving artifact fanout, rebuild decisions, and
+   family-specific cleanup into tested lifecycle services instead of adding more
+   root-facade special cases.
 5. Add finer cancellation checkpoints for long foreground study, index, vector,
-   and dossier operations. The job supervisor is in place; the remaining craft
+   dossier, and profile operations. The job supervisor is in place, and
+   `/profile-refresh` now forwards foreground cancellation; the remaining craft
    work is narrowing the long functions so `/stop` and pause feel immediate.
 6. Improve curator quality in a Hermes-inspired but Motoko-shaped way:
    usage/patch metadata, loaded-skill patch preference, support-file
