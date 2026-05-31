@@ -1047,6 +1047,8 @@ def test_phase_timer_key_ignores_progress_counters(m):
     right = "bg-heavy: vectorizing(model) batch 30/129 parallel 32 rows 2780/10525 eta 1m45s"
     assert m.phase_timer_key(left) == m.phase_timer_key(right)
     assert m.phase_timer_key(left) == "bg-heavy: vectorizing(model)"
+    incremental = "bg-heavy: vectorizing(model) incremental reuse 9000 new 25 batch 1/2 parallel 32 rows 9012/9025 eta 2s"
+    assert m.phase_timer_key(incremental) == "bg-heavy: vectorizing(model)"
     assert m.phase_timer_key("study: planning") != m.phase_timer_key(left)
 
 
@@ -1063,6 +1065,18 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     assert "orgfiles" not in line
     assert "logbook" not in line
 
+    incremental = m.format_vector_progress_phase(
+        completed_batches=0,
+        total_batches=1,
+        active_parallelism=32,
+        completed_rows=150,
+        total_rows=160,
+        eta_seconds=None,
+        reused_rows=150,
+        pending_rows=10,
+    )
+    assert incremental == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
+
     finalizing = m.format_vector_progress_phase(
         completed_batches=5,
         total_batches=5,
@@ -1072,6 +1086,11 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         state="finalizing",
     )
     assert finalizing == "bg-heavy: vectorizing finalizing rows 160/160"
+    sanitized = m.sanitize_background_phase(
+        "bg-heavy: vectorizing(model) orgfiles incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
+    )
+    assert sanitized == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
+    assert "orgfiles" not in sanitized
 
 
 def test_generated_title(m):
@@ -7519,7 +7538,12 @@ def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
             assert "reusable family vector store" in reason
 
             EmbeddingHandler.payloads = []
-            store2 = m.build_vector_store(index2["id"], method=m.EMBEDDING_VECTOR_METHOD)
+            phases = []
+            store2 = m.build_vector_store_from_index(
+                index2,
+                method=m.EMBEDDING_VECTOR_METHOD,
+                progress_callback=phases.append,
+            )
 
             model_inputs = []
             for payload in EmbeddingHandler.payloads:
@@ -7533,6 +7557,10 @@ def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
             assert len(model_inputs) == store2["embedding_embedded_rows"]
             assert store2["embedding_embedded_rows"] < store2["row_count"]
             assert m.vector_store_freshness(store2)[0] == "fresh"
+            assert phases
+            assert any("incremental" in phase for phase in phases)
+            assert any(f"reuse {store2['embedding_reused_rows']}" in phase for phase in phases)
+            assert any(f"new {store2['embedding_embedded_rows']}" in phase for phase in phases)
 
             alpha_rows_1 = {
                 row["id"]: row

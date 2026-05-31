@@ -114,6 +114,8 @@ def human_duration_words(seconds: int | float | None) -> str:
 
 def phase_timer_key(phase: str) -> str:
     phase = str(phase or "")
+    phase = re.sub(r"\s+incremental\s+reuse\s+\d+\s+new\s+\d+", "", phase)
+    phase = re.sub(r"\s+retry(?=\s|$)", "", phase)
     phase = re.sub(r"\s+batch\s+\d+/\d+.*$", "", phase)
     phase = re.sub(r"\s+rows\s+\d+/\d+.*$", "", phase)
     phase = re.sub(r"\s+file\s+\d+/\d+.*$", "", phase)
@@ -155,4 +157,3 @@ def slug_title(text: str) -> str:
         return "Untitled"
     title = " ".join(words[:8])
     return title[:80]
-

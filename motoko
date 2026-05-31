@@ -1952,11 +1952,31 @@ def sanitize_background_phase(phase: object) -> str:
     if not text:
         return "idle"
     if text.startswith("bg-heavy: vectorizing"):
+        rows_match = re.search(r"\brows\s+\d+/\d+\b", text)
         if "finalizing" in text:
-            return "bg-heavy: vectorizing finalizing"
+            rows_text = f" {rows_match.group(0)}" if rows_match else ""
+            return f"bg-heavy: vectorizing finalizing{rows_text}"
+        parts = ["bg-heavy: vectorizing(model)"]
         if "retry" in text:
-            return "bg-heavy: vectorizing retry"
-        return "bg-heavy: vectorizing(model)"
+            parts.append("retry")
+        reuse_match = re.search(r"\breuse\s+\d+\b", text)
+        new_match = re.search(r"\bnew\s+\d+\b", text)
+        if "incremental" in text or reuse_match or new_match:
+            parts.append("incremental")
+            if reuse_match:
+                parts.append(reuse_match.group(0))
+            if new_match:
+                parts.append(new_match.group(0))
+        for pattern in [
+            r"\bbatch\s+\d+/\d+\b",
+            r"\bparallel\s+\d+\b",
+            r"\brows\s+\d+/\d+\b",
+            r"\beta\s+\S+",
+        ]:
+            match = re.search(pattern, text)
+            if match:
+                parts.append(match.group(0))
+        return " ".join(parts)
     if text.startswith("bg-heavy: index"):
         return phase_timer_key(text)
     if text.startswith("study:"):
@@ -1977,16 +1997,22 @@ def format_vector_progress_phase(
     total_rows: int,
     eta_seconds: int | None = None,
     state: str = "running",
+    reused_rows: int = 0,
+    pending_rows: int | None = None,
 ) -> str:
     state = str(state or "running").strip()
     if state == "finalizing":
         return f"bg-heavy: vectorizing finalizing rows {completed_rows}/{total_rows}"
     eta_text = f"eta {human_duration(eta_seconds)}" if eta_seconds is not None else "eta ?"
     batch_text = f"batch {completed_batches}/{total_batches}" if total_batches else "batch 0/0"
+    incremental_text = ""
+    if reused_rows:
+        new_rows = max(0, int(total_rows or 0) - int(reused_rows or 0)) if pending_rows is None else max(0, int(pending_rows or 0))
+        incremental_text = f"incremental reuse {max(0, int(reused_rows or 0))} new {new_rows}"
     return (
-        f"bg-heavy: vectorizing(model) {batch_text} parallel {max(1, int(active_parallelism or 1))} "
+        f"bg-heavy: vectorizing(model) {incremental_text} {batch_text} parallel {max(1, int(active_parallelism or 1))} "
         f"rows {completed_rows}/{total_rows} {eta_text}"
-    )
+    ).replace("  ", " ")
 
 
 def safe_model_route_state(route_name: str) -> str:
@@ -14961,6 +14987,20 @@ def build_embedding_vector_store_from_index(
     ]
     pending_batches = [(offset, batch) for offset, batch in pending_batches if batch]
     completed_batches = len(batches) - len(pending_batches)
+    pending_row_count = max(0, len(candidates) - initial_completed_rows)
+    if progress_callback is not None and initial_completed_rows:
+        progress_callback(
+            format_vector_progress_phase(
+                completed_batches=completed_batches,
+                total_batches=len(batches),
+                active_parallelism=active_parallelism,
+                completed_rows=len(completed_rows_by_id),
+                total_rows=len(candidates),
+                eta_seconds=vector_eta_seconds(),
+                reused_rows=initial_completed_rows,
+                pending_rows=pending_row_count,
+            )
+        )
 
     def record_completed_batch(new_rows: list[dict], embedded_route: dict | None) -> None:
         nonlocal dimensions, route_info, completed_batches
@@ -14980,6 +15020,8 @@ def build_embedding_vector_store_from_index(
                     completed_rows=len(completed_rows_by_id),
                     total_rows=len(candidates),
                     eta_seconds=vector_eta_seconds(),
+                    reused_rows=initial_completed_rows,
+                    pending_rows=pending_row_count,
                 )
             )
 
@@ -15087,8 +15129,17 @@ def build_embedding_vector_store_from_index(
                 write_progress()
                 if progress_callback is not None:
                     progress_callback(
-                        f"bg-heavy: vectorizing(model) retry parallel {active_parallelism} "
-                        f"rows {len(completed_rows_by_id)}/{len(candidates)} {vector_eta_text()}"
+                        format_vector_progress_phase(
+                            completed_batches=completed_batches,
+                            total_batches=len(batches),
+                            active_parallelism=active_parallelism,
+                            completed_rows=len(completed_rows_by_id),
+                            total_rows=len(candidates),
+                            eta_seconds=vector_eta_seconds(),
+                            state="retry",
+                            reused_rows=initial_completed_rows,
+                            pending_rows=pending_row_count,
+                        ).replace("bg-heavy: vectorizing(model)", "bg-heavy: vectorizing(model) retry", 1)
                     )
                 continue
         else:

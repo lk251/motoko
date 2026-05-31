@@ -1685,10 +1685,12 @@ files or sections, `vector-refresh` now looks for the latest compatible
 embedding store, reuses rows whose stable row id and embedding input hash still
 match, omits rows for removed or ignored sources, and embeds only new or
 changed rows before writing a compact fresh manifest for the new index. The
-refresh report includes reused, embedded, and superseded row counts. Embedding
-stores still require source re-vectorization when the vector schema, vector
-row-id schema, embedding input schema/split policy, embedding route, model, or
-dimensions change. Dense vector coordinates are not migrated across
+refresh report includes reused, embedded, and superseded row counts. Live
+status is also content-free but should show `incremental reuse N new M` once
+the reusable rows have been identified. Embedding stores still require source
+re-vectorization when the vector schema, vector row-id schema, embedding input
+schema/split policy, embedding route, model, or dimensions change. Dense vector
+coordinates are not migrated across
 incompatible embedding models; source re-vectorization is the correct upgrade
 path in that case. A fresh embedding store participates in true hybrid
 retrieval: lexical/path candidates, deterministic Org/task candidates,
