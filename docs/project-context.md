@@ -1221,12 +1221,14 @@ Current progress on this stretch:
   evidence/vector rows, production selected-source summary, and content-free
   diagnostics from the same retrieval-service result object used for chat
   context.
-- Progress: artifact lifecycle now owns the stale-superseded index cleanup
-  decision/apply loop through injected callbacks, so the root facade supplies
-  filesystem authority while lifecycle owns report shape and blocking logic.
-  Remaining lifecycle work is broader source-level apply support for vectors,
-  evidence stores, dossiers, memories, feedback fixtures, profiles, and
-  conversation-derived artifacts after rebuilds materialize replacement state.
+- Complete for the current safe boundary: artifact lifecycle now owns both the
+  stale-superseded index cleanup decision/apply loop and a broader
+  source-lifecycle report for changed, deleted, or newly ignored indexed
+  sources. The report fans out across vectors, evidence stores, dossiers,
+  retrieval/debug/eval artifacts, raw feedback, memories, profiles, and
+  conversations. Apply remains conservative: it deletes only stale superseded
+  index snapshots and rebuildable derived artifacts after a fresh replacement
+  index exists, while durable human signal stays manual-review.
 - Complete: embedding vector refresh now reuses compatible rows from the
   latest same-family vector store when a newer source index changes only some
   files or sections. Stable vector row ids and input hashes decide reuse,
@@ -1283,11 +1285,10 @@ Remaining follow-up items from this stretch:
   reused, embedded, and superseded row counts. Future tuning should add corpus
   health thresholds and eval/latency checks that decide when a rare full
   re-vectorization is worth doing for quality rather than compatibility.
-- Add broader source-level lifecycle apply support after rebuilds materialize
-  replacement state: vectors, evidence stores, dossiers, memories, feedback
-  fixtures, profiles, and conversation-derived artifacts should have one clear
-  cleanup/rebuild path for changed, deleted, ignored, or reprocessed source
-  files.
+- Continue source-lifecycle hardening through usage: watch for cases where
+  manual-review artifacts should gain a separate reviewed action, but keep raw
+  conversations, memories, profile dossiers, and response feedback out of
+  automatic source cleanup unless a new design explicitly accepts that risk.
 - Add finer cooperative cancellation checkpoints for foreground study, index,
   vector, and dossier work. Foreground work is now tracked by the job
   supervisor, but long-running functions still need narrower pause/stop

@@ -8629,6 +8629,102 @@ def test_index_change_summary_reports_source_lifecycle_decisions(m):
             m.quiet_model = old_quiet_model
 
 
+def test_source_lifecycle_report_blocks_changed_sources(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "a.org"
+        source.write_text("* TODO [#A] Alpha\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            index = m.build_document_index(str(docs))
+            m.atomic_write(
+                m.vector_store_path("vec-source-lifecycle-blocked"),
+                json.dumps({"id": "vec-source-lifecycle-blocked", "source_index": index["id"]}) + "\n",
+            )
+
+            source.write_text("* TODO [#A] Alpha\nChanged body\n", encoding="utf-8")
+            report = m.source_lifecycle_report_for_index(index)
+            plan = report["plan"]
+            assert plan["status"] == "needs-rebuild"
+            assert plan["apply_status"] == "blocked"
+            assert plan["source_counts"]["changed"] == 1
+            assert plan["derived_artifact_count"] == 1
+            assert "changed sources require source reprocessing" in plan["apply_reason"]
+            text = m.format_source_lifecycle_report(report)
+            assert "next: rebuild/refresh the corpus first" in text
+        finally:
+            m.quiet_model = old_quiet_model
+
+
+def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "a.org"
+        keeper = docs / "b.org"
+        source.write_text("* TODO [#A] Alpha\n", encoding="utf-8")
+        keeper.write_text("* TODO [#B] Bravo\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+
+        old_quiet_model = m.quiet_model
+        try:
+            m.quiet_model = lambda *args, **kwargs: "summary"
+            old_index = m.build_document_index(str(docs))
+            old_index["created"] = "2026-05-01T00:00:00+00:00"
+            m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
+
+            m.atomic_write(
+                m.vector_store_path("vec-source-lifecycle-apply"),
+                json.dumps({"id": "vec-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
+            )
+            m.atomic_write(
+                m.evidence_store_path("ev-source-lifecycle-apply"),
+                json.dumps({"id": "ev-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
+            )
+            m.atomic_write(
+                m.topic_path("topic-source-lifecycle-apply"),
+                json.dumps({"id": "topic-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
+            )
+            m.append_jsonl(
+                m.response_feedback_path(),
+                {
+                    "schema": m.RESPONSE_FEEDBACK_SCHEMA_VERSION,
+                    "id": "feedback-source-lifecycle-apply",
+                    "sources": [{"path": str(source), "index": old_index["id"]}],
+                },
+            )
+
+            (docs / ".motokoignore").write_text("a.org\n", encoding="utf-8")
+            new_index = m.build_document_index(str(docs))
+            new_index["created"] = "2026-05-02T00:00:00+00:00"
+            m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
+
+            report = m.source_lifecycle_report_for_index(old_index)
+            plan = report["plan"]
+            assert plan["status"] == "cleanup-ready"
+            assert plan["apply_status"] == "ready"
+            assert plan["source_counts"]["ignored"] == 1
+            assert plan["derived_artifact_count"] == 3
+            assert plan["manual_review_artifact_count"] == 1
+            assert m.response_feedback_path().exists()
+
+            applied = m.source_lifecycle_report_for_index(old_index, apply=True, yes=True)
+            assert applied["applied"]["status"] == "deleted-superseded-index-snapshot"
+            assert not m.index_path(old_index["id"]).exists()
+            assert m.index_path(new_index["id"]).exists()
+            assert not m.vector_store_path("vec-source-lifecycle-apply").exists()
+            assert not m.evidence_store_path("ev-source-lifecycle-apply").exists()
+            assert not m.topic_path("topic-source-lifecycle-apply").exists()
+            assert m.response_feedback_path().exists()
+            assert m.read_jsonl(m.response_feedback_path())[0]["id"] == "feedback-source-lifecycle-apply"
+        finally:
+            m.quiet_model = old_quiet_model
+
+
 def test_index_signal_enrichment_upgrades_legacy_index(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -10943,6 +11039,8 @@ def main() -> int:
         test_project_scope_filters_topic_reuse_before_attachment,
         test_assistant_color_config,
         test_index_change_summary_reports_source_lifecycle_decisions,
+        test_source_lifecycle_report_blocks_changed_sources,
+        test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
         test_tui_alt_backspace_deletes_previous_word,

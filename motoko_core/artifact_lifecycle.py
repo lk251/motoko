@@ -8,6 +8,7 @@ from typing import Callable
 
 
 ARTIFACT_LIFECYCLE_SCHEMA = "artifact-lifecycle-v1"
+SOURCE_LIFECYCLE_PLAN_SCHEMA = "source-lifecycle-plan-v1"
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,83 @@ def source_lifecycle_artifact_plan(
         "source_counts": counts,
         "source_count": len(rows),
         "affected_artifacts": affected,
+    }
+
+
+def source_lifecycle_cleanup_plan(
+    *,
+    index_id: str,
+    source_lifecycle: list[dict],
+    artifact_records: list[dict] | None = None,
+    replacement_index_id: str = "",
+    replacement_ready: bool = False,
+) -> dict:
+    rows = [row for row in source_lifecycle if isinstance(row, dict) and row.get("status") != "fresh"]
+    counts = dict(collections.Counter(str(row.get("status", "unknown")) for row in rows))
+    records = [record for record in artifact_records or [] if isinstance(record, dict)]
+    policy_counts: dict[tuple[str, str], dict] = {}
+    bytes_by_policy: dict[str, int] = collections.Counter()
+    for record in records:
+        kind = str(record.get("artifact_kind", "artifact") or "artifact")
+        policy = str(record.get("cleanup_policy", "manual-review") or "manual-review")
+        key = (kind, policy)
+        item = policy_counts.setdefault(
+            key,
+            {
+                "kind": kind,
+                "policy": policy,
+                "count": 0,
+                "bytes": 0,
+            },
+        )
+        item["count"] += 1
+        item["bytes"] += int(record.get("bytes_estimate", 0) or 0)
+        bytes_by_policy[policy] += int(record.get("bytes_estimate", 0) or 0)
+
+    affected_artifacts = sorted(policy_counts.values(), key=lambda item: (item["policy"], item["kind"]))
+    derived_records = [record for record in records if record.get("cleanup_policy") == "delete-derived"]
+    manual_records = [record for record in records if record.get("cleanup_policy") != "delete-derived"]
+
+    if not rows:
+        status = "fresh"
+        recommended_action = "keep-derived-artifacts"
+        apply_status = "no-op"
+        apply_reason = "all indexed sources are fresh"
+    elif counts.get("changed"):
+        status = "needs-rebuild"
+        recommended_action = "rebuild-index-and-refresh-derived-artifacts"
+        apply_status = "blocked"
+        apply_reason = "changed sources require source reprocessing before cleanup"
+    elif not replacement_ready:
+        status = "detached-source-work"
+        recommended_action = "rebuild-index-before-cleanup"
+        apply_status = "blocked"
+        apply_reason = "source lifecycle cleanup requires a newer replacement index without the detached sources"
+    else:
+        status = "cleanup-ready"
+        recommended_action = "clean-superseded-derived-artifacts"
+        apply_status = "ready"
+        apply_reason = f"superseded by replacement index {replacement_index_id}"
+
+    return {
+        "schema": SOURCE_LIFECYCLE_PLAN_SCHEMA,
+        "index": index_id,
+        "status": status,
+        "recommended_action": recommended_action,
+        "apply_status": apply_status,
+        "apply_reason": apply_reason,
+        "replacement_index": replacement_index_id,
+        "replacement_ready": bool(replacement_ready),
+        "source_counts": counts,
+        "source_count": len(rows),
+        "affected_artifacts": affected_artifacts,
+        "affected_artifact_count": len(records),
+        "derived_artifact_count": len(derived_records),
+        "manual_review_artifact_count": len(manual_records),
+        "derived_bytes": int(bytes_by_policy.get("delete-derived", 0)),
+        "manual_review_bytes": sum(
+            value for policy, value in bytes_by_policy.items() if policy != "delete-derived"
+        ),
     }
 
 

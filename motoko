@@ -434,6 +434,7 @@ from motoko_core.runtime import (  # noqa: E402
 from motoko_core.artifact_lifecycle import (  # noqa: E402
     cleanup_superseded_index_candidates,
     source_lifecycle_artifact_plan,
+    source_lifecycle_cleanup_plan,
     source_lifecycle_state,
 )
 from motoko_core.observability import (  # noqa: E402
@@ -867,6 +868,7 @@ SLASH_COMMANDS = [
     ("/index-repair [ID]", "repair failed index quality artifacts"),
     ("/index-storage", "audit index storage and safe cleanup opportunities"),
     ("/index-cleanup", "clean stale superseded index snapshots and derived stores"),
+    ("/source-lifecycle [ID]", "report source changes and safe derived-artifact cleanup"),
     ("/tasks [QUERY]", "show ranked Org task candidates from corpus indexes"),
     ("/topics", "list topic dossiers"),
     ("/topic-show [ID]", "show a topic dossier"),
@@ -980,6 +982,7 @@ SHELL_COMMANDS = [
     "index-repair",
     "index-storage",
     "index-cleanup",
+    "source-lifecycle",
     "topic",
     "deepen",
     "topics",
@@ -1078,6 +1081,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/index-quality",
     "/index-repair",
     "/index-storage",
+    "/source-lifecycle",
     "/index-cleanup",
     "/bg-now",
     "/tasks",
@@ -12090,6 +12094,221 @@ def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
     }
 
 
+def json_matching_source_paths(value, source_paths: set[str]) -> set[str]:
+    matches: set[str] = set()
+    if not source_paths:
+        return matches
+    if isinstance(value, dict):
+        for item in value.values():
+            matches.update(json_matching_source_paths(item, source_paths))
+        return matches
+    if isinstance(value, list):
+        for item in value:
+            matches.update(json_matching_source_paths(item, source_paths))
+        return matches
+    if isinstance(value, str):
+        for source_path in source_paths:
+            if source_path and (value == source_path or source_path in value):
+                matches.add(source_path)
+    return matches
+
+
+def source_lifecycle_affected_paths(source_lifecycle: list[dict]) -> set[str]:
+    paths = set()
+    for item in source_lifecycle:
+        if not isinstance(item, dict) or item.get("status") == "fresh":
+            continue
+        path_text = str(item.get("path", "")).strip()
+        if not path_text:
+            continue
+        paths.add(path_text)
+        try:
+            paths.add(str(pathlib.Path(path_text).expanduser().resolve()))
+        except OSError:
+            paths.add(str(pathlib.Path(path_text).expanduser()))
+    return paths
+
+
+def source_artifact_record(
+    *,
+    artifact_id: str,
+    artifact_kind: str,
+    state_path: pathlib.Path,
+    cleanup_policy: str,
+    source_index_ids: list[str] | None = None,
+    source_paths: list[str] | None = None,
+    row_count: int = 0,
+) -> dict:
+    return {
+        "artifact_id": artifact_id,
+        "artifact_kind": artifact_kind,
+        "state_path": str(state_path),
+        "cleanup_policy": cleanup_policy,
+        "source_index_ids": source_index_ids or [],
+        "source_paths": source_paths or [],
+        "row_count": row_count,
+        "bytes_estimate": path_size(state_path),
+    }
+
+
+def json_artifact_records_for_source_lifecycle(
+    directory: pathlib.Path,
+    *,
+    artifact_kind: str,
+    cleanup_policy: str,
+    index_id: str,
+    source_paths: set[str],
+) -> list[dict]:
+    records = []
+    if not directory.exists():
+        return records
+    for path in sorted(directory.glob("*.json")):
+        data = safe_load_json(path)
+        if data is None:
+            continue
+        references_index = json_references_index(data, index_id)
+        matched_paths = sorted(json_matching_source_paths(data, source_paths))
+        if not references_index and not matched_paths:
+            continue
+        records.append(
+            source_artifact_record(
+                artifact_id=str(data.get("id", path.stem)) if isinstance(data, dict) else path.stem,
+                artifact_kind=artifact_kind,
+                state_path=path,
+                cleanup_policy=cleanup_policy,
+                source_index_ids=[index_id] if references_index else [],
+                source_paths=matched_paths,
+            )
+        )
+    return records
+
+
+def jsonl_artifact_record_for_source_lifecycle(
+    path: pathlib.Path,
+    *,
+    artifact_kind: str,
+    cleanup_policy: str,
+    index_id: str,
+    source_paths: set[str],
+) -> dict | None:
+    if not path.exists():
+        return None
+    row_count = 0
+    references_index = False
+    matched_paths: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                row_index = json_references_index(row, index_id)
+                row_paths = json_matching_source_paths(row, source_paths)
+                if row_index or row_paths:
+                    row_count += 1
+                    references_index = references_index or row_index
+                    matched_paths.update(row_paths)
+    except OSError:
+        return None
+    if not row_count:
+        return None
+    return source_artifact_record(
+        artifact_id=path.stem,
+        artifact_kind=artifact_kind,
+        state_path=path,
+        cleanup_policy=cleanup_policy,
+        source_index_ids=[index_id] if references_index else [],
+        source_paths=sorted(matched_paths),
+        row_count=row_count,
+    )
+
+
+def conversation_artifact_records_for_source_lifecycle(
+    *,
+    index_id: str,
+    source_paths: set[str],
+) -> list[dict]:
+    records = []
+    if not conversations_dir().exists():
+        return records
+    for path in sorted(conversations_dir().glob("*.json")):
+        data = safe_load_json(path)
+        if data is None:
+            continue
+        references_index = json_references_index(data, index_id)
+        matched_paths = sorted(json_matching_source_paths(data, source_paths))
+        if not references_index and not matched_paths:
+            continue
+        records.append(
+            source_artifact_record(
+                artifact_id=str(data.get("id", path.stem)) if isinstance(data, dict) else path.stem,
+                artifact_kind="conversation",
+                state_path=path,
+                cleanup_policy="manual-review",
+                source_index_ids=[index_id] if references_index else [],
+                source_paths=matched_paths,
+            )
+        )
+    return records
+
+
+def source_lifecycle_artifact_records(index_id: str, source_paths: set[str]) -> list[dict]:
+    records = []
+    for directory, artifact_kind, cleanup_policy in [
+        (vector_stores_dir(), "vector_store", "delete-derived"),
+        (evidence_stores_dir(), "evidence_store", "delete-derived"),
+        (vector_progress_dir(), "vector_progress", "delete-derived"),
+        (topics_dir(), "topic_dossier", "delete-derived"),
+        (dossiers_dir(), "memory_dossier", "delete-derived"),
+        (retrieval_debug_dir(), "retrieval_debug", "delete-derived"),
+        (retrieval_evals_dir(), "retrieval_eval", "delete-derived"),
+        (feedback_evals_dir(), "feedback_eval", "delete-derived"),
+    ]:
+        records.extend(
+            json_artifact_records_for_source_lifecycle(
+                directory,
+                artifact_kind=artifact_kind,
+                cleanup_policy=cleanup_policy,
+                index_id=index_id,
+                source_paths=source_paths,
+            )
+        )
+    for path, artifact_kind in [
+        (response_feedback_path(), "response_feedback"),
+        (memories_path(), "memory"),
+        (memory_proposal_queue_path(), "memory_proposal"),
+        (study_jobs_path(), "study_job"),
+    ]:
+        record = jsonl_artifact_record_for_source_lifecycle(
+            path,
+            artifact_kind=artifact_kind,
+            cleanup_policy="manual-review",
+            index_id=index_id,
+            source_paths=source_paths,
+        )
+        if record is not None:
+            records.append(record)
+    profile = safe_load_json(profile_path())
+    if profile is not None:
+        references_index = json_references_index(profile, index_id)
+        matched_paths = sorted(json_matching_source_paths(profile, source_paths))
+        if references_index or matched_paths:
+            records.append(
+                source_artifact_record(
+                    artifact_id="profile",
+                    artifact_kind="profile_dossier",
+                    state_path=profile_path(),
+                    cleanup_policy="manual-review",
+                    source_index_ids=[index_id] if references_index else [],
+                    source_paths=matched_paths,
+                )
+            )
+    records.extend(conversation_artifact_records_for_source_lifecycle(index_id=index_id, source_paths=source_paths))
+    records.sort(key=lambda item: (item.get("cleanup_policy", ""), item.get("artifact_kind", ""), item.get("artifact_id", "")))
+    return records
+
+
 def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:
     all_indexes = indexes if indexes is not None else list_indexes()
     latest_by_key = {index_family_key(index): index for index in latest_indexes_by_family(all_indexes)}
@@ -12230,6 +12449,167 @@ def format_index_cleanup_report(report: dict) -> str:
             lines.append(f"  warning: {warning}")
     if not report.get("deleted") and not report.get("blocked") and not report.get("materialized"):
         lines.append("no stale superseded index artifacts were safe to clean")
+    return "\n".join(lines)
+
+
+def index_file_path_keys(index: dict) -> set[str]:
+    keys = set()
+    for file_item in index.get("files", []):
+        path_text = str(file_item.get("path", "")).strip()
+        if not path_text:
+            continue
+        keys.add(path_text)
+        try:
+            keys.add(str(pathlib.Path(path_text).expanduser().resolve()))
+        except OSError:
+            keys.add(str(pathlib.Path(path_text).expanduser()))
+    return keys
+
+
+def source_lifecycle_replacement(index: dict, source_paths: set[str]) -> tuple[dict | None, bool, str]:
+    latest = latest_index_for_family(index, list_indexes())
+    if latest is None or latest.get("id") == index.get("id"):
+        return None, False, "no newer replacement index for this corpus family"
+    latest_status, latest_warnings = index_staleness(latest)
+    if latest_status != "fresh":
+        warning = f": {'; '.join(latest_warnings[:2])}" if latest_warnings else ""
+        return latest, False, f"replacement index is {latest_status}{warning}"
+    replacement_paths = index_file_path_keys(latest)
+    still_attached = sorted(path for path in source_paths if path in replacement_paths)
+    if still_attached:
+        return latest, False, "replacement index still references detached source path(s)"
+    return latest, True, "replacement index is fresh and does not reference detached source path(s)"
+
+
+def source_lifecycle_report_for_index(index: dict, *, apply: bool = False, yes: bool = False) -> dict:
+    index_id = str(index.get("id", "")).strip()
+    summary = index_change_summary(index)
+    source_lifecycle = summary.get("source_lifecycle", [])
+    source_paths = source_lifecycle_affected_paths(source_lifecycle)
+    if source_lifecycle:
+        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(index, source_paths)
+    else:
+        replacement, replacement_ready, replacement_reason = None, False, "all indexed sources are fresh"
+    records = source_lifecycle_artifact_records(index_id, source_paths) if source_lifecycle else []
+    plan = source_lifecycle_cleanup_plan(
+        index_id=index_id,
+        source_lifecycle=source_lifecycle,
+        artifact_records=records,
+        replacement_index_id=str((replacement or {}).get("id", "")),
+        replacement_ready=replacement_ready,
+    )
+    report = {
+        "schema": "source-lifecycle-report-v1",
+        "created": now(),
+        "index": {
+            "id": index_id,
+            "name": index.get("name", ""),
+            "root": index.get("root", ""),
+            "glob": index.get("glob") or AUTO_INDEX_GLOB,
+            "status": summary.get("status", ""),
+            "warnings": summary.get("warnings", [])[:6],
+        },
+        "replacement": {
+            "id": str((replacement or {}).get("id", "")),
+            "ready": replacement_ready,
+            "reason": replacement_reason,
+        },
+        "dry_run": not apply,
+        "source_lifecycle": source_lifecycle[:100],
+        "plan": plan,
+        "artifact_records": records[:200],
+        "artifact_record_count": len(records),
+        "applied": None,
+    }
+    if apply:
+        if not yes:
+            raise SystemExit("refusing source lifecycle cleanup without --yes")
+        if plan.get("apply_status") != "ready":
+            report["applied"] = {
+                "status": "blocked",
+                "reason": plan.get("apply_reason", "cleanup is not ready"),
+            }
+            return report
+        deletion = delete_index_snapshot(index)
+        invalidate_context_catalog_after_cleanup()
+        report["applied"] = {
+            "status": "deleted-superseded-index-snapshot",
+            "index": index_id,
+            "deleted": deletion,
+            "manual_review_artifacts_preserved": plan.get("manual_review_artifact_count", 0),
+        }
+    return report
+
+
+def format_source_lifecycle_report(report: dict) -> str:
+    index = report.get("index", {})
+    replacement = report.get("replacement", {})
+    plan = report.get("plan", {})
+    lines = [
+        f"source lifecycle: {report.get('schema', 'source-lifecycle-report-v1')}",
+        f"created: {report.get('created', '')}",
+        f"mode: {'dry-run' if report.get('dry_run') else 'apply'}",
+        f"index: {index.get('id', '')} {index.get('name', '')} {index.get('root', '')}".rstrip(),
+        f"index status: {index.get('status', '')}",
+        f"replacement: {replacement.get('id') or '-'} ({'ready' if replacement.get('ready') else 'not ready'})",
+        f"replacement reason: {replacement.get('reason', '')}",
+        f"plan: {plan.get('status', '')} -> {plan.get('recommended_action', '')}",
+        f"apply: {plan.get('apply_status', '')} ({plan.get('apply_reason', '')})",
+    ]
+    source_counts = plan.get("source_counts") or {}
+    if source_counts:
+        lines.append("sources: " + ", ".join(f"{key}:{source_counts[key]}" for key in sorted(source_counts)))
+    else:
+        lines.append("sources: fresh")
+    for source in report.get("source_lifecycle", [])[:20]:
+        lines.append(
+            f"- {source.get('status', '')}: {source.get('path', '')} "
+            f"({source.get('recommended_action', '')})"
+        )
+    if plan.get("affected_artifacts"):
+        lines.append("affected artifacts:")
+        for item in plan.get("affected_artifacts", []):
+            bytes_part = f", {human_bytes(item.get('bytes', 0))}" if item.get("bytes") else ""
+            lines.append(
+                f"- {item.get('kind', '')}: {item.get('count', 0)} "
+                f"policy={item.get('policy', '')}{bytes_part}"
+            )
+    else:
+        lines.append("affected artifacts: none")
+    manual = plan.get("manual_review_artifact_count", 0)
+    if manual:
+        lines.append(
+            f"manual review: {manual} durable artifact(s) may mention these sources; "
+            "Motoko will not delete memories, conversations, profile, or raw feedback automatically."
+        )
+    applied = report.get("applied")
+    if applied:
+        lines.append(f"applied: {applied.get('status', '')}")
+        if applied.get("reason"):
+            lines.append(f"reason: {applied.get('reason')}")
+        deleted = applied.get("deleted") or {}
+        if deleted:
+            extras = []
+            for key, label in [
+                ("vector_stores_deleted", "vector"),
+                ("evidence_stores_deleted", "evidence"),
+                ("topics_deleted", "topics"),
+                ("dossiers_deleted", "dossiers"),
+                ("retrieval_debug_deleted", "retrieval-debug"),
+                ("retrieval_evals_deleted", "retrieval-evals"),
+                ("feedback_evals_deleted", "feedback-evals"),
+            ]:
+                if deleted.get(key):
+                    extras.append(f"{label}:{deleted.get(key)}")
+            lines.append(
+                "deleted: "
+                f"index={deleted.get('index_deleted')} chunks={deleted.get('chunk_dir_deleted')} "
+                + (", ".join(extras) if extras else "derived=0")
+            )
+    elif plan.get("apply_status") == "ready" and report.get("dry_run"):
+        lines.append("next: run motoko source-lifecycle INDEX --apply --yes after reviewing this report")
+    elif plan.get("apply_status") == "blocked":
+        lines.append("next: rebuild/refresh the corpus first, then rerun source-lifecycle")
     return "\n".join(lines)
 
 
@@ -19652,6 +20032,18 @@ def index_report_command_request(text: str, conv: dict):
             "/index-cleanup",
             lambda: format_index_cleanup_report(cleanup_superseded_stale_indexes(limit=1, dry_run=not apply_cleanup)),
         )
+    if primary == "/source-lifecycle":
+        parts = body.split()
+        apply_cleanup = any(part in {"--apply", "apply"} for part in parts)
+        yes = any(part == "--yes" for part in parts)
+        selector_parts = [part for part in parts if part not in {"--apply", "apply", "--yes"}]
+        selector = " ".join(selector_parts).strip() or None
+        return (
+            "/source-lifecycle",
+            lambda: format_source_lifecycle_report(
+                source_lifecycle_report_for_index(load_index(selector), apply=apply_cleanup, yes=yes)
+            ),
+        )
     if primary == "/index-repair":
         selector = body or None
 
@@ -23247,6 +23639,15 @@ def command_index_cleanup(args) -> None:
         print_report(format_index_cleanup_report(report))
 
 
+def command_source_lifecycle(args) -> None:
+    index = load_index(args.index)
+    report = source_lifecycle_report_for_index(index, apply=args.apply, yes=args.yes)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_source_lifecycle_report(report))
+
+
 def command_bg_now(args) -> None:
     if args.conversation:
         conv = load_conversation(args.conversation)
@@ -24180,6 +24581,16 @@ def main(argv: list[str]) -> int:
     index_cleanup.add_argument("--yes", action="store_true", help="apply cleanup; without this Motoko prints a dry-run")
     index_cleanup.add_argument("--json", action="store_true", help="print JSON report")
     index_cleanup.set_defaults(func=command_index_cleanup)
+
+    source_lifecycle = sub.add_parser(
+        "source-lifecycle",
+        help="report source changes and safe derived-artifact cleanup",
+    )
+    source_lifecycle.add_argument("index", nargs="?", help="document index to inspect; picker if omitted")
+    source_lifecycle.add_argument("--apply", action="store_true", help="apply safe cleanup when the report says ready")
+    source_lifecycle.add_argument("--yes", action="store_true", help="confirm cleanup with --apply")
+    source_lifecycle.add_argument("--json", action="store_true", help="print JSON report")
+    source_lifecycle.set_defaults(func=command_source_lifecycle)
 
     bg_now = sub.add_parser("bg-now", help="run background index/retrieval maintenance now")
     bg_now.add_argument("--conversation", help="saved conversation to update; defaults to an unsaved current-directory pass")

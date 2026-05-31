@@ -5,6 +5,14 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Added `motoko source-lifecycle [INDEX]` and `/source-lifecycle [ID]` to
+  inspect changed, deleted, or newly ignored indexed source files across their
+  dependent artifacts. The report covers indexes, vector/evidence stores,
+  dossiers, retrieval/eval artifacts, raw feedback, memories, profiles, and
+  conversations. `motoko source-lifecycle INDEX --apply --yes` now has a
+  narrow safe path that deletes only a stale superseded index snapshot and its
+  derived stores after a fresh replacement index exists; durable human signal
+  remains manual-review instead of being silently deleted.
 - Fixed destructive TUI bottom-frame redraws. Active answers now stream stable
   completed lines into the real terminal transcript, the bottom frame keeps
   only the live phase/input/status controls, and shrinking slash-command
