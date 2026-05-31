@@ -832,6 +832,27 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert "Motoko code query:" in run()
 
 
+def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
+    with isolated_state():
+        report = m.run_self_improvement_eval()
+        assert report["schema"] == "motoko-self-improvement-eval-v1"
+        assert report["status"] == "pass"
+        names = {row.get("name") for row in report.get("checks", [])}
+        assert "code_query_finds_commands_symbols_tests" in names
+        assert "motoko_codebase_skill_activates" in names
+        assert "skill_scanner_detects_risky_script" in names
+        rendered = m.format_self_improvement_eval(report)
+        assert "self-improvement eval:" in rendered
+        assert "status: pass" in rendered
+
+        conv = m.new_conversation("Self eval")
+        command = m.shared_command_request("/self-eval", conv)
+        assert command is not None
+        assert command.kind == m.COMMAND_KIND_REPORT
+        _label, run = command
+        assert "self-improvement eval:" in run()
+
+
 def test_skill_scan_reports_script_risks(m):
     with isolated_state():
         m.learn_skill_text(
@@ -11323,6 +11344,7 @@ def main() -> int:
         test_skill_lifecycle_records_usage_and_archive_restore,
         test_skill_lifecycle_commands_are_realm_local,
         test_motoko_codebase_context_and_commands_are_deterministic,
+        test_self_improvement_eval_checks_codebase_skill_and_scanner,
         test_skill_scan_reports_script_risks,
         test_skill_curator_creates_feedback_patch_suggestion,
         test_skill_curator_creates_loaded_skill_patch_suggestion,

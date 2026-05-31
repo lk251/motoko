@@ -115,6 +115,10 @@ from motoko_core.skill_scanner import (  # noqa: E402
     format_skill_scan_report,
     scan_skill_package,
 )
+from motoko_core.self_eval import (  # noqa: E402
+    format_self_improvement_eval,
+    run_self_improvement_eval,
+)
 from motoko_core.tui_render import (  # noqa: E402
     bottom_area_absolute_sequence as render_bottom_area_absolute_sequence,
     bottom_clear_sequence as render_bottom_clear_sequence,
@@ -906,6 +910,7 @@ SLASH_COMMANDS = [
     ("/retrieval-preview QUERY", "show retrieved context without calling a model"),
     ("/code-map", "show deterministic Motoko source-code map"),
     ("/code-query QUERY", "locate Motoko commands, symbols, tests, and files"),
+    ("/self-eval", "run deterministic Motoko self-improvement readiness checks"),
     ("/evidence-build [ID]", "build a deterministic hierarchical evidence store"),
     ("/evidence-query QUERY", "query the latest evidence store"),
     ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
@@ -1036,6 +1041,7 @@ SHELL_COMMANDS = [
     "retrieval-preview",
     "code-map",
     "code-query",
+    "self-eval",
     "evidence-build",
     "evidence-query",
     "evidence-refresh",
@@ -1079,6 +1085,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/retrieval-preview",
     "/code-map",
     "/code-query",
+    "/self-eval",
     "/evidence-build",
     "/evidence-query",
     "/evidence-refresh",
@@ -19755,6 +19762,7 @@ HELP_SECTIONS = [
             ("/evidence-query QUERY", "query the latest evidence store"),
             ("/code-map", "show deterministic Motoko source-code map"),
             ("/code-query QUERY", "locate Motoko commands, symbols, tests, and files"),
+            ("/self-eval", "run deterministic Motoko self-improvement readiness checks"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -19793,6 +19801,7 @@ HELP_SECTIONS = [
             ("/evidence-query QUERY", "query the latest evidence store"),
             ("/code-map", "show deterministic Motoko source-code map"),
             ("/code-query QUERY", "locate Motoko commands, symbols, tests, and files"),
+            ("/self-eval", "run deterministic Motoko self-improvement readiness checks"),
             ("/vector-plan [ID]", "inspect vector/reranker storage readiness"),
             ("/vector-build [ID]", "build a realm-local vector store for an index"),
             ("/vector-refresh [ID]", "build missing or stale embedding vector stores"),
@@ -19917,6 +19926,7 @@ HELP_SECTIONS = [
             ("motoko retrieval-preview QUERY", "show retrieved context without calling a model"),
             ("motoko code-map", "show deterministic Motoko source-code map"),
             ("motoko code-query QUERY", "locate Motoko commands, symbols, tests, and files"),
+            ("motoko self-eval", "run deterministic Motoko self-improvement readiness checks"),
             ("motoko evidence-build [ID]", "build a deterministic hierarchical evidence store"),
             ("motoko evidence-refresh [ID]", "build missing or stale evidence stores"),
             ("motoko evidence-query QUERY", "query a hierarchical evidence store"),
@@ -20353,6 +20363,8 @@ def report_command_request(text: str, conv: dict):
     if primary == "/code-query":
         query = body or context_query_text(conv, conv.get("title", ""))
         return "/code-query", lambda: format_motoko_code_query(query)
+    if primary == "/self-eval" and not body:
+        return "/self-eval", lambda: format_self_improvement_eval(run_self_improvement_eval())
     if primary == "/identity" and not body:
         return "/identity", format_identity
     if primary == "/permissions" and not body:
@@ -24720,6 +24732,14 @@ def command_code_query(args) -> None:
         print_report(format_code_query_report(report))
 
 
+def command_self_eval(args) -> None:
+    report = run_self_improvement_eval(args.repo)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_self_improvement_eval(report))
+
+
 def command_status(_args) -> None:
     print_status()
 
@@ -25056,6 +25076,11 @@ def main(argv: list[str]) -> int:
     code_query.add_argument("--limit", type=int, default=12)
     code_query.add_argument("--json", action="store_true", help="print JSON report")
     code_query.set_defaults(func=command_code_query)
+
+    self_eval = sub.add_parser("self-eval", help="run deterministic Motoko self-improvement readiness checks")
+    self_eval.add_argument("--repo", help="Motoko checkout root; defaults to the current checkout")
+    self_eval.add_argument("--json", action="store_true", help="print JSON report")
+    self_eval.set_defaults(func=command_self_eval)
 
     evidence_build = sub.add_parser("evidence-build", help="build a deterministic hierarchical evidence store")
     evidence_build.add_argument("index", nargs="?", help="optional document index; picker if omitted")

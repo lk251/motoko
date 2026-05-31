@@ -945,6 +945,10 @@ Self-code and static scan checkpoint, 2026-05-31:
 - Added `motoko skill scan [NAME]` and `/skill scan [NAME]` as a conservative
   static scanner for learned skills and support scripts. It is report-first
   and does not grant approval or execution authority.
+- Added `motoko self-eval` and `/self-eval`, a no-model readiness gate for
+  the self-code and static-scan path. It verifies that code-map/code-query
+  work, the self-code skill activates, built-in skills scan cleanly, and the
+  scanner catches a synthetic risky script.
 
 Next long stretch after skill lifecycle:
 

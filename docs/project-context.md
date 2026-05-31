@@ -1499,6 +1499,10 @@ Motoko self-code checkpoint, 2026-05-31:
   flagging prompt-injection text, destructive shell patterns,
   subprocess/network/secret/path signals, and risky Python imports or calls
   before external, community, or self-created skills are trusted further.
+- Added `motoko self-eval` and `/self-eval` as a deterministic no-model gate
+  for this self-improvement path. It checks code-map parsing, code-query
+  usefulness, self-code skill activation, clean built-in skill scans, and
+  scanner detection of a synthetic risky script.
 - This completes the first practical version of "Motoko can inspect her own
   code before proposing improvements." It does not replace Codex-level
   engineering review, tests, commits, or user approval; it gives Motoko better
@@ -1517,7 +1521,10 @@ Motoko self-improvement list prepared for future work:
    checklists, templates, or scripts.
 5. Keep self-improvement evals close to behavior: retrieval/debug fixtures for
    context failures, action-eval for authority failures, and regression tests
-   for every new command or handler.
+   for every new command or handler. The first dedicated no-model check is
+   now `motoko self-eval`, which verifies code-map/code-query readiness,
+   self-code skill activation, clean built-in skill scans, and scanner
+   detection of a synthetic risky script.
 6. Continue shrinking the root facade only when an extracted module gets clear
    ownership, tests, and a simpler public API.
 7. Treat reflection as inspectable audits and review records, not hidden

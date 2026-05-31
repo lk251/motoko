@@ -702,6 +702,7 @@ motoko skill suggestions
 motoko skill suggestion SUGGESTION_ID
 motoko skill accept SUGGESTION_ID
 motoko skill reject SUGGESTION_ID
+motoko self-eval
 ```
 
 Skills are durable procedural packages for repeatable "how to approach this
@@ -811,6 +812,7 @@ Motoko codebase intelligence is available without a model call:
 ```bash
 motoko code-map
 motoko code-query "skill planner command implementation"
+motoko self-eval
 ```
 
 `motoko code-map` builds a deterministic map of the current Motoko checkout:
@@ -819,6 +821,13 @@ largest files, and parser warnings. `motoko code-query QUERY` ranks commands,
 symbols, tests, and files against a query. Ordinary chat questions about
 Motoko's own codebase can activate the same built-in handler and include a
 bounded code-query report in prompt context.
+
+`motoko self-eval` is a deterministic no-model readiness check for Motoko
+self-improvement. It verifies that the code map parses, code-query finds
+commands/symbols/tests, the built-in self-code skill activates for Motoko
+refactor questions, built-in skills scan cleanly, and the scanner catches a
+synthetic risky script. Use it after changes to the skill/codebase
+self-improvement path or before trusting Motoko to help plan her own refactor.
 
 Project-file mutation uses a separate code-owned action kind,
 `project_file_write`, not arbitrary script side effects. `motoko action apply
