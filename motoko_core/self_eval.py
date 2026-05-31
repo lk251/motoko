@@ -133,6 +133,16 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             },
         )
     )
+    constants = code_map.get("constants", []) if isinstance(code_map.get("constants"), list) else []
+    schema_constants = [row for row in constants if row.get("category") == "schema"]
+    checks.append(
+        _check(
+            "code_map_schema_constants_present",
+            bool(schema_constants),
+            f"constants={len(constants)} schema_constants={len(schema_constants)}",
+            evidence={"schema_constants": [row.get("name", "") for row in schema_constants[:8]]},
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(
@@ -149,6 +159,15 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
                 "top_symbol": (code_query.get("symbols") or [{}])[0].get("qualname", ""),
                 "top_test": (code_query.get("tests") or [{}])[0].get("name", ""),
             },
+        )
+    )
+    schema_query = query_code_map(code_map, "source lifecycle schema artifact version migration", limit=8)
+    checks.append(
+        _check(
+            "code_query_finds_schema_constants",
+            bool(schema_query.get("constants")),
+            f"constants={len(schema_query.get('constants', []))}",
+            evidence={"top_constant": (schema_query.get("constants") or [{}])[0].get("name", "")},
         )
     )
     lifecycle_query = query_code_map(code_map, "source lifecycle command handler tests", limit=8)

@@ -1560,6 +1560,12 @@ Motoko self-code checkpoint, 2026-05-31:
   resolved call edges, root-facade hotspots, and `motoko_core`
   service-boundary summaries so Motoko can locate implementation, ownership,
   and likely tests before proposing changes.
+- Code intelligence now also extracts module-level schema/version/artifact
+  constants and exposes them through `code-map`, `code-query`, and
+  `self-eval`. This matters for Motoko self-improvement because artifact
+  compatibility, migration obligations, and source-reprocessing boundaries
+  should be visible as deterministic code facts before any model proposes a
+  schema or lifecycle change.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

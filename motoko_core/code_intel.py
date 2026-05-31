@@ -55,6 +55,26 @@ class CodeCall:
         }
 
 
+@dataclass(frozen=True)
+class CodeConstant:
+    name: str
+    category: str
+    value: str
+    value_kind: str
+    path: str
+    line: int
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "category": self.category,
+            "value": self.value,
+            "value_kind": self.value_kind,
+            "path": self.path,
+            "line": self.line,
+        }
+
+
 def find_motoko_repo_root(start: str | pathlib.Path | None = None) -> pathlib.Path:
     """Find a Motoko checkout without broad filesystem crawling."""
 
@@ -121,6 +141,42 @@ def _literal_string(node: ast.AST) -> str:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else ""
 
 
+def _literal_preview(node: ast.AST, *, max_chars: int = 160) -> tuple[str, str]:
+    try:
+        value = ast.literal_eval(node)
+    except (SyntaxError, ValueError):
+        return "", "nonliteral"
+    if isinstance(value, str):
+        preview = value
+    else:
+        preview = repr(value)
+    if len(preview) > max_chars:
+        preview = preview[: max_chars - 3] + "..."
+    return preview, type(value).__name__
+
+
+def _constant_category(name: str) -> str:
+    upper = str(name or "").upper()
+    if "ARTIFACT" in upper:
+        return "artifact"
+    if "SCHEMA" in upper:
+        return "schema"
+    if "MIGRATION" in upper or "UPGRADE" in upper:
+        return "migration"
+    if "VERSION" in upper:
+        return "version"
+    return "constant"
+
+
+def _is_relevant_constant(name: str) -> bool:
+    upper = str(name or "").upper()
+    if not upper:
+        return False
+    if any(marker in upper for marker in ["SCHEMA", "VERSION", "MIGRATION", "UPGRADE", "ARTIFACT"]):
+        return True
+    return upper == name and not name.startswith("_")
+
+
 def _module_doc(text: str) -> str:
     try:
         tree = ast.parse(text)
@@ -139,18 +195,19 @@ def _source_segment(text: str, line: int, end_line: int, *, max_chars: int = 200
 
 def parse_python_symbols(
     path: pathlib.Path, root: pathlib.Path
-) -> tuple[list[CodeSymbol], list[dict], list[dict], list[CodeCall], list[dict]]:
+) -> tuple[list[CodeSymbol], list[dict], list[dict], list[CodeCall], list[CodeConstant], list[dict]]:
     text = _safe_read(path)
     relpath = _rel(root, path)
     try:
         tree = ast.parse(text, filename=relpath)
     except SyntaxError as exc:
-        return [], [], [], [], [{"path": relpath, "error": f"SyntaxError: {exc}"}]
+        return [], [], [], [], [], [{"path": relpath, "error": f"SyntaxError: {exc}"}]
 
     symbols: list[CodeSymbol] = []
     imports: list[dict] = []
     commands: list[dict] = []
     calls: list[CodeCall] = []
+    constants: list[CodeConstant] = []
     parser_vars: dict[str, dict] = {}
 
     class Visitor(ast.NodeVisitor):
@@ -212,7 +269,30 @@ def parse_python_symbols(
 
         def visit_Assign(self, node: ast.Assign) -> None:  # noqa: N802
             self._maybe_parser_assign(node)
+            self._maybe_constant_assign(node.targets, node.value, node.lineno)
             self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:  # noqa: N802
+            self._maybe_constant_assign([node.target], node.value, node.lineno)
+            self.generic_visit(node)
+
+        def _maybe_constant_assign(self, targets: list[ast.AST], value: ast.AST | None, line: int) -> None:
+            if self.class_stack or self.function_stack or value is None:
+                return
+            for target in targets:
+                if not isinstance(target, ast.Name) or not _is_relevant_constant(target.id):
+                    continue
+                preview, value_kind = _literal_preview(value)
+                constants.append(
+                    CodeConstant(
+                        name=target.id,
+                        category=_constant_category(target.id),
+                        value=preview,
+                        value_kind=value_kind,
+                        path=relpath,
+                        line=line,
+                    )
+                )
 
         def _maybe_parser_assign(self, node: ast.Assign) -> None:
             if not isinstance(node.value, ast.Call):
@@ -250,7 +330,7 @@ def parse_python_symbols(
             self.generic_visit(node)
 
     Visitor().visit(tree)
-    return symbols, imports, commands, calls, []
+    return symbols, imports, commands, calls, constants, []
 
 
 def _symbol_indexes(symbols: list[dict]) -> tuple[dict[str, list[dict]], dict[str, dict]]:
@@ -479,6 +559,7 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
     imports: list[dict] = []
     commands: list[dict] = []
     calls: list[dict] = []
+    constants: list[dict] = []
     parse_errors: list[dict] = []
     modules = []
     file_texts: dict[str, str] = {}
@@ -486,11 +567,14 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
         text = _safe_read(path)
         relpath = _rel(repo_root, path)
         file_texts[relpath] = text
-        file_symbols, file_imports, file_commands, file_calls, file_errors = parse_python_symbols(path, repo_root)
+        file_symbols, file_imports, file_commands, file_calls, file_constants, file_errors = parse_python_symbols(
+            path, repo_root
+        )
         symbols.extend(row.to_dict() for row in file_symbols)
         imports.extend(file_imports)
         commands.extend(file_commands)
         calls.extend(row.to_dict() for row in file_calls)
+        constants.extend(row.to_dict() for row in file_constants)
         parse_errors.extend(file_errors)
         modules.append(
             {
@@ -500,6 +584,7 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
                 "doc": _module_doc(text),
                 "symbols": len(file_symbols),
                 "commands": len(file_commands),
+                "constants": len(file_constants),
             }
         )
     tests = [row for row in symbols if row["path"].startswith("tests/") and row["kind"] == "function" and row["name"].startswith("test_")]
@@ -525,6 +610,7 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
         "calls": calls,
         "call_edges": call_edges,
         "commands": commands,
+        "constants": constants,
         "command_traces": command_traces,
         "tests": tests,
         "root_hotspots": root_hotspots,
@@ -536,6 +622,10 @@ def build_code_map(root: str | pathlib.Path | None = None) -> dict:
             "functions": sum(1 for row in symbols if row["kind"] in {"function", "async_function"}),
             "methods": sum(1 for row in symbols if row["kind"] in {"method", "async_method"}),
             "commands": len(commands),
+            "constants": len(constants),
+            "schema_constants": sum(1 for row in constants if row.get("category") == "schema"),
+            "artifact_constants": sum(1 for row in constants if row.get("category") == "artifact"),
+            "migration_constants": sum(1 for row in constants if row.get("category") == "migration"),
             "command_handlers": len(command_handlers),
             "command_traces": len(command_traces),
             "command_traces_with_tests": sum(1 for row in command_traces if row.get("tests")),
@@ -590,6 +680,7 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12) -> dict:
         "query": str(query or ""),
         "root": code_map.get("root", ""),
         "symbols": rank(code_map.get("symbols", []), ["name", "qualname", "path", "doc"]),
+        "constants": rank(code_map.get("constants", []), ["name", "category", "value", "path"], name_field="name"),
         "commands": rank(code_map.get("commands", []), ["command", "handler", "path"], name_field="command"),
         "command_traces": rank(
             code_map.get("command_traces", []),
@@ -630,6 +721,10 @@ def format_code_map_report(code_map: dict) -> str:
             f"calls: {summary.get('calls', 0)}  resolved edges: {summary.get('resolved_call_edges', 0)}  "
             f"service boundaries: {summary.get('service_boundaries', 0)}  tests: {summary.get('tests', 0)}"
         ),
+        (
+            f"constants: {summary.get('constants', 0)}  schemas: {summary.get('schema_constants', 0)}  "
+            f"artifacts: {summary.get('artifact_constants', 0)}  migrations: {summary.get('migration_constants', 0)}"
+        ),
         f"root facade: motoko has {summary.get('root_script_lines', 0)} line(s)",
     ]
     if summary.get("largest_files"):
@@ -660,6 +755,19 @@ def format_code_map_report(code_map: dict) -> str:
                 f"- {row.get('command', '')}: handler={row.get('handler', '') or '-'} "
                 f"at {row.get('handler_path', '') or '?'}:{row.get('handler_line', '') or '?'} tests={tests}"
             )
+    important_constants = [
+        row
+        for row in code_map.get("constants", [])
+        if row.get("category") in {"schema", "artifact", "migration", "version"}
+    ]
+    if important_constants:
+        lines.append("schema/artifact constants:")
+        for row in important_constants[:10]:
+            value = row.get("value", "")
+            lines.append(
+                f"- {row.get('name', '')}: {row.get('category', '')} "
+                f"{row.get('path', '')}:{row.get('line', '')}" + (f" = {value}" if value else "")
+            )
     if code_map.get("parse_errors"):
         lines.append("parse errors:")
         for row in code_map.get("parse_errors", [])[:5]:
@@ -672,7 +780,15 @@ def format_code_map_report(code_map: dict) -> str:
     return "\n".join(lines)
 
 
-def _format_rows(title: str, rows: list[dict], *, command: bool = False, trace: bool = False, service: bool = False) -> list[str]:
+def _format_rows(
+    title: str,
+    rows: list[dict],
+    *,
+    command: bool = False,
+    trace: bool = False,
+    service: bool = False,
+    constant: bool = False,
+) -> list[str]:
     lines = [title + ":"]
     if not rows:
         lines.append("- none")
@@ -692,6 +808,11 @@ def _format_rows(title: str, rows: list[dict], *, command: bool = False, trace: 
         elif command:
             label = row.get("command", "")
             detail = f"handler={row.get('handler', '') or '-'}"
+            location = f"{row.get('path', '')}:{row.get('line', 1)}"
+        elif constant:
+            label = row.get("name", "")
+            value = row.get("value", "")
+            detail = f"{row.get('category', '')}" + (f"={value}" if value else "")
             location = f"{row.get('path', '')}:{row.get('line', 1)}"
         elif "target" in row:
             label = f"{row.get('caller', '')} -> {row.get('target', '')}"
@@ -714,6 +835,7 @@ def format_code_query_report(result: dict) -> str:
     ]
     lines.extend(_format_rows("commands", result.get("commands", []), command=True))
     lines.extend(_format_rows("command traces", result.get("command_traces", []), trace=True))
+    lines.extend(_format_rows("constants", result.get("constants", []), constant=True))
     lines.extend(_format_rows("symbols", result.get("symbols", [])))
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
     lines.extend(_format_rows("service boundaries", result.get("service_boundaries", []), service=True))

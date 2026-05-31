@@ -12,6 +12,11 @@ playbook turns the current craft direction into reusable procedure.
 - Use `motoko code-map` for the repository overview and `motoko code-query
   QUERY` to find command handlers, symbols, tests, modules, and ownership
   boundaries before proposing code changes.
+- Include schema, artifact, migration, and version terms in code queries when
+  the work touches derived state such as indexes, vectors, memories, skills,
+  actions, cache manifests, or corpus lifecycle. `code-query` exposes
+  module-level constants so compatibility boundaries can be checked as code
+  facts.
 - Prefer existing `motoko_core` modules and narrow service boundaries over
   adding more root-facade orchestration.
 - Keep the runtime stdlib-only, realm-local, inspectable, and explicit about

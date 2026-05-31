@@ -835,7 +835,9 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert summary["command_traces"] >= summary["commands"] - 20
         assert summary["resolved_call_edges"] > 0
         assert summary["service_boundaries"] > 0
+        assert summary["schema_constants"] > 0
         assert summary["root_hotspots"]
+        assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in code_map["constants"])
         source_trace = next(row for row in code_map["command_traces"] if row["command"] == "source-lifecycle")
         assert source_trace["handler"] == "command_source_lifecycle"
         assert source_trace["handler_found"] is True
@@ -846,13 +848,17 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert query["symbols"] or query["commands"] or query["tests"]
         assert query["command_traces"]
         assert query["service_boundaries"]
+        schema_query = m.motoko_code_query("source lifecycle schema artifact version")
+        assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in schema_query["constants"])
         rendered = m.format_motoko_code_query("Motoko skill plan command implementation tests")
         assert "Motoko code query:" in rendered
         assert "command traces:" in rendered
+        assert "constants:" in rendered
         assert "symbols:" in rendered
         map_rendered = m.format_motoko_code_map()
         assert "root facade hotspots:" in map_rendered
         assert "service boundaries:" in map_rendered
+        assert "schema/artifact constants:" in map_rendered
 
         context_text, sources = m.render_motoko_codebase_context(
             "How should Motoko refactor its codebase command handlers?"
@@ -880,6 +886,8 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "motoko_codebase_skill_activates" in names
         assert "code_map_command_traces_link_tests" in names
         assert "code_map_relationships_present" in names
+        assert "code_map_schema_constants_present" in names
+        assert "code_query_finds_schema_constants" in names
         assert "code_query_finds_traces_and_services" in names
         assert "skill_scanner_detects_risky_script" in names
         umbrella = next(row for row in report.get("checks", []) if row.get("name") == "self_improvement_umbrella_skills_select")
