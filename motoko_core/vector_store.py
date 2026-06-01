@@ -90,6 +90,86 @@ def format_vector_progress_phase(
     ).replace("  ", " ")
 
 
+def safe_vector_ref(value: object, *, prefix: str = "ref") -> str:
+    text = str(value or "")
+    if not text:
+        return f"{prefix}:none"
+    return f"{prefix}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}"
+
+
+def vector_progress_age_seconds(value: object, *, now: _dt.datetime | None = None) -> int | None:
+    parsed = parse_timestamp(str(value or ""))
+    if parsed is None:
+        return None
+    now = now or _dt.datetime.now(_dt.timezone.utc).astimezone()
+    return max(0, int((now.astimezone() - parsed.astimezone()).total_seconds()))
+
+
+def safe_progress_state(updated_age_seconds: int | None, *, complete: bool = False, stale_seconds: int = 300) -> str:
+    if complete:
+        return "finalizing"
+    if updated_age_seconds is not None and updated_age_seconds >= max(1, _int_or_zero(stale_seconds)):
+        return "stale"
+    return "running"
+
+
+def safe_duration_field(seconds: object) -> str:
+    try:
+        return human_duration(int(seconds))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def safe_age_field(seconds: int | None) -> str:
+    if seconds is None:
+        return "unknown"
+    return human_duration(seconds)
+
+
+def format_safe_vector_progress_row(
+    progress: dict,
+    *,
+    now: _dt.datetime | None = None,
+    stale_seconds: int = 300,
+) -> str:
+    updated_age = vector_progress_age_seconds(progress.get("updated"), now=now)
+    expected_rows = _int_or_zero(progress.get("expected_rows"))
+    completed_rows = _int_or_zero(progress.get("completed_rows"))
+    batch_size = _int_or_zero(progress.get("embedding_batch_size"))
+    total_batches = (expected_rows + batch_size - 1) // batch_size if batch_size else 0
+    completed_batches = (completed_rows + batch_size - 1) // batch_size if batch_size else 0
+    state = safe_progress_state(
+        updated_age,
+        complete=expected_rows > 0 and completed_rows >= expected_rows,
+        stale_seconds=stale_seconds,
+    )
+    route = progress.get("embedding_route") if isinstance(progress.get("embedding_route"), dict) else {}
+    route_name = str(route.get("catalog_route") or route.get("route") or "")
+    parts = [
+        f"- {safe_vector_ref(progress.get('id'), prefix='job')}",
+        "kind=vector",
+        f"state={state}",
+        f"rows={completed_rows}/{expected_rows}",
+        f"batches={completed_batches}/{total_batches}",
+        f"batch_size={batch_size}",
+        f"parallel={_int_or_zero(progress.get('embedding_parallelism'))}",
+        f"requested={_int_or_zero(progress.get('embedding_requested_parallelism'))}",
+        f"fallbacks={len(progress.get('embedding_parallel_fallbacks') or [])}",
+    ]
+    if progress.get("embedding_refresh_mode"):
+        parts.append(f"mode={progress.get('embedding_refresh_mode')}")
+    if progress.get("embedding_refresh_cause"):
+        parts.append(f"cause={progress.get('embedding_refresh_cause')}")
+    if progress.get("elapsed_seconds") is not None:
+        parts.append(f"elapsed={safe_duration_field(progress.get('elapsed_seconds'))}")
+    if progress.get("eta_seconds") is not None:
+        parts.append(f"eta={safe_duration_field(progress.get('eta_seconds'))}")
+    parts.append(f"updated_age={safe_age_field(updated_age)}")
+    if route_name:
+        parts.append(f"route={route_name}")
+    return " ".join(parts)
+
+
 def embedding_vector_elapsed_seconds(
     progress_created: str,
     *,

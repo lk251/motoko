@@ -100,6 +100,7 @@ from motoko_core.vector_store import (
     embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
     embedding_vector_rows_by_id as embedding_vector_rows_by_id_core,
     embedding_vector_store_record as embedding_vector_store_record_core,
+    format_safe_vector_progress_row as format_safe_vector_progress_row_core,
     format_vector_progress_phase as format_vector_progress_phase_core,
     lexical_sparse_vector as lexical_sparse_vector_core,
     reusable_embedding_vector_row as reusable_embedding_vector_row_core,
@@ -1790,6 +1791,42 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         "bg-heavy: vectorizing(model) orgfiles full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
     )
     assert sanitized_full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+
+
+def test_safe_vector_progress_row_core_is_content_free_and_stale_aware(m):
+    assert m.format_safe_vector_progress_row({"id": "x"}).startswith("- job:")
+    now = dt.datetime(2026, 6, 1, 4, 30, 0, tzinfo=dt.timezone.utc)
+    progress = {
+        "id": "embedding-secret-logbook-orgfiles",
+        "updated": "2026-06-01T04:20:00+00:00",
+        "expected_rows": 100,
+        "completed_rows": 25,
+        "embedding_batch_size": 10,
+        "embedding_parallelism": 8,
+        "embedding_requested_parallelism": 32,
+        "embedding_parallel_fallbacks": [{"from": 32, "to": 16}],
+        "embedding_refresh_mode": "incremental",
+        "embedding_refresh_cause": "source-change",
+        "elapsed_seconds": 600,
+        "eta_seconds": 300,
+        "embedding_route": {"catalog_route": "qwen3-embedding-0b6"},
+    }
+
+    text = format_safe_vector_progress_row_core(progress, now=now, stale_seconds=300)
+
+    assert "kind=vector" in text
+    assert "state=stale" in text
+    assert "rows=25/100" in text
+    assert "batches=3/10" in text
+    assert "fallbacks=1" in text
+    assert "mode=incremental" in text
+    assert "cause=source-change" in text
+    assert "elapsed=10m00s" in text
+    assert "eta=5m00s" in text
+    assert "route=qwen3-embedding-0b6" in text
+    assert "secret" not in text
+    assert "logbook" not in text
+    assert "orgfiles" not in text
 
 
 def test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta(_m=None):
@@ -15526,6 +15563,7 @@ def main() -> int:
         test_tui_bottom_status_omits_chat_phase_and_spinner,
         test_tui_vector_status_reports_stale_progress,
         test_vector_progress_phase_is_content_free_and_finalizing,
+        test_safe_vector_progress_row_core_is_content_free_and_stale_aware,
         test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta,
         test_tui_append_renderer_keeps_transcript_in_scrollback,
         test_tui_active_answer_streams_stable_lines_to_scrollback,
