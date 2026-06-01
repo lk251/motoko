@@ -38,6 +38,9 @@ GOAL_LOOP_PLANNER_DISABLED = "disabled"
 GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS = "explicit_actions"
 GOAL_LOOP_PLANNER_MODEL_READONLY = "model_readonly"
 GOAL_LOOP_PLANNER_MODEL_CONFIRMED = "model_confirmed"
+GOAL_RUN_SCHEMA = "goal-run-v1"
+GOAL_READONLY_RESULT_SCHEMA = "goal-readonly-result-v1"
+GOAL_MODEL_RESULT_SCHEMA = "goal-model-result-v1"
 
 MAX_OBJECTIVE_CHARS = 1000
 MAX_SCOPE_ITEMS = 20
@@ -353,4 +356,159 @@ def format_goal_loop_list(rows: list[dict], *, limit: int = 20) -> str:
             f"effects={','.join(row.get('allowed_effects', []))}  "
             f"{row.get('objective', '')[:120]}"
         )
+    return "\n".join(lines)
+
+
+def goal_action_results(actions: list[dict]) -> list[dict]:
+    return [
+        {"index": idx + 1, "status": "pending", "kind": str(action.get("kind", ""))}
+        for idx, action in enumerate(actions or [])
+    ]
+
+
+def make_goal_run_record(
+    goal: dict,
+    *,
+    source_path: pathlib.Path | str | None = None,
+    now_text: str | None = None,
+    run_id: str | None = None,
+) -> dict:
+    actions = goal.get("actions") if isinstance(goal.get("actions"), list) else []
+    stamp = str(now_text or utc_now())
+    run_id = str(run_id or ("goal-run-" + uuid.uuid4().hex[:16]))
+    return {
+        "schema": GOAL_RUN_SCHEMA,
+        "id": run_id,
+        "goal_id": goal.get("id", ""),
+        "created": stamp,
+        "updated": stamp,
+        "status": "queued",
+        "cursor": 0,
+        "source_path": str(source_path or ""),
+        "objective": goal.get("objective", ""),
+        "planner": goal.get("planner", GOAL_LOOP_PLANNER_EXPLICIT_ACTIONS if actions else GOAL_LOOP_PLANNER_DISABLED),
+        "scope": goal.get("scope", []),
+        "allowed_effects": goal.get("allowed_effects", []),
+        "allowed_tools": goal.get("allowed_tools", []),
+        "budgets": goal.get("budgets", {}),
+        "actions": actions,
+        "action_results": goal_action_results(actions),
+    }
+
+
+def completed_action_count(rows: list[dict] | None) -> int:
+    return sum(1 for row in rows or [] if isinstance(row, dict) and row.get("status") == "completed")
+
+
+def format_goal_run_list(rows: list[dict], *, limit: int = 20) -> str:
+    limit = max(1, min(200, int(limit or 20)))
+    rows = rows[:limit]
+    if not rows:
+        return "goal runs: none"
+    lines = [f"goal runs: {len(rows)} shown"]
+    for row in rows:
+        lines.append(
+            f"- {row.get('id', '')}  {row.get('status', '')}  "
+            f"cursor={row.get('cursor', 0)}/{len(row.get('actions', []) or [])}  "
+            f"{row.get('objective', '')[:120]}"
+        )
+    return "\n".join(lines)
+
+
+def goal_result_key(run: dict) -> str:
+    if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED:
+        return "model_result"
+    return "readonly_result"
+
+
+def goal_result_actions(run: dict) -> list[dict]:
+    for key in ("model_result", "readonly_result"):
+        result = run.get(key) if isinstance(run.get(key), dict) else {}
+        actions = result.get("proposed_actions") if isinstance(result.get("proposed_actions"), list) else []
+        if actions:
+            return actions
+    return []
+
+
+def _compact_text(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _list(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def format_goal_run_result(run: dict, *, record_path: str = "", compact_text_fn=None) -> str:
+    compact = compact_text_fn or _compact_text
+    if run.get("planner") in {GOAL_LOOP_PLANNER_MODEL_READONLY, GOAL_LOOP_PLANNER_MODEL_CONFIRMED}:
+        result = run.get(goal_result_key(run)) if isinstance(run.get(goal_result_key(run)), dict) else {}
+        lines = [
+            "goal run:",
+            f"id: {run.get('id', '')}",
+            f"status: {run.get('status', '')}",
+            f"planner: {run.get('planner', '')}",
+            f"objective: {run.get('objective', '')}",
+            f"sources: {result.get('source_count', 0) if result else 0}",
+            f"proposed actions: {len(_list(result.get('proposed_actions')))}",
+        ]
+        if run.get("error"):
+            lines.append(f"error: {run.get('error')}")
+        if result.get("retrieval_assessment"):
+            lines.append(f"retrieval: {compact(str(result.get('retrieval_assessment', '')), 360)}")
+        if result.get("plan"):
+            lines.append("plan:")
+            for item in _list(result.get("plan"))[:8]:
+                lines.append(f"- {item}")
+        if result.get("observations"):
+            lines.append("observations:")
+            for item in _list(result.get("observations"))[:8]:
+                lines.append(f"- {item}")
+        if result.get("audit"):
+            lines.append(f"audit: {compact(str(result.get('audit', '')), 360)}")
+        if result.get("next_steps"):
+            lines.append("next steps:")
+            for item in _list(result.get("next_steps"))[:8]:
+                lines.append(f"- {item}")
+        if result.get("proposed_action_validations"):
+            lines.append("proposal validations:")
+            for row in _list(result.get("proposed_action_validations"))[:12]:
+                lines.append(
+                    f"- [{row.get('index')}] {row.get('kind', '')} {row.get('status', '')} "
+                    f"approval={row.get('approval', '')}"
+                )
+                if row.get("reason"):
+                    lines.append(f"  reason: {row.get('reason')}")
+        if run.get("planner") == GOAL_LOOP_PLANNER_MODEL_CONFIRMED and run.get("status") == "awaiting_confirmation":
+            lines.append(f"apply: motoko goal apply {run.get('id', '')} --yes")
+        if run.get("apply_results"):
+            lines.append("apply results:")
+            for row in _list(run.get("apply_results"))[:20]:
+                lines.append(f"- action {row.get('index')}: {row.get('kind', '')} {row.get('status', '')}")
+                if row.get("error"):
+                    lines.append(f"  error: {row.get('error')}")
+        lines.append(f"record: {record_path}")
+        return "\n".join(lines)
+
+    actions = run.get("actions") if isinstance(run.get("actions"), list) else []
+    completed = completed_action_count(run.get("action_results") if isinstance(run.get("action_results"), list) else [])
+    lines = [
+        "goal run:",
+        f"id: {run.get('id', '')}",
+        f"status: {run.get('status', '')}",
+        f"objective: {run.get('objective', '')}",
+        f"cursor: {run.get('cursor', 0)}/{len(actions)}",
+        f"completed: {completed}/{len(actions)}",
+    ]
+    if run.get("error"):
+        lines.append(f"error: {run.get('error')}")
+    for row in _list(run.get("action_results")):
+        lines.append(f"- action {row.get('index')}: {row.get('kind', '')} {row.get('status', '')}")
+        if row.get("tool_run_id"):
+            lines.append(f"  run: {row.get('tool_run_id')}")
+        if row.get("error"):
+            lines.append(f"  error: {row.get('error')}")
+    lines.append(f"record: {record_path}")
     return "\n".join(lines)
