@@ -70,7 +70,9 @@ from motoko_core.skill_curator import (
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 from motoko_core.vector_store import (
+    embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
     lexical_sparse_vector as lexical_sparse_vector_core,
+    reusable_embedding_vector_row as reusable_embedding_vector_row_core,
     vector_plan_readiness_gates as vector_plan_readiness_gates_core,
     vector_plan_row_plans as vector_plan_row_plans_core,
     vector_query_rank_rows as vector_query_rank_rows_core,
@@ -7647,6 +7649,64 @@ def test_vector_query_core_scores_and_dedupes_rows(_m=None):
     assert ranked[0]["score"] >= ranked[-1]["score"]
 
 
+def test_embedding_vector_row_core_preserves_evidence_and_reuse_rules(_m=None):
+    index = {"id": "idx"}
+    file_item = {"path": "/tmp/docs/tasks.org", "summary": "Task file summary."}
+    chunk = {
+        "chunk": 3,
+        "content_sha256": "abc123",
+        "summary": "Chunk summary should be replaced by evidence excerpt.",
+    }
+    row_meta = {
+        "id": "row-1",
+        "vector_row_kind": "evidence_embedding",
+        "embedding_kind": "evidence",
+        "embedding_input_chars": 128,
+        "embedding_input_sha256": "input-sha",
+        "embedding_part": 1,
+        "embedding_part_count": 1,
+        "evidence_id": "ev-1",
+        "evidence_kind": "org_task",
+        "evidence_title": "Finish vector readiness",
+        "evidence_excerpt": "TODO Finish vector readiness by Friday.",
+    }
+    vector = [0.25, 0.5, 0.75]
+
+    row = embedding_vector_row_from_vector_core(
+        index,
+        file_item,
+        chunk,
+        vector,
+        row_meta,
+        embedding_input_schema="embedding-input-test",
+    )
+    reused = reusable_embedding_vector_row_core(
+        row,
+        index,
+        file_item,
+        chunk,
+        row_meta,
+        route_dims=3,
+        embedding_input_schema="embedding-input-test",
+    )
+    stale = reusable_embedding_vector_row_core(
+        {**row, "embedding_input_sha256": "old"},
+        index,
+        file_item,
+        chunk,
+        row_meta,
+        route_dims=3,
+        embedding_input_schema="embedding-input-test",
+    )
+
+    assert row["kind"] == "evidence_embedding"
+    assert row["summary"] == "TODO Finish vector readiness by Friday."
+    assert row["evidence_id"] == "ev-1"
+    assert reused is not None
+    assert reused["vector"] == vector
+    assert stale is None
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14240,6 +14300,7 @@ def main() -> int:
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_plan_core_builds_rows_and_readiness_gates,
         test_vector_query_core_scores_and_dedupes_rows,
+        test_embedding_vector_row_core_preserves_evidence_and_reuse_rules,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

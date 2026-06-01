@@ -413,6 +413,10 @@ Current progress on this backlog:
 - Vector query row scoring and same-chunk deduplication now live in
   `motoko_core.vector_store`. The root facade still owns query embedding,
   reranker model calls, freshness checks, and cancellation wording.
+- Embedding vector row construction and reusable-row validation now live in
+  `motoko_core.vector_store`, so checkpoint and previous-store reuse share the
+  same evidence/provenance rules. The root facade still owns batching,
+  progress, route calls, and atomic persistence.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

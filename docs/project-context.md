@@ -1635,6 +1635,10 @@ Motoko self-code checkpoint, 2026-05-31:
   owns deterministic row scoring and same-source chunk deduplication, while the
   root facade keeps live query embedding, reranker calls, freshness checks, and
   user-facing cancellation messages.
+- Embedding vector row construction has moved inward too: checkpoint reuse and
+  previous-store reuse now pass through shared `motoko_core.vector_store`
+  evidence/provenance validation, while the root facade keeps batching,
+  progress callbacks, route calls, and atomic persistence.
 - Code intelligence now also extracts module-level schema/version/artifact
   constants and exposes them through `code-map`, `code-query`, and
   `self-eval`. This matters for Motoko self-improvement because artifact

@@ -372,6 +372,87 @@ def vector_query_rank_rows(
     return dedupe_vector_query_rows(rows)
 
 
+def embedding_vector_row_from_vector(
+    index: dict,
+    file_item: dict,
+    chunk: dict,
+    vector: list[float],
+    row_meta: dict,
+    *,
+    embedding_input_schema: str,
+) -> dict:
+    row = {
+        "id": row_meta.get("id") or f"{file_item.get('path', '')}#{chunk.get('chunk', '')}",
+        "kind": row_meta.get("vector_row_kind", "raw_chunk_embedding"),
+        "embedding_kind": row_meta.get("embedding_kind", "chunk_content"),
+        "embedding_input_schema": embedding_input_schema,
+        "embedding_input_chars": row_meta.get("embedding_input_chars", 0),
+        "embedding_input_sha256": row_meta.get("embedding_input_sha256", ""),
+        "embedding_part": row_meta.get("embedding_part", 1),
+        "embedding_part_count": row_meta.get("embedding_part_count", 1),
+        "index": index.get("id", ""),
+        "path": file_item.get("path", ""),
+        "chunk": chunk.get("chunk", ""),
+        "content_sha256": chunk.get("content_sha256", ""),
+        "source_fingerprint": chunk.get("content_sha256", ""),
+        "vector": vector,
+        "summary": compact_text(chunk.get("summary", "") or file_item.get("summary", ""), 280),
+    }
+    for key in [
+        "evidence_id",
+        "evidence_kind",
+        "evidence_title",
+        "evidence_date",
+        "evidence_todo",
+        "evidence_priority",
+        "evidence_start",
+        "evidence_end",
+        "evidence_excerpt",
+        "evidence_text_sha256",
+    ]:
+        if row_meta.get(key) not in (None, "", []):
+            row[key] = row_meta.get(key)
+    if row.get("evidence_excerpt"):
+        row["summary"] = compact_text(str(row.get("evidence_excerpt", "")), 280)
+    return row
+
+
+def reusable_embedding_vector_row(
+    existing: dict,
+    index: dict,
+    file_item: dict,
+    chunk: dict,
+    row_meta: dict,
+    *,
+    route_dims: int,
+    embedding_input_schema: str,
+) -> dict | None:
+    if not isinstance(existing, dict) or not existing.get("vector"):
+        return None
+    if str(existing.get("id", "")) != str(row_meta.get("id", "")):
+        return None
+    if str(existing.get("embedding_input_sha256", "")) != str(row_meta.get("embedding_input_sha256", "")):
+        return None
+    if str(existing.get("embedding_input_schema", "")) != embedding_input_schema:
+        return None
+    expected_kind = str(row_meta.get("vector_row_kind", "raw_chunk_embedding"))
+    if str(existing.get("kind", "")) != expected_kind:
+        return None
+    vector = existing.get("vector")
+    if not isinstance(vector, list) or not vector:
+        return None
+    if route_dims and len(vector) != route_dims:
+        return None
+    return embedding_vector_row_from_vector(
+        index,
+        file_item,
+        chunk,
+        vector,
+        row_meta,
+        embedding_input_schema=embedding_input_schema,
+    )
+
+
 def split_embedding_content_parts(content: str, budget: int, max_parts: int) -> list[str]:
     text = re.sub(r"\s+", " ", content.strip())
     if not text:
