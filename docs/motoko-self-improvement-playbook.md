@@ -553,6 +553,13 @@ Operational packet for future Motoko self-improvement sessions:
   migration path or visible resumable source reprocessing.
 - Keep background work lane-aware, durable, interruptible, progress-visible,
   and parallel only up to the approved local route or workload limit.
+- Treat shared progress/state writes as concurrency-sensitive infrastructure.
+  Parallel background lanes must not reuse one fixed temporary path for the
+  same destination; use a unique same-directory temp file before atomic replace
+  and leave a regression that exercises concurrent writers.
+- When a background crash is fixed, patch `motoko-refactor-craft` or the
+  relevant umbrella skill with the reusable lesson so future self-improvement
+  sessions look for the same class of durability bug.
 
 ## Soak Checklist
 

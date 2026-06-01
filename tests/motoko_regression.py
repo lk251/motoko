@@ -12141,6 +12141,9 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         assert "kind: self-improvement" in retrieval
         assert "handler: prompt_only" in retrieval
         assert "Classify retrieval failures precisely" in retrieval or "Name the failure precisely" in retrieval
+        refactor = m.format_skill("motoko-refactor-craft")
+        assert "unique same-directory temporary file per writer" in refactor
+        assert "concurrency regressions for background progress" in refactor
 
         rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
         assert "Skill: org-temporal-retrieval" in rendered

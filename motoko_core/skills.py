@@ -236,6 +236,8 @@ BUILTIN_SKILLS = [
                 "- Prefer pure helpers, then fakeable service boundaries, then live subsystem extraction.",
                 "- Keep the root motoko executable as the compatibility facade until the extracted boundary is safer and simpler.",
                 "- Preserve stdlib-only runtime, realm-local state, content-free observability, migrations, durable checkpoints, and pause/resume behavior.",
+                "- For shared state/progress writes, use a unique same-directory temporary file per writer before atomic replace; never reuse one fixed .tmp path across parallel workers.",
+                "- Add concurrency regressions for background progress, vector/evidence refresh, ledgers, and any other state file touched by parallel or interruptible work.",
                 "- Make each commit coherent, update docs with the new ownership boundary, and run syntax, regression, eval, TTY, diff-check, and flake checks.",
             ]
         ),
