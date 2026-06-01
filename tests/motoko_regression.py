@@ -79,11 +79,13 @@ from motoko_core.vector_store import (
     embedding_pending_batches as embedding_pending_batches_core,
     embedding_refresh_mode as embedding_refresh_mode_core,
     embedding_rows_vector_dims as embedding_rows_vector_dims_core,
+    embedding_vector_checkpoint_rows as embedding_vector_checkpoint_rows_core,
     embedding_vector_progress_record as embedding_vector_progress_record_core,
     embedding_vector_progress_id as embedding_vector_progress_id_core,
     embedding_vector_progress_key as embedding_vector_progress_key_core,
     embedding_vector_progress_matches as embedding_vector_progress_matches_core,
     embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
+    embedding_vector_rows_by_id as embedding_vector_rows_by_id_core,
     embedding_vector_store_record as embedding_vector_store_record_core,
     lexical_sparse_vector as lexical_sparse_vector_core,
     reusable_embedding_vector_row as reusable_embedding_vector_row_core,
@@ -8031,6 +8033,33 @@ def test_embedding_refresh_mode_core_labels_reuse_and_rebuild(_m=None):
     assert embedding_refresh_mode_core() == "full"
 
 
+def test_embedding_vector_checkpoint_rows_core_filters_candidates(_m=None):
+    progress = {
+        "created": "2026-06-01T00:00:00+00:00",
+        "rows": [
+            {"id": "row-1", "vector": [0.1]},
+            {"id": "row-2", "vector": [0.2]},
+            {"id": "row-3"},
+            {"id": "", "vector": [0.4]},
+        ],
+    }
+    created, rows_by_id = embedding_vector_checkpoint_rows_core(
+        progress,
+        ["row-1", "row-3"],
+        default_created="fallback",
+    )
+
+    assert created == "2026-06-01T00:00:00+00:00"
+    assert list(rows_by_id) == ["row-1"]
+    assert embedding_vector_checkpoint_rows_core({}, [], default_created="fallback") == ("fallback", {})
+
+
+def test_embedding_vector_rows_by_id_core_ignores_invalid_rows(_m=None):
+    row = {"id": "row-1", "vector": [0.1]}
+
+    assert embedding_vector_rows_by_id_core([row, {"vector": [0.2]}, "bad"]) == {"row-1": row}
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14631,6 +14660,8 @@ def main() -> int:
         test_embedding_vector_store_record_core_shapes_provenance_and_reuse,
         test_embedding_vector_batch_and_reuse_helpers_are_core_owned,
         test_embedding_refresh_mode_core_labels_reuse_and_rebuild,
+        test_embedding_vector_checkpoint_rows_core_filters_candidates,
+        test_embedding_vector_rows_by_id_core_ignores_invalid_rows,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

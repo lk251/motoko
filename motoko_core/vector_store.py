@@ -95,6 +95,32 @@ def embedding_rows_vector_dims(rows, *, current_dims: int = 0) -> int:
     return 0
 
 
+def embedding_vector_rows_by_id(rows) -> dict[str, dict]:
+    return {
+        str(row.get("id", "")): row
+        for row in rows or []
+        if isinstance(row, dict) and row.get("id")
+    }
+
+
+def embedding_vector_checkpoint_rows(
+    progress: dict,
+    candidate_ids,
+    *,
+    default_created: str,
+) -> tuple[str, dict[str, dict]]:
+    created = str(progress.get("created") or default_created)
+    candidates = set(candidate_ids or [])
+    rows_by_id: dict[str, dict] = {}
+    for row in progress.get("rows", []):
+        if not isinstance(row, dict) or not row.get("id") or not row.get("vector"):
+            continue
+        row_id = str(row.get("id"))
+        if row_id in candidates:
+            rows_by_id[row_id] = row
+    return created, rows_by_id
+
+
 def embedding_vector_progress_key(
     *,
     progress_schema: str,
