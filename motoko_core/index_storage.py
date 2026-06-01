@@ -144,6 +144,38 @@ def index_storage_scan_record(
     return row
 
 
+def index_storage_orphan_chunk_files(
+    data_dirs,
+    *,
+    referenced_paths: set[pathlib.Path],
+    path_size: Callable[[pathlib.Path], int],
+    check_cancelled: Callable[[], None] | None = None,
+) -> list[dict]:
+    """Return stored chunk text files that are no longer referenced."""
+
+    orphan_files: list[dict] = []
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    for data_dir in data_dirs or []:
+        maybe_cancel()
+        data_dir = pathlib.Path(data_dir)
+        if not data_dir.is_dir():
+            continue
+        for path in data_dir.rglob("*.txt"):
+            maybe_cancel()
+            try:
+                resolved = path.resolve()
+            except OSError:
+                resolved = path
+            if resolved in referenced_paths:
+                continue
+            orphan_files.append({"path": str(path), "bytes": path_size(path)})
+    return orphan_files
+
+
 def index_storage_audit_report(
     *,
     created: str,

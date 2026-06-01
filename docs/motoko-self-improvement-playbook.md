@@ -406,6 +406,9 @@ Current progress on this backlog:
   service-owned with injected path/size callbacks. The root facade still
   supplies realm-local path resolution, filesystem reads, and cancellation
   checkpoints.
+- Orphan chunk-file detection for index-storage audits is now service-owned as
+  well, with the root facade only supplying the allowed chunk directories,
+  path-size callback, and cancellation hook.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

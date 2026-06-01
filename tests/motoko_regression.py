@@ -68,6 +68,7 @@ from motoko_core.evals import worker_model_eval_fixtures as worker_model_eval_fi
 from motoko_core.index_storage import (
     duplicate_reference_target_report as duplicate_reference_target_report_core,
     index_storage_audit_report as index_storage_audit_report_core,
+    index_storage_orphan_chunk_files as index_storage_orphan_chunk_files_core,
     index_storage_scan_record as index_storage_scan_record_core,
 )
 from motoko_core.skill_curator import (
@@ -11403,6 +11404,58 @@ def test_index_storage_scan_record_is_service_owned(_m):
         ]
 
 
+def test_index_storage_orphan_chunk_files_is_service_owned(_m):
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = pathlib.Path(tmp_name)
+        chunks = tmp / "index.chunks"
+        chunks.mkdir()
+        referenced = chunks / "000001-000001.txt"
+        orphan = chunks / "000001-000002.txt"
+        nested = chunks / "nested"
+        nested.mkdir()
+        nested_orphan = nested / "000002-000001.txt"
+        referenced.write_text("keep", encoding="utf-8")
+        orphan.write_text("delete", encoding="utf-8")
+        nested_orphan.write_text("nested", encoding="utf-8")
+        (chunks / "ignore.md").write_text("not a chunk text file", encoding="utf-8")
+        cancel_calls = {"count": 0}
+
+        def check_cancelled():
+            cancel_calls["count"] += 1
+
+        rows = index_storage_orphan_chunk_files_core(
+            [chunks, tmp / "missing.chunks"],
+            referenced_paths={referenced.resolve()},
+            path_size=lambda path: path.stat().st_size,
+            check_cancelled=check_cancelled,
+        )
+
+        assert {pathlib.Path(row["path"]).name for row in rows} == {
+            "000001-000002.txt",
+            "000002-000001.txt",
+        }
+        assert sum(row["bytes"] for row in rows) == len("delete".encode("utf-8")) + len("nested".encode("utf-8"))
+        assert cancel_calls["count"] >= 3
+
+        cancel_after_first = {"count": 0}
+
+        def cancelling_check():
+            cancel_after_first["count"] += 1
+            if cancel_after_first["count"] >= 2:
+                raise RuntimeError("cancelled orphan scan")
+
+        try:
+            index_storage_orphan_chunk_files_core(
+                [chunks],
+                referenced_paths=set(),
+                path_size=lambda path: path.stat().st_size,
+                check_cancelled=cancelling_check,
+            )
+            raise AssertionError("orphan scan should honor cancellation")
+        except RuntimeError as exc:
+            assert "cancelled orphan scan" in str(exc)
+
+
 def test_index_storage_cleanup_sections_are_service_owned(_m):
     sections = index_storage_cleanup_sections_core(
         stale_superseded_indexes=[{"id": "old-index", "bytes": 10}],
@@ -14856,6 +14909,7 @@ def main() -> int:
         test_artifact_lifecycle_family_specs_are_service_owned,
         test_conversation_artifact_cleanup_report_is_service_owned,
         test_index_storage_scan_record_is_service_owned,
+        test_index_storage_orphan_chunk_files_is_service_owned,
         test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_report_from_index_owns_orchestration,

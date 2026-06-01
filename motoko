@@ -106,6 +106,7 @@ from motoko_core.index_storage import (  # noqa: E402
     duplicate_reference_target_report as core_duplicate_reference_target_report,
     format_index_storage_audit,
     index_storage_audit_report as core_index_storage_audit_report,
+    index_storage_orphan_chunk_files as core_index_storage_orphan_chunk_files,
     index_storage_scan_record as core_index_storage_scan_record,
 )
 from motoko_core.code_intel import (  # noqa: E402
@@ -12240,20 +12241,16 @@ def index_storage_audit(*, cancel_event=None) -> dict:
     duplicate_reference_report = core_duplicate_reference_target_report(duplicate_refs, stored_by_digest)
     missing_duplicate_refs = duplicate_reference_report["missing_duplicate_targets"]
 
-    orphan_files = []
-    for data_dir in indexes_dir().glob("*.chunks"):
-        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-        if not data_dir.is_dir():
-            continue
-        for path in data_dir.rglob("*.txt"):
-            raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-            try:
-                resolved = path.resolve()
-            except OSError:
-                resolved = path
-            if resolved in referenced_paths:
-                continue
-            orphan_files.append({"path": str(path), "bytes": path_size(path)})
+    orphan_files = core_index_storage_orphan_chunk_files(
+        indexes_dir().glob("*.chunks"),
+        referenced_paths=referenced_paths,
+        path_size=path_size,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "index storage audit interrupted by request",
+            work_kind="index-storage",
+        ),
+    )
 
     older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
     stale_superseded_indexes = index_cleanup_candidates(indexes)
