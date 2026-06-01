@@ -1649,6 +1649,11 @@ Motoko self-code checkpoint, 2026-05-31:
   compatibility, migration obligations, and source-reprocessing boundaries
   should be visible as deterministic code facts before any model proposes a
   schema or lifecycle change.
+- Code intelligence also exposes validation gates as deterministic facts:
+  syntax, regression, evaluation, TTY, self-eval, action-eval, whitespace, and
+  `nix flake check`. `code-query` can retrieve those gates when Motoko plans a
+  refactor or self-improvement pass, so the validation path comes from current
+  repo facts rather than chat memory.
 - Artifact lifecycle ownership has continued moving out of the root facade:
   `motoko_core.artifact_lifecycle` now owns source-lifecycle artifact
   scanning, index dependency counting, JSON artifact deletion, superseded

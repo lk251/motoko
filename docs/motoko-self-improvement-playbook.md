@@ -656,8 +656,8 @@ It is a reliability and self-understanding stretch:
    fanout are good candidates.
 5. Improve code-query precision with deterministic facts that help Motoko find
    the right code before editing: command traces, tests, schema constants,
-   artifact-family owners, cancellation paths, route/model call paths, and
-   root hotspots.
+   validation gates, artifact-family owners, cancellation paths,
+   route/model call paths, and root hotspots.
 6. Strengthen conversation persistence trust with focused regressions for
    queued prompts, resumed empty chats, feedback targeting, rename/delete
    cleanup, and derived artifact cleanup.

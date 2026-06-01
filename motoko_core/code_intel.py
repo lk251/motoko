@@ -557,6 +557,75 @@ def _build_service_boundaries(modules: list[dict], symbols: list[dict], imports:
     return rows
 
 
+def _build_validation_gates() -> list[dict]:
+    return [
+        {
+            "name": "syntax",
+            "command": "nix develop --command python3 -m py_compile motoko",
+            "purpose": "quick syntax check for the root executable",
+            "scope": "syntax",
+            "when": "after Python edits and before slower gates",
+            "order": 10,
+        },
+        {
+            "name": "regression",
+            "command": "nix develop --command python3 tests/motoko_regression.py",
+            "purpose": "full stdlib regression suite for commands, state, retrieval, actions, jobs, and TUI-adjacent behavior",
+            "scope": "behavior",
+            "when": "after code changes that affect Motoko behavior",
+            "order": 20,
+        },
+        {
+            "name": "evaluation",
+            "command": "nix develop --command python3 tests/motoko_eval.py",
+            "purpose": "synthetic retrieval/model/worker evaluation harness",
+            "scope": "eval",
+            "when": "after retrieval, index, route, model-worker, or prompt-context changes",
+            "order": 30,
+        },
+        {
+            "name": "tty",
+            "command": "nix develop --command python3 tests/motoko_tty.py",
+            "purpose": "terminal render and input behavior checks",
+            "scope": "terminal",
+            "when": "after TUI, report, wrapping, or keybinding changes",
+            "order": 40,
+        },
+        {
+            "name": "self-eval",
+            "command": "nix develop --command ./motoko self-eval",
+            "purpose": "deterministic self-improvement readiness checks for code-map, code-query, skills, and scanner behavior",
+            "scope": "self-improvement",
+            "when": "after code-intelligence, skill, scanner, refactor, or self-maintenance changes",
+            "order": 50,
+        },
+        {
+            "name": "action-eval",
+            "command": "nix develop --command ./motoko action-eval",
+            "purpose": "deterministic authority and action-safety fixtures",
+            "scope": "authority",
+            "when": "after skills, tools, project writes, approvals, or goal-loop changes",
+            "order": 60,
+        },
+        {
+            "name": "whitespace",
+            "command": "git diff --check",
+            "purpose": "detect whitespace errors before commit",
+            "scope": "git",
+            "when": "before committing local changes",
+            "order": 70,
+        },
+        {
+            "name": "nix-flake",
+            "command": "nix flake check",
+            "purpose": "final package, syntax, regression, evaluation, and TTY flake gate",
+            "scope": "release",
+            "when": "before committing or handing off source intended for rebuild",
+            "order": 80,
+        },
+    ]
+
+
 def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None) -> dict:
     repo_root = find_motoko_repo_root(root)
     files = code_files(repo_root)
@@ -605,6 +674,8 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     _maybe_cancel(cancel_check)
     service_boundaries = _build_service_boundaries(modules, symbols, imports, call_edges)
     _maybe_cancel(cancel_check)
+    validation_gates = _build_validation_gates()
+    _maybe_cancel(cancel_check)
     command_handlers = {row.get("handler", "") for row in commands if row.get("handler")}
     symbol_names = {row.get("name", "") for row in symbols}
     unlinked_commands = [
@@ -628,6 +699,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
         "tests": tests,
         "root_hotspots": root_hotspots,
         "service_boundaries": service_boundaries,
+        "validation_gates": validation_gates,
         "summary": {
             "files": len(files),
             "symbols": len(symbols),
@@ -645,6 +717,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
             "calls": len(calls),
             "resolved_call_edges": len(call_edges),
             "service_boundaries": len(service_boundaries),
+            "validation_gates": len(validation_gates),
             "tests": len(tests),
             "parse_errors": len(parse_errors),
             "root_script_lines": next((row["lines"] for row in modules if row["path"] == "motoko"), 0),
@@ -720,6 +793,11 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
             ["path", "doc", "public_symbols"],
             name_field="path",
         ),
+        "validation_gates": rank(
+            code_map.get("validation_gates", []),
+            ["name", "command", "purpose", "scope", "when"],
+            name_field="name",
+        ),
         "root_hotspots": rank(
             hotspot_rows,
             ["name", "qualname", "path", "role"],
@@ -783,6 +861,10 @@ def format_code_map_report(code_map: dict) -> str:
                 f"- {row.get('command', '')}: handler={row.get('handler', '') or '-'} "
                 f"at {row.get('handler_path', '') or '?'}:{row.get('handler_line', '') or '?'} tests={tests}"
             )
+    if code_map.get("validation_gates"):
+        lines.append("validation gates:")
+        for row in sorted(code_map.get("validation_gates", []), key=lambda item: int(item.get("order", 0) or 0))[:8]:
+            lines.append(f"- {row.get('name', '')}: {row.get('command', '')} ({row.get('scope', '')})")
     important_constants = [
         row
         for row in code_map.get("constants", [])
@@ -817,6 +899,7 @@ def _format_rows(
     service: bool = False,
     constant: bool = False,
     hotspot: bool = False,
+    validation: bool = False,
 ) -> list[str]:
     lines = [title + ":"]
     if not rows:
@@ -847,6 +930,10 @@ def _format_rows(
             label = row.get("qualname") or row.get("name", "")
             detail = f"lines={row.get('lines', 0)} calls={row.get('calls', 0)}"
             location = f"{row.get('path', '')}:{row.get('line', 1)}"
+        elif validation:
+            label = row.get("name", "")
+            detail = f"{row.get('scope', '')}; {row.get('purpose', '')}"
+            location = row.get("command", "")
         elif "target" in row:
             label = f"{row.get('caller', '')} -> {row.get('target', '')}"
             detail = f"callee={row.get('callee', '')}"
@@ -872,6 +959,7 @@ def format_code_query_report(result: dict) -> str:
     lines.extend(_format_rows("symbols", result.get("symbols", [])))
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
     lines.extend(_format_rows("service boundaries", result.get("service_boundaries", []), service=True))
+    lines.extend(_format_rows("validation gates", result.get("validation_gates", []), validation=True))
     lines.extend(_format_rows("root facade hotspots", result.get("root_hotspots", []), hotspot=True))
     lines.extend(_format_rows("tests", result.get("tests", [])))
     lines.extend(_format_rows("files", result.get("files", [])))

@@ -143,6 +143,16 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"schema_constants": [row.get("name", "") for row in schema_constants[:8]]},
         )
     )
+    validation_gates = code_map.get("validation_gates", []) if isinstance(code_map.get("validation_gates"), list) else []
+    validation_gate_names = {str(row.get("name", "")) for row in validation_gates if isinstance(row, dict)}
+    checks.append(
+        _check(
+            "code_map_validation_gates_present",
+            {"regression", "self-eval", "action-eval", "nix-flake"} <= validation_gate_names,
+            f"validation_gates={len(validation_gates)}",
+            evidence={"validation_gates": sorted(validation_gate_names)},
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(

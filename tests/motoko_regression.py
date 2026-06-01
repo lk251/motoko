@@ -1131,7 +1131,9 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert summary["resolved_call_edges"] > 0
         assert summary["service_boundaries"] > 0
         assert summary["schema_constants"] > 0
+        assert summary["validation_gates"] >= 6
         assert summary["root_hotspots"]
+        assert any(row["name"] == "nix-flake" for row in code_map["validation_gates"])
         assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in code_map["constants"])
         source_trace = next(row for row in code_map["command_traces"] if row["command"] == "source-lifecycle")
         assert source_trace["handler"] == "command_source_lifecycle"
@@ -1149,15 +1151,20 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert "root facade hotspots:" in m.format_motoko_code_query("root facade hotspot extraction target")
         schema_query = m.motoko_code_query("source lifecycle schema artifact version")
         assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in schema_query["constants"])
+        gate_query = m.motoko_code_query("validation gates nix flake check action eval")
+        assert any(row["name"] == "nix-flake" for row in gate_query["validation_gates"])
+        assert any(row["name"] == "action-eval" for row in gate_query["validation_gates"])
         rendered = m.format_motoko_code_query("Motoko skill plan command implementation tests")
         assert "Motoko code query:" in rendered
         assert "command traces:" in rendered
         assert "constants:" in rendered
         assert "symbols:" in rendered
+        assert "validation gates:" in m.format_motoko_code_query("validation gates nix flake check")
         map_rendered = m.format_motoko_code_map()
         assert "root facade hotspots:" in map_rendered
         assert "service boundaries:" in map_rendered
         assert "schema/artifact constants:" in map_rendered
+        assert "validation gates:" in map_rendered
 
         context_text, sources = m.render_motoko_codebase_context(
             "How should Motoko refactor its codebase command handlers?"
