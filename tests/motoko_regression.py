@@ -1364,6 +1364,57 @@ def test_core_profile_rendering_is_injectable(m):
     assert "No profile dossier yet" in m.format_profile_dossier(None)
 
 
+def test_core_profile_source_material_is_service_owned(m):
+    memories = [
+        {"id": "mem-1", "text": "Javier values careful craftsmanship.", "importance": 4},
+        {"id": "mem-2", "text": "Motoko should be inspectable."},
+    ]
+    conversations = [
+        {"id": "conv-1", "title": "Useful", "updated": "2026-06-01T00:00:00+00:00"},
+        {"id": "conv-empty", "title": "Empty", "updated": "2026-06-01T01:00:00+00:00"},
+    ]
+    recall_by_id = {
+        "conv-1": "Grounded retrieval and source visibility matter.",
+        "conv-empty": "",
+    }
+
+    text, memory_ids, conversation_ids = m.profile_source_material_core(
+        memories,
+        conversations,
+        conversation_text=lambda conv: recall_by_id.get(conv.get("id", ""), ""),
+        memory_default_importance=3,
+        conversation_excerpt_chars=80,
+    )
+
+    assert "Durable memories:" in text
+    assert "[mem-1; i4] Javier values careful craftsmanship." in text
+    assert "[mem-2; i3] Motoko should be inspectable." in text
+    assert "conversation:conv-1 title:Useful" in text
+    assert "Grounded retrieval and source visibility matter." in text
+    assert "conv-empty" not in text
+    assert memory_ids == ["mem-1", "mem-2"]
+    assert conversation_ids == ["conv-1"]
+
+    cancel_calls = {"count": 0}
+
+    def check_cancelled():
+        cancel_calls["count"] += 1
+        if cancel_calls["count"] >= 2:
+            raise RuntimeError("profile source cancelled")
+
+    try:
+        m.profile_source_material_core(
+            memories,
+            conversations,
+            conversation_text=lambda conv: recall_by_id.get(conv.get("id", ""), ""),
+            memory_default_importance=3,
+            check_cancelled=check_cancelled,
+        )
+        raise AssertionError("profile source material should honor cancellation")
+    except RuntimeError as exc:
+        assert "profile source cancelled" in str(exc)
+
+
 def test_memory_dossier(m):
     with isolated_state():
         conv = m.new_conversation("Dossier source")
@@ -15045,6 +15096,8 @@ def main() -> int:
         test_other_conversation_maintenance_is_quietly_abandoned,
         test_profile_dossier,
         test_project_scope_filters_memory_and_profile_context,
+        test_core_profile_rendering_is_injectable,
+        test_core_profile_source_material_is_service_owned,
         test_memory_dossier,
         test_spinner_and_input_wrapping,
         test_phase_timer_key_ignores_progress_counters,

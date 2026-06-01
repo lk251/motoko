@@ -499,6 +499,10 @@ Current progress on this backlog:
   guarded user-state mutation. Memory-row cleanup for deleted conversations now
   uses a memory-core helper for normalization and conversation-reference
   filtering, leaving root to only read and rewrite the realm-local memory file.
+  Profile source-material assembly now also lives in `motoko_core.profile`:
+  the service selects useful conversation recall rows, formats bounded private
+  source blocks, returns source ids, and honors injected cancellation while
+  root only loads user-owned state and calls the profile model route.
   Feedback targeting now pairs the rated
   assistant answer with the nearest prior user prompt, so `/up` or `/down`
   used while a newer prompt is preparing does not attach the wrong query to

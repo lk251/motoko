@@ -233,6 +233,7 @@ from motoko_core.memory import (  # noqa: E402
 )
 from motoko_core.profile import (  # noqa: E402
     format_profile_dossier,
+    profile_source_material_core,
     render_profile_with_sources_core,
 )
 from motoko_core.skills import (  # noqa: E402
@@ -9603,41 +9604,19 @@ def profile_matches_project_scope(profile: dict | None, project_scope: dict | No
 
 
 def profile_source_material(*, cancel_event=None) -> tuple[str, list[str], list[str]]:
-    raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
-    memories = load_memories(limit=PROFILE_SOURCE_MEMORIES)
-    raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
-    conversations = []
-    for conv in list_conversations()[:PROFILE_SOURCE_CONVERSATIONS]:
+    def check_cancelled() -> None:
         raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
-        if conversation_recall_text(conv).strip():
-            conversations.append(conv)
-    memory_lines = []
-    for row in memories:
-        raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
-        memory_lines.append(
-            f"- [{row.get('id', '')}; i{row.get('importance', MEMORY_DEFAULT_IMPORTANCE)}] {row.get('text', '')}"
-        )
-    conversation_blocks = []
-    for conv in conversations:
-        raise_if_work_cancelled(cancel_event, "profile source scan interrupted by request", work_kind="profile")
-        title = conv.get("title") or "Untitled"
-        conversation_blocks.append(
-            f"--- conversation:{conv.get('id', '')} title:{title} updated:{conv.get('updated', '')} ---\n"
-            f"{compact_text(conversation_recall_text(conv), 2500)}"
-        )
-    text = textwrap.dedent(
-        f"""
-        Durable memories:
-        {chr(10).join(memory_lines) if memory_lines else "(none)"}
 
-        Recent conversation material:
-        {chr(10).join(conversation_blocks) if conversation_blocks else "(none)"}
-        """
-    ).strip()
-    return (
-        text,
-        [row.get("id", "") for row in memories if row.get("id")],
-        [conv.get("id", "") for conv in conversations if conv.get("id")],
+    check_cancelled()
+    memories = load_memories(limit=PROFILE_SOURCE_MEMORIES)
+    check_cancelled()
+    conversations = list_conversations()[:PROFILE_SOURCE_CONVERSATIONS]
+    return profile_source_material_core(
+        memories,
+        conversations,
+        conversation_text=conversation_recall_text,
+        memory_default_importance=MEMORY_DEFAULT_IMPORTANCE,
+        check_cancelled=check_cancelled,
     )
 
 
