@@ -68,6 +68,7 @@ from motoko_core.evals import worker_model_eval_fixtures as worker_model_eval_fi
 from motoko_core.index_storage import (
     duplicate_reference_target_report as duplicate_reference_target_report_core,
     index_storage_audit_report as index_storage_audit_report_core,
+    index_storage_scan_record as index_storage_scan_record_core,
 )
 from motoko_core.skill_curator import (
     curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
@@ -11324,6 +11325,84 @@ def test_conversation_artifact_cleanup_report_is_service_owned(_m):
         assert not context_catalog.exists()
 
 
+def test_index_storage_scan_record_is_service_owned(_m):
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = pathlib.Path(tmp_name)
+        chunk_path = tmp / "chunk.txt"
+        chunk_path.write_text("stored body", encoding="utf-8")
+        referenced_paths: set[pathlib.Path] = set()
+        stored_by_digest: dict[str, list[dict]] = {}
+        unique_digest_bytes: dict[str, int] = {}
+        duplicate_refs: list[dict] = []
+        record = {
+            "id": "index-storage-scan",
+            "name": "docs",
+            "root": str(tmp),
+            "files": [
+                {
+                    "path": str(tmp / "a.org"),
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "content": "inline body",
+                            "content_sha256": "inline-digest",
+                        },
+                        {
+                            "chunk": 2,
+                            "content_path": "chunk.txt",
+                            "content_sha256": "stored-digest",
+                            "stored_content_bytes": 0,
+                        },
+                        {
+                            "chunk": 3,
+                            "duplicate_of_existing_index": True,
+                            "content_sha256": "duplicate-digest",
+                            "content_bytes": 12,
+                        },
+                        {
+                            "chunk": 4,
+                            "content_path": "missing.txt",
+                            "content_sha256": "missing-digest",
+                        },
+                    ],
+                }
+            ],
+        }
+
+        def chunk_content_path(_record, chunk):
+            relpath = chunk.get("content_path")
+            return tmp / relpath if relpath else None
+
+        row = index_storage_scan_record_core(
+            record,
+            record_kind="index",
+            referenced_paths=referenced_paths,
+            stored_by_digest=stored_by_digest,
+            unique_digest_bytes=unique_digest_bytes,
+            duplicate_refs=duplicate_refs,
+            chunk_content_path=chunk_content_path,
+            path_size=lambda path: path.stat().st_size,
+        )
+
+        assert row["chunks"] == 4
+        assert row["stored_chunks"] == 2
+        assert row["duplicate_reference_chunks"] == 1
+        assert row["missing_stored_chunks"] == 1
+        assert chunk_path.resolve() in referenced_paths
+        assert stored_by_digest["inline-digest"][0]["storage"] == "inline"
+        assert stored_by_digest["stored-digest"][0]["storage"] == str(chunk_path)
+        assert unique_digest_bytes["stored-digest"] == len("stored body".encode("utf-8"))
+        assert duplicate_refs == [
+            {
+                "index_id": "index-storage-scan",
+                "path": str(tmp / "a.org"),
+                "chunk": 3,
+                "content_sha256": "duplicate-digest",
+                "logical_content_bytes": 12,
+            }
+        ]
+
+
 def test_index_storage_cleanup_sections_are_service_owned(_m):
     sections = index_storage_cleanup_sections_core(
         stale_superseded_indexes=[{"id": "old-index", "bytes": 10}],
@@ -14776,6 +14855,7 @@ def main() -> int:
         test_source_lifecycle_cleanup_allows_reprocessed_changed_sources,
         test_artifact_lifecycle_family_specs_are_service_owned,
         test_conversation_artifact_cleanup_report_is_service_owned,
+        test_index_storage_scan_record_is_service_owned,
         test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_report_from_index_owns_orchestration,

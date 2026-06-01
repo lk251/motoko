@@ -400,6 +400,12 @@ Current progress on this backlog:
   final audit dictionary assembly. The root facade still owns filesystem
   scanning, cancellation checkpoints, source lifecycle callbacks, and cleanup
   materialization authority.
+- Index-storage scan-row semantics have also moved into
+  `motoko_core.index_storage`: inline chunks, stored chunk paths, duplicate
+  references, missing content, digest accounting, and warning rows are now
+  service-owned with injected path/size callbacks. The root facade still
+  supplies realm-local path resolution, filesystem reads, and cancellation
+  checkpoints.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

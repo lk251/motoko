@@ -1,6 +1,9 @@
-"""Index storage audit formatting for Motoko."""
+"""Index storage audit helpers and formatting for Motoko."""
 
 from __future__ import annotations
+
+import pathlib
+from typing import Callable
 
 from motoko_core.text import human_bytes
 
@@ -33,6 +36,112 @@ def duplicate_reference_target_report(duplicate_refs: list[dict], stored_by_dige
         "missing_duplicate_targets": missing_duplicate_refs,
         "duplicate_reference_bytes_with_target": duplicate_reference_bytes_with_target,
     }
+
+
+def index_storage_scan_record(
+    record: dict,
+    *,
+    record_kind: str,
+    referenced_paths: set[pathlib.Path],
+    stored_by_digest: dict[str, list[dict]],
+    unique_digest_bytes: dict[str, int],
+    duplicate_refs: list[dict],
+    chunk_content_path: Callable[[dict, dict], pathlib.Path | None],
+    path_size: Callable[[pathlib.Path], int],
+) -> dict:
+    """Scan one index-like record and update shared storage-audit collections."""
+
+    row = {
+        "id": record.get("id", ""),
+        "kind": record_kind,
+        "name": record.get("name", ""),
+        "root": record.get("root", ""),
+        "chunks": 0,
+        "stored_chunks": 0,
+        "duplicate_reference_chunks": 0,
+        "logical_content_bytes": 0,
+        "stored_content_bytes": 0,
+        "duplicate_reference_bytes": 0,
+        "missing_stored_chunks": 0,
+        "chunks_missing_digest": 0,
+        "warnings": [],
+    }
+    for file_item in record.get("files", []):
+        for chunk in file_item.get("chunks", []):
+            row["chunks"] += 1
+            digest = str(chunk.get("content_sha256", "")).strip()
+            logical_bytes = _safe_int(chunk.get("content_bytes"))
+            if not logical_bytes and isinstance(chunk.get("content"), str):
+                logical_bytes = len(chunk.get("content", "").encode("utf-8"))
+            row["logical_content_bytes"] += logical_bytes
+            if not digest:
+                row["chunks_missing_digest"] += 1
+            if chunk.get("duplicate_of_existing_index"):
+                row["duplicate_reference_chunks"] += 1
+                row["duplicate_reference_bytes"] += logical_bytes
+                duplicate_refs.append(
+                    {
+                        "index_id": record.get("id", ""),
+                        "path": file_item.get("path", ""),
+                        "chunk": chunk.get("chunk", ""),
+                        "content_sha256": digest,
+                        "logical_content_bytes": logical_bytes,
+                    }
+                )
+                continue
+            content_bytes = _safe_int(chunk.get("stored_content_bytes"))
+            if "content" in chunk:
+                text = str(chunk.get("content", ""))
+                content_bytes = len(text.encode("utf-8"))
+                row["stored_chunks"] += 1
+                row["stored_content_bytes"] += content_bytes
+                if digest:
+                    stored_by_digest.setdefault(digest, []).append(
+                        {
+                            "index_id": record.get("id", ""),
+                            "kind": record_kind,
+                            "path": file_item.get("path", ""),
+                            "chunk": chunk.get("chunk", ""),
+                            "storage": "inline",
+                            "bytes": content_bytes,
+                        }
+                    )
+                    unique_digest_bytes.setdefault(digest, content_bytes)
+                continue
+            try:
+                content_path = chunk_content_path(record, chunk)
+            except ValueError as exc:
+                row["warnings"].append(str(exc))
+                row["missing_stored_chunks"] += 1
+                continue
+            if content_path is None:
+                row["missing_stored_chunks"] += 1
+                continue
+            try:
+                resolved = content_path.resolve()
+            except OSError:
+                resolved = content_path
+            referenced_paths.add(resolved)
+            if not content_path.exists():
+                row["missing_stored_chunks"] += 1
+                continue
+            if not content_bytes:
+                content_bytes = path_size(content_path)
+            row["stored_chunks"] += 1
+            row["stored_content_bytes"] += content_bytes
+            if digest:
+                stored_by_digest.setdefault(digest, []).append(
+                    {
+                        "index_id": record.get("id", ""),
+                        "kind": record_kind,
+                        "path": file_item.get("path", ""),
+                        "chunk": chunk.get("chunk", ""),
+                        "storage": str(content_path),
+                        "bytes": content_bytes,
+                    }
+                )
+                unique_digest_bytes.setdefault(digest, content_bytes)
+    return row
 
 
 def index_storage_audit_report(
