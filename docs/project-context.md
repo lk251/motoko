@@ -1085,8 +1085,11 @@ Live subsystem extraction status:
   lifecycle decisions for changed, deleted, or newly ignored indexed files.
   Source lifecycle plans now count dependent vector stores, evidence stores,
   dossiers, retrieval debug/eval files, and feedback evals, and `index-storage`
-  surfaces that as rebuild-first work. There is still not one service that
-  applies cleanup/rebuild work across all of those artifact families.
+  surfaces that as rebuild-first work. The service also declares derived
+  single-file invalidation for the context catalog, so snapshot deletion no
+  longer needs an extra root-facade cleanup hook for that cache. There is still
+  not one service that applies cleanup/rebuild work across all artifact
+  families.
 - TUI event loop through job/event paths: mostly complete. Worker creation now
   goes through the job supervisor and terminal writes remain single-owned.
   `/stop` and `Ctrl+C` share the active-answer cancellation path, while

@@ -96,6 +96,18 @@ DERIVED_JSON_ARTIFACT_FAMILIES: tuple[dict, ...] = (
     },
 )
 
+DERIVED_JSON_FILE_ARTIFACT_FAMILIES: tuple[dict, ...] = (
+    {
+        "path_key": "context_catalog",
+        "artifact_id": "context_catalog",
+        "artifact_kind": "context_catalog",
+        "cleanup_policy": "delete-derived",
+        "delete_report_key": "context_catalog_deleted",
+        "report_label": "context-catalog",
+        "snapshot_action": "delete-always",
+    },
+)
+
 MANUAL_JSON_ARTIFACT_FAMILIES: tuple[dict, ...] = (
     {
         "path_key": "goal_loops",
@@ -207,7 +219,7 @@ def source_lifecycle_jsonl_specs() -> list[dict]:
 def source_lifecycle_json_file_specs() -> list[dict]:
     """Return single JSON state files scanned for source lifecycle reports."""
 
-    return _copy_specs(MANUAL_JSON_FILE_ARTIFACT_FAMILIES)
+    return _copy_specs(DERIVED_JSON_FILE_ARTIFACT_FAMILIES) + _copy_specs(MANUAL_JSON_FILE_ARTIFACT_FAMILIES)
 
 
 def index_snapshot_delete_specs() -> list[dict]:
@@ -219,6 +231,19 @@ def index_snapshot_delete_specs() -> list[dict]:
             "report_key": spec["delete_report_key"],
         }
         for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+    ]
+
+
+def index_snapshot_delete_file_specs() -> list[dict]:
+    """Return derived single-file artifacts invalidated with index snapshots."""
+
+    return [
+        {
+            "path_key": spec["path_key"],
+            "report_key": spec["delete_report_key"],
+            "action": spec.get("snapshot_action", "delete-if-references-index"),
+        }
+        for spec in DERIVED_JSON_FILE_ARTIFACT_FAMILIES
     ]
 
 
@@ -290,7 +315,7 @@ def derived_delete_report_labels() -> list[tuple[str, str]]:
 
     return [
         (str(spec["delete_report_key"]), str(spec["report_label"]))
-        for spec in DERIVED_JSON_ARTIFACT_FAMILIES
+        for spec in DERIVED_JSON_ARTIFACT_FAMILIES + DERIVED_JSON_FILE_ARTIFACT_FAMILIES
     ]
 
 
@@ -895,6 +920,7 @@ def delete_index_snapshot_artifacts(
     partial_path: str | pathlib.Path,
     chunk_dir: str | pathlib.Path,
     json_artifact_dirs: list[dict],
+    json_artifact_files: list[dict] | None = None,
     load_json: Callable[[pathlib.Path], object | None],
     unlink_path: Callable[[pathlib.Path], None],
     remove_tree: Callable[[pathlib.Path], None],
@@ -924,6 +950,10 @@ def delete_index_snapshot_artifacts(
         report_key = str(target.get("report_key", "")).strip()
         if report_key:
             report[report_key] = 0
+    for target in json_artifact_files or []:
+        report_key = str(target.get("report_key", "")).strip()
+        if report_key:
+            report[report_key] = False
     if not index_id:
         return report
 
@@ -953,6 +983,26 @@ def delete_index_snapshot_artifacts(
             load_json=load_json,
             unlink_path=unlink_path,
         )
+    for target in json_artifact_files or []:
+        report_key = str(target.get("report_key", "")).strip()
+        path = target.get("path", "")
+        if not report_key or not path:
+            continue
+        state_path = pathlib.Path(path)
+        if not state_path.exists():
+            continue
+        action = str(target.get("action", "delete-if-references-index") or "delete-if-references-index")
+        should_delete = action == "delete-always"
+        if not should_delete:
+            data = load_json(state_path)
+            should_delete = bool(data is not None and json_references_index(data, index_id))
+        if not should_delete:
+            continue
+        try:
+            unlink_path(state_path)
+        except FileNotFoundError:
+            continue
+        report[report_key] = True
     return report
 
 

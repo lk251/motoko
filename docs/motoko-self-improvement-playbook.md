@@ -381,7 +381,10 @@ Current progress on this backlog:
   service: the service now owns the derived-family fanout, single-state-file
   actions, slot-cache counters, report shape, and path-key spec normalization,
   while root code still resolves realm-local paths and performs filesystem
-  mutation through explicit callbacks.
+  mutation through explicit callbacks. Context-catalog invalidation for deleted
+  index snapshots is now also declared by the lifecycle service as a
+  derived single-file artifact, so cache cleanup follows the same service-owned
+  policy path as vectors, evidence, progress, and other derived state.
 - Source-lifecycle report orchestration has moved another step inward. The
   lifecycle service now sequences summary collection, affected-source path
   derivation, replacement readiness, artifact-record lookup, cancellation

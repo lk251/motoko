@@ -39,6 +39,7 @@ from motoko_core.artifact_lifecycle import (
     dependency_json_artifact_specs as dependency_json_artifact_specs_core,
     derived_delete_report_labels as derived_delete_report_labels_core,
     format_source_lifecycle_report as format_source_lifecycle_report_core,
+    index_snapshot_delete_file_specs as index_snapshot_delete_file_specs_core,
     index_snapshot_delete_specs as index_snapshot_delete_specs_core,
     index_artifact_dependency_counts as index_artifact_dependency_counts_core,
     index_file_path_keys as index_file_path_keys_core,
@@ -10489,6 +10490,7 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
     }
     json_file_specs = source_lifecycle_json_file_specs_core()
     assert {spec["artifact_kind"] for spec in json_file_specs} >= {
+        "context_catalog",
         "maintenance_state",
         "skill_suggestion",
         "skill_lifecycle",
@@ -10497,15 +10499,21 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
     }
 
     delete_specs = index_snapshot_delete_specs_core()
+    delete_file_specs = index_snapshot_delete_file_specs_core()
     conversation_delete_specs = conversation_delete_json_dir_specs_core()
     conversation_delete_jsonl = conversation_delete_jsonl_specs_core()
     conversation_delete_json_files = conversation_delete_json_file_specs_core()
     assert ("vector_progress_deleted", "vector-progress") in derived_delete_report_labels_core()
+    assert ("context_catalog_deleted", "context-catalog") in derived_delete_report_labels_core()
     assert {spec["report_key"] for spec in delete_specs} >= {
         "vector_stores_deleted",
         "evidence_stores_deleted",
         "vector_progress_deleted",
     }
+    assert {spec["report_key"] for spec in delete_file_specs} >= {
+        "context_catalog_deleted",
+    }
+    assert {spec["action"] for spec in delete_file_specs} >= {"delete-always"}
     assert {spec["report_key"] for spec in conversation_delete_specs} >= {
         "goal_loops_deleted",
         "goal_runs_deleted",
@@ -10936,6 +10944,11 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
             json.dumps({"id": "unrelated", "source_index": "other-index"}) + "\n",
             encoding="utf-8",
         )
+        context_catalog = root / "context-catalog.json"
+        context_catalog.write_text(
+            json.dumps({"indexes": [{"id": "old-index"}]}) + "\n",
+            encoding="utf-8",
+        )
 
         deletion_report = delete_index_snapshot_artifacts_core(
             {"id": "old-index"},
@@ -10944,6 +10957,13 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
             partial_path=partial_file,
             chunk_dir=chunk_dir,
             json_artifact_dirs=[{"path": derived_dir, "report_key": "derived_deleted"}],
+            json_artifact_files=[
+                {
+                    "path": context_catalog,
+                    "report_key": "context_catalog_deleted",
+                    "action": "delete-always",
+                }
+            ],
             load_json=load_json,
             path_size=lambda path: path.stat().st_size,
             tree_size=lambda path: sum(item.stat().st_size for item in path.rglob("*") if item.is_file()),
@@ -10955,11 +10975,13 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
         assert deletion_report["partial_deleted"] is True
         assert deletion_report["chunk_dir_deleted"] is True
         assert deletion_report["derived_deleted"] == 1
+        assert deletion_report["context_catalog_deleted"] is True
         assert deletion_report["bytes"] > 0
         assert not index_file.exists()
         assert not progress_file.exists()
         assert not partial_file.exists()
         assert not chunk_dir.exists()
+        assert not context_catalog.exists()
         assert not (derived_dir / "derived.json").exists()
         assert (derived_dir / "unrelated.json").exists()
 
@@ -11331,6 +11353,18 @@ def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m
                 json.dumps({"id": "model-source-lifecycle-apply", "source_index": old_index["id"]}) + "\n",
             )
             m.atomic_write(
+                m.context_catalog_path(),
+                json.dumps(
+                    {
+                        "schema": "motoko-context-catalog-v1",
+                        "indexes": [{"id": old_index["id"], "root": str(docs)}],
+                        "source_paths": [str(source)],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+            )
+            m.atomic_write(
                 m.goal_run_path("goal-source-lifecycle-apply"),
                 json.dumps(
                     {
@@ -11372,15 +11406,18 @@ def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m
             assert plan["source_counts"]["ignored"] == 1
             affected = {(item["kind"], item["policy"]): item["count"] for item in plan["affected_artifacts"]}
             assert affected[("action_eval", "delete-derived")] == 1
+            assert affected[("context_catalog", "delete-derived")] == 1
             assert affected[("model_eval", "delete-derived")] == 1
             assert affected[("action_ledger", "manual-review")] == 1
             assert affected[("goal_run", "manual-review")] == 1
-            assert plan["derived_artifact_count"] == 5
+            assert plan["derived_artifact_count"] == 6
             assert plan["manual_review_artifact_count"] == 3
             assert m.response_feedback_path().exists()
+            assert m.context_catalog_path().exists()
 
             applied = m.source_lifecycle_report_for_index(old_index, apply=True, yes=True)
             assert applied["applied"]["status"] == "deleted-superseded-index-snapshot"
+            assert applied["applied"]["deleted"]["context_catalog_deleted"] is True
             assert not m.index_path(old_index["id"]).exists()
             assert m.index_path(new_index["id"]).exists()
             assert not m.vector_store_path("vec-source-lifecycle-apply").exists()
@@ -11388,6 +11425,7 @@ def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m
             assert not m.topic_path("topic-source-lifecycle-apply").exists()
             assert not m.action_eval_path("action-source-lifecycle-apply").exists()
             assert not m.model_eval_path("model-source-lifecycle-apply").exists()
+            assert not m.context_catalog_path().exists()
             assert m.goal_run_path("goal-source-lifecycle-apply").exists()
             assert m.response_feedback_path().exists()
             assert m.read_jsonl(m.response_feedback_path())[0]["id"] == "feedback-source-lifecycle-apply"
