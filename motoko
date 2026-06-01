@@ -332,6 +332,9 @@ from motoko_core.retrieval_planner import build_retrieval_plan  # noqa: E402
 from motoko_core.vector_store import (  # noqa: E402
     bounded_vector_embedding_text,
     dense_normalize,
+    embedding_vector_progress_id as core_embedding_vector_progress_id,
+    embedding_vector_progress_key as core_embedding_vector_progress_key,
+    embedding_vector_progress_matches as core_embedding_vector_progress_matches,
     embedding_vector_row_from_vector as core_embedding_vector_row_from_vector,
     format_vector_eval_report,
     format_vector_plan as format_vector_plan_core,
@@ -14207,21 +14210,21 @@ def build_embedding_vector_store_from_index(
     ]
     requested_parallelism = embedding_parallelism(route_info, len(batches))
     active_parallelism = requested_parallelism
-    progress_key = {
-        "schema": VECTOR_PROGRESS_SCHEMA_VERSION,
-        "target_schema": VECTOR_STORE_SCHEMA_VERSION,
-        "method": EMBEDDING_VECTOR_METHOD,
-        "source_index": index.get("id", ""),
-        "source_fingerprint": source_fingerprint,
-        "route": route_id,
-        "model": route_model,
-        "embedding_dimensions": route_dims,
-        "embedding_input_schema": EMBEDDING_INPUT_SCHEMA_VERSION,
-        "embedding_input_chars": embedding_input_chars_limit(),
-        "embedding_max_parts_per_chunk": embedding_max_parts_per_chunk(),
-        "vector_row_id_schema": VECTOR_ROW_ID_SCHEMA_VERSION,
-    }
-    progress_id = "embedding-" + sha256_hex(json.dumps(progress_key, sort_keys=True).encode("utf-8"))[:16]
+    progress_key = core_embedding_vector_progress_key(
+        progress_schema=VECTOR_PROGRESS_SCHEMA_VERSION,
+        target_schema=VECTOR_STORE_SCHEMA_VERSION,
+        method=EMBEDDING_VECTOR_METHOD,
+        source_index_id=str(index.get("id", "")),
+        source_fingerprint=source_fingerprint,
+        route_id=route_id,
+        route_model=route_model,
+        route_dims=route_dims,
+        embedding_input_schema=EMBEDDING_INPUT_SCHEMA_VERSION,
+        embedding_input_chars=embedding_input_chars_limit(),
+        embedding_max_parts_per_chunk=embedding_max_parts_per_chunk(),
+        vector_row_id_schema=VECTOR_ROW_ID_SCHEMA_VERSION,
+    )
+    progress_id = core_embedding_vector_progress_id(progress_key)
     progress_path = vector_progress_path(progress_id)
     candidate_ids = [row_id for row_id, _file_item, _chunk, _text, _row_meta in candidates]
     completed_rows_by_id: dict[str, dict] = {}
@@ -14232,22 +14235,7 @@ def build_embedding_vector_store_from_index(
             progress = json.loads(progress_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             progress = {}
-        source = progress.get("source_index") if isinstance(progress.get("source_index"), dict) else {}
-        route = progress.get("embedding_route") if isinstance(progress.get("embedding_route"), dict) else {}
-        if (
-            progress.get("schema") == VECTOR_PROGRESS_SCHEMA_VERSION
-            and progress.get("method") == EMBEDDING_VECTOR_METHOD
-            and source.get("id") == index.get("id", "")
-            and source.get("fingerprint") == source_fingerprint
-            and route.get("catalog_route") == route_id
-            and route.get("model") == route_model
-            and int(route.get("embedding_dimensions") or 0) == route_dims
-            and progress.get("target_schema") == VECTOR_STORE_SCHEMA_VERSION
-            and progress.get("embedding_input_schema") == EMBEDDING_INPUT_SCHEMA_VERSION
-            and int(progress.get("embedding_input_chars") or 0) == embedding_input_chars_limit()
-            and int(progress.get("embedding_max_parts_per_chunk") or 0) == embedding_max_parts_per_chunk()
-            and progress.get("vector_row_id_schema") == VECTOR_ROW_ID_SCHEMA_VERSION
-        ):
+        if core_embedding_vector_progress_matches(progress, progress_key):
             progress_created = str(progress.get("created") or progress_created)
             for row in progress.get("rows", []):
                 if not isinstance(row, dict) or not row.get("id") or not row.get("vector"):

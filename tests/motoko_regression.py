@@ -74,6 +74,9 @@ from motoko_core.skill_curator import (
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 from motoko_core.vector_store import (
+    embedding_vector_progress_id as embedding_vector_progress_id_core,
+    embedding_vector_progress_key as embedding_vector_progress_key_core,
+    embedding_vector_progress_matches as embedding_vector_progress_matches_core,
     embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
     lexical_sparse_vector as lexical_sparse_vector_core,
     reusable_embedding_vector_row as reusable_embedding_vector_row_core,
@@ -7807,6 +7810,53 @@ def test_embedding_vector_row_core_preserves_evidence_and_reuse_rules(_m=None):
     assert stale is None
 
 
+def test_embedding_vector_progress_core_identity_and_matching(_m=None):
+    progress_key = embedding_vector_progress_key_core(
+        progress_schema="vector-progress-v1",
+        target_schema="vector-store-v2",
+        method="embedding-v1",
+        source_index_id="idx-1",
+        source_fingerprint="fingerprint-1",
+        route_id="embed-route",
+        route_model="embed-model",
+        route_dims=1024,
+        embedding_input_schema="embedding-input-v3",
+        embedding_input_chars=1800,
+        embedding_max_parts_per_chunk=12,
+        vector_row_id_schema="vector-row-id-v2",
+    )
+    same_key = dict(progress_key)
+    reversed_key = {key: same_key[key] for key in reversed(list(same_key.keys()))}
+    progress = {
+        "schema": "vector-progress-v1",
+        "method": "embedding-v1",
+        "target_schema": "vector-store-v2",
+        "source_index": {"id": "idx-1", "fingerprint": "fingerprint-1"},
+        "embedding_route": {
+            "catalog_route": "embed-route",
+            "model": "embed-model",
+            "embedding_dimensions": "1024",
+        },
+        "embedding_input_schema": "embedding-input-v3",
+        "embedding_input_chars": "1800",
+        "embedding_max_parts_per_chunk": "12",
+        "vector_row_id_schema": "vector-row-id-v2",
+    }
+    stale_progress = {
+        **progress,
+        "embedding_route": {
+            "catalog_route": "embed-route",
+            "model": "other-model",
+            "embedding_dimensions": 1024,
+        },
+    }
+
+    assert embedding_vector_progress_id_core(progress_key).startswith("embedding-")
+    assert embedding_vector_progress_id_core(progress_key) == embedding_vector_progress_id_core(reversed_key)
+    assert embedding_vector_progress_matches_core(progress, progress_key)
+    assert not embedding_vector_progress_matches_core(stale_progress, progress_key)
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14402,6 +14452,7 @@ def main() -> int:
         test_vector_plan_core_builds_rows_and_readiness_gates,
         test_vector_query_core_scores_and_dedupes_rows,
         test_embedding_vector_row_core_preserves_evidence_and_reuse_rules,
+        test_embedding_vector_progress_core_identity_and_matching,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

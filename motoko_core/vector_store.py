@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import collections.abc
 import hashlib
+import json
 import re
 
 from motoko_core.retrieval import query_path_match_boost, score_text, token_counts
@@ -16,6 +17,71 @@ EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
 DEFAULT_VECTOR_DIMS = 1024
+
+
+def _int_or_zero(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def embedding_vector_progress_key(
+    *,
+    progress_schema: str,
+    target_schema: str,
+    method: str,
+    source_index_id: str,
+    source_fingerprint: str,
+    route_id: str,
+    route_model: str,
+    route_dims: int,
+    embedding_input_schema: str,
+    embedding_input_chars: int,
+    embedding_max_parts_per_chunk: int,
+    vector_row_id_schema: str,
+) -> dict:
+    return {
+        "schema": progress_schema,
+        "target_schema": target_schema,
+        "method": method,
+        "source_index": source_index_id,
+        "source_fingerprint": source_fingerprint,
+        "route": route_id,
+        "model": route_model,
+        "embedding_dimensions": _int_or_zero(route_dims),
+        "embedding_input_schema": embedding_input_schema,
+        "embedding_input_chars": _int_or_zero(embedding_input_chars),
+        "embedding_max_parts_per_chunk": _int_or_zero(embedding_max_parts_per_chunk),
+        "vector_row_id_schema": vector_row_id_schema,
+    }
+
+
+def embedding_vector_progress_id(progress_key: dict) -> str:
+    data = json.dumps(progress_key, sort_keys=True).encode("utf-8")
+    return "embedding-" + hashlib.sha256(data).hexdigest()[:16]
+
+
+def embedding_vector_progress_matches(progress: dict, progress_key: dict) -> bool:
+    if not isinstance(progress, dict) or not isinstance(progress_key, dict):
+        return False
+    source = progress.get("source_index") if isinstance(progress.get("source_index"), dict) else {}
+    route = progress.get("embedding_route") if isinstance(progress.get("embedding_route"), dict) else {}
+    return (
+        progress.get("schema") == progress_key.get("schema")
+        and progress.get("method") == progress_key.get("method")
+        and progress.get("target_schema") == progress_key.get("target_schema")
+        and str(source.get("id") or "") == str(progress_key.get("source_index") or "")
+        and str(source.get("fingerprint") or "") == str(progress_key.get("source_fingerprint") or "")
+        and str(route.get("catalog_route") or "") == str(progress_key.get("route") or "")
+        and str(route.get("model") or "") == str(progress_key.get("model") or "")
+        and _int_or_zero(route.get("embedding_dimensions")) == _int_or_zero(progress_key.get("embedding_dimensions"))
+        and progress.get("embedding_input_schema") == progress_key.get("embedding_input_schema")
+        and _int_or_zero(progress.get("embedding_input_chars")) == _int_or_zero(progress_key.get("embedding_input_chars"))
+        and _int_or_zero(progress.get("embedding_max_parts_per_chunk"))
+        == _int_or_zero(progress_key.get("embedding_max_parts_per_chunk"))
+        and progress.get("vector_row_id_schema") == progress_key.get("vector_row_id_schema")
+    )
 
 
 def vector_row_plan(kind: str, rows: int, dims: int, *, source: str, invalidates_on: list[str]) -> dict:
