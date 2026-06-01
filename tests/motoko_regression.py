@@ -123,13 +123,35 @@ def test_atomic_write_uses_unique_temp_paths_under_concurrency(m):
         barrier = threading.Barrier(8)
         lock = threading.Lock()
         errors: list[str] = []
-        original_write_text = pathlib.Path.write_text
+        temp_names: list[str] = []
+        original_named_temporary_file = m.atomic_write.__globals__["tempfile"].NamedTemporaryFile
 
-        def patched_write_text(self, text, *args, **kwargs):
-            result = original_write_text(self, text, *args, **kwargs)
-            if self == path.with_suffix(path.suffix + ".tmp"):
-                barrier.wait(timeout=5)
-            return result
+        def patched_named_temporary_file(*args, **kwargs):
+            context = original_named_temporary_file(*args, **kwargs)
+
+            class BarrierWriter:
+                def __enter__(self):
+                    fh = context.__enter__()
+                    with lock:
+                        temp_names.append(fh.name)
+
+                    class FileProxy:
+                        name = fh.name
+
+                        def write(self, text):
+                            result = fh.write(text)
+                            barrier.wait(timeout=5)
+                            return result
+
+                        def __getattr__(self, name):
+                            return getattr(fh, name)
+
+                    return FileProxy()
+
+                def __exit__(self, *exc_info):
+                    return context.__exit__(*exc_info)
+
+            return BarrierWriter()
 
         def writer(worker: int) -> None:
             try:
@@ -138,7 +160,7 @@ def test_atomic_write_uses_unique_temp_paths_under_concurrency(m):
                 with lock:
                     errors.append(f"{type(exc).__name__}: {exc}")
 
-        pathlib.Path.write_text = patched_write_text
+        m.atomic_write.__globals__["tempfile"].NamedTemporaryFile = patched_named_temporary_file
         try:
             threads = [threading.Thread(target=writer, args=(idx,)) for idx in range(8)]
             for thread in threads:
@@ -147,10 +169,12 @@ def test_atomic_write_uses_unique_temp_paths_under_concurrency(m):
                 thread.join(timeout=10)
             stuck = [thread.name for thread in threads if thread.is_alive()]
         finally:
-            pathlib.Path.write_text = original_write_text
+            m.atomic_write.__globals__["tempfile"].NamedTemporaryFile = original_named_temporary_file
 
         assert stuck == []
         assert errors == []
+        assert len(temp_names) == 8
+        assert len(set(temp_names)) == 8
         data = json.loads(path.read_text(encoding="utf-8"))
         assert isinstance(data.get("worker"), int)
         leftovers = list(path.parent.glob(f".{path.name}.*.tmp")) + list(path.parent.glob(f"{path.name}.tmp"))
