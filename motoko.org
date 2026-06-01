@@ -1,5 +1,11 @@
 Motoko org file
 * do
+** hermes compile
+and other such hermes features. consider including
+
+consider also adding the "ai pitfalls" learnings from project Vicar
+
+and also use guidance from AI Andrew Ng.
 ** add effort levels to motoko, like in codex
 low, medium, high, xhigh
 ** test goal loops
