@@ -366,8 +366,12 @@ Current progress on this backlog:
   newly built index, saves the conversation, and refreshes the catalog from the
   TUI event handler when the job completes. `/sources` fallback for attached
   index context now reports current evidence/vector artifact ids, row counts,
-  freshness, and vector refresh labels from live state. The next improvement is
-  checking any remaining TUI-only cached surfaces after real usage exposes them.
+  freshness, and vector refresh labels from live state. It also resyncs
+  attached index records before rendering when no answer sources have been
+  recorded yet, so a newly materialized same-family index can appear in source
+  inspection without needing a chat prompt path or TUI restart. The next
+  improvement is checking any remaining TUI-only cached surfaces after real
+  usage exposes them.
 - Vector refresh diagnostics now expose content-free mode/cause labels such as
   `full missing`, `resumed checkpoint`, `incremental source-change`, and
   `rebuild schema`, plus reuse/new row counts, durable elapsed time, and ETA.

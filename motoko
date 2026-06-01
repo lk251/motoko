@@ -19345,6 +19345,7 @@ def model_route_manager() -> ModelRouteManager:
 
 
 def attached_context_sources(conv: dict) -> list[dict]:
+    sync_attached_indexes_to_latest(conv)
     project_roots = active_project_roots(conv)
     result = make_retrieval_service().render_attached_context(
         scoped_context_items(conv.get("context_items", []), project_roots),

@@ -10657,6 +10657,80 @@ def test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up(m):
             os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
 
 
+def test_sources_fallback_resyncs_attached_index_to_latest(m):
+    old_cwd = os.getcwd()
+    old_evidence = os.environ.get("MOTOKO_EVIDENCE_RETRIEVAL")
+    old_vector = os.environ.get("MOTOKO_VECTOR_RETRIEVAL")
+    try:
+        os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
+        os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            source = docs / "logbook.org"
+            source.write_text("* [2026-05-24 Sun 09:00]\n** log\nFresh sources fallback note.\n", encoding="utf-8")
+            m.add_allowed_dir(str(docs))
+            os.chdir(docs)
+            base = {
+                "name": "docs",
+                "root": str(docs.resolve()),
+                "glob": m.AUTO_INDEX_GLOB,
+                "files": [
+                    {
+                        "path": str(source.resolve()),
+                        "source_fingerprint": m.source_fingerprint(source),
+                        "summary": "Daily logbook entries.",
+                    }
+                ],
+            }
+            old_index = {
+                **base,
+                "id": "20260524-010000-oldsrc",
+                "created": "2026-05-24T01:00:00+00:00",
+                "corpus_summary": "old sources summary",
+                "files": [
+                    {
+                        **base["files"][0],
+                        "chunks": [{"chunk": 1, "summary": "Old chunk.", "content": "Old sources fallback note."}],
+                    }
+                ],
+            }
+            new_index = {
+                **base,
+                "id": "20260524-020000-newsrc",
+                "created": "2026-05-24T02:00:00+00:00",
+                "corpus_summary": "new sources summary",
+                "files": [
+                    {
+                        **base["files"][0],
+                        "chunks": [{"chunk": 1, "summary": "Fresh chunk.", "content": "Fresh sources fallback note."}],
+                    }
+                ],
+            }
+            m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
+            m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
+            conv = m.new_conversation("Sources fallback freshness")
+            conv["context_items"] = [m.context_item_from_index(old_index)]
+            m.save_conversation(conv)
+
+            text = m.format_conversation_sources(conv)
+
+            assert conv["context_items"][0]["id"] == new_index["id"]
+            assert "No recorded sources for the last answer yet. Attached context:" in text
+            assert "20260524-020000-newsrc" in text
+            assert "20260524-010000-oldsrc" not in text
+    finally:
+        os.chdir(old_cwd)
+        if old_evidence is None:
+            os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = old_evidence
+        if old_vector is None:
+            os.environ.pop("MOTOKO_VECTOR_RETRIEVAL", None)
+        else:
+            os.environ["MOTOKO_VECTOR_RETRIEVAL"] = old_vector
+
+
 def test_sync_attached_context_refreshes_topic_and_dossier_metadata(m):
     with isolated_state():
         topic = {
@@ -15538,6 +15612,7 @@ def main() -> int:
         test_system_prompt_uses_context_package_for_plan,
         test_prompt_context_resyncs_attached_index_to_newer_completed_index,
         test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up,
+        test_sources_fallback_resyncs_attached_index_to_latest,
         test_sync_attached_context_refreshes_topic_and_dossier_metadata,
         test_prompt_context_filters_attached_artifacts_to_current_project,
         test_project_scope_filters_topic_reuse_before_attachment,
