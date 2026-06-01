@@ -103,7 +103,9 @@ from motoko_core.input_edit import (  # noqa: E402
     seed_input_history_from_messages,
 )
 from motoko_core.index_storage import (  # noqa: E402
+    duplicate_reference_target_report as core_duplicate_reference_target_report,
     format_index_storage_audit,
+    index_storage_audit_report as core_index_storage_audit_report,
 )
 from motoko_core.code_intel import (  # noqa: E402
     build_code_map,
@@ -12359,21 +12361,10 @@ def index_storage_audit(*, cancel_event=None) -> dict:
         row["superseded"] = partial_index_superseded(partial, indexes)
         rows.append(row)
 
-    missing_duplicate_refs = []
-    duplicate_reference_bytes_with_target = 0
     for ref in duplicate_refs:
         raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-        digest = ref.get("content_sha256", "")
-        targets = [
-            target
-            for target in stored_by_digest.get(digest, [])
-            if target.get("index_id") != ref.get("index_id")
-            and target.get("kind") == "index"
-        ]
-        if targets:
-            duplicate_reference_bytes_with_target += safe_int(ref.get("logical_content_bytes"))
-        else:
-            missing_duplicate_refs.append(ref)
+    duplicate_reference_report = core_duplicate_reference_target_report(duplicate_refs, stored_by_digest)
+    missing_duplicate_refs = duplicate_reference_report["missing_duplicate_targets"]
 
     orphan_files = []
     for data_dir in indexes_dir().glob("*.chunks"):
@@ -12390,11 +12381,6 @@ def index_storage_audit(*, cancel_event=None) -> dict:
                 continue
             orphan_files.append({"path": str(path), "bytes": path_size(path)})
 
-    completed_rows = [row for row in rows if row.get("kind") == "index"]
-    logical_bytes = sum(safe_int(row.get("logical_content_bytes")) for row in completed_rows)
-    physical_bytes = sum(safe_int(row.get("stored_content_bytes")) for row in rows)
-    unique_stored_bytes = sum(unique_digest_bytes.values())
-    stored_body_duplicates = sum(max(0, len(locations) - 1) for locations in stored_by_digest.values())
     older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
     stale_superseded_indexes = index_cleanup_candidates(indexes)
     source_lifecycle_plans = []
@@ -12423,37 +12409,22 @@ def index_storage_audit(*, cancel_event=None) -> dict:
         missing_duplicate_targets=missing_duplicate_refs,
         source_lifecycle_plans=source_lifecycle_plans,
     )
-    return {
-        "schema": INDEX_STORAGE_AUDIT_SCHEMA_VERSION,
-        "created": now(),
-        "index_count": len(indexes),
-        "latest_index_families": len(latest_ids),
-        "older_complete_indexes": len(older_indexes),
-        "partial_count": len(partials),
-        "resumable_partial_count": len(resumable_partial_ids),
-        "superseded_partial_count": len(superseded_partials),
-        "total_chunks": sum(safe_int(row.get("chunks")) for row in completed_rows),
-        "stored_chunks": sum(safe_int(row.get("stored_chunks")) for row in completed_rows),
-        "duplicate_reference_chunks": sum(safe_int(row.get("duplicate_reference_chunks")) for row in completed_rows),
-        "stored_body_duplicates": stored_body_duplicates,
-        "unique_stored_bodies": len(unique_digest_bytes),
-        "logical_content_bytes": logical_bytes,
-        "physical_stored_content_bytes": physical_bytes,
-        "unique_stored_content_bytes": unique_stored_bytes,
-        "duplicate_reference_bytes": sum(safe_int(row.get("duplicate_reference_bytes")) for row in completed_rows),
-        "duplicate_reference_bytes_with_target": duplicate_reference_bytes_with_target,
-        "estimated_dedup_saved_bytes": duplicate_reference_bytes_with_target,
-        "missing_duplicate_target_count": len(missing_duplicate_refs),
-        "missing_stored_chunk_count": sum(safe_int(row.get("missing_stored_chunks")) for row in rows),
-        "orphan_chunk_file_count": len(orphan_files),
-        "orphan_chunk_file_bytes": sum(item.get("bytes", 0) for item in orphan_files),
-        "rows": rows,
-        "missing_duplicate_targets": missing_duplicate_refs[:50],
-        "orphan_chunk_files": orphan_files[:50],
-        "source_lifecycle_plans": source_lifecycle_plans[:50],
-        "safe_cleanup": cleanup_sections["safe_cleanup"],
-        "blocked_cleanup": cleanup_sections["blocked_cleanup"],
-    }
+    return core_index_storage_audit_report(
+        created=now(),
+        indexes=indexes,
+        partials=partials,
+        rows=rows,
+        latest_ids=latest_ids,
+        resumable_partial_ids=resumable_partial_ids,
+        superseded_partials=superseded_partials,
+        older_indexes=older_indexes,
+        unique_digest_bytes=unique_digest_bytes,
+        stored_by_digest=stored_by_digest,
+        duplicate_reference_report=duplicate_reference_report,
+        orphan_files=orphan_files,
+        source_lifecycle_plans=source_lifecycle_plans,
+        cleanup_sections=cleanup_sections,
+    )
 
 
 def index_is_persisted(index: dict) -> bool:

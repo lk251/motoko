@@ -1661,6 +1661,10 @@ Motoko self-code checkpoint, 2026-05-31:
   and filesystem authority, but not the report-input fanout policy. The
   index-storage audit source-lifecycle summary now reuses that service-owned
   orchestration instead of carrying a parallel root-facade plan builder.
+- Index-storage audit report assembly has moved into `motoko_core.index_storage`
+  for duplicate-reference target analysis and aggregate audit fields. Root code
+  still owns filesystem scans, cancellation checkpoints, source lifecycle
+  callbacks, and cleanup materialization authority.
 - Foreground cancellation coverage has expanded beyond active chat answers:
   evidence build/refresh, index cleanup, source-lifecycle reports, and
   `bg-now` now receive cooperative cancel events in both CLI and slash-command

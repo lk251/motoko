@@ -64,6 +64,10 @@ from motoko_core.artifact_lifecycle import (
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
 from motoko_core.evals import worker_model_eval_fixtures as worker_model_eval_fixtures_core
+from motoko_core.index_storage import (
+    duplicate_reference_target_report as duplicate_reference_target_report_core,
+    index_storage_audit_report as index_storage_audit_report_core,
+)
 from motoko_core.skill_curator import (
     curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
     format_skill_curator_report as format_skill_curator_report_core,
@@ -7441,6 +7445,78 @@ def test_index_storage_audit_reports_duplicates_and_cleanup_plan(m):
         assert "safe cleanup plan:" in text
 
 
+def test_index_storage_core_builds_duplicate_and_summary_report(_m=None):
+    duplicate_refs = [
+        {
+            "index_id": "new-index",
+            "content_sha256": "same",
+            "logical_content_bytes": 17,
+            "path": "/tmp/new.org",
+            "chunk": 1,
+        },
+        {
+            "index_id": "broken-index",
+            "content_sha256": "missing",
+            "logical_content_bytes": 11,
+            "path": "/tmp/broken.org",
+            "chunk": 2,
+        },
+    ]
+    stored_by_digest = {
+        "same": [
+            {"index_id": "old-index", "kind": "index", "bytes": 17},
+            {"index_id": "new-index", "kind": "index", "bytes": 17},
+        ]
+    }
+    duplicate_report = duplicate_reference_target_report_core(duplicate_refs, stored_by_digest)
+    audit = index_storage_audit_report_core(
+        created="2026-06-01T00:00:00+00:00",
+        indexes=[{"id": "old-index"}, {"id": "new-index"}],
+        partials=[{"id": "partial-old"}],
+        rows=[
+            {
+                "kind": "index",
+                "id": "old-index",
+                "chunks": 1,
+                "stored_chunks": 1,
+                "logical_content_bytes": 17,
+                "stored_content_bytes": 17,
+            },
+            {
+                "kind": "index",
+                "id": "new-index",
+                "chunks": 1,
+                "duplicate_reference_chunks": 1,
+                "duplicate_reference_bytes": 17,
+                "logical_content_bytes": 17,
+            },
+            {"kind": "partial", "id": "partial-old", "missing_stored_chunks": 1},
+        ],
+        latest_ids={"new-index"},
+        resumable_partial_ids={"partial-old"},
+        superseded_partials=[{"id": "partial-old"}],
+        older_indexes=[{"id": "old-index"}],
+        unique_digest_bytes={"same": 17},
+        stored_by_digest=stored_by_digest,
+        duplicate_reference_report=duplicate_report,
+        orphan_files=[{"path": "/tmp/orphan.txt", "bytes": 5}],
+        source_lifecycle_plans=[{"index": "old-index", "recommended_action": "review"}],
+        cleanup_sections={
+            "safe_cleanup": [{"kind": "orphan-chunk-files", "count": 1, "bytes": 5}],
+            "blocked_cleanup": [{"kind": "older-complete-indexes", "count": 1}],
+        },
+    )
+
+    assert duplicate_report["duplicate_reference_bytes_with_target"] == 17
+    assert duplicate_report["missing_duplicate_targets"][0]["index_id"] == "broken-index"
+    assert audit["schema"] == "index-storage-audit-v1"
+    assert audit["estimated_dedup_saved_bytes"] == 17
+    assert audit["missing_duplicate_target_count"] == 1
+    assert audit["missing_stored_chunk_count"] == 1
+    assert audit["orphan_chunk_file_bytes"] == 5
+    assert audit["safe_cleanup"][0]["kind"] == "orphan-chunk-files"
+
+
 def test_index_storage_audit_honors_cancel_event(m):
     with isolated_state():
         event = threading.Event()
@@ -14319,6 +14395,7 @@ def main() -> int:
         test_retrieval_service_builds_sufficiency_expansion,
         test_prompt_context_runs_bounded_retrieval_sufficiency_pass,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
+        test_index_storage_core_builds_duplicate_and_summary_report,
         test_index_storage_audit_honors_cancel_event,
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,
         test_vector_plan_reports_storage_and_readiness_gates,

@@ -395,6 +395,11 @@ Current progress on this backlog:
   owns the report-input fanout itself. Index-storage audit source-lifecycle rows
   now use the same service-owned orchestration path instead of rebuilding a
   parallel plan in the root facade.
+- Index-storage audit ownership has moved another pure slice inward:
+  `motoko_core.index_storage` now owns duplicate-reference target analysis and
+  final audit dictionary assembly. The root facade still owns filesystem
+  scanning, cancellation checkpoints, source lifecycle callbacks, and cleanup
+  materialization authority.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw
