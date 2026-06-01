@@ -90,6 +90,7 @@ from motoko_core.vector_store import (
     embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
     embedding_vector_rows_by_id as embedding_vector_rows_by_id_core,
     embedding_vector_store_record as embedding_vector_store_record_core,
+    format_vector_progress_phase as format_vector_progress_phase_core,
     lexical_sparse_vector as lexical_sparse_vector_core,
     reusable_embedding_vector_row as reusable_embedding_vector_row_core,
     vector_plan_readiness_gates as vector_plan_readiness_gates_core,
@@ -1489,7 +1490,8 @@ def test_phase_timer_key_ignores_progress_counters(m):
 
 
 def test_vector_progress_phase_is_content_free_and_finalizing(m):
-    line = m.format_vector_progress_phase(
+    assert m.format_vector_progress_phase is format_vector_progress_phase_core
+    line = format_vector_progress_phase_core(
         completed_batches=2,
         total_batches=5,
         active_parallelism=32,
@@ -1501,7 +1503,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     assert "orgfiles" not in line
     assert "logbook" not in line
 
-    incremental = m.format_vector_progress_phase(
+    incremental = format_vector_progress_phase_core(
         completed_batches=0,
         total_batches=1,
         active_parallelism=32,
@@ -1513,7 +1515,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert incremental == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
 
-    full = m.format_vector_progress_phase(
+    full = format_vector_progress_phase_core(
         completed_batches=0,
         total_batches=5,
         active_parallelism=32,
@@ -1525,7 +1527,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
 
-    resumed = m.format_vector_progress_phase(
+    resumed = format_vector_progress_phase_core(
         completed_batches=2,
         total_batches=5,
         active_parallelism=32,
@@ -1540,7 +1542,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert resumed == "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 elapsed 5m00s eta 2m00s"
 
-    finalizing = m.format_vector_progress_phase(
+    finalizing = format_vector_progress_phase_core(
         completed_batches=5,
         total_batches=5,
         active_parallelism=32,

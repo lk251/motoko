@@ -8,7 +8,7 @@ import json
 import re
 
 from motoko_core.retrieval import query_path_match_boost, score_text, token_counts
-from motoko_core.text import compact_text, compact_text_middle
+from motoko_core.text import compact_text, compact_text_middle, human_duration
 
 DEFAULT_LEXICAL_VECTOR_DIMS = 256
 VECTOR_METHOD_AUTO = "auto"
@@ -46,6 +46,47 @@ def embedding_refresh_mode(
     if previous_store_row_count or refresh_cause in {"schema", "route"}:
         return "rebuild"
     return "full"
+
+
+def format_vector_progress_phase(
+    *,
+    completed_batches: int,
+    total_batches: int,
+    active_parallelism: int,
+    completed_rows: int,
+    total_rows: int,
+    eta_seconds: int | None = None,
+    elapsed_seconds: int | None = None,
+    state: str = "running",
+    reused_rows: int = 0,
+    pending_rows: int | None = None,
+    refresh_mode: str = "",
+    refresh_cause: str = "",
+) -> str:
+    state = str(state or "running").strip()
+    elapsed_text = f"elapsed {human_duration(elapsed_seconds)} " if elapsed_seconds is not None else ""
+    if state == "finalizing":
+        return f"bg-heavy: vectorizing finalizing rows {completed_rows}/{total_rows} {elapsed_text}".strip()
+    eta_text = f"eta {human_duration(eta_seconds)}" if eta_seconds is not None else "eta ?"
+    batch_text = f"batch {completed_batches}/{total_batches}" if total_batches else "batch 0/0"
+    refresh_text = ""
+    refresh_mode = str(refresh_mode or "").strip()
+    refresh_cause = str(refresh_cause or "").strip()
+    new_rows = max(0, _int_or_zero(total_rows) - _int_or_zero(reused_rows)) if pending_rows is None else max(0, _int_or_zero(pending_rows))
+    if reused_rows:
+        refresh_text = f"{refresh_mode or 'incremental'}"
+        if refresh_cause:
+            refresh_text += f" {refresh_cause}"
+        refresh_text += f" reuse {max(0, _int_or_zero(reused_rows))} new {new_rows}"
+    elif refresh_mode:
+        refresh_text = refresh_mode
+        if refresh_cause:
+            refresh_text += f" {refresh_cause}"
+        refresh_text += f" new {new_rows}"
+    return (
+        f"bg-heavy: vectorizing(model) {refresh_text} {batch_text} parallel {max(1, _int_or_zero(active_parallelism) or 1)} "
+        f"rows {completed_rows}/{total_rows} {elapsed_text}{eta_text}"
+    ).replace("  ", " ")
 
 
 def embedding_candidate_batches(candidates, batch_size: int) -> list[tuple[int, list]]:

@@ -448,6 +448,10 @@ Current progress on this backlog:
   `motoko_core.vector_store`, including checkpoint precedence, reused-row
   counts, superseded-row counts, initial completed rows, pending rows, and
   dimension inference.
+- Embedding vector progress-line formatting is now core-owned too, so
+  content-free refresh mode, reuse/new row counts, elapsed time, ETA, and
+  finalizing status are tested with the vector refresh contract rather than
+  hidden in the root facade.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted
