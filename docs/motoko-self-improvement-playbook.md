@@ -427,6 +427,11 @@ Current progress on this backlog:
   progress-file paths, elapsed/ETA callbacks, pause/resume writes, and model
   batch orchestration, but the schema/route/source/input rules and checkpoint
   dictionary shape are now pure and regression-tested.
+- Embedding vector store record assembly now also lives in
+  `motoko_core.vector_store`. The root facade still owns model route calls,
+  progress callbacks, atomic persistence, and cancellation, but the final
+  vector-store provenance/reuse/source/route dictionary shape is pure and
+  regression-tested.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted
