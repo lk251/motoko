@@ -73,6 +73,7 @@ from motoko_core.index_storage import (
     index_storage_scan_record as index_storage_scan_record_core,
     index_storage_scan_records as index_storage_scan_records_core,
 )
+from motoko_core.memory import memory_rows_without_conversation as memory_rows_without_conversation_core
 from motoko_core.skill_curator import (
     curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
     format_skill_curator_report as format_skill_curator_report_core,
@@ -6417,6 +6418,23 @@ def test_conversation_delete_removes_owned_derived_artifacts(m):
         assert m.read_maintenance_state() is None
         assert m.read_study_state() is None
         assert not m.context_catalog_path().exists()
+
+
+def test_memory_rows_without_conversation_is_service_owned(_m):
+    rows = [
+        {"text": "delete direct", "conversation_id": "delete-me"},
+        {"id": "nested-delete", "text": "delete nested", "source_conversation_ids": ["delete-me"]},
+        {"id": "keep", "text": "keep", "conversation_id": "keep-me", "importance": "9"},
+        "not a memory row",
+    ]
+
+    kept, removed = memory_rows_without_conversation_core(rows, "delete-me")
+
+    assert removed == 2
+    assert [row["id"] for row in kept] == ["keep"]
+    assert kept[0]["importance"] == 5
+    assert kept[0]["pinned"] is False
+    assert kept[0]["tags"] == []
 
 
 def test_core_memory_report_formatters_are_injectable(m):
@@ -15125,6 +15143,7 @@ def main() -> int:
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
         test_conversation_delete_removes_owned_derived_artifacts,
+        test_memory_rows_without_conversation_is_service_owned,
         test_list_conversations_omits_empty_chats_but_keeps_queued_prompts,
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,

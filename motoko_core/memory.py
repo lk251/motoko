@@ -6,6 +6,7 @@ import json
 import pathlib
 import uuid
 
+from motoko_core.conversations import json_references_conversation
 from motoko_core.retrieval import score_text, token_counts
 from motoko_core.state import atomic_write, read_jsonl
 
@@ -69,6 +70,18 @@ def load_memory_rows(
         for idx, row in enumerate(read_memory_rows_file(path), 1)
     ]
     return rows[-limit:]
+
+
+def memory_rows_without_conversation(raw_rows: list[dict], conversation_id: str) -> tuple[list[dict], int]:
+    """Normalize memory rows and remove rows that reference a conversation."""
+
+    normalized = [
+        normalize_memory_row(row, idx)
+        for idx, row in enumerate(raw_rows or [], 1)
+        if isinstance(row, dict)
+    ]
+    kept = [row for row in normalized if not json_references_conversation(row, conversation_id)]
+    return kept, len(normalized) - len(kept)
 
 
 def write_memory_rows_file(path: pathlib.Path, rows: list[dict]) -> None:

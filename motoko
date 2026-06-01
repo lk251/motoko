@@ -222,6 +222,7 @@ from motoko_core.memory import (  # noqa: E402
     memory_query_text,
     memory_relevance,
     memory_id,
+    memory_rows_without_conversation as core_memory_rows_without_conversation,
     memory_tags,
     normalize_memory_row as core_normalize_memory_row,
     rank_memory_rows,
@@ -410,7 +411,6 @@ from motoko_core.conversations import (  # noqa: E402
     conversation_recall_text as core_conversation_recall_text,
     conversation_transcript_for_model as core_conversation_transcript_for_model,
     delete_json_artifacts_referencing_conversation,
-    filter_json_rows_without_conversation,
     format_conversation_delete_report,
     list_conversation_records,
     make_conversation_record,
@@ -2879,8 +2879,7 @@ def delete_conversation_then_new(conv: dict) -> tuple[dict, dict]:
 
 
 def cleanup_memory_rows_for_conversation(conversation_id: str) -> int:
-    rows = [normalize_memory_row(row, idx) for idx, row in enumerate(read_memory_rows(), 1)]
-    kept_memories, removed = filter_json_rows_without_conversation(rows, conversation_id)
+    kept_memories, removed = core_memory_rows_without_conversation(read_memory_rows(), conversation_id)
     if removed:
         write_memory_rows(kept_memories)
     return removed

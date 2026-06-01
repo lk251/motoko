@@ -496,7 +496,10 @@ Current progress on this backlog:
   state cleanup for skill suggestions, profile state, maintenance state, study
   state, and the context catalog is also declared by the lifecycle service,
   with the root facade only resolving realm-local paths and performing the
-  guarded user-state mutation. Feedback targeting now pairs the rated
+  guarded user-state mutation. Memory-row cleanup for deleted conversations now
+  uses a memory-core helper for normalization and conversation-reference
+  filtering, leaving root to only read and rewrite the realm-local memory file.
+  Feedback targeting now pairs the rated
   assistant answer with the nearest prior user prompt, so `/up` or `/down`
   used while a newer prompt is preparing does not attach the wrong query to
   the private feedback fixture.
