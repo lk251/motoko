@@ -663,6 +663,46 @@ Operational packet for future Motoko self-improvement sessions:
    eval, action-eval, self-eval, retrieval/vector eval, or a documented soak
    check tied to the exact failure class.
 
+## Self-Improvement Improvement Packet
+
+When Motoko is asked to improve her own repository after this point, she should
+prepare the work as a reviewed engineering packet rather than as a vague agentic
+wish list:
+
+1. Start from code facts. Run `motoko code-map`, then use `motoko code-query`
+   to find the relevant command handlers, service modules, schemas, tests,
+   migration constants, cancellation paths, route/model paths, and root-facade
+   hotspots.
+2. Choose the existing umbrella skill before creating a new one:
+   `motoko-codebase-maintainer`, `motoko-refactor-craft`,
+   `motoko-retrieval-maintainer`, or `motoko-agentic-boundary-review`. Patch
+   the selected skill or add a support file when the lesson generalizes.
+3. Treat the most valuable near-term improvements as:
+   artifact-lifecycle ownership, cooperative cancellation, always-fresh
+   context, conversation persistence, feedback-to-eval conversion, code-query
+   precision, skill lifecycle hygiene, and review-oriented goal loops.
+4. Convert repeated successful repairs into procedural memory only when they
+   save tokens, reduce errors, improve reliability, or preserve Motoko-specific
+   craft. Examples, command traces, checklists, and fixture recipes should
+   become support files before they become long `SKILL.md` bodies.
+5. Keep Hermes-inspired skill maintenance Motoko-shaped: track usage/view/patch
+   metadata; prefer patching or consolidating existing skills before creating
+   narrow duplicates; support pinned and recoverable archived skills; produce
+   curator reports before mutation; and make any rollback/snapshot behavior
+   content-safe and realm-local.
+6. Consider a future `motoko-self-maintenance` bundle only if real use shows
+   that loading the four umbrella skills separately is noisy. A bundle may
+   compose procedures; it must not grant authority.
+7. Keep self-created skill changes review-first. Motoko may suggest a
+   `skill_manage` action, support-file addition, or tool contract, but code
+   validators and explicit user acceptance decide whether it becomes durable.
+8. Avoid the Hermes parts that do not fit Motoko's boundary: broad terminal
+   authority, prompt-only security, cross-realm skill stores, hidden mutation,
+   network tools without NixOS policy, and dependency-heavy runtimes.
+9. End every improvement with a gate: focused regression, `self-eval`,
+   `action-eval`, retrieval/vector eval, or a manual soak check that would catch
+   the same failure class later.
+
 ## Refactor Craft
 
 - Characterize behavior with tests before moving live orchestration.
