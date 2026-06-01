@@ -2,7 +2,97 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from motoko_core.retrieval import score_text, token_counts
+
+
+def memory_dossier_source_material_core(
+    *,
+    memories: list[dict],
+    conversations: list[dict],
+    profile: dict | None,
+    excerpt_chars: int,
+    max_source_chars: int,
+    memory_default_importance: int,
+    conversation_text: Callable[[dict], str],
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
+    """Build bounded source rows and prompt blocks for a memory dossier."""
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    source_memories: list[dict] = []
+    source_conversations: list[dict] = []
+    blocks: list[str] = []
+    used = 0
+
+    maybe_cancel()
+    if profile:
+        profile_text = str(profile.get("text", ""))[:excerpt_chars]
+        block = f"Profile dossier updated {profile.get('updated', '')}:\n{profile_text}"
+        blocks.append(block)
+        used += len(block)
+
+    for row in memories or []:
+        maybe_cancel()
+        if used >= max_source_chars:
+            break
+        text = str(row.get("text", ""))[:excerpt_chars]
+        item = {
+            "id": row.get("id", ""),
+            "source": row.get("source", "unknown"),
+            "conversation_id": row.get("conversation_id", ""),
+            "created": row.get("created", ""),
+            "importance": row.get("importance", memory_default_importance),
+            "pinned": bool(row.get("pinned")),
+            "score": row.get("_score", 0),
+            "matched_terms": row.get("_matched_terms", 0),
+            "excerpt": text,
+        }
+        source_memories.append(item)
+        block = (
+            f"Memory {item['id']} importance={item['importance']} "
+            f"score={item['score']} match={item['matched_terms']}:\n{text}"
+        )
+        blocks.append(block)
+        used += len(block)
+
+    for row in conversations or []:
+        maybe_cancel()
+        if used >= max_source_chars:
+            break
+        recall = conversation_text(row)[:excerpt_chars]
+        item = {
+            "id": row.get("id", ""),
+            "title": row.get("title", "Untitled"),
+            "created": row.get("created", ""),
+            "updated": row.get("updated", row.get("created", "")),
+            "branch": row.get("branch", ""),
+            "score": row.get("_recall_score", 0),
+            "matched_terms": row.get("_matched_terms", 0),
+            "selection": row.get("_selection_reasons", []),
+            "excerpt": recall,
+        }
+        source_conversations.append(item)
+        block = (
+            f"Conversation {item['id']} title={item['title']} "
+            f"updated={item['updated']} score={item['score']} "
+            f"selection={','.join(item['selection']) or '-'}:\n{recall}"
+        )
+        blocks.append(block)
+        used += len(block)
+
+    maybe_cancel()
+    return {
+        "source_memories": source_memories,
+        "source_conversations": source_conversations,
+        "blocks": blocks,
+        "source_chars": used,
+        "profile_used": bool(profile),
+    }
 
 
 def retrieve_from_dossier_core(dossier: dict, query: str, *, max_chars: int) -> tuple[str, list[dict]]:

@@ -91,6 +91,7 @@ from motoko_core.evals import (  # noqa: E402
 from motoko_core.dossiers import (  # noqa: E402
     format_dossier_report as format_dossier_report_core,
     format_dossiers_list,
+    memory_dossier_source_material_core,
     retrieve_from_dossier_core,
 )
 from motoko_core.input_edit import (  # noqa: E402
@@ -16225,65 +16226,23 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
         raise SystemExit("dossier needs saved memories, prior conversations, or a profile dossier")
 
     dossier_id = _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    source_memories = []
-    source_conversations = []
-    blocks = []
-    used = 0
-
-    raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
-    if profile:
-        profile_text = profile.get("text", "")[:MEMORY_DOSSIER_EXCERPT_CHARS]
-        blocks.append(f"Profile dossier updated {profile.get('updated', '')}:\n{profile_text}")
-        used += len(blocks[-1])
-
-    for row in memories:
-        raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
-        if used >= MEMORY_DOSSIER_MAX_SOURCE_CHARS:
-            break
-        text = row.get("text", "")[:MEMORY_DOSSIER_EXCERPT_CHARS]
-        item = {
-            "id": row.get("id", ""),
-            "source": row.get("source", "unknown"),
-            "conversation_id": row.get("conversation_id", ""),
-            "created": row.get("created", ""),
-            "importance": row.get("importance", MEMORY_DEFAULT_IMPORTANCE),
-            "pinned": bool(row.get("pinned")),
-            "score": row.get("_score", 0),
-            "matched_terms": row.get("_matched_terms", 0),
-            "excerpt": text,
-        }
-        source_memories.append(item)
-        block = (
-            f"Memory {item['id']} importance={item['importance']} "
-            f"score={item['score']} match={item['matched_terms']}:\n{text}"
-        )
-        blocks.append(block)
-        used += len(block)
-
-    for row in conversations:
-        raise_if_work_cancelled(cancel_event, "memory dossier interrupted by request", work_kind="dossier")
-        if used >= MEMORY_DOSSIER_MAX_SOURCE_CHARS:
-            break
-        recall = conversation_recall_text(row)[:MEMORY_DOSSIER_EXCERPT_CHARS]
-        item = {
-            "id": row.get("id", ""),
-            "title": row.get("title", "Untitled"),
-            "created": row.get("created", ""),
-            "updated": row.get("updated", row.get("created", "")),
-            "branch": row.get("branch", ""),
-            "score": row.get("_recall_score", 0),
-            "matched_terms": row.get("_matched_terms", 0),
-            "selection": row.get("_selection_reasons", []),
-            "excerpt": recall,
-        }
-        source_conversations.append(item)
-        block = (
-            f"Conversation {item['id']} title={item['title']} "
-            f"updated={item['updated']} score={item['score']} "
-            f"selection={','.join(item['selection']) or '-'}:\n{recall}"
-        )
-        blocks.append(block)
-        used += len(block)
+    source_material = memory_dossier_source_material_core(
+        memories=memories,
+        conversations=conversations,
+        profile=profile,
+        excerpt_chars=MEMORY_DOSSIER_EXCERPT_CHARS,
+        max_source_chars=MEMORY_DOSSIER_MAX_SOURCE_CHARS,
+        memory_default_importance=MEMORY_DEFAULT_IMPORTANCE,
+        conversation_text=conversation_recall_text,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "memory dossier interrupted by request",
+            work_kind="dossier",
+        ),
+    )
+    source_memories = source_material["source_memories"]
+    source_conversations = source_material["source_conversations"]
+    blocks = source_material["blocks"]
 
     print(
         f"Building memory dossier {dossier_id} from "
@@ -16329,7 +16288,7 @@ def build_memory_dossier(query: str, *, name: str | None = None, owner_conversat
             prompt_version=MEMORY_DOSSIER_SCHEMA_VERSION,
             source_sha256=sha256_hex(memory_source.encode("utf-8")),
         ),
-        "profile_used": bool(profile),
+        "profile_used": bool(source_material.get("profile_used")),
         "source_memory_count": len(source_memories),
         "source_conversation_count": len(source_conversations),
         "source_memories": source_memories,

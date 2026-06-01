@@ -507,7 +507,11 @@ Current progress on this backlog:
   source blocks, returns source ids, and honors injected cancellation while
   root only loads user-owned state and calls the profile model route. Project
   scope matching for profile dossiers is service-owned too; root supplies
-  conversation-root lookup and the project-root comparison callback.
+  conversation-root lookup and the project-root comparison callback. Memory
+  dossier source-material assembly now lives in `motoko_core.dossiers` as
+  well: the service formats bounded profile, memory, and conversation source
+  blocks, returns normalized source rows, and honors injected cancellation
+  while root owns ranking, model calls, and realm-local persistence.
   Feedback targeting now pairs the rated
   assistant answer with the nearest prior user prompt, so `/up` or `/down`
   used while a newer prompt is preparing does not attach the wrong query to

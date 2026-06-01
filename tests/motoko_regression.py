@@ -1536,6 +1536,87 @@ def test_core_dossier_retrieval_is_injectable(m):
     assert [source["kind"] for source in sources] == ["dossier", "dossier-memory", "dossier-memory", "dossier-conversation"]
 
 
+def test_core_memory_dossier_source_material_is_service_owned(m):
+    memories = [
+        {
+            "id": "mem-1",
+            "text": "Grounded retrieval matters.",
+            "source": "manual",
+            "conversation_id": "conv-1",
+            "created": "today",
+            "importance": 5,
+            "_score": 9,
+            "_matched_terms": 2,
+            "pinned": True,
+        }
+    ]
+    conversations = [
+        {
+            "id": "conv-1",
+            "title": "Retrieval chat",
+            "created": "today",
+            "updated": "later",
+            "branch": "main",
+            "_recall_score": 8,
+            "_matched_terms": 1,
+            "_selection_reasons": ["matched-snippet"],
+            "recall": "Conversation excerpt.",
+        }
+    ]
+    material = m.memory_dossier_source_material_core(
+        memories=memories,
+        conversations=conversations,
+        profile={"updated": "now", "text": "Profile note."},
+        excerpt_chars=100,
+        max_source_chars=1000,
+        memory_default_importance=3,
+        conversation_text=lambda row: row["recall"],
+    )
+
+    assert material["profile_used"] is True
+    assert material["source_memories"][0]["id"] == "mem-1"
+    assert material["source_memories"][0]["pinned"] is True
+    assert material["source_conversations"][0]["selection"] == ["matched-snippet"]
+    assert material["blocks"][0].startswith("Profile dossier updated now")
+    assert "Memory mem-1 importance=5 score=9 match=2" in material["blocks"][1]
+    assert "Conversation conv-1 title=Retrieval chat" in material["blocks"][2]
+
+    tiny = m.memory_dossier_source_material_core(
+        memories=memories,
+        conversations=conversations,
+        profile={"updated": "now", "text": "Profile note."},
+        excerpt_chars=100,
+        max_source_chars=1,
+        memory_default_importance=3,
+        conversation_text=lambda row: row["recall"],
+    )
+    assert len(tiny["blocks"]) == 1
+    assert tiny["source_memories"] == []
+    assert tiny["source_conversations"] == []
+
+    cancel_calls = {"count": 0}
+
+    def check_cancelled():
+        cancel_calls["count"] += 1
+        if cancel_calls["count"] >= 2:
+            raise RuntimeError("memory dossier material cancelled")
+
+    try:
+        m.memory_dossier_source_material_core(
+            memories=memories,
+            conversations=conversations,
+            profile=None,
+            excerpt_chars=100,
+            max_source_chars=1000,
+            memory_default_importance=3,
+            conversation_text=lambda row: row["recall"],
+            check_cancelled=check_cancelled,
+        )
+        raise AssertionError("memory dossier source material should honor cancellation")
+    except RuntimeError as exc:
+        assert "material cancelled" in str(exc)
+
+
 def test_spinner_and_input_wrapping(m):
     old_term = os.environ.get("TERM")
     old_spinner = os.environ.get("MOTOKO_SPINNER")
@@ -15266,6 +15347,9 @@ def main() -> int:
         test_core_profile_project_scope_matching_is_service_owned,
         test_core_profile_source_material_is_service_owned,
         test_memory_dossier,
+        test_core_dossier_formatters_are_injectable,
+        test_core_dossier_retrieval_is_injectable,
+        test_core_memory_dossier_source_material_is_service_owned,
         test_spinner_and_input_wrapping,
         test_phase_timer_key_ignores_progress_counters,
         test_generated_title,
