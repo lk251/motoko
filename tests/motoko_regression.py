@@ -74,6 +74,7 @@ from motoko_core.skill_curator import (
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 from motoko_core.vector_store import (
+    embedding_vector_progress_record as embedding_vector_progress_record_core,
     embedding_vector_progress_id as embedding_vector_progress_id_core,
     embedding_vector_progress_key as embedding_vector_progress_key_core,
     embedding_vector_progress_matches as embedding_vector_progress_matches_core,
@@ -7857,6 +7858,62 @@ def test_embedding_vector_progress_core_identity_and_matching(_m=None):
     assert not embedding_vector_progress_matches_core(stale_progress, progress_key)
 
 
+def test_embedding_vector_progress_record_core_shapes_resume_checkpoint(_m=None):
+    row = {"id": "row-1", "vector": [0.1, 0.2]}
+    progress = embedding_vector_progress_record_core(
+        progress_id="embedding-test",
+        created="2026-06-01T00:00:00+00:00",
+        updated="2026-06-01T00:01:00+00:00",
+        progress_schema="vector-progress-v1",
+        method="embedding-v1",
+        target_schema="vector-store-v2",
+        realm="mares",
+        source_index={
+            "id": "idx-1",
+            "name": "docs",
+            "root": "/tmp/docs",
+            "created": "2026-06-01T00:00:00+00:00",
+        },
+        source_fingerprint="fingerprint-1",
+        source_family_key="family-1",
+        source_default_glob="**/*",
+        route_info={"request_path": "/v1/embeddings", "max_parallel": 32},
+        route_id="embed-route",
+        route_model="embed-model",
+        route_dims="1024",
+        embedding_input_schema="embedding-input-v3",
+        embedding_input_chars="1800",
+        embedding_max_parts_per_chunk="12",
+        vector_row_id_schema="vector-row-id-v2",
+        embedding_batch_size="75",
+        embedding_requested_parallelism="32",
+        embedding_parallelism="16",
+        embedding_parallel_fallbacks=[{"from": 32, "to": 16}],
+        embedding_refresh_mode="resumed",
+        embedding_refresh_cause="checkpoint",
+        expected_rows="9603",
+        completed_rows="72",
+        checkpoint_reused_rows="72",
+        previous_store_reused_rows="0",
+        previous_store_row_count="0",
+        previous_store_superseded_rows="0",
+        elapsed_seconds=32,
+        eta_seconds=3600,
+        rows=[row],
+    )
+
+    assert progress["id"] == "embedding-test"
+    assert progress["source_index"]["family_key"] == "family-1"
+    assert progress["source_index"]["glob"] == "**/*"
+    assert progress["embedding_route"]["catalog_route"] == "embed-route"
+    assert progress["embedding_route"]["embedding_dimensions"] == 1024
+    assert progress["embedding_batch_size"] == 75
+    assert progress["embedding_parallelism"] == 16
+    assert progress["expected_rows"] == 9603
+    assert progress["completed_rows"] == 72
+    assert progress["rows"] == [row]
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14453,6 +14510,7 @@ def main() -> int:
         test_vector_query_core_scores_and_dedupes_rows,
         test_embedding_vector_row_core_preserves_evidence_and_reuse_rules,
         test_embedding_vector_progress_core_identity_and_matching,
+        test_embedding_vector_progress_record_core_shapes_resume_checkpoint,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

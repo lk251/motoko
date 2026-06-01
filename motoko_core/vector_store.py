@@ -84,6 +84,119 @@ def embedding_vector_progress_matches(progress: dict, progress_key: dict) -> boo
     )
 
 
+def embedding_vector_source_index_record(
+    index: dict,
+    *,
+    source_fingerprint: str,
+    family_key: str,
+    default_glob: str,
+) -> dict:
+    return {
+        "id": index.get("id", ""),
+        "name": index.get("name", ""),
+        "root": index.get("root", ""),
+        "created": index.get("created", ""),
+        "glob": index.get("glob") or default_glob,
+        "family_key": family_key,
+        "fingerprint": source_fingerprint,
+    }
+
+
+def embedding_vector_route_record(
+    route_info: dict,
+    *,
+    route_id: str,
+    route_model: str,
+    route_dims: int,
+) -> dict:
+    return {
+        "catalog_route": route_id,
+        "model": route_model,
+        "request_path": route_info.get("request_path", "/v1/embeddings"),
+        "embedding_dimensions": _int_or_zero(route_dims),
+        "max_parallel": route_info.get("max_parallel"),
+    }
+
+
+def embedding_vector_progress_record(
+    *,
+    progress_id: str,
+    created: str,
+    updated: str,
+    progress_schema: str,
+    method: str,
+    target_schema: str,
+    realm: str,
+    source_index: dict,
+    source_fingerprint: str,
+    source_family_key: str,
+    source_default_glob: str,
+    route_info: dict,
+    route_id: str,
+    route_model: str,
+    route_dims: int,
+    embedding_input_schema: str,
+    embedding_input_chars: int,
+    embedding_max_parts_per_chunk: int,
+    vector_row_id_schema: str,
+    embedding_batch_size: int,
+    embedding_requested_parallelism: int,
+    embedding_parallelism: int,
+    embedding_parallel_fallbacks: list[dict],
+    embedding_refresh_mode: str,
+    embedding_refresh_cause: str,
+    expected_rows: int,
+    completed_rows: int,
+    checkpoint_reused_rows: int,
+    previous_store_reused_rows: int,
+    previous_store_row_count: int,
+    previous_store_superseded_rows: int,
+    elapsed_seconds: int | None,
+    eta_seconds: int | None,
+    rows: list[dict],
+) -> dict:
+    return {
+        "schema": progress_schema,
+        "id": progress_id,
+        "created": created,
+        "updated": updated,
+        "method": method,
+        "target_schema": target_schema,
+        "realm": realm,
+        "source_index": embedding_vector_source_index_record(
+            source_index,
+            source_fingerprint=source_fingerprint,
+            family_key=source_family_key,
+            default_glob=source_default_glob,
+        ),
+        "embedding_route": embedding_vector_route_record(
+            route_info,
+            route_id=route_id,
+            route_model=route_model,
+            route_dims=route_dims,
+        ),
+        "embedding_input_schema": embedding_input_schema,
+        "embedding_input_chars": _int_or_zero(embedding_input_chars),
+        "embedding_max_parts_per_chunk": _int_or_zero(embedding_max_parts_per_chunk),
+        "vector_row_id_schema": vector_row_id_schema,
+        "embedding_batch_size": _int_or_zero(embedding_batch_size),
+        "embedding_requested_parallelism": _int_or_zero(embedding_requested_parallelism),
+        "embedding_parallelism": _int_or_zero(embedding_parallelism),
+        "embedding_parallel_fallbacks": embedding_parallel_fallbacks,
+        "embedding_refresh_mode": embedding_refresh_mode,
+        "embedding_refresh_cause": embedding_refresh_cause,
+        "expected_rows": _int_or_zero(expected_rows),
+        "completed_rows": _int_or_zero(completed_rows),
+        "checkpoint_reused_rows": _int_or_zero(checkpoint_reused_rows),
+        "previous_store_reused_rows": _int_or_zero(previous_store_reused_rows),
+        "previous_store_row_count": _int_or_zero(previous_store_row_count),
+        "previous_store_superseded_rows": _int_or_zero(previous_store_superseded_rows),
+        "elapsed_seconds": elapsed_seconds,
+        "eta_seconds": eta_seconds,
+        "rows": rows,
+    }
+
+
 def vector_row_plan(kind: str, rows: int, dims: int, *, source: str, invalidates_on: list[str]) -> dict:
     rows = max(0, int(rows or 0))
     dims = max(1, int(dims or DEFAULT_VECTOR_DIMS))
