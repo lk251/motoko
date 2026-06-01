@@ -422,11 +422,11 @@ Current progress on this backlog:
   `motoko_core.vector_store`, so checkpoint and previous-store reuse share the
   same evidence/provenance rules. The root facade still owns batching,
   progress, route calls, and atomic persistence.
-- Embedding vector progress identity and compatibility checks now live in
-  `motoko_core.vector_store`. The root facade still owns progress-file paths,
-  elapsed/ETA reporting, pause/resume writes, and model batch orchestration, but
-  the schema/route/source/input rules that decide whether a checkpoint can be
-  resumed are now pure and regression-tested.
+- Embedding vector progress identity, compatibility checks, and progress-record
+  assembly now live in `motoko_core.vector_store`. The root facade still owns
+  progress-file paths, elapsed/ETA callbacks, pause/resume writes, and model
+  batch orchestration, but the schema/route/source/input rules and checkpoint
+  dictionary shape are now pure and regression-tested.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted
