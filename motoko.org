@@ -1,0 +1,9 @@
+Motoko org file
+* do
+** add effort levels to motoko, like in codex
+low, medium, high, xhigh
+** test goal loops
+I don't think they're read only anymore, I think they work 1. on
+normal branch/worktree but requesting review/acceptance 2. on a
+different branch / worktree and will ask for review and acceptance for
+merging into master / the working branch.
