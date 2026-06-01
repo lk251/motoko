@@ -404,6 +404,9 @@ Current progress on this backlog:
   by that same service. The root facade keeps realm-local state access and
   suggestion writes. `motoko self-eval` now checks that the code-query path can
   find this curator/eval implementation and its regression coverage.
+- Worker model-eval fixtures now live in `motoko_core.evals` with the worker
+  eval prompt/scoring helpers. Live route selection, model calls, and private
+  report persistence remain at the root facade edge.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

@@ -63,6 +63,7 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_storage_plan_summary_from_index as source_lifecycle_storage_plan_summary_from_index_core,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
+from motoko_core.evals import worker_model_eval_fixtures as worker_model_eval_fixtures_core
 from motoko_core.skill_curator import (
     curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
     format_skill_curator_report as format_skill_curator_report_core,
@@ -12444,6 +12445,20 @@ def test_skill_curator_core_formats_report_without_private_feedback(_m=None):
     assert "private stale source note" not in report
 
 
+def test_worker_model_eval_fixtures_are_core_owned(_m=None):
+    fixtures = worker_model_eval_fixtures_core()
+    routes = {fixture.get("route") for fixture in fixtures}
+    ids = {fixture.get("id") for fixture in fixtures}
+
+    assert {"index_chunk", "index_file", "index_label", "index_corpus"} <= routes
+    assert {"org-priority-chunk", "file-purpose-map", "document-label", "corpus-priority-synthesis"} <= ids
+    for fixture in fixtures:
+        assert fixture.get("required_keys")
+        assert fixture.get("required_facts")
+        assert "text" in fixture
+        assert int(fixture.get("max_output_chars", 0) or 0) > 0
+
+
 def test_skill_curator_uses_saved_feedback_eval_fixtures(m):
     with isolated_state():
         m.learn_skill_text(
@@ -14207,6 +14222,7 @@ def main() -> int:
         test_skill_scan_reports_script_risks,
         test_skill_curator_core_builds_review_first_candidates,
         test_skill_curator_core_formats_report_without_private_feedback,
+        test_worker_model_eval_fixtures_are_core_owned,
         test_skill_curator_creates_feedback_patch_suggestion,
         test_skill_curator_creates_loaded_skill_patch_suggestion,
         test_skill_curator_creates_support_file_plan_for_large_skill,

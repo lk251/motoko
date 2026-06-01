@@ -6,6 +6,179 @@ import json
 import re
 import textwrap
 
+from motoko_core.model_routes import (
+    MODEL_ROUTE_INDEX_CHUNK,
+    MODEL_ROUTE_INDEX_CORPUS,
+    MODEL_ROUTE_INDEX_FILE,
+    MODEL_ROUTE_INDEX_LABEL,
+)
+
+
+def worker_model_eval_fixtures() -> list[dict]:
+    return [
+        {
+            "id": "org-priority-chunk",
+            "route": MODEL_ROUTE_INDEX_CHUNK,
+            "role": "chunk summary",
+            "label": "orgfiles/tasks.org chunk 1",
+            "required_keys": [
+                "summary",
+                "title",
+                "kind",
+                "dates",
+                "todos",
+                "obligations",
+                "files_or_paths_mentioned",
+                "confidence",
+                "escalation_needed",
+            ],
+            "required_facts": [
+                {"name": "todo state", "any": ["TODO"]},
+                {"name": "priority", "any": ["#A", "priority A", "A priority"]},
+                {"name": "deadline", "any": ["2026-05-22", "May 22"]},
+                {"name": "scheduled date", "any": ["2026-05-21", "May 21"]},
+                {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
+                {"name": "obligation", "any": ["countersigned packet", "signed packet"]},
+                {"name": "path", "any": ["/workspace/orgfiles/legal.org", "legal.org"]},
+                {"name": "project", "any": ["violet harbor"]},
+            ],
+            "forbidden_facts": [
+                {"name": "wrong date", "any": ["2026-05-23"]},
+                {"name": "invented person", "any": ["Marina"]},
+                {"name": "invented payment", "any": ["invoice 2026-019", "payment due"]},
+            ],
+            "text": "\n".join(
+                [
+                    "* TODO [#A] Send signed Alvarez packet :client:legal:",
+                    "SCHEDULED: <2026-05-21 Thu 09:00>",
+                    "DEADLINE: <2026-05-22 Fri>",
+                    "Project: violet harbor",
+                    "File reference: /workspace/orgfiles/legal.org",
+                    "Obligation: Javier must email the countersigned packet to Ana Alvarez before noon.",
+                ]
+            ),
+            "max_output_chars": 2200,
+            "min_fact_ratio": 0.82,
+        },
+        {
+            "id": "file-purpose-map",
+            "route": MODEL_ROUTE_INDEX_FILE,
+            "role": "file summary",
+            "label": "orgfiles/tasks.org file summary",
+            "required_keys": [
+                "file_summary",
+                "file_title",
+                "file_role",
+                "file_kind",
+                "main_projects",
+                "main_dates",
+                "main_todos",
+                "main_obligations",
+                "confidence",
+                "escalation_needed",
+            ],
+            "required_facts": [
+                {"name": "file role", "any": ["planning", "task"]},
+                {"name": "priority task", "any": ["Send signed Alvarez packet", "Alvarez packet"]},
+                {"name": "deadline", "any": ["2026-05-22", "May 22"]},
+                {"name": "project", "any": ["violet harbor"]},
+                {"name": "support task", "any": ["Draft support note"]},
+                {"name": "path", "any": ["/workspace/orgfiles/tasks.org", "tasks.org"]},
+            ],
+            "forbidden_facts": [
+                {"name": "wrong repo", "any": ["nixos-configs"]},
+                {"name": "wrong status", "any": ["DONE Send signed Alvarez packet"]},
+            ],
+            "text": "\n\n".join(
+                [
+                    "Path: /workspace/orgfiles/tasks.org",
+                    "Chunk 1 summary: TODO priority A Send signed Alvarez packet for project violet harbor. "
+                    "Deadline 2026-05-22. Obligation to email Ana Alvarez before noon.",
+                    "Chunk 2 summary: TODO priority B Draft support note, scheduled 2026-05-23, "
+                    "depends on the Alvarez packet being sent.",
+                ]
+            ),
+            "max_output_chars": 2600,
+            "min_fact_ratio": 0.82,
+        },
+        {
+            "id": "document-label",
+            "route": MODEL_ROUTE_INDEX_LABEL,
+            "role": "classification label",
+            "label": "orgfiles/inbox.org label",
+            "required_keys": [
+                "label",
+                "kind",
+                "active",
+                "task_bearing",
+                "sensitive",
+                "confidence",
+                "escalation_needed",
+            ],
+            "required_facts": [
+                {"name": "org kind", "any": ["org", "notes", "task"]},
+                {"name": "task-bearing", "any": ["task_bearing", "task-bearing", "task bearing", "TODO"]},
+                {"name": "active", "any": ["active"]},
+                {"name": "legal tag", "any": ["legal"]},
+                {"name": "client tag", "any": ["client"]},
+            ],
+            "forbidden_facts": [
+                {"name": "archive", "any": ["archived"]},
+                {"name": "code", "any": ["python", "javascript"]},
+            ],
+            "text": "\n".join(
+                [
+                    "Path: /workspace/orgfiles/inbox.org",
+                    "* TODO [#A] Client legal packet :client:legal:",
+                    "DEADLINE: <2026-05-22 Fri>",
+                    "Short note: active inbox item, current item.",
+                ]
+            ),
+            "max_output_chars": 1400,
+            "min_fact_ratio": 0.80,
+        },
+        {
+            "id": "corpus-priority-synthesis",
+            "route": MODEL_ROUTE_INDEX_CORPUS,
+            "role": "corpus summary",
+            "label": "orgfiles corpus synthesis",
+            "required_keys": [
+                "corpus_summary",
+                "active_projects",
+                "priority_items",
+                "deadlines",
+                "scheduled_items",
+                "obligations",
+                "files_by_role",
+                "audit_needed",
+            ],
+            "required_facts": [
+                {"name": "top priority", "any": ["Send signed Alvarez packet", "Alvarez packet"]},
+                {"name": "deadline", "any": ["2026-05-22", "May 22"]},
+                {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
+                {"name": "project", "any": ["violet harbor"]},
+                {"name": "repo planning file", "any": ["nixos-configs.org"]},
+                {"name": "morning schedule", "any": ["2026-05-21", "May 21"]},
+            ],
+            "forbidden_facts": [
+                {"name": "wrong person", "any": ["Marina"]},
+                {"name": "invented completion", "any": ["already completed", "DONE Send signed Alvarez packet"]},
+            ],
+            "text": "\n\n".join(
+                [
+                    "File /workspace/orgfiles/tasks.org: active planning file. "
+                    "Priority A TODO Send signed Alvarez packet. Deadline 2026-05-22. "
+                    "Scheduled 2026-05-21 morning. Obligation: email Ana Alvarez.",
+                    "File /workspace/orgfiles/nixos-configs.org: repo planning file. "
+                    "Priority B TODO prepare branch review notes after the legal packet.",
+                    "File /workspace/orgfiles/ideas.org: ideas backlog for project violet harbor.",
+                ]
+            ),
+            "max_output_chars": 3000,
+            "min_fact_ratio": 0.82,
+        },
+    ]
+
 
 def worker_eval_instruction(fixture: dict) -> str:
     keys = ", ".join(fixture.get("required_keys", []))

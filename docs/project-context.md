@@ -1624,6 +1624,9 @@ Motoko self-code checkpoint, 2026-05-31:
   signals, support-file opportunities, consolidation reviews, and stale-unused
   archive reviews. The root facade still owns realm-local state reads and
   pending-suggestion writes.
+- Model-eval fixture construction has moved to `motoko_core.evals`, alongside
+  the worker-eval prompt and scoring helpers. The root facade still owns live
+  route selection, model calls, private report saving, and command formatting.
 - Code intelligence now also extracts module-level schema/version/artifact
   constants and exposes them through `code-map`, `code-query`, and
   `self-eval`. This matters for Motoko self-improvement because artifact
