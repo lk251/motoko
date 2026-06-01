@@ -79,6 +79,7 @@ from motoko_core.vector_store import (
     embedding_vector_progress_key as embedding_vector_progress_key_core,
     embedding_vector_progress_matches as embedding_vector_progress_matches_core,
     embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
+    embedding_vector_store_record as embedding_vector_store_record_core,
     lexical_sparse_vector as lexical_sparse_vector_core,
     reusable_embedding_vector_row as reusable_embedding_vector_row_core,
     vector_plan_readiness_gates as vector_plan_readiness_gates_core,
@@ -7914,6 +7915,76 @@ def test_embedding_vector_progress_record_core_shapes_resume_checkpoint(_m=None)
     assert progress["rows"] == [row]
 
 
+def test_embedding_vector_store_record_core_shapes_provenance_and_reuse(_m=None):
+    rows = [
+        {"id": "reused", "vector": [0.1, 0.2]},
+        {"id": "new", "vector": [0.2, 0.3]},
+    ]
+    store = embedding_vector_store_record_core(
+        store_id="store-1",
+        created="2026-06-01T00:00:00+00:00",
+        schema="vector-store-v2",
+        realm="mares",
+        method="embedding-v1",
+        dims=2,
+        vector_format="dense-json-normalized",
+        production_embedding=True,
+        route_info={
+            "endpoint": "unix:///run/motoko-llm/mares/embed.sock",
+            "request_path": "/v1/embeddings",
+            "max_parallel": 32,
+        },
+        route_id="embed-route",
+        route_model="embed-model",
+        route_dims=2,
+        embedding_batch_size=75,
+        embedding_batch_count=2,
+        embedding_requested_parallelism=32,
+        embedding_parallelism=16,
+        embedding_parallel_fallbacks=[{"from": 32, "to": 16}],
+        embedding_refresh_mode="incremental",
+        embedding_refresh_cause="source-change",
+        embedding_input_schema="embedding-input-v3",
+        embedding_input_chars=1800,
+        embedding_max_parts_per_chunk=12,
+        vector_row_id_schema="vector-row-id-v2",
+        checkpoint_reused_rows=0,
+        previous_store_reused_rows=1,
+        previous_store_row_count=3,
+        previous_store_superseded_rows=2,
+        previous_store_id="old-store",
+        source_index={
+            "id": "idx-2",
+            "name": "docs",
+            "root": "/tmp/docs",
+            "glob": "**/*.org",
+            "created": "2026-06-01T00:00:00+00:00",
+        },
+        source_fingerprint="fingerprint-2",
+        source_family_key="family-2",
+        source_default_glob="**/*",
+        builder="motoko",
+        builder_version="0.1.0",
+        quality_status="needs-eval",
+        provenance_mode="model",
+        source_realm="mares",
+        security_context="repo-review",
+        rows=rows,
+        note="test store",
+    )
+
+    assert store["schema"] == "vector-store-v2"
+    assert store["dims"] == 2
+    assert store["embedding_reused_rows"] == 1
+    assert store["embedding_embedded_rows"] == 1
+    assert store["embedding_reuse_store_id"] == "old-store"
+    assert store["source_index"]["family_key"] == "family-2"
+    assert store["provenance"]["source_realm"] == "mares"
+    assert store["provenance"]["source_fingerprint"] == {"sha256": "fingerprint-2"}
+    assert store["row_count"] == 2
+    assert store["rows"] == rows
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14511,6 +14582,7 @@ def main() -> int:
         test_embedding_vector_row_core_preserves_evidence_and_reuse_rules,
         test_embedding_vector_progress_core_identity_and_matching,
         test_embedding_vector_progress_record_core_shapes_resume_checkpoint,
+        test_embedding_vector_store_record_core_shapes_provenance_and_reuse,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,
