@@ -123,6 +123,40 @@ class CodeConstant:
         }
 
 
+@dataclass(frozen=True)
+class CodeArtifactFamily:
+    owner_constant: str
+    family_kind: str
+    storage: str
+    path_key: str
+    artifact_kind: str
+    cleanup_policy: str
+    delete_report_key: str
+    report_label: str
+    artifact_id: str
+    snapshot_action: str
+    path: str
+    line: int
+    role: str
+
+    def to_dict(self) -> dict:
+        return {
+            "owner_constant": self.owner_constant,
+            "family_kind": self.family_kind,
+            "storage": self.storage,
+            "path_key": self.path_key,
+            "artifact_kind": self.artifact_kind,
+            "cleanup_policy": self.cleanup_policy,
+            "delete_report_key": self.delete_report_key,
+            "report_label": self.report_label,
+            "artifact_id": self.artifact_id,
+            "snapshot_action": self.snapshot_action,
+            "path": self.path,
+            "line": self.line,
+            "role": self.role,
+        }
+
+
 def find_motoko_repo_root(start: str | pathlib.Path | None = None) -> pathlib.Path:
     """Find a Motoko checkout without broad filesystem crawling."""
 
@@ -203,6 +237,82 @@ def _literal_preview(node: ast.AST, *, max_chars: int = 160) -> tuple[str, str]:
     return preview, type(value).__name__
 
 
+def _literal_value(node: ast.AST) -> object:
+    try:
+        return ast.literal_eval(node)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _artifact_family_storage(owner_constant: str) -> tuple[str, str]:
+    name = str(owner_constant or "").lower()
+    derived = "derived" in name
+    manual = "manual" in name
+    if "jsonl" in name:
+        storage = "jsonl-ledger"
+    elif "json_file" in name or "file_artifact" in name:
+        storage = "json-file"
+    else:
+        storage = "json-dir"
+    if derived:
+        prefix = "derived"
+    elif manual:
+        prefix = "manual"
+    else:
+        prefix = "artifact"
+    return f"{prefix}-{storage}", storage
+
+
+def _artifact_family_rows_from_literal(
+    owner_constant: str,
+    value_node: ast.AST,
+    *,
+    relpath: str,
+    line: int,
+) -> list[CodeArtifactFamily]:
+    if "ARTIFACT_FAMILIES" not in str(owner_constant or "").upper():
+        return []
+    literal = _literal_value(value_node)
+    if not isinstance(literal, (tuple, list)):
+        return []
+    family_kind, storage = _artifact_family_storage(owner_constant)
+    rows: list[CodeArtifactFamily] = []
+    for item in literal:
+        if not isinstance(item, dict):
+            continue
+        path_key = str(item.get("path_key") or "")
+        artifact_kind = str(item.get("artifact_kind") or item.get("artifact_id") or "")
+        cleanup_policy = str(item.get("cleanup_policy") or "")
+        report_label = str(item.get("report_label") or "")
+        role_terms = [
+            "artifact family ownership",
+            family_kind,
+            storage,
+            cleanup_policy,
+            path_key,
+            artifact_kind,
+            "lifecycle cleanup rebuild migration derived manual review",
+        ]
+        rows.append(
+            CodeArtifactFamily(
+                owner_constant=str(owner_constant),
+                family_kind=family_kind,
+                storage=storage,
+                path_key=path_key,
+                artifact_kind=artifact_kind,
+                cleanup_policy=cleanup_policy,
+                delete_report_key=str(item.get("delete_report_key") or ""),
+                report_label=report_label,
+                artifact_id=str(item.get("artifact_id") or ""),
+                snapshot_action=str(item.get("snapshot_action") or ""),
+                path=relpath,
+                line=line,
+                role=" ".join(term for term in role_terms if term),
+            )
+        )
+    return rows
+
+
 def _constant_category(name: str) -> str:
     upper = str(name or "").upper()
     if "ARTIFACT" in upper:
@@ -243,19 +353,28 @@ def _source_segment(text: str, line: int, end_line: int, *, max_chars: int = 200
 
 def parse_python_symbols(
     path: pathlib.Path, root: pathlib.Path
-) -> tuple[list[CodeSymbol], list[dict], list[dict], list[CodeCall], list[CodeConstant], list[dict]]:
+) -> tuple[
+    list[CodeSymbol],
+    list[dict],
+    list[dict],
+    list[CodeCall],
+    list[CodeConstant],
+    list[CodeArtifactFamily],
+    list[dict],
+]:
     text = _safe_read(path)
     relpath = _rel(root, path)
     try:
         tree = ast.parse(text, filename=relpath)
     except SyntaxError as exc:
-        return [], [], [], [], [], [{"path": relpath, "error": f"SyntaxError: {exc}"}]
+        return [], [], [], [], [], [], [{"path": relpath, "error": f"SyntaxError: {exc}"}]
 
     symbols: list[CodeSymbol] = []
     imports: list[dict] = []
     commands: list[dict] = []
     calls: list[CodeCall] = []
     constants: list[CodeConstant] = []
+    artifact_families: list[CodeArtifactFamily] = []
     parser_vars: dict[str, dict] = {}
 
     class Visitor(ast.NodeVisitor):
@@ -341,6 +460,9 @@ def parse_python_symbols(
                         line=line,
                     )
                 )
+                artifact_families.extend(
+                    _artifact_family_rows_from_literal(target.id, value, relpath=relpath, line=line)
+                )
 
         def _maybe_parser_assign(self, node: ast.Assign) -> None:
             if not isinstance(node.value, ast.Call):
@@ -378,7 +500,7 @@ def parse_python_symbols(
             self.generic_visit(node)
 
     Visitor().visit(tree)
-    return symbols, imports, commands, calls, constants, []
+    return symbols, imports, commands, calls, constants, artifact_families, []
 
 
 def _symbol_indexes(symbols: list[dict]) -> tuple[dict[str, list[dict]], dict[str, dict]]:
@@ -757,6 +879,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     commands: list[dict] = []
     calls: list[dict] = []
     constants: list[dict] = []
+    artifact_families: list[dict] = []
     parse_errors: list[dict] = []
     modules = []
     file_texts: dict[str, str] = {}
@@ -766,14 +889,21 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
         text = _safe_read(path)
         relpath = _rel(repo_root, path)
         file_texts[relpath] = text
-        file_symbols, file_imports, file_commands, file_calls, file_constants, file_errors = parse_python_symbols(
-            path, repo_root
-        )
+        (
+            file_symbols,
+            file_imports,
+            file_commands,
+            file_calls,
+            file_constants,
+            file_artifact_families,
+            file_errors,
+        ) = parse_python_symbols(path, repo_root)
         symbols.extend(row.to_dict() for row in file_symbols)
         imports.extend(file_imports)
         commands.extend(file_commands)
         calls.extend(row.to_dict() for row in file_calls)
         constants.extend(row.to_dict() for row in file_constants)
+        artifact_families.extend(row.to_dict() for row in file_artifact_families)
         parse_errors.extend(file_errors)
         modules.append(
             {
@@ -822,6 +952,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
         "call_edges": call_edges,
         "cancellation_paths": cancellation_paths,
         "model_route_paths": model_route_paths,
+        "artifact_families": artifact_families,
         "commands": commands,
         "constants": constants,
         "command_traces": command_traces,
@@ -839,6 +970,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
             "constants": len(constants),
             "schema_constants": sum(1 for row in constants if row.get("category") == "schema"),
             "artifact_constants": sum(1 for row in constants if row.get("category") == "artifact"),
+            "artifact_families": len(artifact_families),
             "migration_constants": sum(1 for row in constants if row.get("category") == "migration"),
             "command_handlers": len(command_handlers),
             "command_traces": len(command_traces),
@@ -908,6 +1040,24 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
         "root": code_map.get("root", ""),
         "symbols": rank(code_map.get("symbols", []), ["name", "qualname", "path", "doc"]),
         "constants": rank(code_map.get("constants", []), ["name", "category", "value", "path"], name_field="name"),
+        "artifact_families": rank(
+            code_map.get("artifact_families", []),
+            [
+                "owner_constant",
+                "family_kind",
+                "storage",
+                "path_key",
+                "artifact_kind",
+                "cleanup_policy",
+                "delete_report_key",
+                "report_label",
+                "artifact_id",
+                "snapshot_action",
+                "role",
+                "path",
+            ],
+            name_field="path_key",
+        ),
         "commands": rank(code_map.get("commands", []), ["command", "handler", "path"], name_field="command"),
         "command_traces": rank(
             code_map.get("command_traces", []),
@@ -972,7 +1122,9 @@ def format_code_map_report(code_map: dict) -> str:
         ),
         (
             f"constants: {summary.get('constants', 0)}  schemas: {summary.get('schema_constants', 0)}  "
-            f"artifacts: {summary.get('artifact_constants', 0)}  migrations: {summary.get('migration_constants', 0)}"
+            f"artifacts: {summary.get('artifact_constants', 0)}  "
+            f"artifact families: {summary.get('artifact_families', 0)}  "
+            f"migrations: {summary.get('migration_constants', 0)}"
         ),
         f"root facade: motoko has {summary.get('root_script_lines', 0)} line(s)",
     ]
@@ -1002,6 +1154,16 @@ def format_code_map_report(code_map: dict) -> str:
             lines.append(
                 f"- {row.get('qualname', '')}: calls={row.get('check_count', 0)} "
                 f"helpers={helpers} {row.get('path', '')}:{row.get('line', '')}"
+            )
+    if code_map.get("artifact_families"):
+        lines.append("artifact families:")
+        for row in code_map.get("artifact_families", [])[:10]:
+            label = row.get("path_key", "") or row.get("artifact_kind", "")
+            policy = row.get("cleanup_policy", "") or "-"
+            owner = row.get("owner_constant", "")
+            lines.append(
+                f"- {label}: kind={row.get('artifact_kind', '') or '-'} "
+                f"policy={policy} owner={owner} {row.get('path', '')}:{row.get('line', '')}"
             )
     if code_map.get("service_boundaries"):
         lines.append("service boundaries:")
@@ -1061,6 +1223,7 @@ def _format_rows(
     validation: bool = False,
     cancellation: bool = False,
     model_route: bool = False,
+    artifact_family: bool = False,
 ) -> list[str]:
     lines = [title + ":"]
     if not rows:
@@ -1105,6 +1268,14 @@ def _format_rows(
             helpers = ",".join(row.get("helpers", [])[:4]) or "-"
             detail = f"calls={row.get('check_count', 0)} helpers={helpers}"
             location = f"{row.get('path', '')}:{row.get('line', 1)}"
+        elif artifact_family:
+            label = row.get("path_key") or row.get("artifact_kind", "")
+            detail = (
+                f"kind={row.get('artifact_kind', '') or '-'} "
+                f"policy={row.get('cleanup_policy', '') or '-'} "
+                f"owner={row.get('owner_constant', '')}"
+            )
+            location = f"{row.get('path', '')}:{row.get('line', 1)}"
         elif "target" in row:
             label = f"{row.get('caller', '')} -> {row.get('target', '')}"
             detail = f"callee={row.get('callee', '')}"
@@ -1127,6 +1298,7 @@ def format_code_query_report(result: dict) -> str:
     lines.extend(_format_rows("commands", result.get("commands", []), command=True))
     lines.extend(_format_rows("command traces", result.get("command_traces", []), trace=True))
     lines.extend(_format_rows("constants", result.get("constants", []), constant=True))
+    lines.extend(_format_rows("artifact families", result.get("artifact_families", []), artifact_family=True))
     lines.extend(_format_rows("symbols", result.get("symbols", [])))
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
     lines.extend(_format_rows("cancellation paths", result.get("cancellation_paths", []), cancellation=True))

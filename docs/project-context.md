@@ -1628,6 +1628,11 @@ Motoko self-code checkpoint, 2026-05-31:
   "root facade hotspot extraction target", and `self-eval` checks that those
   rows remain discoverable. This makes future refactor planning less dependent
   on remembering that hotspot data only appeared in the broad code-map report.
+- Code-query now also returns artifact-family ownership rows from
+  `motoko_core.artifact_lifecycle`, including path keys, artifact kinds,
+  cleanup policies, report keys, storage types, and owning constants. This
+  helps Motoko locate the declared lifecycle owner before changing derived
+  artifact cleanup, migration, source reprocessing, or rebuild behavior.
 - Skill curator decision logic has begun moving out of the root facade:
   `motoko_core.skill_curator` now owns pure matching, suggestion-candidate
   construction, and report formatting for feedback signals, feedback-eval

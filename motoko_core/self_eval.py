@@ -171,6 +171,18 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"top_path": (model_route_paths or [{}])[0].get("qualname", "")},
         )
     )
+    artifact_families = code_map.get("artifact_families", []) if isinstance(code_map.get("artifact_families"), list) else []
+    checks.append(
+        _check(
+            "code_map_artifact_families_present",
+            any(row.get("path_key") == "vector_stores" for row in artifact_families),
+            f"artifact_families={len(artifact_families)}",
+            evidence={
+                "top_family": (artifact_families or [{}])[0].get("path_key", ""),
+                "owners": sorted({str(row.get("owner_constant", "")) for row in artifact_families if isinstance(row, dict)})[:8],
+            },
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(
@@ -243,6 +255,18 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={
                 "top_path": (model_route_query.get("model_route_paths") or [{}])[0].get("qualname", ""),
                 "helpers": (model_route_query.get("model_route_paths") or [{}])[0].get("helpers", []),
+            },
+        )
+    )
+    artifact_family_query = query_code_map(code_map, "artifact family vector store cleanup policy derived lifecycle", limit=8)
+    checks.append(
+        _check(
+            "code_query_finds_artifact_families",
+            any(row.get("path_key") == "vector_stores" for row in artifact_family_query.get("artifact_families", [])),
+            f"artifact_families={len(artifact_family_query.get('artifact_families', []))}",
+            evidence={
+                "top_family": (artifact_family_query.get("artifact_families") or [{}])[0].get("path_key", ""),
+                "top_policy": (artifact_family_query.get("artifact_families") or [{}])[0].get("cleanup_policy", ""),
             },
         )
     )

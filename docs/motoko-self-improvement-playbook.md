@@ -655,6 +655,11 @@ It is a reliability and self-understanding stretch:
    decisions, cleanup, and source reprocessing are declared in service-owned
    code across indexes, evidence, vectors, dossiers, conversations, feedback,
    goals, memory artifacts, and skill-support artifacts.
+   Current progress: `motoko code-map` and `motoko code-query` now expose
+   artifact-family ownership rows from lifecycle declarations, including each
+   family path key, artifact kind, cleanup policy, report key, storage type,
+   and owning constant. This gives Motoko a deterministic starting point before
+   changing cleanup, rebuild, migration, or source-reprocessing behavior.
 2. Finish cooperative cancellation and interruption by finding any remaining
    long-running report, topic, dossier, profile, memory, vector, evidence, or
    indexing path that still cannot stop at a durable checkpoint.
@@ -746,8 +751,8 @@ wish list:
 
 1. Start from code facts. Run `motoko code-map`, then use `motoko code-query`
    to find the relevant command handlers, service modules, schemas, tests,
-   migration constants, cancellation paths, route/model paths, and root-facade
-   hotspots.
+   migration constants, artifact-family owners, cancellation paths, route/model
+   paths, and root-facade hotspots.
 2. Choose the existing umbrella skill before creating a new one:
    `motoko-codebase-maintainer`, `motoko-refactor-craft`,
    `motoko-retrieval-maintainer`, or `motoko-agentic-boundary-review`. Patch
