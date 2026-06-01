@@ -471,6 +471,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     source_lifecycle_replacement_readiness,
     source_lifecycle_plan_summary,
     source_lifecycle_report,
+    source_lifecycle_report_from_index,
     superseded_stale_index_candidates,
 )
 from motoko_core.observability import (  # noqa: E402
@@ -12876,30 +12877,11 @@ def source_lifecycle_report_for_index(
     def check_cancelled() -> None:
         raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
 
-    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
-    index_id = str(index.get("id", "")).strip()
-    summary = index_change_summary(index)
-    source_lifecycle = summary.get("source_lifecycle", [])
-    source_paths = source_lifecycle_affected_paths(source_lifecycle)
-    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
-    if source_lifecycle:
-        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(
-            index,
-            source_paths,
-            source_lifecycle,
-        )
-    else:
-        replacement, replacement_ready, replacement_reason = None, False, "all indexed sources are fresh"
-    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
-    records = source_lifecycle_artifact_records(index_id, source_paths) if source_lifecycle else []
-    raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
-    return source_lifecycle_report(
+    return source_lifecycle_report_from_index(
         index=index,
-        summary=summary,
-        artifact_records=records,
-        replacement_index=replacement,
-        replacement_ready=replacement_ready,
-        replacement_reason=replacement_reason,
+        summary_for_index=index_change_summary,
+        replacement_for_index=source_lifecycle_replacement,
+        artifact_records_for_index=source_lifecycle_artifact_records,
         created=now(),
         default_glob=AUTO_INDEX_GLOB,
         apply=apply,

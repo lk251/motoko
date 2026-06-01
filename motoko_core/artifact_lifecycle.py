@@ -1374,6 +1374,67 @@ def source_lifecycle_report(
     return report
 
 
+def source_lifecycle_report_from_index(
+    index: dict,
+    *,
+    summary_for_index: Callable[[dict], dict],
+    replacement_for_index: Callable[[dict, set[str], list[dict]], tuple[dict | None, bool, str]],
+    artifact_records_for_index: Callable[[str, set[str]], list[dict]],
+    created: str = "",
+    default_glob: str = "**/*",
+    apply: bool = False,
+    yes: bool = False,
+    delete_snapshot: Callable[[dict], dict] | None = None,
+    invalidate_catalog: Callable[[], None] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
+    """Build a source lifecycle report for one index through injected state callbacks.
+
+    The root facade owns how to read current state, find replacement indexes,
+    and delete files. The lifecycle service owns the sequencing and report
+    inputs, so source lifecycle behavior does not spread across callers.
+    """
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    maybe_cancel()
+    index_id = str(index.get("id", "")).strip()
+    summary = summary_for_index(index)
+    source_lifecycle = [
+        row for row in summary.get("source_lifecycle", []) or [] if isinstance(row, dict)
+    ]
+    source_paths = source_lifecycle_affected_paths(source_lifecycle)
+    maybe_cancel()
+    if source_lifecycle:
+        replacement, replacement_ready, replacement_reason = replacement_for_index(
+            index,
+            source_paths,
+            source_lifecycle,
+        )
+    else:
+        replacement, replacement_ready, replacement_reason = None, False, "all indexed sources are fresh"
+    maybe_cancel()
+    artifact_records = artifact_records_for_index(index_id, source_paths) if source_lifecycle else []
+    maybe_cancel()
+    return source_lifecycle_report(
+        index=index,
+        summary=summary,
+        artifact_records=artifact_records,
+        replacement_index=replacement,
+        replacement_ready=replacement_ready,
+        replacement_reason=replacement_reason,
+        created=created,
+        default_glob=default_glob,
+        apply=apply,
+        yes=yes,
+        delete_snapshot=delete_snapshot,
+        invalidate_catalog=invalidate_catalog,
+        check_cancelled=check_cancelled,
+    )
+
+
 def index_storage_cleanup_sections(
     *,
     stale_superseded_indexes: list[dict],

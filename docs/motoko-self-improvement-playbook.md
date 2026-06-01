@@ -382,6 +382,12 @@ Current progress on this backlog:
   actions, slot-cache counters, report shape, and path-key spec normalization,
   while root code still resolves realm-local paths and performs filesystem
   mutation through explicit callbacks.
+- Source-lifecycle report orchestration has moved another step inward. The
+  lifecycle service now sequences summary collection, affected-source path
+  derivation, replacement readiness, artifact-record lookup, cancellation
+  checkpoints, and final report/apply delegation through injected callbacks.
+  The root facade supplies current-state and filesystem authority, but no longer
+  owns the report-input fanout itself.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

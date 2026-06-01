@@ -1626,6 +1626,11 @@ Motoko self-code checkpoint, 2026-05-31:
   state. The root executable still supplies explicit state paths, corpus
   candidates, staleness checks, and filesystem callbacks, preserving the
   security boundary while reducing policy spread.
+- Source-lifecycle report orchestration now also runs through the lifecycle
+  service: it sequences summary lookup, affected-path derivation, replacement
+  readiness, artifact-record lookup, cancellation checkpoints, and final
+  report/apply delegation through injected callbacks. Root keeps current-state
+  and filesystem authority, but not the report-input fanout policy.
 - Foreground cancellation coverage has expanded beyond active chat answers:
   evidence build/refresh, index cleanup, source-lifecycle reports, and
   `bg-now` now receive cooperative cancel events in both CLI and slash-command

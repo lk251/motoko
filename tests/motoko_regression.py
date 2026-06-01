@@ -58,6 +58,7 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_plan_summary as source_lifecycle_plan_summary_core,
     source_lifecycle_replacement_readiness as source_lifecycle_replacement_readiness_core,
     source_lifecycle_report as build_source_lifecycle_report,
+    source_lifecycle_report_from_index as source_lifecycle_report_from_index_core,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
 
@@ -11078,6 +11079,94 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert deleted == ["old-index"]
 
 
+def test_source_lifecycle_report_from_index_owns_orchestration(_m):
+    index = {
+        "id": "old-index",
+        "name": "docs",
+        "root": "/tmp/docs",
+        "glob": "*.org",
+    }
+    lifecycle_row = {
+        "path": "/tmp/docs/a.org",
+        "status": "ignored",
+        "recommended_action": "detach-derived-artifacts",
+    }
+    calls = []
+
+    def summary_for_index(item):
+        calls.append(("summary", item.get("id")))
+        return {
+            "status": "stale",
+            "warnings": ["source ignored"],
+            "source_lifecycle": [lifecycle_row],
+        }
+
+    def replacement_for_index(item, source_paths, source_lifecycle):
+        calls.append(("replacement", item.get("id"), sorted(source_paths), len(source_lifecycle)))
+        assert "/tmp/docs/a.org" in source_paths
+        return {"id": "new-index"}, True, "replacement is fresh"
+
+    def artifact_records_for_index(index_id, source_paths):
+        calls.append(("artifacts", index_id, sorted(source_paths)))
+        return [
+            {
+                "artifact_id": "vec",
+                "artifact_kind": "vector_store",
+                "cleanup_policy": "delete-derived",
+                "bytes_estimate": 100,
+            }
+        ]
+
+    report = source_lifecycle_report_from_index_core(
+        index,
+        summary_for_index=summary_for_index,
+        replacement_for_index=replacement_for_index,
+        artifact_records_for_index=artifact_records_for_index,
+        created="2026-06-01T00:00:00+00:00",
+        delete_snapshot=lambda _index: {"index_deleted": True},
+        invalidate_catalog=lambda: calls.append(("invalidate",)),
+    )
+    assert report["schema"] == "source-lifecycle-report-v1"
+    assert report["replacement"]["id"] == "new-index"
+    assert report["plan"]["status"] == "cleanup-ready"
+    assert report["plan"]["derived_artifact_count"] == 1
+    assert calls == [
+        ("summary", "old-index"),
+        ("replacement", "old-index", ["/tmp/docs/a.org"], 1),
+        ("artifacts", "old-index", ["/tmp/docs/a.org"]),
+    ]
+
+    fresh_calls = []
+    fresh_report = source_lifecycle_report_from_index_core(
+        index,
+        summary_for_index=lambda _index: fresh_calls.append("summary") or {"status": "fresh", "source_lifecycle": []},
+        replacement_for_index=lambda *_args: fresh_calls.append("replacement") or (None, False, ""),
+        artifact_records_for_index=lambda *_args: fresh_calls.append("artifacts") or [],
+    )
+    assert fresh_report["replacement"]["reason"] == "all indexed sources are fresh"
+    assert fresh_report["artifact_record_count"] == 0
+    assert fresh_calls == ["summary"]
+
+    cancel_calls = {"count": 0}
+
+    def check_cancelled():
+        cancel_calls["count"] += 1
+        if cancel_calls["count"] >= 2:
+            raise RuntimeError("cancelled orchestration")
+
+    try:
+        source_lifecycle_report_from_index_core(
+            index,
+            summary_for_index=summary_for_index,
+            replacement_for_index=replacement_for_index,
+            artifact_records_for_index=artifact_records_for_index,
+            check_cancelled=check_cancelled,
+        )
+        raise AssertionError("source lifecycle orchestration should honor cancellation")
+    except RuntimeError as exc:
+        assert "cancelled orchestration" in str(exc)
+
+
 def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -13757,6 +13846,7 @@ def main() -> int:
         test_conversation_artifact_cleanup_report_is_service_owned,
         test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
+        test_source_lifecycle_report_from_index_owns_orchestration,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
