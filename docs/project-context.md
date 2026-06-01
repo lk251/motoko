@@ -1457,6 +1457,12 @@ Skill Curator v2 roadmap:
   Qwen3 0.6B Q8 embedding route can legitimately occupy around 1 GiB VRAM; row
   progress and stale-progress detection are better health signals than resident
   memory size alone.
+- Vector progress wording should distinguish user-facing status from stored
+  provenance. When no compatible previous vector store exists, the live status
+  says `initial new N` instead of the more alarming internal
+  `full/missing/new` cause chain. Incremental refreshes still report reuse and
+  new-row counts, while detailed mode/cause fields remain in progress/store
+  records for diagnostics.
 
 ## Roadmap Candidates
 

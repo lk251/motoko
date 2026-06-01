@@ -1717,8 +1717,8 @@ def test_phase_timer_key_ignores_progress_counters(m):
     assert m.phase_timer_key(left) == "bg-heavy: vectorizing(model)"
     incremental = "bg-heavy: vectorizing(model) incremental reuse 9000 new 25 batch 1/2 parallel 32 rows 9012/9025 eta 2s"
     assert m.phase_timer_key(incremental) == "bg-heavy: vectorizing(model)"
-    full = "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
-    assert m.phase_timer_key(full) == "bg-heavy: vectorizing(model)"
+    initial = "bg-heavy: vectorizing(model) initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+    assert m.phase_timer_key(initial) == "bg-heavy: vectorizing(model)"
     resumed = "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 eta 2m00s"
     assert m.phase_timer_key(resumed) == "bg-heavy: vectorizing(model)"
     elapsed = "bg-heavy: vectorizing(model) resumed checkpoint reuse 80 new 80 batch 2/5 parallel 32 rows 80/160 elapsed 5m00s eta 2m00s"
@@ -1752,7 +1752,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert incremental == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 eta ?"
 
-    full = format_vector_progress_phase_core(
+    initial = format_vector_progress_phase_core(
         completed_batches=0,
         total_batches=5,
         active_parallelism=32,
@@ -1762,7 +1762,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         refresh_mode="full",
         refresh_cause="missing",
     )
-    assert full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+    assert initial == "bg-heavy: vectorizing(model) initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
 
     resumed = format_vector_progress_phase_core(
         completed_batches=2,
@@ -1798,6 +1798,10 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         "bg-heavy: vectorizing(model) orgfiles full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
     )
     assert sanitized_full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+    sanitized_initial = m.sanitize_background_phase(
+        "bg-heavy: vectorizing(model) orgfiles initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+    )
+    assert sanitized_initial == "bg-heavy: vectorizing(model) initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
 
 
 def test_safe_vector_progress_row_core_is_content_free_and_stale_aware(m):
@@ -1834,6 +1838,24 @@ def test_safe_vector_progress_row_core_is_content_free_and_stale_aware(m):
     assert "secret" not in text
     assert "logbook" not in text
     assert "orgfiles" not in text
+
+    initial_text = format_safe_vector_progress_row_core(
+        {
+            "id": "embedding-initial",
+            "updated": "2026-06-01T04:29:00+00:00",
+            "expected_rows": 160,
+            "completed_rows": 0,
+            "embedding_batch_size": 32,
+            "embedding_parallelism": 32,
+            "embedding_requested_parallelism": 32,
+            "embedding_refresh_mode": "full",
+            "embedding_refresh_cause": "missing",
+        },
+        now=now,
+        stale_seconds=300,
+    )
+    assert "mode=initial" in initial_text
+    assert "cause=missing" not in initial_text
 
 
 def test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta(_m=None):

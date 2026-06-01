@@ -115,7 +115,7 @@ def human_duration_words(seconds: int | float | None) -> str:
 def phase_timer_key(phase: str) -> str:
     phase = str(phase or "")
     phase = re.sub(
-        r"\s+(?:full|incremental|resumed|reuse-only|rebuild)"
+        r"\s+(?:initial|full|incremental|resumed|reuse-only|rebuild)"
         r"(?:\s+(?!(?:reuse|new|batch|parallel|rows|eta)\b)\S+)?"
         r"(?:\s+reuse\s+\d+)?(?:\s+new\s+\d+)?",
         "",

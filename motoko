@@ -2079,7 +2079,7 @@ def sanitize_background_phase(phase: object) -> str:
         parts = ["bg-heavy: vectorizing(model)"]
         if "retry" in text:
             parts.append("retry")
-        mode_match = re.search(r"\b(full|incremental|resumed|reuse-only|rebuild)\b", text)
+        mode_match = re.search(r"\b(initial|full|incremental|resumed|reuse-only|rebuild)\b", text)
         if mode_match:
             parts.append(mode_match.group(1))
         cause_match = re.search(r"\b(missing|source-change|schema|route|forced|stale|checkpoint)\b", text)

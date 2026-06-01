@@ -49,6 +49,16 @@ def embedding_refresh_mode(
     return "full"
 
 
+def display_embedding_refresh_mode(refresh_mode: str, refresh_cause: str = "") -> tuple[str, str]:
+    """Return the concise user-facing refresh mode/cause pair."""
+
+    mode = str(refresh_mode or "").strip()
+    cause = str(refresh_cause or "").strip()
+    if mode == "full" and cause == "missing":
+        return "initial", ""
+    return mode, cause
+
+
 def format_vector_progress_phase(
     *,
     completed_batches: int,
@@ -71,8 +81,7 @@ def format_vector_progress_phase(
     eta_text = f"eta {human_duration(eta_seconds)}" if eta_seconds is not None else "eta ?"
     batch_text = f"batch {completed_batches}/{total_batches}" if total_batches else "batch 0/0"
     refresh_text = ""
-    refresh_mode = str(refresh_mode or "").strip()
-    refresh_cause = str(refresh_cause or "").strip()
+    refresh_mode, refresh_cause = display_embedding_refresh_mode(refresh_mode, refresh_cause)
     new_rows = max(0, _int_or_zero(total_rows) - _int_or_zero(reused_rows)) if pending_rows is None else max(0, _int_or_zero(pending_rows))
     if reused_rows:
         refresh_text = f"{refresh_mode or 'incremental'}"
@@ -156,10 +165,14 @@ def format_safe_vector_progress_row(
         f"requested={_int_or_zero(progress.get('embedding_requested_parallelism'))}",
         f"fallbacks={len(progress.get('embedding_parallel_fallbacks') or [])}",
     ]
-    if progress.get("embedding_refresh_mode"):
-        parts.append(f"mode={progress.get('embedding_refresh_mode')}")
-    if progress.get("embedding_refresh_cause"):
-        parts.append(f"cause={progress.get('embedding_refresh_cause')}")
+    display_mode, display_cause = display_embedding_refresh_mode(
+        str(progress.get("embedding_refresh_mode") or ""),
+        str(progress.get("embedding_refresh_cause") or ""),
+    )
+    if display_mode:
+        parts.append(f"mode={display_mode}")
+    if display_cause:
+        parts.append(f"cause={display_cause}")
     if progress.get("elapsed_seconds") is not None:
         parts.append(f"elapsed={safe_duration_field(progress.get('elapsed_seconds'))}")
     if progress.get("eta_seconds") is not None:
