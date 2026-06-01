@@ -211,6 +211,45 @@ def test_atomic_write_uses_unique_temp_paths_under_concurrency(m):
         assert leftovers == []
 
 
+def test_atomic_write_retries_when_temp_disappears_before_replace(m):
+    with isolated_state():
+        path = m.vector_progress_path("embedding-missing-temp")
+        original_named_temporary_file = m.atomic_write.__globals__["tempfile"].NamedTemporaryFile
+        calls = {"count": 0}
+        removed: list[str] = []
+
+        def patched_named_temporary_file(*args, **kwargs):
+            context = original_named_temporary_file(*args, **kwargs)
+
+            class RemovingWriter:
+                def __enter__(self):
+                    self.fh = context.__enter__()
+                    self.remove_after_close = calls["count"] == 0
+                    return self.fh
+
+                def __exit__(self, *exc_info):
+                    result = context.__exit__(*exc_info)
+                    if self.remove_after_close:
+                        pathlib.Path(self.fh.name).unlink()
+                        removed.append(self.fh.name)
+                    calls["count"] += 1
+                    return result
+
+            return RemovingWriter()
+
+        m.atomic_write.__globals__["tempfile"].NamedTemporaryFile = patched_named_temporary_file
+        try:
+            m.atomic_write(path, json.dumps({"ok": True}, ensure_ascii=False) + "\n")
+        finally:
+            m.atomic_write.__globals__["tempfile"].NamedTemporaryFile = original_named_temporary_file
+
+        assert calls["count"] == 2
+        assert len(removed) == 1
+        assert json.loads(path.read_text(encoding="utf-8")) == {"ok": True}
+        leftovers = list(path.parent.glob(f".{path.name}.*.tmp")) + list(path.parent.glob(f"{path.name}.tmp"))
+        assert leftovers == []
+
+
 def test_recent_conversation_lanes(m):
     with isolated_state():
         current = m.new_conversation("Current")
@@ -15335,6 +15374,7 @@ def main() -> int:
     m = load_motoko()
     tests = [
         test_atomic_write_uses_unique_temp_paths_under_concurrency,
+        test_atomic_write_retries_when_temp_disappears_before_replace,
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
         test_memory_proposal_sends_transcript_not_assistant_prefill,

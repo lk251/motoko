@@ -535,6 +535,7 @@ from motoko_core.state import (  # noqa: E402
     dossier_path,
     dossiers_dir,
     ensure_evidence_stores_dir,
+    exclusive_file_lock,
     ensure_private_dir,
     ensure_vector_progress_dir,
     ensure_vector_stores_dir,
@@ -581,6 +582,7 @@ from motoko_core.state import (  # noqa: E402
     topics_dir,
     tool_approvals_path,
     vector_progress_dir,
+    vector_progress_lock_path,
     vector_progress_path,
     vector_store_path,
     vector_stores_dir,
@@ -13907,6 +13909,7 @@ def build_embedding_vector_store_from_index(
     )
     progress_id = core_embedding_vector_progress_id(progress_key)
     progress_path = vector_progress_path(progress_id)
+    progress_lock_path = vector_progress_lock_path(progress_id)
     candidate_ids = [row_id for row_id, _file_item, _chunk, _text, _row_meta in candidates]
     checkpoint_rows_by_id: dict[str, dict] = {}
     progress_created = now()
@@ -14025,7 +14028,8 @@ def build_embedding_vector_store_from_index(
             eta_seconds=vector_eta_seconds(),
             rows=core_embedding_completed_vector_rows(candidate_ids, completed_rows_by_id),
         )
-        atomic_write(progress_path, json.dumps(progress, ensure_ascii=False, indent=2) + "\n")
+        with exclusive_file_lock(progress_lock_path):
+            atomic_write(progress_path, json.dumps(progress, ensure_ascii=False, indent=2) + "\n")
 
     def pause_vectorization(message: str | None = None) -> None:
         write_progress()

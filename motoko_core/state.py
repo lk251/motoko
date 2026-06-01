@@ -8,10 +8,20 @@ import os
 import pathlib
 import re
 import tempfile
+from contextlib import contextmanager, suppress
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Motoko is deployed on Linux.
+    fcntl = None
 
 
 APP = "motoko"
 LOCAL_MODELS_CONFIG = "local-models.json"
+
+
+class FileLockBusy(RuntimeError):
+    """Raised when a nonblocking realm-local file lock is already held."""
 
 
 def state_root() -> pathlib.Path:
@@ -268,6 +278,10 @@ def vector_progress_path(progress_id: str) -> pathlib.Path:
     return ensure_vector_progress_dir() / f"{_safe_component(progress_id, 'vector-progress')}.json"
 
 
+def vector_progress_lock_path(progress_id: str) -> pathlib.Path:
+    return ensure_vector_progress_dir() / f"{_safe_component(progress_id, 'vector-progress')}.lock"
+
+
 def conversation_path(conversation_id: str) -> pathlib.Path:
     return conversations_dir() / f"{conversation_id}.json"
 
@@ -317,26 +331,56 @@ def retrieval_debug_path(debug_id: str) -> pathlib.Path:
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
     path = pathlib.Path(path)
-    tmp_path: pathlib.Path | None = None
+    attempts = 2
+    for attempt in range(attempts):
+        tmp_path: pathlib.Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as fh:
+                tmp_path = pathlib.Path(fh.name)
+                fh.write(text)
+            tmp_path.chmod(0o600)
+            tmp_path.replace(path)
+            return
+        except FileNotFoundError:
+            if tmp_path is None or attempt >= attempts - 1:
+                raise
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+
+@contextmanager
+def exclusive_file_lock(path: pathlib.Path, *, blocking: bool = True):
+    path = pathlib.Path(path)
+    ensure_private_dir(path.parent)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    acquired = False
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as fh:
-            tmp_path = pathlib.Path(fh.name)
-            fh.write(text)
-        tmp_path.chmod(0o600)
-        tmp_path.replace(path)
-    finally:
-        if tmp_path is not None:
+        if fcntl is not None:
+            flags = fcntl.LOCK_EX
+            if not blocking:
+                flags |= fcntl.LOCK_NB
             try:
-                tmp_path.unlink()
-            except FileNotFoundError:
-                pass
+                fcntl.flock(fd, flags)
+            except BlockingIOError as exc:
+                raise FileLockBusy(str(path)) from exc
+        acquired = True
+        yield path
+    finally:
+        if acquired and fcntl is not None:
+            with suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def safe_load_json(path: pathlib.Path) -> dict | None:
