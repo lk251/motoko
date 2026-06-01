@@ -221,6 +221,10 @@ fresh evidence shows a better target:
    Deterministic Motoko codebase context (`code-map` / `code-query`) and
    model-planned goal-loop retrieval now also carry the same cancel signal, so
    self-improvement scans can stop cleanly before expensive planning continues.
+   Superseded index cleanup and source-lifecycle apply now also pass the
+   cancellation token into index snapshot deletion itself; the lifecycle
+   service checks inside the index/progress/partial, chunk-directory,
+   derived-JSON, and single-file artifact deletion loops.
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or

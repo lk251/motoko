@@ -11936,8 +11936,16 @@ def index_cleanup_candidates(indexes: list[dict] | None = None) -> list[dict]:
     )
 
 
-def delete_index_snapshot(index: dict) -> dict:
+def delete_index_snapshot(index: dict, *, cancel_event=None) -> dict:
     index_id = str(index.get("id", "")).strip()
+
+    def check_cancelled() -> None:
+        raise_if_work_cancelled(
+            cancel_event,
+            "index snapshot deletion interrupted by request",
+            work_kind="index-cleanup",
+        )
+
     return delete_index_snapshot_artifacts(
         index,
         index_path=index_path(index_id),
@@ -11951,6 +11959,7 @@ def delete_index_snapshot(index: dict) -> dict:
         tree_size=tree_size,
         unlink_path=lambda path: path.unlink(),
         remove_tree=lambda path: shutil.rmtree(path, ignore_errors=True),
+        check_cancelled=check_cancelled,
     )
 
 
@@ -11975,7 +11984,7 @@ def cleanup_superseded_stale_indexes(*, limit: int = 1, dry_run: bool = False, c
         load_latest=load_index_exact,
         materialize_latest=materialize_duplicate_chunks,
         latest_missing_artifacts=index_artifact_warnings,
-        delete_snapshot=delete_index_snapshot,
+        delete_snapshot=lambda index: delete_index_snapshot(index, cancel_event=cancel_event),
         invalidate_catalog=invalidate_context_catalog_after_cleanup,
         check_cancelled=check_cancelled,
     )
@@ -12006,7 +12015,11 @@ def source_lifecycle_report_for_index(
     cancel_event=None,
 ) -> dict:
     def check_cancelled() -> None:
-        raise_if_work_cancelled(cancel_event, "source lifecycle interrupted by request", work_kind="source-lifecycle")
+        raise_if_work_cancelled(
+            cancel_event,
+            "source lifecycle interrupted by request",
+            work_kind="source-lifecycle",
+        )
 
     return source_lifecycle_report_from_index(
         index=index,
@@ -12017,7 +12030,7 @@ def source_lifecycle_report_for_index(
         default_glob=AUTO_INDEX_GLOB,
         apply=apply,
         yes=yes,
-        delete_snapshot=delete_index_snapshot,
+        delete_snapshot=lambda snapshot: delete_index_snapshot(snapshot, cancel_event=cancel_event),
         invalidate_catalog=invalidate_context_catalog_after_cleanup,
         check_cancelled=check_cancelled,
     )

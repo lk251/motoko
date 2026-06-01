@@ -1695,6 +1695,14 @@ Motoko self-code checkpoint, 2026-05-31:
   durable-job design; it is the next careful checkpoint toward making all
   visible foreground work interruptible without corrupting indexes, vectors,
   evidence stores, memories, or ledgers.
+- Index snapshot cleanup now carries cancellation through the destructive
+  derived-artifact deletion loop itself. Superseded index cleanup and
+  source-lifecycle apply pass their cancel events into
+  `delete_index_snapshot_artifacts`, and the lifecycle service checks before
+  index/progress/partial deletion, chunk-dir removal, per-family JSON artifact
+  deletion, and single-file artifact deletion. This closes a coarse
+  interruption gap where cleanup could be cancellable at the report boundary
+  but still run a long deletion loop once apply began.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

@@ -672,11 +672,14 @@ def delete_json_artifacts_referencing_index(
     *,
     load_json: Callable[[pathlib.Path], object | None],
     unlink_path: Callable[[pathlib.Path], None],
+    check_cancelled: Callable[[], None] | None = None,
 ) -> int:
     """Delete JSON artifact files in a directory that reference an index id."""
 
     removed = 0
     for path in json_paths_referencing_index(directory, index_id, load_json=load_json):
+        if check_cancelled is not None:
+            check_cancelled()
         try:
             unlink_path(path)
         except FileNotFoundError:
@@ -926,6 +929,7 @@ def delete_index_snapshot_artifacts(
     remove_tree: Callable[[pathlib.Path], None],
     path_size: Callable[[pathlib.Path], int] | None = None,
     tree_size: Callable[[pathlib.Path], int] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> dict:
     """Delete a superseded index snapshot and derived JSON artifacts.
 
@@ -957,22 +961,29 @@ def delete_index_snapshot_artifacts(
     if not index_id:
         return report
 
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
     for key, path in [
         ("index_deleted", index_path),
         ("progress_deleted", progress_path),
         ("partial_deleted", partial_path),
     ]:
+        maybe_cancel()
         try:
             unlink_path(path)
         except FileNotFoundError:
             continue
         report[key] = True
 
+    maybe_cancel()
     if chunk_dir.exists():
         remove_tree(chunk_dir)
         report["chunk_dir_deleted"] = True
 
     for target in json_artifact_dirs:
+        maybe_cancel()
         report_key = str(target.get("report_key", "")).strip()
         path = target.get("path", "")
         if not report_key or not path:
@@ -982,8 +993,10 @@ def delete_index_snapshot_artifacts(
             index_id,
             load_json=load_json,
             unlink_path=unlink_path,
+            check_cancelled=check_cancelled,
         )
     for target in json_artifact_files or []:
+        maybe_cancel()
         report_key = str(target.get("report_key", "")).strip()
         path = target.get("path", "")
         if not report_key or not path:
@@ -994,10 +1007,12 @@ def delete_index_snapshot_artifacts(
         action = str(target.get("action", "delete-if-references-index") or "delete-if-references-index")
         should_delete = action == "delete-always"
         if not should_delete:
+            maybe_cancel()
             data = load_json(state_path)
             should_delete = bool(data is not None and json_references_index(data, index_id))
         if not should_delete:
             continue
+        maybe_cancel()
         try:
             unlink_path(state_path)
         except FileNotFoundError:

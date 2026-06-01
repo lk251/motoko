@@ -12576,6 +12576,53 @@ def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert deleted == ["old-index"]
 
 
+def test_index_snapshot_deletion_honors_cancellation_inside_artifact_loop(_m):
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        artifact_dir = root / "derived"
+        artifact_dir.mkdir()
+        first = artifact_dir / "a-first.json"
+        second = artifact_dir / "b-second.json"
+        for path in [first, second]:
+            path.write_text(
+                json.dumps({"id": path.stem, "source_index": "old-index"}) + "\n",
+                encoding="utf-8",
+            )
+
+        def load_json(path):
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
+
+        calls = {"count": 0}
+
+        def cancel_after_first_derived_delete():
+            calls["count"] += 1
+            if calls["count"] >= 7:
+                raise RuntimeError("cancelled derived cleanup")
+
+        try:
+            delete_index_snapshot_artifacts_core(
+                {"id": "old-index"},
+                index_path=root / "old-index.json",
+                progress_path=root / "old-index.progress.json",
+                partial_path=root / "old-index.partial.json",
+                chunk_dir=root / "old-index.chunks",
+                json_artifact_dirs=[{"path": artifact_dir, "report_key": "derived_deleted"}],
+                load_json=load_json,
+                unlink_path=lambda path: path.unlink(),
+                remove_tree=lambda path: shutil.rmtree(path, ignore_errors=True),
+                check_cancelled=cancel_after_first_derived_delete,
+            )
+            raise AssertionError("index snapshot deletion should honor artifact-loop cancellation")
+        except RuntimeError as exc:
+            assert "cancelled derived cleanup" in str(exc)
+
+        assert not first.exists()
+        assert second.exists()
+
+
 def test_source_lifecycle_report_from_index_owns_orchestration(_m):
     index = {
         "id": "old-index",
@@ -15635,6 +15682,7 @@ def main() -> int:
         test_index_storage_cleanup_sections_are_service_owned,
         test_index_storage_audit_orchestration_is_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
+        test_index_snapshot_deletion_honors_cancellation_inside_artifact_loop,
         test_source_lifecycle_report_from_index_owns_orchestration,
         test_source_lifecycle_storage_plan_summary_from_index_is_service_owned,
         test_source_lifecycle_storage_plan_summaries_from_indexes_are_service_owned,
