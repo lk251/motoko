@@ -472,6 +472,7 @@ from motoko_core.retrieval_service import (  # noqa: E402
     HybridRetrievalEnvironment,
     RetrievalService,
     build_context_package,
+    build_prompt_context_lanes,
     build_retrieval_preview_result,
     plan_retrieval_sufficiency_expansion,
     rerank_hybrid_candidates_with_environment,
@@ -17761,71 +17762,34 @@ def build_prompt_context_package(
     personality_text, personality_file, personality_exists = load_personality()
     identity_text = format_identity()
     summary_text = render_conversation_summary(conv)
-    lanes = [
-        ContextLane(
-            "identity",
-            identity_text,
-            [
-                {
-                    "kind": "identity",
-                    "name": identity.get("name", "Motoko"),
-                    "realm": identity.get("realm", "personal"),
-                    "description": identity.get("description", ""),
-                }
-            ],
-            "assistant name and account realm",
-        ),
-        ContextLane(
-            "personality",
-            personality_text,
-            [
-                {
-                    "kind": "personality",
-                    "path": personality_file,
-                    "status": "custom" if personality_exists else "default",
-                }
-            ],
-            "tone and behavior only",
-        ),
-        ContextLane("profile", profile_text, profile_sources, "stable Javier context"),
-        ContextLane("durable memories", memory_text, memory_sources, "ranked personal facts and preferences"),
-        ContextLane("procedural skills", skill_text, skill_sources, "relevant learned procedures and debugging lessons"),
-        ContextLane("Motoko codebase", codebase_text, codebase_sources, "deterministic Motoko self-code lookup"),
-        ContextLane("recent conversations", recent_text, recent_sources, "bounded recency plus relevance recall"),
-        ContextLane("project scope", scope_text, scope_sources, "current-project retrieval boundary and recovery"),
-        ContextLane(
-            "conversation summary",
-            summary_text,
-            [{"kind": "conversation-summary", "conversation_id": conv.get("id", "")}]
-            if conv.get("summary", "").strip()
-            else [],
-            "compacted older turns",
-        ),
-        ContextLane("attached context", context_text, context_sources, "explicit files, indexes, topics, dossiers"),
-    ]
-    if sufficiency_text:
-        lanes.append(
-            ContextLane(
-                "retrieval sufficiency",
-                sufficiency_text,
-                sufficiency_sources,
-                "bounded extra retrieval when initial evidence is thin",
-            )
-        )
-    lanes.append(
-        ContextLane(
-            "catalog",
-            catalog_text,
-            [
-                {
-                    "kind": "context-catalog",
-                    "updated": catalog.get("updated", ""),
-                    "scope": "current-project",
-                    "project_roots": sorted(project_roots),
-                }
-            ],
-            "available private context inventory",
-        )
+    lanes = build_prompt_context_lanes(
+        identity=identity,
+        identity_text=identity_text,
+        personality_text=personality_text,
+        personality_file=personality_file,
+        personality_exists=personality_exists,
+        profile_text=profile_text,
+        profile_sources=profile_sources,
+        memory_text=memory_text,
+        memory_sources=memory_sources,
+        skill_text=skill_text,
+        skill_sources=skill_sources,
+        codebase_text=codebase_text,
+        codebase_sources=codebase_sources,
+        recent_text=recent_text,
+        recent_sources=recent_sources,
+        scope_text=scope_text,
+        scope_sources=scope_sources,
+        summary_text=summary_text,
+        conversation_id=conv.get("id", ""),
+        conversation_summary_present=bool(conv.get("summary", "").strip()),
+        context_text=context_text,
+        context_sources=context_sources,
+        sufficiency_text=sufficiency_text,
+        sufficiency_sources=sufficiency_sources,
+        catalog_text=catalog_text,
+        catalog=catalog,
+        project_roots=project_roots,
     )
     context_package = build_context_package(
         lanes,

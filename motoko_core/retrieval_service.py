@@ -101,6 +101,107 @@ class RetrievalSufficiencyExpansion:
     diagnostics: dict = field(default_factory=dict)
 
 
+def build_prompt_context_lanes(
+    *,
+    identity: dict,
+    identity_text: str,
+    personality_text: str,
+    personality_file: str,
+    personality_exists: bool,
+    profile_text: str,
+    profile_sources: list[dict],
+    memory_text: str,
+    memory_sources: list[dict],
+    skill_text: str,
+    skill_sources: list[dict],
+    codebase_text: str,
+    codebase_sources: list[dict],
+    recent_text: str,
+    recent_sources: list[dict],
+    scope_text: str,
+    scope_sources: list[dict],
+    summary_text: str,
+    conversation_id: str,
+    conversation_summary_present: bool,
+    context_text: str,
+    context_sources: list[dict],
+    sufficiency_text: str,
+    sufficiency_sources: list[dict],
+    catalog_text: str,
+    catalog: dict,
+    project_roots,
+) -> list[ContextLane]:
+    """Return the ordered prompt-context lanes for a chat request."""
+
+    lanes = [
+        ContextLane(
+            "identity",
+            identity_text,
+            [
+                {
+                    "kind": "identity",
+                    "name": identity.get("name", "Motoko"),
+                    "realm": identity.get("realm", "personal"),
+                    "description": identity.get("description", ""),
+                }
+            ],
+            "assistant name and account realm",
+        ),
+        ContextLane(
+            "personality",
+            personality_text,
+            [
+                {
+                    "kind": "personality",
+                    "path": personality_file,
+                    "status": "custom" if personality_exists else "default",
+                }
+            ],
+            "tone and behavior only",
+        ),
+        ContextLane("profile", profile_text, profile_sources, "stable Javier context"),
+        ContextLane("durable memories", memory_text, memory_sources, "ranked personal facts and preferences"),
+        ContextLane("procedural skills", skill_text, skill_sources, "relevant learned procedures and debugging lessons"),
+        ContextLane("Motoko codebase", codebase_text, codebase_sources, "deterministic Motoko self-code lookup"),
+        ContextLane("recent conversations", recent_text, recent_sources, "bounded recency plus relevance recall"),
+        ContextLane("project scope", scope_text, scope_sources, "current-project retrieval boundary and recovery"),
+        ContextLane(
+            "conversation summary",
+            summary_text,
+            [{"kind": "conversation-summary", "conversation_id": conversation_id}]
+            if conversation_summary_present
+            else [],
+            "compacted older turns",
+        ),
+        ContextLane("attached context", context_text, context_sources, "explicit files, indexes, topics, dossiers"),
+    ]
+    if sufficiency_text:
+        lanes.append(
+            ContextLane(
+                "retrieval sufficiency",
+                sufficiency_text,
+                sufficiency_sources,
+                "bounded extra retrieval when initial evidence is thin",
+            )
+        )
+    lanes.append(
+        ContextLane(
+            "catalog",
+            catalog_text,
+            [
+                {
+                    "kind": "context-catalog",
+                    "updated": catalog.get("updated", ""),
+                    "scope": "current-project",
+                    "project_roots": sorted(project_roots),
+                }
+            ],
+            "available private context inventory",
+        )
+    )
+    return lanes
+
+
 def plan_retrieval_sufficiency_expansion(
     query: str,
     sources: list[dict],

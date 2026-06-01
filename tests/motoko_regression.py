@@ -5887,19 +5887,63 @@ def test_identity_config(m):
 
 
 def test_context_package_builds_sources_and_plan(m):
+    lanes = m.build_prompt_context_lanes(
+        identity={"name": "Motoko", "realm": "mares", "description": "assistant"},
+        identity_text="Motoko realm",
+        personality_text="Careful.",
+        personality_file="/tmp/personality.md",
+        personality_exists=False,
+        profile_text="Profile.",
+        profile_sources=[{"kind": "profile"}],
+        memory_text="Memory.",
+        memory_sources=[{"kind": "memory"}],
+        skill_text="Skill.",
+        skill_sources=[{"kind": "skill"}],
+        codebase_text="Code.",
+        codebase_sources=[{"kind": "code-query"}],
+        recent_text="Recent.",
+        recent_sources=[{"kind": "recent-conversation"}],
+        scope_text="Scope.",
+        scope_sources=[{"kind": "project-scope"}],
+        summary_text="Summary.",
+        conversation_id="conv-1",
+        conversation_summary_present=True,
+        context_text="source excerpt",
+        context_sources=[{"kind": "chunk"}],
+        sufficiency_text="Extra.",
+        sufficiency_sources=[{"kind": "retrieval-sufficiency"}],
+        catalog_text="Catalog.",
+        catalog={"updated": "now"},
+        project_roots={"/tmp/project"},
+    )
+    assert [lane.lane for lane in lanes[:3]] == ["identity", "personality", "profile"]
+    assert [lane.lane for lane in lanes[-3:]] == ["attached context", "retrieval sufficiency", "catalog"]
+    assert lanes[8].sources == [{"kind": "conversation-summary", "conversation_id": "conv-1"}]
+    assert lanes[-1].sources[0]["project_roots"] == ["/tmp/project"]
+
     package = m.build_context_package(
-        [
-            m.ContextLane("identity", "Motoko realm", [{"kind": "identity"}], "realm"),
-            m.ContextLane("attached context", "source excerpt", [{"kind": "chunk"}], "evidence"),
-        ],
+        lanes,
         budget_chars=100,
     )
 
-    assert [source["kind"] for source in package.sources[:-1]] == ["identity", "chunk"]
+    assert [source["kind"] for source in package.sources[:-1]] == [
+        "identity",
+        "personality",
+        "profile",
+        "memory",
+        "skill",
+        "code-query",
+        "recent-conversation",
+        "project-scope",
+        "conversation-summary",
+        "chunk",
+        "retrieval-sufficiency",
+        "context-catalog",
+    ]
     assert package.sources[-1]["kind"] == "context-plan"
     assert package.context_plan["context_package_schema"] == "context-package-v1"
-    assert package.context_plan["lanes"][1]["lane"] == "attached context"
-    assert package.context_plan["lanes"][1]["sources"] == 1
+    assert package.context_plan["lanes"][9]["lane"] == "attached context"
+    assert package.context_plan["lanes"][9]["sources"] == 1
     assert package.text_for("identity") == "Motoko realm"
     preview = m.build_retrieval_preview_result(
         "source query",

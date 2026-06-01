@@ -357,7 +357,10 @@ Current progress on this backlog:
   metadata are surfaced alongside each index. Catalog memory/profile summaries
   also expose current latest-memory and profile source-count metadata so
   prompt-time private context inventory reflects newly materialized memory and
-  profile state without a restart. `/status` now also builds its
+  profile state without a restart. Prompt-context lane ordering and source
+  bookkeeping now live in `motoko_core.retrieval_service` too, so chat,
+  previews, and `/sources` keep using one tested context-package shape while
+  root owns live retrieval and state reads. `/status` now also builds its
   context-catalog line from current state instead of trusting an older
   persisted catalog file. Current-directory corpus learning now attaches the
   newly built index, saves the conversation, and refreshes the catalog from the
