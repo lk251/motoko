@@ -444,6 +444,10 @@ Current progress on this backlog:
   text reads, model route calls, progress persistence, and cancellation
   wording, but the pure route/candidate contract is tested outside the live
   orchestration path.
+- Embedding vector checkpoint/previous-store reuse accounting now also lives in
+  `motoko_core.vector_store`, including checkpoint precedence, reused-row
+  counts, superseded-row counts, initial completed rows, pending rows, and
+  dimension inference.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

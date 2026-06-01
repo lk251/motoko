@@ -82,6 +82,50 @@ def collect_reusable_embedding_vector_rows(
     return reused
 
 
+def embedding_vector_reuse_state(
+    candidates,
+    checkpoint_rows_by_id: dict,
+    previous_rows_by_id: dict,
+    reusable_row: collections.abc.Callable[[dict, dict, dict, dict], dict | None],
+    *,
+    current_dims: int = 0,
+) -> dict:
+    completed_rows_by_id: dict[str, dict] = {}
+    dimensions = _int_or_zero(current_dims)
+
+    checkpoint_reused = collect_reusable_embedding_vector_rows(
+        candidates,
+        checkpoint_rows_by_id or {},
+        reusable_row,
+    )
+    completed_rows_by_id.update(checkpoint_reused)
+    checkpoint_reused_rows = len(checkpoint_reused)
+    dimensions = embedding_rows_vector_dims(checkpoint_reused.values(), current_dims=dimensions)
+
+    previous_rows_by_id = previous_rows_by_id or {}
+    previous_reused = collect_reusable_embedding_vector_rows(
+        candidates,
+        previous_rows_by_id,
+        reusable_row,
+        skip_row_ids=completed_rows_by_id.keys(),
+    )
+    completed_rows_by_id.update(previous_reused)
+    previous_store_reused_rows = len(previous_reused)
+    dimensions = embedding_rows_vector_dims(previous_reused.values(), current_dims=dimensions)
+
+    previous_store_row_count = len(previous_rows_by_id)
+    return {
+        "completed_rows_by_id": completed_rows_by_id,
+        "checkpoint_reused_rows": checkpoint_reused_rows,
+        "previous_store_reused_rows": previous_store_reused_rows,
+        "previous_store_row_count": previous_store_row_count,
+        "previous_store_superseded_rows": max(0, previous_store_row_count - previous_store_reused_rows),
+        "initial_completed_rows": len(completed_rows_by_id),
+        "pending_rows": max(0, len(candidates or []) - len(completed_rows_by_id)),
+        "dimensions": dimensions,
+    }
+
+
 def embedding_rows_vector_dims(rows, *, current_dims: int = 0) -> int:
     dims = _int_or_zero(current_dims)
     if dims:

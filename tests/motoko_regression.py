@@ -80,6 +80,7 @@ from motoko_core.vector_store import (
     embedding_pending_batches as embedding_pending_batches_core,
     embedding_refresh_mode as embedding_refresh_mode_core,
     embedding_rows_vector_dims as embedding_rows_vector_dims_core,
+    embedding_vector_reuse_state as embedding_vector_reuse_state_core,
     embedding_vector_checkpoint_rows as embedding_vector_checkpoint_rows_core,
     embedding_vector_progress_record as embedding_vector_progress_record_core,
     embedding_vector_progress_id as embedding_vector_progress_id_core,
@@ -7936,6 +7937,42 @@ def test_collect_embedding_vector_candidates_core_filters_and_checks_cancel(_m=N
     assert len(checkpoints) == 5
 
 
+def test_embedding_vector_reuse_state_core_prefers_checkpoint_rows(_m=None):
+    candidates = [
+        ("row-1", {"path": "a.org"}, {"id": "c1"}, "text 1", {"meta": 1}),
+        ("row-2", {"path": "a.org"}, {"id": "c2"}, "text 2", {"meta": 2}),
+        ("row-3", {"path": "a.org"}, {"id": "c3"}, "text 3", {"meta": 3}),
+    ]
+    checkpoint_rows = {
+        "row-1": {"id": "row-1", "vector": [0.1, 0.2]},
+        "row-2": {"id": "row-2", "vector": [0.3, 0.4]},
+    }
+    previous_rows = {
+        "row-2": {"id": "row-2", "vector": [9.0, 9.0]},
+        "row-3": {"id": "row-3", "vector": [0.5, 0.6]},
+        "stale-row": {"id": "stale-row", "vector": [0.0, 0.0]},
+    }
+
+    def reusable(existing, _file_item, _chunk, _row_meta):
+        return existing if existing.get("vector") else None
+
+    state = embedding_vector_reuse_state_core(
+        candidates,
+        checkpoint_rows,
+        previous_rows,
+        reusable,
+    )
+
+    assert state["checkpoint_reused_rows"] == 2
+    assert state["previous_store_reused_rows"] == 1
+    assert state["previous_store_row_count"] == 3
+    assert state["previous_store_superseded_rows"] == 2
+    assert state["initial_completed_rows"] == 3
+    assert state["pending_rows"] == 0
+    assert state["dimensions"] == 2
+    assert state["completed_rows_by_id"]["row-2"]["vector"] == [0.3, 0.4]
+
+
 def test_embedding_vector_progress_record_core_shapes_resume_checkpoint(_m=None):
     row = {"id": "row-1", "vector": [0.1, 0.2]}
     progress = embedding_vector_progress_record_core(
@@ -14728,6 +14765,7 @@ def main() -> int:
         test_embedding_vector_progress_core_identity_and_matching,
         test_embedding_vector_route_identity_core_normalizes_catalog_fields,
         test_collect_embedding_vector_candidates_core_filters_and_checks_cancel,
+        test_embedding_vector_reuse_state_core_prefers_checkpoint_rows,
         test_embedding_vector_progress_record_core_shapes_resume_checkpoint,
         test_embedding_vector_store_record_core_shapes_provenance_and_reuse,
         test_embedding_vector_batch_and_reuse_helpers_are_core_owned,

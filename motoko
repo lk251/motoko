@@ -332,12 +332,11 @@ from motoko_core.retrieval_planner import build_retrieval_plan  # noqa: E402
 from motoko_core.vector_store import (  # noqa: E402
     bounded_vector_embedding_text,
     collect_embedding_vector_candidates as core_collect_embedding_vector_candidates,
-    collect_reusable_embedding_vector_rows as core_collect_reusable_embedding_vector_rows,
     dense_normalize,
     embedding_candidate_batches as core_embedding_candidate_batches,
     embedding_pending_batches as core_embedding_pending_batches,
     embedding_refresh_mode as core_embedding_refresh_mode,
-    embedding_rows_vector_dims as core_embedding_rows_vector_dims,
+    embedding_vector_reuse_state as core_embedding_vector_reuse_state,
     embedding_vector_route_identity as core_embedding_vector_route_identity,
     embedding_vector_progress_record as core_embedding_vector_progress_record,
     embedding_vector_progress_id as core_embedding_vector_progress_id,
@@ -14212,7 +14211,6 @@ def build_embedding_vector_store_from_index(
     progress_id = core_embedding_vector_progress_id(progress_key)
     progress_path = vector_progress_path(progress_id)
     candidate_ids = [row_id for row_id, _file_item, _chunk, _text, _row_meta in candidates]
-    completed_rows_by_id: dict[str, dict] = {}
     checkpoint_rows_by_id: dict[str, dict] = {}
     progress_created = now()
     if write and progress_path.exists():
@@ -14268,35 +14266,26 @@ def build_embedding_vector_store_from_index(
             embedding_input_schema=EMBEDDING_INPUT_SCHEMA_VERSION,
         )
 
-    checkpoint_reused = core_collect_reusable_embedding_vector_rows(
-        candidates,
-        checkpoint_rows_by_id,
-        reusable_completed_row,
-    )
-    completed_rows_by_id.update(checkpoint_reused)
-    checkpoint_reused_rows = len(checkpoint_reused)
-    dimensions = core_embedding_rows_vector_dims(checkpoint_reused.values(), current_dims=dimensions)
-
     previous_store = latest_reusable_embedding_vector_store(index, route_info) if write else None
     previous_rows_by_id = core_embedding_vector_rows_by_id((previous_store or {}).get("rows", []))
-    previous_store_reused_rows = 0
-    if previous_rows_by_id:
-        previous_reused = core_collect_reusable_embedding_vector_rows(
-            candidates,
-            previous_rows_by_id,
-            reusable_completed_row,
-            skip_row_ids=completed_rows_by_id.keys(),
-        )
-        completed_rows_by_id.update(previous_reused)
-        previous_store_reused_rows = len(previous_reused)
-        dimensions = core_embedding_rows_vector_dims(previous_reused.values(), current_dims=dimensions)
-    previous_store_row_count = len(previous_rows_by_id)
-    previous_store_superseded_rows = max(0, previous_store_row_count - previous_store_reused_rows)
-    initial_completed_rows = len(completed_rows_by_id)
+    reuse_state = core_embedding_vector_reuse_state(
+        candidates,
+        checkpoint_rows_by_id,
+        previous_rows_by_id,
+        reusable_completed_row,
+        current_dims=dimensions,
+    )
+    completed_rows_by_id: dict[str, dict] = reuse_state["completed_rows_by_id"]
+    checkpoint_reused_rows = reuse_state["checkpoint_reused_rows"]
+    previous_store_reused_rows = reuse_state["previous_store_reused_rows"]
+    previous_store_row_count = reuse_state["previous_store_row_count"]
+    previous_store_superseded_rows = reuse_state["previous_store_superseded_rows"]
+    initial_completed_rows = reuse_state["initial_completed_rows"]
+    dimensions = reuse_state["dimensions"]
     session_started = time.monotonic()
     session_start_completed_rows = initial_completed_rows
     refresh_cause = str(refresh_cause or "")
-    pending_row_count = max(0, len(candidates) - initial_completed_rows)
+    pending_row_count = reuse_state["pending_rows"]
     refresh_mode = core_embedding_refresh_mode(
         checkpoint_reused_rows=checkpoint_reused_rows,
         previous_store_reused_rows=previous_store_reused_rows,
