@@ -455,6 +455,8 @@ Current progress on this backlog:
 - Embedding vector elapsed/ETA calculations now live with the vector refresh
   contract as pure helpers. Elapsed time can use a durable checkpoint timestamp
   while ETA remains based on rows completed in the current session.
+- Embedding vector completed-row materialization now preserves candidate order
+  through a core helper used by both progress checkpoints and final stores.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

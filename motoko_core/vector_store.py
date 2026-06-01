@@ -218,6 +218,11 @@ def embedding_vector_rows_by_id(rows) -> dict[str, dict]:
     }
 
 
+def embedding_completed_vector_rows(candidate_ids, completed_rows_by_id: dict) -> list[dict]:
+    rows_by_id = completed_rows_by_id or {}
+    return [rows_by_id[row_id] for row_id in candidate_ids or [] if row_id in rows_by_id]
+
+
 def embedding_vector_route_identity(route_info: dict) -> dict:
     return {
         "route_id": str(route_info.get("catalog_route") or route_info.get("route") or ""),

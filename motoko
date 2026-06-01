@@ -336,6 +336,7 @@ from motoko_core.vector_store import (  # noqa: E402
     embedding_candidate_batches as core_embedding_candidate_batches,
     embedding_pending_batches as core_embedding_pending_batches,
     embedding_refresh_mode as core_embedding_refresh_mode,
+    embedding_completed_vector_rows as core_embedding_completed_vector_rows,
     embedding_vector_elapsed_seconds as core_embedding_vector_elapsed_seconds,
     embedding_vector_eta_seconds as core_embedding_vector_eta_seconds,
     embedding_vector_reuse_state as core_embedding_vector_reuse_state,
@@ -14288,7 +14289,7 @@ def build_embedding_vector_store_from_index(
             previous_store_superseded_rows=previous_store_superseded_rows,
             elapsed_seconds=vector_elapsed_seconds(),
             eta_seconds=vector_eta_seconds(),
-            rows=[completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id],
+            rows=core_embedding_completed_vector_rows(candidate_ids, completed_rows_by_id),
         )
         atomic_write(progress_path, json.dumps(progress, ensure_ascii=False, indent=2) + "\n")
 
@@ -14487,7 +14488,7 @@ def build_embedding_vector_store_from_index(
                 record_completed_batch(new_rows, embedded_route)
         break
 
-    rows = [completed_rows_by_id[row_id] for row_id in candidate_ids if row_id in completed_rows_by_id]
+    rows = core_embedding_completed_vector_rows(candidate_ids, completed_rows_by_id)
     write_progress()
     if progress_callback is not None:
         progress_callback(

@@ -78,6 +78,7 @@ from motoko_core.vector_store import (
     collect_embedding_vector_candidates as collect_embedding_vector_candidates_core,
     collect_reusable_embedding_vector_rows as collect_reusable_embedding_vector_rows_core,
     embedding_candidate_batches as embedding_candidate_batches_core,
+    embedding_completed_vector_rows as embedding_completed_vector_rows_core,
     embedding_vector_elapsed_seconds as embedding_vector_elapsed_seconds_core,
     embedding_vector_eta_seconds as embedding_vector_eta_seconds_core,
     embedding_pending_batches as embedding_pending_batches_core,
@@ -8018,6 +8019,19 @@ def test_embedding_vector_reuse_state_core_prefers_checkpoint_rows(_m=None):
     assert state["completed_rows_by_id"]["row-2"]["vector"] == [0.3, 0.4]
 
 
+def test_embedding_completed_vector_rows_core_preserves_candidate_order(_m=None):
+    rows = embedding_completed_vector_rows_core(
+        ["row-2", "missing", "row-1", "row-3"],
+        {
+            "row-1": {"id": "row-1"},
+            "row-2": {"id": "row-2"},
+            "row-3": {"id": "row-3"},
+        },
+    )
+
+    assert [row["id"] for row in rows] == ["row-2", "row-1", "row-3"]
+
+
 def test_embedding_vector_progress_record_core_shapes_resume_checkpoint(_m=None):
     row = {"id": "row-1", "vector": [0.1, 0.2]}
     progress = embedding_vector_progress_record_core(
@@ -14812,6 +14826,7 @@ def main() -> int:
         test_embedding_vector_route_identity_core_normalizes_catalog_fields,
         test_collect_embedding_vector_candidates_core_filters_and_checks_cancel,
         test_embedding_vector_reuse_state_core_prefers_checkpoint_rows,
+        test_embedding_completed_vector_rows_core_preserves_candidate_order,
         test_embedding_vector_progress_record_core_shapes_resume_checkpoint,
         test_embedding_vector_store_record_core_shapes_provenance_and_reuse,
         test_embedding_vector_batch_and_reuse_helpers_are_core_owned,
