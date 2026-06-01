@@ -399,8 +399,11 @@ Current progress on this backlog:
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw
   query/note/source text until the user explicitly inspects the private eval
-  artifact. `motoko self-eval` now checks that the code-query path can find
-  this curator/eval implementation and its regression coverage.
+  artifact. Pure curator candidate construction now lives in
+  `motoko_core.skill_curator`, while the root facade keeps realm-local state
+  access and suggestion writes. `motoko self-eval` now checks that the
+  code-query path can find this curator/eval implementation and its regression
+  coverage.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

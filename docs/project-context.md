@@ -1618,6 +1618,12 @@ Motoko self-code checkpoint, 2026-05-31:
   "root facade hotspot extraction target", and `self-eval` checks that those
   rows remain discoverable. This makes future refactor planning less dependent
   on remembering that hotspot data only appeared in the broad code-map report.
+- Skill curator decision logic has begun moving out of the root facade:
+  `motoko_core.skill_curator` now owns pure matching and suggestion-candidate
+  construction for feedback signals, feedback-eval signals, support-file
+  opportunities, consolidation reviews, and stale-unused archive reviews. The
+  root facade still owns realm-local state reads, pending-suggestion writes,
+  and report rendering.
 - Code intelligence now also extracts module-level schema/version/artifact
   constants and exposes them through `code-map`, `code-query`, and
   `self-eval`. This matters for Motoko self-improvement because artifact

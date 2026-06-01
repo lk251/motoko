@@ -63,6 +63,10 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_storage_plan_summary_from_index as source_lifecycle_storage_plan_summary_from_index_core,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
+from motoko_core.skill_curator import (
+    curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
+    skill_curator_feedback_matches as skill_curator_feedback_matches_core,
+)
 
 
 def load_motoko():
@@ -12366,6 +12370,42 @@ def test_skill_curator_creates_feedback_patch_suggestion(m):
         assert "Feedback-derived review notes" in m.format_skill("retrieval-debugging")
 
 
+def test_skill_curator_core_builds_review_first_candidates(_m=None):
+    active = [
+        {
+            "slug": "retrieval-debugging",
+            "description": "Retrieval debugging checklist",
+            "body": "Inspect sources first.",
+            "lifecycle_state": "active",
+            "support_files": [],
+        }
+    ]
+    feedback_rows = [
+        {
+            "id": "feedback-core",
+            "rating": "down",
+            "note": "retrieval debugging needs ranking and stale-source checks",
+            "user_prompt": "why did retrieval miss this source?",
+        }
+    ]
+
+    matches = skill_curator_feedback_matches_core(active, feedback_rows)
+    candidates = curator_skill_suggestion_candidates_core(
+        active,
+        feedback_matches=matches,
+        feedback_eval_matches=[],
+        limit=2,
+        suggestion_body_chars=3000,
+        stale_unused_days=30,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["action"] == "patch"
+    assert candidates[0]["target_skill"] == "retrieval-debugging"
+    assert "curator-feedback-match" in candidates[0]["signals"]
+    assert "retrieval debugging needs ranking" not in candidates[0]["new_string"]
+
+
 def test_skill_curator_uses_saved_feedback_eval_fixtures(m):
     with isolated_state():
         m.learn_skill_text(
@@ -14127,6 +14167,7 @@ def main() -> int:
         test_code_query_report_command_honors_cancel_event,
         test_self_improvement_eval_checks_codebase_skill_and_scanner,
         test_skill_scan_reports_script_risks,
+        test_skill_curator_core_builds_review_first_candidates,
         test_skill_curator_creates_feedback_patch_suggestion,
         test_skill_curator_creates_loaded_skill_patch_suggestion,
         test_skill_curator_creates_support_file_plan_for_large_skill,
