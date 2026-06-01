@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import io
 import importlib.machinery
 import importlib.util
@@ -77,6 +78,8 @@ from motoko_core.vector_store import (
     collect_embedding_vector_candidates as collect_embedding_vector_candidates_core,
     collect_reusable_embedding_vector_rows as collect_reusable_embedding_vector_rows_core,
     embedding_candidate_batches as embedding_candidate_batches_core,
+    embedding_vector_elapsed_seconds as embedding_vector_elapsed_seconds_core,
+    embedding_vector_eta_seconds as embedding_vector_eta_seconds_core,
     embedding_pending_batches as embedding_pending_batches_core,
     embedding_refresh_mode as embedding_refresh_mode_core,
     embedding_rows_vector_dims as embedding_rows_vector_dims_core,
@@ -1561,6 +1564,46 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         "bg-heavy: vectorizing(model) orgfiles full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
     )
     assert sanitized_full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+
+
+def test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta(_m=None):
+    current = dt.datetime(2026, 6, 1, 4, 30, 0, tzinfo=dt.timezone.utc)
+    assert (
+        embedding_vector_elapsed_seconds_core(
+            "2026-06-01T04:20:00+00:00",
+            session_elapsed_seconds=12,
+            now=current,
+        )
+        == 600
+    )
+    assert embedding_vector_elapsed_seconds_core("not-a-date", session_elapsed_seconds=12.8) == 12
+    assert (
+        embedding_vector_eta_seconds_core(
+            total_rows=1000,
+            completed_rows=250,
+            session_start_completed_rows=100,
+            session_elapsed_seconds=30,
+        )
+        == 150
+    )
+    assert (
+        embedding_vector_eta_seconds_core(
+            total_rows=1000,
+            completed_rows=100,
+            session_start_completed_rows=100,
+            session_elapsed_seconds=30,
+        )
+        is None
+    )
+    assert (
+        embedding_vector_eta_seconds_core(
+            total_rows=1000,
+            completed_rows=1000,
+            session_start_completed_rows=100,
+            session_elapsed_seconds=30,
+        )
+        is None
+    )
 
 
 def test_generated_title(m):
@@ -14730,6 +14773,7 @@ def main() -> int:
         test_tui_bottom_status_omits_chat_phase_and_spinner,
         test_tui_vector_status_reports_stale_progress,
         test_vector_progress_phase_is_content_free_and_finalizing,
+        test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta,
         test_tui_append_renderer_keeps_transcript_in_scrollback,
         test_tui_active_answer_streams_stable_lines_to_scrollback,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,

@@ -336,6 +336,8 @@ from motoko_core.vector_store import (  # noqa: E402
     embedding_candidate_batches as core_embedding_candidate_batches,
     embedding_pending_batches as core_embedding_pending_batches,
     embedding_refresh_mode as core_embedding_refresh_mode,
+    embedding_vector_elapsed_seconds as core_embedding_vector_elapsed_seconds,
+    embedding_vector_eta_seconds as core_embedding_vector_eta_seconds,
     embedding_vector_reuse_state as core_embedding_vector_reuse_state,
     embedding_vector_route_identity as core_embedding_vector_route_identity,
     embedding_vector_progress_record as core_embedding_vector_progress_record,
@@ -14187,23 +14189,18 @@ def build_embedding_vector_store_from_index(
     fallback_events = []
 
     def vector_elapsed_seconds() -> int | None:
-        parsed = parse_timestamp(progress_created)
-        if parsed is not None:
-            delta = _dt.datetime.now(_dt.timezone.utc).astimezone() - parsed.astimezone()
-            return max(0, int(delta.total_seconds()))
-        return max(0, int(time.monotonic() - session_started))
+        return core_embedding_vector_elapsed_seconds(
+            progress_created,
+            session_elapsed_seconds=time.monotonic() - session_started,
+        )
 
     def vector_eta_seconds() -> int | None:
-        done_this_session = len(completed_rows_by_id) - session_start_completed_rows
-        remaining = len(candidates) - len(completed_rows_by_id)
-        if done_this_session <= 0 or remaining <= 0:
-            return None
-        elapsed = max(0.001, time.monotonic() - session_started)
-        return int((elapsed / done_this_session) * remaining)
-
-    def vector_eta_text() -> str:
-        eta = vector_eta_seconds()
-        return f"eta {human_duration(eta)}" if eta is not None else "eta ?"
+        return core_embedding_vector_eta_seconds(
+            total_rows=len(candidates),
+            completed_rows=len(completed_rows_by_id),
+            session_start_completed_rows=session_start_completed_rows,
+            session_elapsed_seconds=time.monotonic() - session_started,
+        )
 
     def row_from_vector(file_item: dict, chunk: dict, vector: list[float], row_meta: dict) -> dict:
         return core_embedding_vector_row_from_vector(

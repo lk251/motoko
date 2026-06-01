@@ -452,6 +452,9 @@ Current progress on this backlog:
   content-free refresh mode, reuse/new row counts, elapsed time, ETA, and
   finalizing status are tested with the vector refresh contract rather than
   hidden in the root facade.
+- Embedding vector elapsed/ETA calculations now live with the vector refresh
+  contract as pure helpers. Elapsed time can use a durable checkpoint timestamp
+  while ETA remains based on rows completed in the current session.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

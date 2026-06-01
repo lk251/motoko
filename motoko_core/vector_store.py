@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import collections.abc
+import datetime as _dt
 import hashlib
 import json
 import re
 
 from motoko_core.retrieval import query_path_match_boost, score_text, token_counts
-from motoko_core.text import compact_text, compact_text_middle, human_duration
+from motoko_core.text import compact_text, compact_text_middle, human_duration, parse_timestamp
 
 DEFAULT_LEXICAL_VECTOR_DIMS = 256
 VECTOR_METHOD_AUTO = "auto"
@@ -87,6 +88,35 @@ def format_vector_progress_phase(
         f"bg-heavy: vectorizing(model) {refresh_text} {batch_text} parallel {max(1, _int_or_zero(active_parallelism) or 1)} "
         f"rows {completed_rows}/{total_rows} {elapsed_text}{eta_text}"
     ).replace("  ", " ")
+
+
+def embedding_vector_elapsed_seconds(
+    progress_created: str,
+    *,
+    session_elapsed_seconds: int | float,
+    now: _dt.datetime | None = None,
+) -> int:
+    parsed = parse_timestamp(str(progress_created or ""))
+    if parsed is not None:
+        now = now or _dt.datetime.now(_dt.timezone.utc).astimezone()
+        delta = now.astimezone() - parsed.astimezone()
+        return max(0, int(delta.total_seconds()))
+    return max(0, int(session_elapsed_seconds or 0))
+
+
+def embedding_vector_eta_seconds(
+    *,
+    total_rows: int,
+    completed_rows: int,
+    session_start_completed_rows: int,
+    session_elapsed_seconds: int | float,
+) -> int | None:
+    done_this_session = _int_or_zero(completed_rows) - _int_or_zero(session_start_completed_rows)
+    remaining = _int_or_zero(total_rows) - _int_or_zero(completed_rows)
+    if done_this_session <= 0 or remaining <= 0:
+        return None
+    elapsed = max(0.001, float(session_elapsed_seconds or 0))
+    return int((elapsed / done_this_session) * remaining)
 
 
 def embedding_candidate_batches(candidates, batch_size: int) -> list[tuple[int, list]]:
