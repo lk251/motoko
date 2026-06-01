@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import re
+import tempfile
 
 
 APP = "motoko"
@@ -315,10 +316,27 @@ def retrieval_debug_path(debug_id: str) -> pathlib.Path:
 
 
 def atomic_write(path: pathlib.Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.chmod(0o600)
-    tmp.replace(path)
+    path = pathlib.Path(path)
+    tmp_path: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as fh:
+            tmp_path = pathlib.Path(fh.name)
+            fh.write(text)
+        tmp_path.chmod(0o600)
+        tmp_path.replace(path)
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def safe_load_json(path: pathlib.Path) -> dict | None:

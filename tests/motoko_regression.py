@@ -102,6 +102,46 @@ def write_conversation(m, conv):
     m.atomic_write(m.conversation_path(conv["id"]), json.dumps(conv, ensure_ascii=False) + "\n")
 
 
+def test_atomic_write_uses_unique_temp_paths_under_concurrency(m):
+    with isolated_state():
+        path = m.vector_progress_path("embedding-race")
+        barrier = threading.Barrier(8)
+        lock = threading.Lock()
+        errors: list[str] = []
+        original_write_text = pathlib.Path.write_text
+
+        def patched_write_text(self, text, *args, **kwargs):
+            result = original_write_text(self, text, *args, **kwargs)
+            if self == path.with_suffix(path.suffix + ".tmp"):
+                barrier.wait(timeout=5)
+            return result
+
+        def writer(worker: int) -> None:
+            try:
+                m.atomic_write(path, json.dumps({"worker": worker}, ensure_ascii=False) + "\n")
+            except BaseException as exc:  # pragma: no cover - assertion reports thread failures.
+                with lock:
+                    errors.append(f"{type(exc).__name__}: {exc}")
+
+        pathlib.Path.write_text = patched_write_text
+        try:
+            threads = [threading.Thread(target=writer, args=(idx,)) for idx in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+            stuck = [thread.name for thread in threads if thread.is_alive()]
+        finally:
+            pathlib.Path.write_text = original_write_text
+
+        assert stuck == []
+        assert errors == []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(data.get("worker"), int)
+        leftovers = list(path.parent.glob(f".{path.name}.*.tmp")) + list(path.parent.glob(f"{path.name}.tmp"))
+        assert leftovers == []
+
+
 def test_recent_conversation_lanes(m):
     with isolated_state():
         current = m.new_conversation("Current")
@@ -13801,6 +13841,7 @@ def test_action_eval_report_covers_agentic_safety_fixtures(m):
 def main() -> int:
     m = load_motoko()
     tests = [
+        test_atomic_write_uses_unique_temp_paths_under_concurrency,
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
         test_memory_proposal_sends_transcript_not_assistant_prefill,
