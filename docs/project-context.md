@@ -1631,6 +1631,10 @@ Motoko self-code checkpoint, 2026-05-31:
   now owns row-plan construction and readiness-gate shaping, while the root
   facade keeps state collection, current route discovery, eval execution, and
   realm-local path resolution.
+- Vector query scoring has also moved inward: `motoko_core.vector_store` now
+  owns deterministic row scoring and same-source chunk deduplication, while the
+  root facade keeps live query embedding, reranker calls, freshness checks, and
+  user-facing cancellation messages.
 - Code intelligence now also extracts module-level schema/version/artifact
   constants and exposes them through `code-map`, `code-query`, and
   `self-eval`. This matters for Motoko self-improvement because artifact

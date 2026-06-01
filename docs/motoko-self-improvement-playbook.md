@@ -410,6 +410,9 @@ Current progress on this backlog:
 - Vector planning row math and readiness-gate shaping now live in
   `motoko_core.vector_store`. The root facade still supplies current indexes,
   memories, conversations, routes, eval reports, and realm-local store paths.
+- Vector query row scoring and same-chunk deduplication now live in
+  `motoko_core.vector_store`. The root facade still owns query embedding,
+  reranker model calls, freshness checks, and cancellation wording.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

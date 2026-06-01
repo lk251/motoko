@@ -70,8 +70,10 @@ from motoko_core.skill_curator import (
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 from motoko_core.vector_store import (
+    lexical_sparse_vector as lexical_sparse_vector_core,
     vector_plan_readiness_gates as vector_plan_readiness_gates_core,
     vector_plan_row_plans as vector_plan_row_plans_core,
+    vector_query_rank_rows as vector_query_rank_rows_core,
 )
 
 
@@ -7604,6 +7606,47 @@ def test_vector_plan_core_builds_rows_and_readiness_gates(_m=None):
     assert "mares Motoko state" in gates[-1]["detail"]
 
 
+def test_vector_query_core_scores_and_dedupes_rows(_m=None):
+    query = "finish vector readiness deadline"
+    query_vector = lexical_sparse_vector_core(query, dims=16)
+    rows = [
+        {
+            "id": "weak-part",
+            "path": "/tmp/docs/tasks.org",
+            "chunk": "1",
+            "summary": "Readiness notes.",
+            "vector": lexical_sparse_vector_core("readiness notes", dims=16),
+            "embedding_part": 1,
+            "embedding_part_count": 2,
+        },
+        {
+            "id": "strong-part",
+            "path": "/tmp/docs/tasks.org",
+            "chunk": "1",
+            "summary": "Finish the vector readiness deadline.",
+            "vector": lexical_sparse_vector_core("finish vector readiness deadline", dims=16),
+            "embedding_part": 2,
+            "embedding_part_count": 2,
+        },
+        {
+            "id": "other",
+            "path": "/tmp/docs/other.org",
+            "chunk": "1",
+            "summary": "Unrelated archive note.",
+            "vector": lexical_sparse_vector_core("unrelated archive", dims=16),
+        },
+    ]
+
+    ranked = vector_query_rank_rows_core(rows, query, query_vector)
+
+    assert ranked
+    assert ranked[0]["path"].endswith("tasks.org")
+    assert ranked[0]["row_id"] == "strong-part"
+    assert ranked[0]["vector_hit_count"] == 2
+    assert ranked[0]["lexical"] > 0
+    assert ranked[0]["score"] >= ranked[-1]["score"]
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14196,6 +14239,7 @@ def main() -> int:
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,
         test_vector_plan_reports_storage_and_readiness_gates,
         test_vector_plan_core_builds_rows_and_readiness_gates,
+        test_vector_query_core_scores_and_dedupes_rows,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

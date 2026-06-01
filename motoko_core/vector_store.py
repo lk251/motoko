@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import collections.abc
 import hashlib
 import re
 
-from motoko_core.retrieval import token_counts
+from motoko_core.retrieval import query_path_match_boost, score_text, token_counts
 from motoko_core.text import compact_text, compact_text_middle
 
 DEFAULT_LEXICAL_VECTOR_DIMS = 256
@@ -286,6 +287,89 @@ def vector_similarity(left, right) -> float:
                 continue
         return total
     return 0.0
+
+
+def vector_query_row_haystack(row: dict) -> str:
+    return "\n".join(
+        [
+            str(row.get("path", "")),
+            str(row.get("summary", "")),
+            str(row.get("evidence_kind", "")),
+            str(row.get("evidence_title", "")),
+            str(row.get("evidence_date", "")),
+            str(row.get("evidence_todo", "")),
+            str(row.get("evidence_priority", "")),
+            str(row.get("evidence_excerpt", "")),
+        ]
+    )
+
+
+def score_vector_query_row(query: str, query_counts, query_vector, row: dict) -> dict | None:
+    if not isinstance(row, dict):
+        return None
+    vector_score = vector_similarity(query_vector, row.get("vector"))
+    lexical = score_text(query_counts, vector_query_row_haystack(row))
+    path_boost = query_path_match_boost(query, str(row.get("path", "")))
+    total = round(vector_score * 1000) + lexical + path_boost
+    if total <= 0:
+        return None
+    return {
+        "score": total,
+        "vector_score": round(vector_score, 6),
+        "lexical": lexical,
+        "path_boost": path_boost,
+        "row_id": row.get("id", ""),
+        "embedding_kind": row.get("embedding_kind", ""),
+        "embedding_part": row.get("embedding_part", 1),
+        "embedding_part_count": row.get("embedding_part_count", 1),
+        "path": row.get("path", ""),
+        "chunk": row.get("chunk", ""),
+        "content_sha256": row.get("content_sha256", ""),
+        "summary": row.get("summary", ""),
+        "evidence_id": row.get("evidence_id", ""),
+        "evidence_kind": row.get("evidence_kind", ""),
+        "evidence_title": row.get("evidence_title", ""),
+        "evidence_date": row.get("evidence_date", ""),
+        "evidence_start": row.get("evidence_start"),
+        "evidence_end": row.get("evidence_end"),
+        "evidence_excerpt": row.get("evidence_excerpt", ""),
+    }
+
+
+def dedupe_vector_query_rows(rows: list[dict]) -> list[dict]:
+    deduped_rows: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        key = (str(row.get("path", "")), str(row.get("chunk", "")))
+        previous = deduped_rows.get(key)
+        if previous is None or row.get("score", 0) > previous.get("score", 0):
+            new_row = dict(row)
+            new_row["vector_hit_count"] = (
+                1 if previous is None else previous.get("vector_hit_count", 1) + 1
+            )
+            deduped_rows[key] = new_row
+        elif previous is not None:
+            previous["vector_hit_count"] = previous.get("vector_hit_count", 1) + 1
+    result = list(deduped_rows.values())
+    result.sort(key=lambda item: item.get("score", 0), reverse=True)
+    return result
+
+
+def vector_query_rank_rows(
+    store_rows,
+    query: str,
+    query_vector,
+    *,
+    checkpoint: collections.abc.Callable[[], None] | None = None,
+) -> list[dict]:
+    query_counts = token_counts(query)
+    rows = []
+    for row in store_rows if isinstance(store_rows, list) else []:
+        if checkpoint is not None:
+            checkpoint()
+        scored = score_vector_query_row(query, query_counts, query_vector, row)
+        if scored is not None:
+            rows.append(scored)
+    return dedupe_vector_query_rows(rows)
 
 
 def split_embedding_content_parts(content: str, budget: int, max_parts: int) -> list[str]:
