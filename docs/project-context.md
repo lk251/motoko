@@ -1323,6 +1323,10 @@ Current progress on this stretch:
   from the original vector-progress checkpoint so progress does not appear to
   restart from zero after an interruption. Reports persist the mode/cause so
   incremental vectorization is inspectable after completion.
+- Complete: vector-progress checkpoint writes are hardened against the old
+  fixed-temp race. Realm-local atomic writes use unique same-directory temp
+  files, retry once if a temp file disappears before replace, and vector
+  checkpoint writes serialize through a content-free per-progress lock file.
 - Progress: long-lived TUI sessions now refresh attached index references after
   background study completion, complementing the existing prompt-time resync.
   `/status` also builds its context-catalog line from current user-owned state
