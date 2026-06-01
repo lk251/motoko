@@ -531,6 +531,83 @@ Self-improvement skill targets:
   and recoverable archives are good fits. Broad host tools, hidden mutation,
   cross-realm stores, and prompt-only security are not.
 
+## Bird's-Eye Update, 2026-06-01
+
+The current architecture is usable and coherent enough for daily work. The
+major systems are in place: document indexes, hierarchical evidence,
+embedding/rerank hybrid retrieval, source citations, background repair/vector
+jobs, realm-local model routes, conversation recall, feedback records,
+review-first skills, typed actions, goal ledgers, worktree actions, code-query,
+self-eval, and action-eval. The recent durability fix for parallel atomic
+writes and the vector-plan extraction are examples of the current preferred
+craft pattern: diagnose a real failure, move reusable logic into a focused
+service module, add regressions, update the playbook, validate, and commit.
+
+What remains is not one missing feature that blocks Motoko from being useful.
+It is a reliability and self-understanding stretch:
+
+1. Finish artifact lifecycle ownership so stale-source detection, rebuild
+   decisions, cleanup, and source reprocessing are declared in service-owned
+   code across indexes, evidence, vectors, dossiers, conversations, feedback,
+   goals, memory artifacts, and skill-support artifacts.
+2. Finish cooperative cancellation and interruption by finding any remaining
+   long-running report, topic, dossier, profile, memory, vector, evidence, or
+   indexing path that still cannot stop at a durable checkpoint.
+3. Keep always-fresh context boringly reliable so an open TUI session notices
+   newly finished indexes, evidence stores, vector stores, memory proposals,
+   profiles, dossiers, and catalog updates without requiring a restart.
+4. Continue shrinking the root facade only where ownership becomes clearer:
+   vector query scoring/deduplication, model-route scheduling diagnostics,
+   foreground job state, command/report formatting, and artifact lifecycle
+   fanout are good candidates.
+5. Improve code-query precision with deterministic facts that help Motoko find
+   the right code before editing: command traces, tests, schema constants,
+   artifact-family owners, cancellation paths, route/model call paths, and
+   root hotspots.
+6. Strengthen conversation persistence trust with focused regressions for
+   queued prompts, resumed empty chats, feedback targeting, rename/delete
+   cleanup, and derived artifact cleanup.
+7. Convert feedback into eval seed material. Positive and negative feedback
+   should propose private fixtures, support files, skill patches, or focused
+   regressions; it should not silently mutate prompts, ranking, or skills.
+8. Mature Hermes-inspired skill lifecycle craft without importing Hermes'
+   broader authority: usage/view/patch metadata, pinned skills, recoverable
+   archives, curator reports, support-file organization, and patch-before-create
+   behavior.
+9. Use goal loops as review loops first. The valuable near-term loop is
+   inspect, retrieve, audit, and propose typed actions under budget, then stop
+   for review. Broader autonomous mutation remains out of scope until that path
+   is uneventful in real use.
+
+Prepared skill-building direction for Motoko:
+
+- Patch `motoko-codebase-maintainer` when code-query learns a better way to
+  expose implementation ownership, tests, schemas, migrations, route paths, or
+  cancellation paths.
+- Patch `motoko-refactor-craft` after each successful extraction with the
+  reusable recipe, risk, validation gate, and deployment soak note.
+- Patch `motoko-retrieval-maintainer` after real retrieval failures with the
+  exact failure taxonomy, fixture shape, and diagnostic command sequence.
+- Patch `motoko-agentic-boundary-review` after action/tool/goal-loop issues
+  with the authority check that would have caught the issue earlier.
+- Add support files before adding new skills when the durable value is an
+  example, transcript, command trace, fixture recipe, or audit checklist.
+- Create a new skill only when repeated evidence shows that an umbrella skill is
+  too broad. Current plausible future candidates are an artifact-lifecycle
+  caretaker, background-job supervisor, conversation-persistence auditor,
+  code-query precision auditor, and Org-structure/query maintainer.
+- Keep every self-created or self-patched skill review-first. Motoko may
+  suggest and prepare a `skill_manage` action, but code-owned validation and
+  explicit user acceptance decide whether it becomes durable.
+
+Hermes Agent remains a useful comparison point, but the lesson for Motoko is
+selective. Hermes' progressive skill disclosure, skill usage metadata,
+agent-created skill lifecycle, background curator reports, pinned/recoverable
+states, and patch-before-create behavior are worth adapting. The security
+lesson is just as important: code-level guards must protect bundled, hub,
+hand-authored, and cross-realm skills from background mutation. Motoko should
+keep the stricter invariant that prompts can recommend, but validators enforce.
+
 Operational packet for future Motoko self-improvement sessions:
 
 1. Inspect first: run `motoko code-map`, then focused `motoko code-query`
