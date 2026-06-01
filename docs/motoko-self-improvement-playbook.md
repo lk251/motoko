@@ -436,6 +436,9 @@ Current progress on this backlog:
   collection, vector-dimension inference, and refresh-mode labeling now live in
   `motoko_core.vector_store`. The root facade still owns reading source text,
   calling the embedding route, and deciding when to checkpoint or pause.
+- Embedding vector checkpoint row parsing and previous-store row indexing now
+  live in `motoko_core.vector_store`, keeping resume filtering and reusable-row
+  lookup rules together with the rest of the vector checkpoint contract.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted
