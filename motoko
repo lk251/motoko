@@ -103,12 +103,9 @@ from motoko_core.input_edit import (  # noqa: E402
     seed_input_history_from_messages,
 )
 from motoko_core.index_storage import (  # noqa: E402
-    duplicate_reference_target_report as core_duplicate_reference_target_report,
+    index_storage_audit as core_index_storage_audit,
     format_index_storage_audit,
-    index_storage_audit_report as core_index_storage_audit_report,
-    index_storage_orphan_chunk_files as core_index_storage_orphan_chunk_files,
     index_storage_scan_record as core_index_storage_scan_record,
-    index_storage_scan_records as core_index_storage_scan_records,
 )
 from motoko_core.code_intel import (  # noqa: E402
     build_code_map,
@@ -12179,49 +12176,6 @@ def index_storage_audit(*, cancel_event=None) -> dict:
     resumable_partial_ids = {partial.get("id", "") for partial in list_resumable_partial_indexes()}
     superseded_partials = list_superseded_partial_indexes()
     latest_ids = {index.get("id", "") for index in latest_indexes_by_family(indexes)}
-    scan = core_index_storage_scan_records(
-        indexes=indexes,
-        partials=partials,
-        latest_ids=latest_ids,
-        resumable_partial_ids=resumable_partial_ids,
-        partial_superseded=lambda partial: partial_index_superseded(partial, indexes),
-        chunk_content_path=chunk_content_path,
-        path_size=path_size,
-        check_cancelled=lambda: raise_if_work_cancelled(
-            cancel_event,
-            "index storage audit interrupted by request",
-            work_kind="index-storage",
-        ),
-    )
-    referenced_paths = scan["referenced_paths"]
-    stored_by_digest = scan["stored_by_digest"]
-    unique_digest_bytes = scan["unique_digest_bytes"]
-    duplicate_refs = scan["duplicate_refs"]
-    rows = scan["rows"]
-
-    duplicate_reference_report = core_duplicate_reference_target_report(
-        duplicate_refs,
-        stored_by_digest,
-        check_cancelled=lambda: raise_if_work_cancelled(
-            cancel_event,
-            "index storage audit interrupted by request",
-            work_kind="index-storage",
-        ),
-    )
-    missing_duplicate_refs = duplicate_reference_report["missing_duplicate_targets"]
-
-    orphan_files = core_index_storage_orphan_chunk_files(
-        indexes_dir().glob("*.chunks"),
-        referenced_paths=referenced_paths,
-        path_size=path_size,
-        check_cancelled=lambda: raise_if_work_cancelled(
-            cancel_event,
-            "index storage audit interrupted by request",
-            work_kind="index-storage",
-        ),
-    )
-
-    older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
     stale_superseded_indexes = index_cleanup_candidates(indexes)
     source_lifecycle_plans = source_lifecycle_storage_plan_summaries_from_indexes(
         indexes,
@@ -12235,30 +12189,26 @@ def index_storage_audit(*, cancel_event=None) -> dict:
         ),
     )
     raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-    cleanup_sections = index_storage_cleanup_sections(
-        stale_superseded_indexes=stale_superseded_indexes,
-        superseded_partial_count=len(superseded_partials),
-        superseded_partial_bytes=sum(partial_index_cleanup_bytes(partial) for partial in superseded_partials),
-        orphan_chunk_files=orphan_files,
-        older_complete_index_count=len(older_indexes),
-        missing_duplicate_targets=missing_duplicate_refs,
-        source_lifecycle_plans=source_lifecycle_plans,
-    )
-    return core_index_storage_audit_report(
+    return core_index_storage_audit(
         created=now(),
         indexes=indexes,
         partials=partials,
-        rows=rows,
         latest_ids=latest_ids,
         resumable_partial_ids=resumable_partial_ids,
         superseded_partials=superseded_partials,
-        older_indexes=older_indexes,
-        unique_digest_bytes=unique_digest_bytes,
-        stored_by_digest=stored_by_digest,
-        duplicate_reference_report=duplicate_reference_report,
-        orphan_files=orphan_files,
+        superseded_partial_bytes=sum(partial_index_cleanup_bytes(partial) for partial in superseded_partials),
+        stale_superseded_indexes=stale_superseded_indexes,
         source_lifecycle_plans=source_lifecycle_plans,
-        cleanup_sections=cleanup_sections,
+        data_dirs=indexes_dir().glob("*.chunks"),
+        partial_superseded=lambda partial: partial_index_superseded(partial, indexes),
+        chunk_content_path=chunk_content_path,
+        path_size=path_size,
+        cleanup_sections=index_storage_cleanup_sections,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "index storage audit interrupted by request",
+            work_kind="index-storage",
+        ),
     )
 
 

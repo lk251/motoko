@@ -307,6 +307,94 @@ def index_storage_audit_report(
     }
 
 
+def index_storage_audit(
+    *,
+    created: str,
+    indexes: list[dict],
+    partials: list[dict],
+    latest_ids: set[str],
+    resumable_partial_ids: set[str],
+    superseded_partials: list[dict],
+    superseded_partial_bytes: int,
+    stale_superseded_indexes: list[dict],
+    source_lifecycle_plans: list[dict],
+    data_dirs,
+    partial_superseded: Callable[[dict], bool],
+    chunk_content_path: Callable[[dict, dict], pathlib.Path | None],
+    path_size: Callable[[pathlib.Path], int],
+    cleanup_sections: Callable[..., dict],
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
+    """Build a full index-storage audit from injected state and filesystem hooks."""
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    maybe_cancel()
+    scan = index_storage_scan_records(
+        indexes=indexes,
+        partials=partials,
+        latest_ids=latest_ids,
+        resumable_partial_ids=resumable_partial_ids,
+        partial_superseded=partial_superseded,
+        chunk_content_path=chunk_content_path,
+        path_size=path_size,
+        check_cancelled=check_cancelled,
+    )
+    referenced_paths = scan["referenced_paths"]
+    stored_by_digest = scan["stored_by_digest"]
+    unique_digest_bytes = scan["unique_digest_bytes"]
+    duplicate_refs = scan["duplicate_refs"]
+    rows = scan["rows"]
+
+    maybe_cancel()
+    duplicate_reference_report = duplicate_reference_target_report(
+        duplicate_refs,
+        stored_by_digest,
+        check_cancelled=check_cancelled,
+    )
+    missing_duplicate_refs = duplicate_reference_report["missing_duplicate_targets"]
+
+    maybe_cancel()
+    orphan_files = index_storage_orphan_chunk_files(
+        data_dirs,
+        referenced_paths=referenced_paths,
+        path_size=path_size,
+        check_cancelled=check_cancelled,
+    )
+
+    maybe_cancel()
+    older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
+    sections = cleanup_sections(
+        stale_superseded_indexes=stale_superseded_indexes,
+        superseded_partial_count=len(superseded_partials),
+        superseded_partial_bytes=_safe_int(superseded_partial_bytes),
+        orphan_chunk_files=orphan_files,
+        older_complete_index_count=len(older_indexes),
+        missing_duplicate_targets=missing_duplicate_refs,
+        source_lifecycle_plans=source_lifecycle_plans,
+    )
+
+    maybe_cancel()
+    return index_storage_audit_report(
+        created=created,
+        indexes=indexes,
+        partials=partials,
+        rows=rows,
+        latest_ids=latest_ids,
+        resumable_partial_ids=resumable_partial_ids,
+        superseded_partials=superseded_partials,
+        older_indexes=older_indexes,
+        unique_digest_bytes=unique_digest_bytes,
+        stored_by_digest=stored_by_digest,
+        duplicate_reference_report=duplicate_reference_report,
+        orphan_files=orphan_files,
+        source_lifecycle_plans=source_lifecycle_plans,
+        cleanup_sections=sections,
+    )
+
+
 def format_index_storage_audit(audit: dict) -> str:
     lines = [
         f"index storage audit: {audit.get('schema', INDEX_STORAGE_AUDIT_SCHEMA_VERSION)}",

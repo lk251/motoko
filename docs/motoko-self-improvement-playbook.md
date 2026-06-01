@@ -400,8 +400,11 @@ Current progress on this backlog:
   plan loop in the root facade.
 - Index-storage audit ownership has moved another pure slice inward:
   `motoko_core.index_storage` now owns duplicate-reference target analysis and
-  final audit dictionary assembly. The root facade still owns filesystem
-  scanning, cancellation checkpoints, source lifecycle callbacks, and cleanup
+  final audit dictionary assembly. It now also owns the full storage-audit
+  orchestration across complete indexes, partial indexes, duplicate-reference
+  checks, orphan chunk-file discovery, cleanup section construction, and final
+  report assembly. The root facade still owns realm-local state discovery,
+  filesystem path resolution, source lifecycle callbacks, and cleanup
   materialization authority.
 - Index-storage scan-row semantics have also moved into
   `motoko_core.index_storage`: inline chunks, stored chunk paths, duplicate

@@ -68,6 +68,7 @@ from motoko_core.artifact_lifecycle import (
 from motoko_core.evals import worker_model_eval_fixtures as worker_model_eval_fixtures_core
 from motoko_core.index_storage import (
     duplicate_reference_target_report as duplicate_reference_target_report_core,
+    index_storage_audit as index_storage_audit_core,
     index_storage_audit_report as index_storage_audit_report_core,
     index_storage_orphan_chunk_files as index_storage_orphan_chunk_files_core,
     index_storage_scan_record as index_storage_scan_record_core,
@@ -11714,6 +11715,123 @@ def test_index_storage_cleanup_sections_are_service_owned(_m):
     assert empty == {"safe_cleanup": [], "blocked_cleanup": []}
 
 
+def test_index_storage_audit_orchestration_is_service_owned(_m):
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = pathlib.Path(tmp_name)
+        chunks = tmp / "idx.chunks"
+        chunks.mkdir()
+        stored = chunks / "stored.txt"
+        orphan = chunks / "orphan.txt"
+        stored.write_text("alpha", encoding="utf-8")
+        orphan.write_text("orphan", encoding="utf-8")
+        index = {
+            "id": "idx",
+            "name": "docs",
+            "root": str(tmp),
+            "files": [
+                {
+                    "path": str(tmp / "a.org"),
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "content_path": "stored.txt",
+                            "content_sha256": "digest-alpha",
+                            "content_bytes": 5,
+                        }
+                    ],
+                }
+            ],
+        }
+        partial = {
+            "id": "partial",
+            "files": [
+                {
+                    "path": str(tmp / "b.org"),
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "duplicate_of_existing_index": True,
+                            "content_sha256": "digest-alpha",
+                            "content_bytes": 5,
+                        }
+                    ],
+                }
+            ],
+        }
+        calls = []
+
+        def chunk_content_path(_record, chunk):
+            return chunks / str(chunk.get("content_path", ""))
+
+        def cleanup_sections(**kwargs):
+            calls.append(("cleanup", kwargs["superseded_partial_bytes"], len(kwargs["orphan_chunk_files"])))
+            assert kwargs["missing_duplicate_targets"] == []
+            assert kwargs["source_lifecycle_plans"] == [{"index": "idx", "apply_status": "blocked"}]
+            return {
+                "safe_cleanup": [{"kind": "superseded-partials", "count": kwargs["superseded_partial_count"]}],
+                "blocked_cleanup": [{"kind": "source-lifecycle-work", "count": 1}],
+            }
+
+        audit = index_storage_audit_core(
+            created="2026-06-01T00:00:00+00:00",
+            indexes=[index],
+            partials=[partial],
+            latest_ids={"idx"},
+            resumable_partial_ids={"partial"},
+            superseded_partials=[partial],
+            superseded_partial_bytes=42,
+            stale_superseded_indexes=[],
+            source_lifecycle_plans=[{"index": "idx", "apply_status": "blocked"}],
+            data_dirs=[chunks],
+            partial_superseded=lambda item: item.get("id") == "partial",
+            chunk_content_path=chunk_content_path,
+            path_size=lambda path: path.stat().st_size,
+            cleanup_sections=cleanup_sections,
+        )
+
+        assert audit["schema"] == "index-storage-audit-v1"
+        assert audit["index_count"] == 1
+        assert audit["partial_count"] == 1
+        assert audit["resumable_partial_count"] == 1
+        assert audit["superseded_partial_count"] == 1
+        assert audit["orphan_chunk_file_count"] == 1
+        assert audit["orphan_chunk_files"][0]["path"] == str(orphan)
+        assert audit["duplicate_reference_bytes_with_target"] == 5
+        assert audit["missing_duplicate_target_count"] == 0
+        assert audit["safe_cleanup"] == [{"kind": "superseded-partials", "count": 1}]
+        assert audit["blocked_cleanup"] == [{"kind": "source-lifecycle-work", "count": 1}]
+        assert calls == [("cleanup", 42, 1)]
+
+        cancel_calls = {"count": 0}
+
+        def check_cancelled():
+            cancel_calls["count"] += 1
+            if cancel_calls["count"] >= 2:
+                raise RuntimeError("cancelled audit orchestration")
+
+        try:
+            index_storage_audit_core(
+                created="2026-06-01T00:00:00+00:00",
+                indexes=[index],
+                partials=[partial],
+                latest_ids={"idx"},
+                resumable_partial_ids={"partial"},
+                superseded_partials=[partial],
+                superseded_partial_bytes=42,
+                stale_superseded_indexes=[],
+                source_lifecycle_plans=[],
+                data_dirs=[chunks],
+                partial_superseded=lambda _item: False,
+                chunk_content_path=chunk_content_path,
+                path_size=lambda path: path.stat().st_size,
+                cleanup_sections=lambda **_kwargs: {"safe_cleanup": [], "blocked_cleanup": []},
+                check_cancelled=check_cancelled,
+            )
+            raise AssertionError("index storage audit orchestration should honor cancellation")
+        except RuntimeError as exc:
+            assert "cancelled audit orchestration" in str(exc)
+
+
 def test_source_lifecycle_report_service_owns_apply_decision(_m):
     assert json_references_index_core({"context_items": [{"kind": "index", "id": "old-index"}]}, "old-index")
     assert json_matching_source_paths_core({"sources": ["/tmp/docs/a.org"]}, {"/tmp/docs/a.org"}) == {
@@ -15228,6 +15346,7 @@ def main() -> int:
         test_index_storage_orphan_chunk_files_is_service_owned,
         test_index_storage_scan_records_orchestrates_indexes_and_partials,
         test_index_storage_cleanup_sections_are_service_owned,
+        test_index_storage_audit_orchestration_is_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_report_from_index_owns_orchestration,
         test_source_lifecycle_storage_plan_summary_from_index_is_service_owned,
