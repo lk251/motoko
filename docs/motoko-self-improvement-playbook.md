@@ -413,6 +413,9 @@ Current progress on this backlog:
   now lives in the same service too: latest-family flags, resumable/superseded
   partial flags, shared digest maps, duplicate-reference rows, and referenced
   path sets are built under one tested helper.
+- Duplicate-reference target reporting now carries its own cancellation
+  checkpoints inside `motoko_core.index_storage`, so root no longer wraps that
+  service-owned report with a separate loop.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

@@ -7533,6 +7533,23 @@ def test_index_storage_core_builds_duplicate_and_summary_report(_m=None):
         ]
     }
     duplicate_report = duplicate_reference_target_report_core(duplicate_refs, stored_by_digest)
+    duplicate_cancel_calls = {"count": 0}
+
+    def duplicate_check_cancelled():
+        duplicate_cancel_calls["count"] += 1
+        if duplicate_cancel_calls["count"] >= 2:
+            raise RuntimeError("cancelled duplicate report")
+
+    try:
+        duplicate_reference_target_report_core(
+            duplicate_refs,
+            stored_by_digest,
+            check_cancelled=duplicate_check_cancelled,
+        )
+        raise AssertionError("duplicate reference report should honor cancellation")
+    except RuntimeError as exc:
+        assert "cancelled duplicate report" in str(exc)
+
     audit = index_storage_audit_report_core(
         created="2026-06-01T00:00:00+00:00",
         indexes=[{"id": "old-index"}, {"id": "new-index"}],

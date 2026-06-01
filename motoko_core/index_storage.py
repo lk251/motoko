@@ -17,10 +17,21 @@ def _safe_int(value, default: int = 0) -> int:
         return default
 
 
-def duplicate_reference_target_report(duplicate_refs: list[dict], stored_by_digest: dict[str, list[dict]]) -> dict:
+def duplicate_reference_target_report(
+    duplicate_refs: list[dict],
+    stored_by_digest: dict[str, list[dict]],
+    *,
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
     missing_duplicate_refs = []
     duplicate_reference_bytes_with_target = 0
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
     for ref in duplicate_refs:
+        maybe_cancel()
         digest = ref.get("content_sha256", "")
         targets = [
             target

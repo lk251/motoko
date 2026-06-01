@@ -12226,9 +12226,15 @@ def index_storage_audit(*, cancel_event=None) -> dict:
     duplicate_refs = scan["duplicate_refs"]
     rows = scan["rows"]
 
-    for ref in duplicate_refs:
-        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-    duplicate_reference_report = core_duplicate_reference_target_report(duplicate_refs, stored_by_digest)
+    duplicate_reference_report = core_duplicate_reference_target_report(
+        duplicate_refs,
+        stored_by_digest,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "index storage audit interrupted by request",
+            work_kind="index-storage",
+        ),
+    )
     missing_duplicate_refs = duplicate_reference_report["missing_duplicate_targets"]
 
     orphan_files = core_index_storage_orphan_chunk_files(
