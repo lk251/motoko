@@ -432,6 +432,10 @@ Current progress on this backlog:
   progress callbacks, atomic persistence, and cancellation, but the final
   vector-store provenance/reuse/source/route dictionary shape is pure and
   regression-tested.
+- Embedding vector refresh batching, pending-batch selection, reusable-row
+  collection, vector-dimension inference, and refresh-mode labeling now live in
+  `motoko_core.vector_store`. The root facade still owns reading source text,
+  calling the embedding route, and deciding when to checkpoint or pause.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted
