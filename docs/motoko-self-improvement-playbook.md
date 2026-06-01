@@ -502,7 +502,9 @@ Current progress on this backlog:
   Profile source-material assembly now also lives in `motoko_core.profile`:
   the service selects useful conversation recall rows, formats bounded private
   source blocks, returns source ids, and honors injected cancellation while
-  root only loads user-owned state and calls the profile model route.
+  root only loads user-owned state and calls the profile model route. Project
+  scope matching for profile dossiers is service-owned too; root supplies
+  conversation-root lookup and the project-root comparison callback.
   Feedback targeting now pairs the rated
   assistant answer with the nearest prior user prompt, so `/up` or `/down`
   used while a newer prompt is preparing does not attach the wrong query to

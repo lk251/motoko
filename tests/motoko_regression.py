@@ -1364,6 +1364,54 @@ def test_core_profile_rendering_is_injectable(m):
     assert "No profile dossier yet" in m.format_profile_dossier(None)
 
 
+def test_core_profile_project_scope_matching_is_service_owned(m):
+    profile = {"conversation_ids": ["conv-1", "conv-2"]}
+    roots_by_conversation = {
+        "conv-1": {"/tmp/project"},
+        "conv-2": {"/tmp/project/sub"},
+        "other": {"/tmp/other"},
+    }
+
+    def roots_match(roots, project_roots):
+        return any(
+            str(root) == str(project_root)
+            or str(root).startswith(str(project_root).rstrip("/") + "/")
+            for root in roots
+            for project_root in project_roots
+        )
+
+    assert m.profile_matches_project_scope_core(
+        profile,
+        project_roots={"/tmp/project"},
+        conversation_roots=lambda conversation_id: roots_by_conversation.get(conversation_id),
+        roots_match=roots_match,
+    )
+    assert not m.profile_matches_project_scope_core(
+        {"conversation_ids": ["conv-1", "other"]},
+        project_roots={"/tmp/project"},
+        conversation_roots=lambda conversation_id: roots_by_conversation.get(conversation_id),
+        roots_match=roots_match,
+    )
+    assert not m.profile_matches_project_scope_core(
+        {"conversation_ids": ["missing"]},
+        project_roots={"/tmp/project"},
+        conversation_roots=lambda conversation_id: roots_by_conversation.get(conversation_id),
+        roots_match=roots_match,
+    )
+    assert m.profile_matches_project_scope_core(
+        {"conversation_ids": ["missing"]},
+        project_roots=set(),
+        conversation_roots=lambda _conversation_id: None,
+        roots_match=roots_match,
+    )
+    assert m.profile_matches_project_scope_core(
+        {"text": "global profile"},
+        project_roots={"/tmp/project"},
+        conversation_roots=lambda _conversation_id: None,
+        roots_match=roots_match,
+    )
+
+
 def test_core_profile_source_material_is_service_owned(m):
     memories = [
         {"id": "mem-1", "text": "Javier values careful craftsmanship.", "importance": 4},
@@ -15097,6 +15145,7 @@ def main() -> int:
         test_profile_dossier,
         test_project_scope_filters_memory_and_profile_context,
         test_core_profile_rendering_is_injectable,
+        test_core_profile_project_scope_matching_is_service_owned,
         test_core_profile_source_material_is_service_owned,
         test_memory_dossier,
         test_spinner_and_input_wrapping,

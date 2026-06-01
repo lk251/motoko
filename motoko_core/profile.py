@@ -34,6 +34,36 @@ def format_profile_dossier(profile: dict | None) -> str:
     )
 
 
+def profile_matches_project_scope_core(
+    profile: dict | None,
+    *,
+    project_roots,
+    conversation_roots,
+    roots_match,
+) -> bool:
+    """Return whether a profile dossier belongs in the active project scope."""
+
+    if not isinstance(profile, dict):
+        return True
+    project_roots = set(project_roots or [])
+    if not project_roots:
+        return True
+    conversation_ids = [
+        str(conversation_id or "").strip()
+        for conversation_id in profile.get("conversation_ids", []) or []
+        if str(conversation_id or "").strip()
+    ]
+    if not conversation_ids:
+        return True
+    for conversation_id in conversation_ids:
+        roots = conversation_roots(conversation_id)
+        if roots is None:
+            return False
+        if not roots_match(roots, project_roots):
+            return False
+    return True
+
+
 def profile_source_material_core(
     memories: list[dict],
     conversations: list[dict],
