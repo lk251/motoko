@@ -422,6 +422,11 @@ Current progress on this backlog:
   `motoko_core.vector_store`, so checkpoint and previous-store reuse share the
   same evidence/provenance rules. The root facade still owns batching,
   progress, route calls, and atomic persistence.
+- Embedding vector progress identity and compatibility checks now live in
+  `motoko_core.vector_store`. The root facade still owns progress-file paths,
+  elapsed/ETA reporting, pause/resume writes, and model batch orchestration, but
+  the schema/route/source/input rules that decide whether a checkpoint can be
+  resumed are now pure and regression-tested.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted
@@ -551,9 +556,10 @@ embedding/rerank hybrid retrieval, source citations, background repair/vector
 jobs, realm-local model routes, conversation recall, feedback records,
 review-first skills, typed actions, goal ledgers, worktree actions, code-query,
 self-eval, and action-eval. The recent durability fix for parallel atomic
-writes and the vector-plan extraction are examples of the current preferred
-craft pattern: diagnose a real failure, move reusable logic into a focused
-service module, add regressions, update the playbook, validate, and commit.
+writes plus the vector-store helper extractions are examples of the current
+preferred craft pattern: diagnose a real failure, move reusable logic into a
+focused service module, add regressions, update the playbook, validate, and
+commit.
 
 What remains is not one missing feature that blocks Motoko from being useful.
 It is a reliability and self-understanding stretch:
