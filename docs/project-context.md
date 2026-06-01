@@ -1709,6 +1709,12 @@ Motoko self-code checkpoint, 2026-05-31:
   deletion, and single-file artifact deletion. This closes a coarse
   interruption gap where cleanup could be cancellable at the report boundary
   but still run a long deletion loop once apply began.
+- Code intelligence now exposes cancellation paths as first-class deterministic
+  rows in `motoko code-map` and `motoko code-query`. Queries about foreground
+  cancellation, vector/index cleanup, or interruption now show functions that
+  call helpers such as `foreground_cancel_scope`, `raise_if_work_cancelled`,
+  `work_cancel_requested`, and `work_pause_requested`, alongside the relevant
+  commands, tests, service modules, and root hotspots.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

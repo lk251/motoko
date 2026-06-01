@@ -1132,9 +1132,11 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert summary["service_boundaries"] > 0
         assert summary["schema_constants"] > 0
         assert summary["validation_gates"] >= 6
+        assert summary["cancellation_paths"] > 0
         assert summary["root_hotspots"]
         assert any(row["name"] == "nix-flake" for row in code_map["validation_gates"])
         assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in code_map["constants"])
+        assert any("raise_if_work_cancelled" in row.get("helpers", []) for row in code_map["cancellation_paths"])
         source_trace = next(row for row in code_map["command_traces"] if row["command"] == "source-lifecycle")
         assert source_trace["handler"] == "command_source_lifecycle"
         assert source_trace["handler_found"] is True
@@ -1154,14 +1156,19 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         gate_query = m.motoko_code_query("validation gates nix flake check action eval")
         assert any(row["name"] == "nix-flake" for row in gate_query["validation_gates"])
         assert any(row["name"] == "action-eval" for row in gate_query["validation_gates"])
+        cancel_query = m.motoko_code_query("foreground cancellation vector index cleanup interruption")
+        assert cancel_query["cancellation_paths"]
+        assert any("raise_if_work_cancelled" in row.get("helpers", []) for row in cancel_query["cancellation_paths"])
         rendered = m.format_motoko_code_query("Motoko skill plan command implementation tests")
         assert "Motoko code query:" in rendered
         assert "command traces:" in rendered
         assert "constants:" in rendered
         assert "symbols:" in rendered
+        assert "cancellation paths:" in m.format_motoko_code_query("foreground cancellation vector index cleanup interruption")
         assert "validation gates:" in m.format_motoko_code_query("validation gates nix flake check")
         map_rendered = m.format_motoko_code_map()
         assert "root facade hotspots:" in map_rendered
+        assert "cancellation paths:" in map_rendered
         assert "service boundaries:" in map_rendered
         assert "schema/artifact constants:" in map_rendered
         assert "validation gates:" in map_rendered
@@ -1229,6 +1236,8 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "code_query_finds_schema_constants" in names
         assert "code_query_finds_root_hotspots" in names
         assert "code_query_finds_traces_and_services" in names
+        assert "code_map_cancellation_paths_present" in names
+        assert "code_query_finds_cancellation_paths" in names
         assert "code_query_finds_feedback_eval_curator_path" in names
         assert "skill_scanner_detects_risky_script" in names
         curator_check = next(

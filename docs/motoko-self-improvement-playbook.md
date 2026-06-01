@@ -228,7 +228,11 @@ fresh evidence shows a better target:
 3. Improve code-intelligence precision. Extend `motoko code-map` and
    `motoko code-query` only with deterministic facts that help Motoko find the
    right implementation, test, schema, command handler, module boundary, or
-   migration before proposing a change.
+   migration before proposing a change. Current progress: code intelligence
+   now exposes cooperative cancellation paths, so self-improvement work can
+   query which functions use foreground cancel scopes, pause checks, or
+   `raise_if_work_cancelled` before editing long-running index, vector,
+   dossier, memory, or report operations.
 4. Keep skill learning review-first. Patch the existing umbrella skills before
    creating narrow new skills. Use support files for examples, debugging
    transcripts, validation checklists, and reusable design recipes that would

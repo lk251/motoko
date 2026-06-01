@@ -153,6 +153,15 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"validation_gates": sorted(validation_gate_names)},
         )
     )
+    cancellation_paths = code_map.get("cancellation_paths", []) if isinstance(code_map.get("cancellation_paths"), list) else []
+    checks.append(
+        _check(
+            "code_map_cancellation_paths_present",
+            bool(cancellation_paths),
+            f"cancellation_paths={len(cancellation_paths)}",
+            evidence={"top_path": (cancellation_paths or [{}])[0].get("qualname", "")},
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(
@@ -201,6 +210,18 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={
                 "top_trace": (lifecycle_query.get("command_traces") or [{}])[0].get("command", ""),
                 "top_service": (lifecycle_query.get("service_boundaries") or [{}])[0].get("path", ""),
+            },
+        )
+    )
+    cancellation_query = query_code_map(code_map, "foreground cancellation vector index cleanup interruption", limit=8)
+    checks.append(
+        _check(
+            "code_query_finds_cancellation_paths",
+            bool(cancellation_query.get("cancellation_paths")),
+            f"cancellation_paths={len(cancellation_query.get('cancellation_paths', []))}",
+            evidence={
+                "top_path": (cancellation_query.get("cancellation_paths") or [{}])[0].get("qualname", ""),
+                "helpers": (cancellation_query.get("cancellation_paths") or [{}])[0].get("helpers", []),
             },
         )
     )

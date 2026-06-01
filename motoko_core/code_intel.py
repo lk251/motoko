@@ -15,6 +15,17 @@ from dataclasses import dataclass
 
 CODE_INTEL_SCHEMA = "motoko-code-intel-v1"
 CODE_QUERY_SCHEMA = "motoko-code-query-v1"
+CANCELLATION_HELPERS = {
+    "WorkPaused",
+    "cancel_check",
+    "check_cancelled",
+    "foreground_cancel_scope",
+    "model_call_cancelled",
+    "pause_vectorization",
+    "raise_if_work_cancelled",
+    "work_cancel_requested",
+    "work_pause_requested",
+}
 
 
 def _maybe_cancel(cancel_check=None) -> None:
@@ -502,6 +513,55 @@ def _build_root_hotspots(symbols: list[dict], calls: list[dict], *, limit: int =
     return rows[:limit]
 
 
+def _build_cancellation_paths(calls: list[dict], symbols: list[dict], *, limit: int = 200) -> list[dict]:
+    """Return functions that visibly participate in cooperative cancellation."""
+
+    symbol_lookup = {
+        (str(row.get("path", "")), str(row.get("qualname", ""))): row
+        for row in symbols
+    }
+    rows: dict[tuple[str, str], dict] = {}
+    for call in calls:
+        callee = str(call.get("callee", ""))
+        tail = callee.rsplit(".", 1)[-1]
+        if tail not in CANCELLATION_HELPERS:
+            continue
+        path = str(call.get("path", ""))
+        caller = str(call.get("caller", ""))
+        key = (path, caller)
+        symbol = symbol_lookup.get(key, {})
+        row = rows.setdefault(
+            key,
+            {
+                "caller": caller,
+                "qualname": caller,
+                "path": path,
+                "line": symbol.get("line", call.get("line", 1)),
+                "end_line": symbol.get("end_line", symbol.get("line", call.get("line", 1))),
+                "helpers": [],
+                "checks": [],
+                "role": "cooperative cancellation path durable interruption checkpoint",
+            },
+        )
+        if tail not in row["helpers"]:
+            row["helpers"].append(tail)
+        row["checks"].append({"callee": callee, "line": call.get("line", 1)})
+    result = []
+    for row in rows.values():
+        row["helpers"] = sorted(row["helpers"])
+        row["check_count"] = len(row["checks"])
+        result.append(row)
+    result.sort(
+        key=lambda row: (
+            str(row.get("path", "")) != "motoko",
+            -int(row.get("check_count", 0) or 0),
+            int(row.get("line", 0) or 0),
+            str(row.get("qualname", "")),
+        )
+    )
+    return result[:limit]
+
+
 def _build_service_boundaries(modules: list[dict], symbols: list[dict], imports: list[dict], call_edges: list[dict]) -> list[dict]:
     public_by_path: dict[str, list[dict]] = {}
     for symbol in symbols:
@@ -670,6 +730,8 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     _maybe_cancel(cancel_check)
     call_edges = _build_call_edges(calls, symbols)
     _maybe_cancel(cancel_check)
+    cancellation_paths = _build_cancellation_paths(calls, symbols)
+    _maybe_cancel(cancel_check)
     root_hotspots = _build_root_hotspots(symbols, calls)
     _maybe_cancel(cancel_check)
     service_boundaries = _build_service_boundaries(modules, symbols, imports, call_edges)
@@ -693,6 +755,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
         "imports": imports,
         "calls": calls,
         "call_edges": call_edges,
+        "cancellation_paths": cancellation_paths,
         "commands": commands,
         "constants": constants,
         "command_traces": command_traces,
@@ -716,6 +779,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
             "command_traces_with_tests": sum(1 for row in command_traces if row.get("tests")),
             "calls": len(calls),
             "resolved_call_edges": len(call_edges),
+            "cancellation_paths": len(cancellation_paths),
             "service_boundaries": len(service_boundaries),
             "validation_gates": len(validation_gates),
             "tests": len(tests),
@@ -788,6 +852,11 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
             ["caller", "callee", "path", "target", "target_path"],
             name_field="callee",
         ),
+        "cancellation_paths": rank(
+            code_map.get("cancellation_paths", []),
+            ["caller", "qualname", "path", "helpers", "checks", "role"],
+            name_field="qualname",
+        ),
         "service_boundaries": rank(
             code_map.get("service_boundaries", []),
             ["path", "doc", "public_symbols"],
@@ -825,6 +894,7 @@ def format_code_map_report(code_map: dict) -> str:
         ),
         (
             f"calls: {summary.get('calls', 0)}  resolved edges: {summary.get('resolved_call_edges', 0)}  "
+            f"cancellation paths: {summary.get('cancellation_paths', 0)}  "
             f"service boundaries: {summary.get('service_boundaries', 0)}  tests: {summary.get('tests', 0)}"
         ),
         (
@@ -843,6 +913,14 @@ def format_code_map_report(code_map: dict) -> str:
             lines.append(
                 f"- {row.get('qualname', '')}: {row.get('lines', 0)} line(s), "
                 f"{row.get('calls', 0)} call(s), {row.get('path', '')}:{row.get('line', '')}"
+            )
+    if code_map.get("cancellation_paths"):
+        lines.append("cancellation paths:")
+        for row in code_map.get("cancellation_paths", [])[:8]:
+            helpers = ", ".join(row.get("helpers", [])[:4]) or "-"
+            lines.append(
+                f"- {row.get('qualname', '')}: checks={row.get('check_count', 0)} "
+                f"helpers={helpers} {row.get('path', '')}:{row.get('line', '')}"
             )
     if code_map.get("service_boundaries"):
         lines.append("service boundaries:")
@@ -900,6 +978,7 @@ def _format_rows(
     constant: bool = False,
     hotspot: bool = False,
     validation: bool = False,
+    cancellation: bool = False,
 ) -> list[str]:
     lines = [title + ":"]
     if not rows:
@@ -934,6 +1013,11 @@ def _format_rows(
             label = row.get("name", "")
             detail = f"{row.get('scope', '')}; {row.get('purpose', '')}"
             location = row.get("command", "")
+        elif cancellation:
+            label = row.get("qualname") or row.get("caller", "")
+            helpers = ",".join(row.get("helpers", [])[:4]) or "-"
+            detail = f"checks={row.get('check_count', 0)} helpers={helpers}"
+            location = f"{row.get('path', '')}:{row.get('line', 1)}"
         elif "target" in row:
             label = f"{row.get('caller', '')} -> {row.get('target', '')}"
             detail = f"callee={row.get('callee', '')}"
@@ -958,6 +1042,7 @@ def format_code_query_report(result: dict) -> str:
     lines.extend(_format_rows("constants", result.get("constants", []), constant=True))
     lines.extend(_format_rows("symbols", result.get("symbols", [])))
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
+    lines.extend(_format_rows("cancellation paths", result.get("cancellation_paths", []), cancellation=True))
     lines.extend(_format_rows("service boundaries", result.get("service_boundaries", []), service=True))
     lines.extend(_format_rows("validation gates", result.get("validation_gates", []), validation=True))
     lines.extend(_format_rows("root facade hotspots", result.get("root_hotspots", []), hotspot=True))
