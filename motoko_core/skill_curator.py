@@ -7,7 +7,7 @@ import hashlib
 import re
 
 from motoko_core.skills import SKILL_STATE_ARCHIVED
-from motoko_core.text import compact_text
+from motoko_core.text import compact_text, relative_time
 
 
 def skill_curator_generic_terms() -> set[str]:
@@ -458,3 +458,156 @@ def curator_skill_suggestion_candidates(
         if candidate is not None:
             candidates.append(candidate)
     return candidates[:limit]
+
+
+def format_skill_curator_report(
+    rows: list[dict],
+    *,
+    pending_suggestions: list[dict],
+    feedback_matches: list[tuple[dict, list[tuple[dict, list[str]]]]] | None = None,
+    feedback_eval_matches: list[tuple[dict, list[tuple[dict, list[str]]]]] | None = None,
+    pending_candidates: list[dict] | None = None,
+    stale_unused_days: int,
+) -> str:
+    learned = [row for row in rows if not row.get("builtin")]
+    archived = [row for row in learned if row.get("lifecycle_state") == SKILL_STATE_ARCHIVED]
+    active = [row for row in learned if row.get("lifecycle_state") != SKILL_STATE_ARCHIVED]
+    pinned = [row for row in learned if row.get("pinned")]
+    pending = list(pending_suggestions or [])
+    unused = [
+        row
+        for row in active
+        if int(row.get("selected_count", 0) or 0) == 0 and not row.get("pinned")
+    ]
+    staleish = [
+        row
+        for row in active
+        if int(row.get("selected_count", 0) or 0) > 0
+        and int(row.get("patch_count", 0) or 0) == 0
+        and not row.get("pinned")
+    ]
+    staleish.sort(key=lambda row: row.get("last_selected_at", ""), reverse=True)
+    support_opportunities = [
+        row
+        for row in active
+        if len(str(row.get("body", ""))) > 2500 and not skill_support_file_count(row)
+    ]
+    consolidation = skill_consolidation_groups(active)
+    archive_reviews = stale_unused_skill_rows(active, min_age_days=stale_unused_days)
+    feedback_links = list(feedback_matches or [])
+    feedback_eval_links = list(feedback_eval_matches or [])
+    pending_candidates = list(pending_candidates or [])
+    lines = [
+        "skill curator report: report-only",
+        "automatic mutations: none",
+        f"skills: {len(rows)} total, {len(active)} learned active, {len(archived)} learned archived, {len(pinned)} pinned",
+        f"pending suggestions: {len(pending)}",
+        f"curator suggestion candidates: {len(pending_candidates)}",
+        "",
+        "Suggested review queue:",
+    ]
+    if pending:
+        lines.append("pending skill suggestions:")
+        for row in pending[:8]:
+            lines.append(f"- {row.get('id', '')}  {row.get('action', '')}  {row.get('slug', '')}: {row.get('description', '')}")
+        if len(pending) > 8:
+            lines.append(f"- ... {len(pending) - 8} more")
+    else:
+        lines.append("pending skill suggestions: none")
+    if staleish:
+        lines.append("")
+        lines.append("recently used skills that may deserve consolidation or support files:")
+        for row in staleish[:8]:
+            lines.append(
+                f"- {row.get('slug', '')}  selected={row.get('selected_count', 0)}  "
+                f"last={relative_time(row.get('last_selected_at', ''))}  {row.get('description', '')}"
+            )
+    if unused:
+        lines.append("")
+        lines.append("learned active skills with no recorded selection yet:")
+        for row in unused[:8]:
+            lines.append(f"- {row.get('slug', '')}: {row.get('description', '')}")
+        if len(unused) > 8:
+            lines.append(f"- ... {len(unused) - 8} more")
+    if archive_reviews:
+        lines.append("")
+        lines.append("stale unused skills that may deserve archive review:")
+        for row in archive_reviews[:8]:
+            lines.append(
+                f"- {row.get('slug', '')}  age={row.get('curator_age_days', 0)}d  "
+                f"{row.get('description', '')}"
+            )
+    if support_opportunities:
+        lines.append("")
+        lines.append("support-file opportunities:")
+        for row in support_opportunities[:8]:
+            lines.append(
+                f"- {row.get('slug', '')}  body={len(str(row.get('body', '')))} chars  "
+                "consider moving durable references/templates/checklists into support files"
+            )
+    if consolidation:
+        lines.append("")
+        lines.append("possible consolidation groups:")
+        for row, matches in consolidation[:6]:
+            joined = ", ".join(
+                f"{other.get('slug', '')} ({'/'.join(overlap[:3])})"
+                for other, overlap in matches[:4]
+            )
+            lines.append(f"- {row.get('slug', '')}: {joined}")
+    if feedback_links:
+        lines.append("")
+        lines.append("recent feedback that may point at skill updates:")
+        for feedback, matched in feedback_links[:6]:
+            skill_text = ", ".join(
+                f"{row.get('slug', '')} ({len(overlap)} signal term(s))"
+                for row, overlap in matched
+            )
+            lines.append(
+                f"- {feedback.get('rating', '')} {feedback.get('id', '')}: {skill_text}; "
+                "raw note hidden; inspect a specific feedback/suggestion record if needed"
+            )
+    if feedback_eval_links:
+        lines.append("")
+        lines.append("saved feedback-eval fixtures that may point at skill updates:")
+        for fixture, matched in feedback_eval_links[:6]:
+            focus = [
+                str(item)
+                for item in fixture.get("focus", [])
+                if str(item).strip()
+            ] if isinstance(fixture.get("focus"), list) else []
+            skill_text = ", ".join(
+                f"{row.get('slug', '')} ({len(overlap)} signal term(s))"
+                for row, overlap in matched
+            )
+            lines.append(
+                f"- {fixture.get('rating', '')} {fixture.get('id', '')}: {skill_text}; "
+                f"focus={', '.join(focus[:4]) if focus else '-'}; raw fixture text hidden"
+            )
+    if pending_candidates:
+        lines.append("")
+        lines.append("concrete pending-suggestion candidates:")
+        for row in pending_candidates[:8]:
+            lines.append(
+                f"- {row.get('action', '')}  {row.get('target_skill') or row.get('slug', '')}: "
+                f"{row.get('description', '')}"
+            )
+        lines.append("  queue them with: motoko skill curator --suggest")
+    if archived:
+        lines.append("")
+        lines.append("archived skills:")
+        for row in archived[:8]:
+            lifecycle = row.get("lifecycle", {}) if isinstance(row.get("lifecycle"), dict) else {}
+            lines.append(
+                f"- {row.get('slug', '')}  archived={relative_time(lifecycle.get('archived_at', ''))}  "
+                f"restore: motoko skill restore {row.get('slug', '')}"
+            )
+    lines.extend(
+        [
+            "",
+            "Curator policy:",
+            "- report first; do not mutate skills automatically",
+            "- prefer patching recently loaded or umbrella skills before creating narrow duplicates",
+            "- archive is reversible and never applies to built-in or pinned skills",
+        ]
+    )
+    return "\n".join(lines)

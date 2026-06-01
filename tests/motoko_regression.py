@@ -65,6 +65,7 @@ from motoko_core.artifact_lifecycle import (
 )
 from motoko_core.skill_curator import (
     curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
+    format_skill_curator_report as format_skill_curator_report_core,
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 
@@ -12406,6 +12407,43 @@ def test_skill_curator_core_builds_review_first_candidates(_m=None):
     assert "retrieval debugging needs ranking" not in candidates[0]["new_string"]
 
 
+def test_skill_curator_core_formats_report_without_private_feedback(_m=None):
+    rows = [
+        {
+            "slug": "retrieval-debugging",
+            "description": "Retrieval debugging checklist",
+            "body": "Inspect sources first.",
+            "lifecycle_state": "active",
+            "support_files": [],
+            "selected_count": 1,
+            "patch_count": 0,
+            "last_selected_at": "2026-05-31T00:00:00+00:00",
+        }
+    ]
+    feedback = {"id": "feedback-core", "rating": "down", "note": "private stale source note"}
+    matches = [(feedback, [(rows[0], ["retrieval", "debugging"])])]
+    report = format_skill_curator_report_core(
+        rows,
+        pending_suggestions=[],
+        feedback_matches=matches,
+        feedback_eval_matches=[],
+        pending_candidates=[
+            {
+                "action": "patch",
+                "target_skill": "retrieval-debugging",
+                "description": "Patch with review signal.",
+            }
+        ],
+        stale_unused_days=30,
+    )
+
+    assert "skill curator report: report-only" in report
+    assert "curator suggestion candidates: 1" in report
+    assert "retrieval-debugging" in report
+    assert "raw note hidden" in report
+    assert "private stale source note" not in report
+
+
 def test_skill_curator_uses_saved_feedback_eval_fixtures(m):
     with isolated_state():
         m.learn_skill_text(
@@ -14168,6 +14206,7 @@ def main() -> int:
         test_self_improvement_eval_checks_codebase_skill_and_scanner,
         test_skill_scan_reports_script_risks,
         test_skill_curator_core_builds_review_first_candidates,
+        test_skill_curator_core_formats_report_without_private_feedback,
         test_skill_curator_creates_feedback_patch_suggestion,
         test_skill_curator_creates_loaded_skill_patch_suggestion,
         test_skill_curator_creates_support_file_plan_for_large_skill,
