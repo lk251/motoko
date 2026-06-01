@@ -1614,6 +1614,10 @@ Motoko self-code checkpoint, 2026-05-31:
   resolved call edges, root-facade hotspots, and `motoko_core`
   service-boundary summaries so Motoko can locate implementation, ownership,
   and likely tests before proposing changes.
+- Code-query now returns root-facade hotspot rows directly for queries such as
+  "root facade hotspot extraction target", and `self-eval` checks that those
+  rows remain discoverable. This makes future refactor planning less dependent
+  on remembering that hotspot data only appeared in the broad code-map report.
 - Code intelligence now also extracts module-level schema/version/artifact
   constants and exposes them through `code-map`, `code-query`, and
   `self-eval`. This matters for Motoko self-improvement because artifact

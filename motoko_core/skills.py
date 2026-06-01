@@ -154,7 +154,7 @@ BUILTIN_SKILLS = [
                 "Procedure:",
                 "- Read AGENTS.md, docs/project-context.md, docs/agentic-capability-design.md, and relevant docs before architectural or authority changes.",
                 "- For long self-improvement work, follow docs/motoko-self-improvement-playbook.md as the current craft checklist.",
-                "- Use motoko code-map for a repo overview and motoko code-query QUERY to find commands, handlers, symbols, tests, and ownership boundaries.",
+                "- Use motoko code-map for a repo overview and motoko code-query QUERY to find commands, handlers, symbols, tests, ownership boundaries, and root-facade hotspots.",
                 "- Prefer existing modules in motoko_core over adding more root-facade orchestration.",
                 "- Keep changes stdlib-only, realm-local, inspectable, and covered by regression/eval tests.",
                 "- For skills/tools, preserve the review-first planner boundary: models may propose, Motoko validators decide, and mutating actions require explicit confirmation.",

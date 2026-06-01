@@ -1035,6 +1035,10 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert query["symbols"] or query["commands"] or query["tests"]
         assert query["command_traces"]
         assert query["service_boundaries"]
+        hotspot_query = m.motoko_code_query("root facade hotspot extraction target")
+        assert hotspot_query["root_hotspots"]
+        assert hotspot_query["root_hotspots"][0]["path"] == "motoko"
+        assert "root facade hotspots:" in m.format_motoko_code_query("root facade hotspot extraction target")
         schema_query = m.motoko_code_query("source lifecycle schema artifact version")
         assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in schema_query["constants"])
         rendered = m.format_motoko_code_query("Motoko skill plan command implementation tests")
@@ -1108,6 +1112,7 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "code_map_relationships_present" in names
         assert "code_map_schema_constants_present" in names
         assert "code_query_finds_schema_constants" in names
+        assert "code_query_finds_root_hotspots" in names
         assert "code_query_finds_traces_and_services" in names
         assert "code_query_finds_feedback_eval_curator_path" in names
         assert "skill_scanner_detects_risky_script" in names

@@ -691,6 +691,13 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
         return ranked[: max(0, int(limit or 0))]
 
     _maybe_cancel(cancel_check)
+    hotspot_rows = [
+        {
+            **row,
+            "role": "root facade hotspot live orchestration extraction target",
+        }
+        for row in code_map.get("root_hotspots", [])
+    ]
     return {
         "schema": CODE_QUERY_SCHEMA,
         "query": str(query or ""),
@@ -712,6 +719,11 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
             code_map.get("service_boundaries", []),
             ["path", "doc", "public_symbols"],
             name_field="path",
+        ),
+        "root_hotspots": rank(
+            hotspot_rows,
+            ["name", "qualname", "path", "role"],
+            name_field="qualname",
         ),
         "tests": rank(code_map.get("tests", []), ["name", "qualname", "path", "doc"]),
         "files": rank(code_map.get("files", []), ["path"], name_field="path"),
@@ -804,6 +816,7 @@ def _format_rows(
     trace: bool = False,
     service: bool = False,
     constant: bool = False,
+    hotspot: bool = False,
 ) -> list[str]:
     lines = [title + ":"]
     if not rows:
@@ -830,6 +843,10 @@ def _format_rows(
             value = row.get("value", "")
             detail = f"{row.get('category', '')}" + (f"={value}" if value else "")
             location = f"{row.get('path', '')}:{row.get('line', 1)}"
+        elif hotspot:
+            label = row.get("qualname") or row.get("name", "")
+            detail = f"lines={row.get('lines', 0)} calls={row.get('calls', 0)}"
+            location = f"{row.get('path', '')}:{row.get('line', 1)}"
         elif "target" in row:
             label = f"{row.get('caller', '')} -> {row.get('target', '')}"
             detail = f"callee={row.get('callee', '')}"
@@ -855,6 +872,7 @@ def format_code_query_report(result: dict) -> str:
     lines.extend(_format_rows("symbols", result.get("symbols", [])))
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
     lines.extend(_format_rows("service boundaries", result.get("service_boundaries", []), service=True))
+    lines.extend(_format_rows("root facade hotspots", result.get("root_hotspots", []), hotspot=True))
     lines.extend(_format_rows("tests", result.get("tests", [])))
     lines.extend(_format_rows("files", result.get("files", [])))
     return "\n".join(lines)

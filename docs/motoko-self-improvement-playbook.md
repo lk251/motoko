@@ -11,7 +11,9 @@ playbook turns the current craft direction into reusable procedure.
   skill/tool, background-job, retrieval, memory, or TUI changes.
 - Use `motoko code-map` for the repository overview and `motoko code-query
   QUERY` to find command handlers, symbols, tests, modules, and ownership
-  boundaries before proposing code changes.
+  boundaries before proposing code changes. For refactors, include
+  root-facade or hotspot terms so `code-query` returns the largest live
+  orchestration targets instead of relying on memory of the root file.
 - Include schema, artifact, migration, and version terms in code queries when
   the work touches derived state such as indexes, vectors, memories, skills,
   actions, cache manifests, or corpus lifecycle. `code-query` exposes

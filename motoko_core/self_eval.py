@@ -170,6 +170,15 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"top_constant": (schema_query.get("constants") or [{}])[0].get("name", "")},
         )
     )
+    hotspot_query = query_code_map(code_map, "root facade hotspot extraction target", limit=8)
+    checks.append(
+        _check(
+            "code_query_finds_root_hotspots",
+            bool(hotspot_query.get("root_hotspots")),
+            f"hotspots={len(hotspot_query.get('root_hotspots', []))}",
+            evidence={"top_hotspot": (hotspot_query.get("root_hotspots") or [{}])[0].get("qualname", "")},
+        )
+    )
     lifecycle_query = query_code_map(code_map, "source lifecycle command handler tests", limit=8)
     checks.append(
         _check(
