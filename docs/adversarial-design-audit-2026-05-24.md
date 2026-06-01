@@ -183,23 +183,26 @@ source and metadata are trusted.
 
 Before external/community scripts, network tools, or broad terminal-like tools:
 
-- Add a static skill/script scanner inspired by Hermes' `skills_guard.py`.
+- Require the static skill/script scanner inspired by Hermes'
+  `skills_guard.py`; `motoko skill scan [NAME]` now exists as the
+  report-first review surface.
 - Prefer a NixOS-owned sandbox wrapper or helper user.
 - Keep no ambient secrets in the runner environment.
 - Keep network disabled by default.
 
 ### B. Foreground script cancellation needs a real kill path
 
-The runner enforces timeouts, but `/stop` should eventually interrupt active
-foreground script work and mark the ledger as interrupted. This is most
-important before longer-running script tools or goal loops depend on scripts.
+The initial runner now has an interrupt path and durable interrupted ledger
+state. This remains a risk area if Motoko later adds broader or longer-running
+script tools, because each new runner path must keep the same interrupt,
+timeout, and ledger guarantees.
 
-Recommended next work:
+Ongoing rule:
 
-- Add an interrupt signal into the action runner.
-- Terminate the subprocess on stop.
-- Persist an `interrupted` ledger/result state.
-- Add action-eval coverage for interrupted tool work.
+- Pass `/stop`/cancel events into every new foreground tool runner.
+- Terminate subprocesses on stop or timeout.
+- Persist `interrupted` ledger/result state.
+- Keep action-eval coverage for interrupted tool work.
 
 ### C. Skill lifecycle is safer than Hermes but less mature
 
@@ -207,33 +210,36 @@ Hermes has usage telemetry, curator state, archives, pinned skills, structured
 curator reports, and consolidation/pruning distinction. Motoko has review-first
 suggestions and support files, but not a full curator.
 
-Recommended Motoko-shaped path:
+Motoko has started the Motoko-shaped path with lifecycle state, pin/archive
+commands, report-first curator suggestions, and support files. Remaining
+craft work:
 
-- Track usage/selection/patch counts for learned skills.
-- Add pin/archive/restore before any automatic cleanup.
+- Improve usage/selection/patch metadata quality.
 - Keep automatic curator passes report-first until trust is earned.
 - Prefer umbrella skill consolidation and support files over many narrow
   session-specific skills.
 
 ### D. Goal loops are durable but not yet autonomous
 
-The explicit action-list runner is a good foundation. Autonomous model-planned
-loops are not enabled, by design.
+The explicit action-list runner, read-only model-planned loop, and
+user-confirmed model-planned proposal loop are enabled as reviewed behavior.
+Broad autonomous mutation remains disabled by design.
 
-Before enabling them:
+Before broadening them:
 
 - Start with read-only plan/retrieve/inspect/audit loops.
 - Require budgets, stop conditions, allowed skills/tools, and visible
   checkpoints.
 - Require final audit and user review before mutation.
-- Only then consider user-confirmed mutating loops.
+- Keep mutating work behind reviewable typed proposals and explicit apply.
 
 ### E. Artifact lifecycle remains incomplete across all derived families
 
-Index cleanup and source lifecycle decisions exist, but a single lifecycle
-service does not yet apply cleanup/rebuild across vectors, evidence stores,
-topic dossiers, memory dossiers, feedback fixtures, profile dossiers, and
-conversation-derived artifacts.
+Index cleanup, source lifecycle decisions, conversation cleanup families, and
+several derived-artifact cleanup report shapes now live in the lifecycle
+service. This remains incomplete across every derived family: the remaining
+work is to keep moving rebuild/upgrade decisions and family-specific apply
+logic into service-owned code with injected filesystem callbacks.
 
 Recommended next work:
 
@@ -303,7 +309,9 @@ Remaining:
 
 1. Extend artifact lifecycle application across vectors, evidence, dossiers,
    memories, feedback, profiles, and conversation-derived artifacts.
-2. Add static script/skill scanning before any external skill import path.
+2. If Motoko later gets an external/community skill import path, make scanner
+   review, trust labels, and any NixOS sandbox wrapper mandatory before imported
+   script assets can be approved.
 
 ## Validation Added By This Audit
 
