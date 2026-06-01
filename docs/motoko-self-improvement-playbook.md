@@ -419,6 +419,10 @@ Current progress on this backlog:
 - Duplicate-reference target reporting now carries its own cancellation
   checkpoints inside `motoko_core.index_storage`, so root no longer wraps that
   service-owned report with a separate loop.
+- `motoko-refactor-craft` now records the service-loop extraction lesson from
+  this pass: once a service owns a per-record decision, the collection loop
+  should usually move there too, while root keeps realm-local state and
+  filesystem authority behind callbacks.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

@@ -208,7 +208,7 @@ BUILTIN_SKILLS = [
         "name": MOTOKO_REFACTOR_CRAFT_SKILL,
         "slug": MOTOKO_REFACTOR_CRAFT_SKILL,
         "description": "Refactor Motoko with service boundaries and careful validation",
-        "version": "3",
+        "version": "4",
         "kind": "self-improvement",
         "triggers": [
             "refactor Motoko",
@@ -235,6 +235,8 @@ BUILTIN_SKILLS = [
                 "- Characterize behavior with tests before moving live orchestration.",
                 "- Prefer pure helpers, then fakeable service boundaries, then live subsystem extraction.",
                 "- Keep the root motoko executable as the compatibility facade until the extracted boundary is safer and simpler.",
+                "- When a service owns a per-record decision, consider moving the collection loop into that service too, with injected state/filesystem callbacks and cancellation checkpoints.",
+                "- Keep root authority at the edge: realm-local paths, current-state loading, model calls, and filesystem mutation stay behind callbacks unless there is a reviewed boundary change.",
                 "- Preserve stdlib-only runtime, realm-local state, content-free observability, migrations, durable checkpoints, and pause/resume behavior.",
                 "- For shared state/progress writes, use a unique same-directory temporary file per writer before atomic replace; never reuse one fixed .tmp path across parallel workers.",
                 "- Add concurrency regressions for background progress, vector/evidence refresh, ledgers, and any other state file touched by parallel or interruptible work.",
