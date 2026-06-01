@@ -144,6 +144,67 @@ def index_storage_scan_record(
     return row
 
 
+def index_storage_scan_records(
+    *,
+    indexes: list[dict],
+    partials: list[dict],
+    latest_ids: set[str],
+    resumable_partial_ids: set[str],
+    partial_superseded: Callable[[dict], bool],
+    chunk_content_path: Callable[[dict, dict], pathlib.Path | None],
+    path_size: Callable[[pathlib.Path], int],
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict:
+    """Scan complete and partial indexes into storage-audit rows and indexes."""
+
+    referenced_paths: set[pathlib.Path] = set()
+    stored_by_digest: dict[str, list[dict]] = {}
+    unique_digest_bytes: dict[str, int] = {}
+    duplicate_refs: list[dict] = []
+    rows: list[dict] = []
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    for index in indexes or []:
+        maybe_cancel()
+        row = index_storage_scan_record(
+            index,
+            record_kind="index",
+            referenced_paths=referenced_paths,
+            stored_by_digest=stored_by_digest,
+            unique_digest_bytes=unique_digest_bytes,
+            duplicate_refs=duplicate_refs,
+            chunk_content_path=chunk_content_path,
+            path_size=path_size,
+        )
+        row["latest_for_family"] = index.get("id", "") in latest_ids
+        rows.append(row)
+    for partial in partials or []:
+        maybe_cancel()
+        row = index_storage_scan_record(
+            partial,
+            record_kind="partial",
+            referenced_paths=referenced_paths,
+            stored_by_digest=stored_by_digest,
+            unique_digest_bytes=unique_digest_bytes,
+            duplicate_refs=duplicate_refs,
+            chunk_content_path=chunk_content_path,
+            path_size=path_size,
+        )
+        row["resumable"] = partial.get("id", "") in resumable_partial_ids
+        row["superseded"] = partial_superseded(partial)
+        rows.append(row)
+    return {
+        "rows": rows,
+        "referenced_paths": referenced_paths,
+        "stored_by_digest": stored_by_digest,
+        "unique_digest_bytes": unique_digest_bytes,
+        "duplicate_refs": duplicate_refs,
+    }
+
+
 def index_storage_orphan_chunk_files(
     data_dirs,
     *,

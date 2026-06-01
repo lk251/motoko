@@ -108,6 +108,7 @@ from motoko_core.index_storage import (  # noqa: E402
     index_storage_audit_report as core_index_storage_audit_report,
     index_storage_orphan_chunk_files as core_index_storage_orphan_chunk_files,
     index_storage_scan_record as core_index_storage_scan_record,
+    index_storage_scan_records as core_index_storage_scan_records,
 )
 from motoko_core.code_intel import (  # noqa: E402
     build_code_map,
@@ -12205,36 +12206,25 @@ def index_storage_audit(*, cancel_event=None) -> dict:
     resumable_partial_ids = {partial.get("id", "") for partial in list_resumable_partial_indexes()}
     superseded_partials = list_superseded_partial_indexes()
     latest_ids = {index.get("id", "") for index in latest_indexes_by_family(indexes)}
-    referenced_paths: set[pathlib.Path] = set()
-    stored_by_digest: dict[str, list[dict]] = {}
-    unique_digest_bytes: dict[str, int] = {}
-    duplicate_refs: list[dict] = []
-    rows = []
-    for index in indexes:
-        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-        row = index_storage_scan_record(
-            index,
-            record_kind="index",
-            referenced_paths=referenced_paths,
-            stored_by_digest=stored_by_digest,
-            unique_digest_bytes=unique_digest_bytes,
-            duplicate_refs=duplicate_refs,
-        )
-        row["latest_for_family"] = index.get("id", "") in latest_ids
-        rows.append(row)
-    for partial in partials:
-        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-        row = index_storage_scan_record(
-            partial,
-            record_kind="partial",
-            referenced_paths=referenced_paths,
-            stored_by_digest=stored_by_digest,
-            unique_digest_bytes=unique_digest_bytes,
-            duplicate_refs=duplicate_refs,
-        )
-        row["resumable"] = partial.get("id", "") in resumable_partial_ids
-        row["superseded"] = partial_index_superseded(partial, indexes)
-        rows.append(row)
+    scan = core_index_storage_scan_records(
+        indexes=indexes,
+        partials=partials,
+        latest_ids=latest_ids,
+        resumable_partial_ids=resumable_partial_ids,
+        partial_superseded=lambda partial: partial_index_superseded(partial, indexes),
+        chunk_content_path=chunk_content_path,
+        path_size=path_size,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "index storage audit interrupted by request",
+            work_kind="index-storage",
+        ),
+    )
+    referenced_paths = scan["referenced_paths"]
+    stored_by_digest = scan["stored_by_digest"]
+    unique_digest_bytes = scan["unique_digest_bytes"]
+    duplicate_refs = scan["duplicate_refs"]
+    rows = scan["rows"]
 
     for ref in duplicate_refs:
         raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")

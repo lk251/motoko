@@ -70,6 +70,7 @@ from motoko_core.index_storage import (
     index_storage_audit_report as index_storage_audit_report_core,
     index_storage_orphan_chunk_files as index_storage_orphan_chunk_files_core,
     index_storage_scan_record as index_storage_scan_record_core,
+    index_storage_scan_records as index_storage_scan_records_core,
 )
 from motoko_core.skill_curator import (
     curator_skill_suggestion_candidates as curator_skill_suggestion_candidates_core,
@@ -11456,6 +11457,95 @@ def test_index_storage_orphan_chunk_files_is_service_owned(_m):
             assert "cancelled orphan scan" in str(exc)
 
 
+def test_index_storage_scan_records_orchestrates_indexes_and_partials(_m):
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = pathlib.Path(tmp_name)
+        stored = tmp / "stored.txt"
+        stored.write_text("stored", encoding="utf-8")
+        index = {
+            "id": "index-current",
+            "files": [
+                {
+                    "path": str(tmp / "a.org"),
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "content_path": "stored.txt",
+                            "content_sha256": "stored-digest",
+                        }
+                    ],
+                }
+            ],
+        }
+        partial = {
+            "id": "partial-old",
+            "files": [
+                {
+                    "path": str(tmp / "b.org"),
+                    "chunks": [
+                        {
+                            "chunk": 1,
+                            "duplicate_of_existing_index": True,
+                            "content_sha256": "stored-digest",
+                            "content_bytes": 6,
+                        }
+                    ],
+                }
+            ],
+        }
+        cancel_calls = {"count": 0}
+
+        def chunk_content_path(_record, chunk):
+            relpath = chunk.get("content_path")
+            return tmp / relpath if relpath else None
+
+        def check_cancelled():
+            cancel_calls["count"] += 1
+
+        scan = index_storage_scan_records_core(
+            indexes=[index],
+            partials=[partial],
+            latest_ids={"index-current"},
+            resumable_partial_ids={"partial-old"},
+            partial_superseded=lambda item: item.get("id") == "partial-old",
+            chunk_content_path=chunk_content_path,
+            path_size=lambda path: path.stat().st_size,
+            check_cancelled=check_cancelled,
+        )
+
+        rows = scan["rows"]
+        assert [row["kind"] for row in rows] == ["index", "partial"]
+        assert rows[0]["latest_for_family"] is True
+        assert rows[1]["resumable"] is True
+        assert rows[1]["superseded"] is True
+        assert stored.resolve() in scan["referenced_paths"]
+        assert scan["unique_digest_bytes"]["stored-digest"] == len("stored".encode("utf-8"))
+        assert scan["duplicate_refs"][0]["index_id"] == "partial-old"
+        assert cancel_calls["count"] == 2
+
+        cancelling_calls = {"count": 0}
+
+        def cancelling_check():
+            cancelling_calls["count"] += 1
+            if cancelling_calls["count"] >= 2:
+                raise RuntimeError("cancelled scan records")
+
+        try:
+            index_storage_scan_records_core(
+                indexes=[index],
+                partials=[partial],
+                latest_ids=set(),
+                resumable_partial_ids=set(),
+                partial_superseded=lambda _item: False,
+                chunk_content_path=chunk_content_path,
+                path_size=lambda path: path.stat().st_size,
+                check_cancelled=cancelling_check,
+            )
+            raise AssertionError("scan records should honor cancellation between records")
+        except RuntimeError as exc:
+            assert "cancelled scan records" in str(exc)
+
+
 def test_index_storage_cleanup_sections_are_service_owned(_m):
     sections = index_storage_cleanup_sections_core(
         stale_superseded_indexes=[{"id": "old-index", "bytes": 10}],
@@ -14910,6 +15000,7 @@ def main() -> int:
         test_conversation_artifact_cleanup_report_is_service_owned,
         test_index_storage_scan_record_is_service_owned,
         test_index_storage_orphan_chunk_files_is_service_owned,
+        test_index_storage_scan_records_orchestrates_indexes_and_partials,
         test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_report_from_index_owns_orchestration,

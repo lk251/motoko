@@ -409,6 +409,10 @@ Current progress on this backlog:
 - Orphan chunk-file detection for index-storage audits is now service-owned as
   well, with the root facade only supplying the allowed chunk directories,
   path-size callback, and cancellation hook.
+- Index-storage row orchestration across complete indexes and partial indexes
+  now lives in the same service too: latest-family flags, resumable/superseded
+  partial flags, shared digest maps, duplicate-reference rows, and referenced
+  path sets are built under one tested helper.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw
