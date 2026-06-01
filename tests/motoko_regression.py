@@ -74,6 +74,7 @@ from motoko_core.skill_curator import (
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 from motoko_core.vector_store import (
+    collect_embedding_vector_candidates as collect_embedding_vector_candidates_core,
     collect_reusable_embedding_vector_rows as collect_reusable_embedding_vector_rows_core,
     embedding_candidate_batches as embedding_candidate_batches_core,
     embedding_pending_batches as embedding_pending_batches_core,
@@ -84,6 +85,7 @@ from motoko_core.vector_store import (
     embedding_vector_progress_id as embedding_vector_progress_id_core,
     embedding_vector_progress_key as embedding_vector_progress_key_core,
     embedding_vector_progress_matches as embedding_vector_progress_matches_core,
+    embedding_vector_route_identity as embedding_vector_route_identity_core,
     embedding_vector_row_from_vector as embedding_vector_row_from_vector_core,
     embedding_vector_rows_by_id as embedding_vector_rows_by_id_core,
     embedding_vector_store_record as embedding_vector_store_record_core,
@@ -7866,6 +7868,74 @@ def test_embedding_vector_progress_core_identity_and_matching(_m=None):
     assert not embedding_vector_progress_matches_core(stale_progress, progress_key)
 
 
+def test_embedding_vector_route_identity_core_normalizes_catalog_fields(_m=None):
+    route = embedding_vector_route_identity_core(
+        {
+            "catalog_route": "qwen3-embedding-0b6",
+            "route": "fallback-route",
+            "model": "qwen3-embedding",
+            "embedding_dimensions": "1024",
+        }
+    )
+    fallback = embedding_vector_route_identity_core(
+        {
+            "route": "legacy-route",
+            "model": "legacy-model",
+            "embedding_dimensions": "not-int",
+        }
+    )
+
+    assert route == {
+        "route_id": "qwen3-embedding-0b6",
+        "route_model": "qwen3-embedding",
+        "route_dims": 1024,
+    }
+    assert fallback == {
+        "route_id": "legacy-route",
+        "route_model": "legacy-model",
+        "route_dims": 0,
+    }
+
+
+def test_collect_embedding_vector_candidates_core_filters_and_checks_cancel(_m=None):
+    index = {
+        "files": [
+            {"path": "a.org", "chunks": [{"id": "c1"}, {"id": "c2"}]},
+            {"path": "b.org", "chunks": [{"id": "c3"}]},
+        ]
+    }
+    checkpoints = []
+
+    def cancel_check():
+        checkpoints.append("checked")
+
+    def chunk_rows(_index, file_item, chunk):
+        return [
+            (f"chunk:{file_item['path']}:{chunk['id']}", " keep chunk ", {"kind": "chunk"}),
+            (f"blank:{chunk['id']}", "   ", {"kind": "blank"}),
+        ]
+
+    def evidence_rows(_index, file_item, chunk):
+        return [(f"evidence:{file_item['path']}:{chunk['id']}", "keep evidence", {"kind": "evidence"})]
+
+    rows = collect_embedding_vector_candidates_core(
+        index,
+        chunk_rows,
+        evidence_rows,
+        cancel_check=cancel_check,
+    )
+
+    assert [row[0] for row in rows] == [
+        "chunk:a.org:c1",
+        "evidence:a.org:c1",
+        "chunk:a.org:c2",
+        "evidence:a.org:c2",
+        "chunk:b.org:c3",
+        "evidence:b.org:c3",
+    ]
+    assert len(checkpoints) == 5
+
+
 def test_embedding_vector_progress_record_core_shapes_resume_checkpoint(_m=None):
     row = {"id": "row-1", "vector": [0.1, 0.2]}
     progress = embedding_vector_progress_record_core(
@@ -14656,6 +14726,8 @@ def main() -> int:
         test_vector_query_core_scores_and_dedupes_rows,
         test_embedding_vector_row_core_preserves_evidence_and_reuse_rules,
         test_embedding_vector_progress_core_identity_and_matching,
+        test_embedding_vector_route_identity_core_normalizes_catalog_fields,
+        test_collect_embedding_vector_candidates_core_filters_and_checks_cancel,
         test_embedding_vector_progress_record_core_shapes_resume_checkpoint,
         test_embedding_vector_store_record_core_shapes_provenance_and_reuse,
         test_embedding_vector_batch_and_reuse_helpers_are_core_owned,

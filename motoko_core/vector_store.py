@@ -103,6 +103,37 @@ def embedding_vector_rows_by_id(rows) -> dict[str, dict]:
     }
 
 
+def embedding_vector_route_identity(route_info: dict) -> dict:
+    return {
+        "route_id": str(route_info.get("catalog_route") or route_info.get("route") or ""),
+        "route_model": str(route_info.get("model") or ""),
+        "route_dims": _int_or_zero(route_info.get("embedding_dimensions")),
+    }
+
+
+def collect_embedding_vector_candidates(
+    index: dict,
+    chunk_row_provider,
+    evidence_row_provider,
+    *,
+    cancel_check=None,
+) -> list[tuple[str, dict, dict, str, dict]]:
+    candidates: list[tuple[str, dict, dict, str, dict]] = []
+    for file_item in index.get("files", []) or []:
+        if cancel_check is not None:
+            cancel_check()
+        for chunk in file_item.get("chunks", []) or []:
+            if cancel_check is not None:
+                cancel_check()
+            for row_id, text, row_meta in chunk_row_provider(index, file_item, chunk):
+                if str(text or "").strip():
+                    candidates.append((str(row_id), file_item, chunk, str(text), row_meta))
+            for row_id, text, row_meta in evidence_row_provider(index, file_item, chunk):
+                if str(text or "").strip():
+                    candidates.append((str(row_id), file_item, chunk, str(text), row_meta))
+    return candidates
+
+
 def embedding_vector_checkpoint_rows(
     progress: dict,
     candidate_ids,

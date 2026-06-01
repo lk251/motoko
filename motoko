@@ -331,12 +331,14 @@ from motoko_core.retrieval import (  # noqa: E402
 from motoko_core.retrieval_planner import build_retrieval_plan  # noqa: E402
 from motoko_core.vector_store import (  # noqa: E402
     bounded_vector_embedding_text,
+    collect_embedding_vector_candidates as core_collect_embedding_vector_candidates,
     collect_reusable_embedding_vector_rows as core_collect_reusable_embedding_vector_rows,
     dense_normalize,
     embedding_candidate_batches as core_embedding_candidate_batches,
     embedding_pending_batches as core_embedding_pending_batches,
     embedding_refresh_mode as core_embedding_refresh_mode,
     embedding_rows_vector_dims as core_embedding_rows_vector_dims,
+    embedding_vector_route_identity as core_embedding_vector_route_identity,
     embedding_vector_progress_record as core_embedding_vector_progress_record,
     embedding_vector_progress_id as core_embedding_vector_progress_id,
     embedding_vector_progress_key as core_embedding_vector_progress_key,
@@ -14171,24 +14173,23 @@ def build_embedding_vector_store_from_index(
     cancel_event=None,
     refresh_cause: str = "",
 ) -> dict:
-    raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
+    def check_vector_cancelled() -> None:
+        raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
+
+    check_vector_cancelled()
     route_info = embedding_route_info()
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
-    route_id = str(route_info.get("catalog_route") or route_info.get("route") or "")
-    route_model = str(route_info.get("model") or "")
-    route_dims = int(route_info.get("embedding_dimensions") or 0)
-    candidates = []
-    for file_item in index.get("files", []):
-        raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
-        for chunk in file_item.get("chunks", []):
-            raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
-            for row_id, text, row_meta in vector_embedding_input_rows(index, file_item, chunk):
-                if text.strip():
-                    candidates.append((row_id, file_item, chunk, text, row_meta))
-            for row_id, text, row_meta in evidence_vector_embedding_input_rows(index, file_item, chunk):
-                if text.strip():
-                    candidates.append((row_id, file_item, chunk, text, row_meta))
+    route_identity = core_embedding_vector_route_identity(route_info)
+    route_id = route_identity["route_id"]
+    route_model = route_identity["route_model"]
+    route_dims = route_identity["route_dims"]
+    candidates = core_collect_embedding_vector_candidates(
+        index,
+        vector_embedding_input_rows,
+        evidence_vector_embedding_input_rows,
+        cancel_check=check_vector_cancelled,
+    )
     batch_size = embedding_batch_size(route_info, len(candidates))
     dimensions = route_dims
     batches = core_embedding_candidate_batches(candidates, batch_size)
@@ -14554,9 +14555,10 @@ def build_embedding_vector_store_from_index(
                 state="finalizing",
             )
         )
-    store_route_id = str(route_info.get("catalog_route") or route_info.get("route", ""))
-    store_route_model = str(route_info.get("model", ""))
-    store_route_dims = int(route_info.get("embedding_dimensions") or 0)
+    store_route_identity = core_embedding_vector_route_identity(route_info)
+    store_route_id = store_route_identity["route_id"]
+    store_route_model = store_route_identity["route_model"]
+    store_route_dims = store_route_identity["route_dims"]
     store_created = now()
     store = core_embedding_vector_store_record(
         store_id=store_id,
