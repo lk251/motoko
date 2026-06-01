@@ -407,6 +407,9 @@ Current progress on this backlog:
 - Worker model-eval fixtures now live in `motoko_core.evals` with the worker
   eval prompt/scoring helpers. Live route selection, model calls, and private
   report persistence remain at the root facade edge.
+- Vector planning row math and readiness-gate shaping now live in
+  `motoko_core.vector_store`. The root facade still supplies current indexes,
+  memories, conversations, routes, eval reports, and realm-local store paths.
 - Conversation persistence trust has focused coverage for empty-chat pruning,
   queued prompt durability/history seeding, report-output non-persistence,
   rename/delete helpers, and owned derived-artifact cleanup. Deleted

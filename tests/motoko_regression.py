@@ -69,6 +69,10 @@ from motoko_core.skill_curator import (
     format_skill_curator_report as format_skill_curator_report_core,
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
+from motoko_core.vector_store import (
+    vector_plan_readiness_gates as vector_plan_readiness_gates_core,
+    vector_plan_row_plans as vector_plan_row_plans_core,
+)
 
 
 def load_motoko():
@@ -7560,6 +7564,46 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
         assert "readiness gates:" in text
 
 
+def test_vector_plan_core_builds_rows_and_readiness_gates(_m=None):
+    row_plans = vector_plan_row_plans_core(
+        {
+            "raw_embedding_row_estimate": 3,
+            "evidence_row_estimate": 2,
+            "chunk_summary_count": 1,
+            "file_summary_count": 1,
+            "file_count": 1,
+        },
+        {
+            "memory_count": 1,
+            "conversation_count": 2,
+            "topic_count": 1,
+            "dossier_count": 0,
+        },
+        dims=8,
+    )
+    rows_by_kind = {row["kind"]: row for row in row_plans}
+
+    assert rows_by_kind["raw_chunk_embedding"]["rows"] == 3
+    assert rows_by_kind["evidence_embedding"]["rows"] == 2
+    assert rows_by_kind["conversation_summary_embedding"]["rows"] == 2
+    assert rows_by_kind["raw_chunk_embedding"]["vector_bytes"] == 3 * 8 * 4
+    assert "embedding_model" in rows_by_kind["memory_embedding"]["invalidates_on"]
+
+    gates = vector_plan_readiness_gates_core(
+        retrieval_eval={"status": "pass", "passed": 4, "total": 4},
+        storage_audit={"missing_duplicate_target_count": 0, "missing_stored_chunk_count": 0},
+        embedding_routes=[{"route": "embed", "embedding_dimensions": 8, "endpoint_paths": ["/v1/embeddings"]}],
+        reranker_routes=[{"route": "rerank", "endpoint_paths": ["/v1/rerank"]}],
+        realm="mares",
+    )
+    gate_status = {gate["name"]: gate["status"] for gate in gates}
+
+    assert gate_status["retrieval_eval"] == "pass"
+    assert gate_status["index_storage_audit"] == "pass"
+    assert gate_status["embedding_route"] == "available"
+    assert "mares Motoko state" in gates[-1]["detail"]
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14151,6 +14195,7 @@ def main() -> int:
         test_index_storage_audit_honors_cancel_event,
         test_index_cleanup_removes_stale_superseded_snapshots_after_materializing_latest,
         test_vector_plan_reports_storage_and_readiness_gates,
+        test_vector_plan_core_builds_rows_and_readiness_gates,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

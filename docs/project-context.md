@@ -1627,6 +1627,10 @@ Motoko self-code checkpoint, 2026-05-31:
 - Model-eval fixture construction has moved to `motoko_core.evals`, alongside
   the worker-eval prompt and scoring helpers. The root facade still owns live
   route selection, model calls, private report saving, and command formatting.
+- Vector planning has moved another pure slice inward: `motoko_core.vector_store`
+  now owns row-plan construction and readiness-gate shaping, while the root
+  facade keeps state collection, current route discovery, eval execution, and
+  realm-local path resolution.
 - Code intelligence now also extracts module-level schema/version/artifact
   constants and exposes them through `code-map`, `code-query`, and
   `self-eval`. This matters for Motoko self-improvement because artifact

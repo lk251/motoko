@@ -17,6 +17,144 @@ VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
 DEFAULT_VECTOR_DIMS = 1024
 
 
+def vector_row_plan(kind: str, rows: int, dims: int, *, source: str, invalidates_on: list[str]) -> dict:
+    rows = max(0, int(rows or 0))
+    dims = max(1, int(dims or DEFAULT_VECTOR_DIMS))
+    vector_bytes = rows * dims * 4
+    metadata_bytes = rows * 768
+    return {
+        "kind": kind,
+        "rows": rows,
+        "dims": dims,
+        "vector_bytes": vector_bytes,
+        "metadata_bytes": metadata_bytes,
+        "estimated_bytes": vector_bytes + metadata_bytes,
+        "source": source,
+        "invalidates_on": invalidates_on,
+    }
+
+
+def vector_plan_row_plans(stats: dict, counts: dict, *, dims: int) -> list[dict]:
+    dims = max(1, int(dims or DEFAULT_VECTOR_DIMS))
+    return [
+        vector_row_plan(
+            "raw_chunk_embedding",
+            stats.get("raw_embedding_row_estimate", 0),
+            dims,
+            source="bounded source-linked chunk/subchunk embedding rows",
+            invalidates_on=["content_sha256", "embedding_model", "embedding_input_schema", "embedding_split_policy", "source_realm"],
+        ),
+        vector_row_plan(
+            "evidence_embedding",
+            stats.get("evidence_row_estimate", 0),
+            dims,
+            source="hierarchical evidence objects: Org days, tasks, headings, paragraphs, and source windows",
+            invalidates_on=["evidence_schema", "evidence_input_schema", "content_sha256", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "chunk_summary_embedding",
+            stats.get("chunk_summary_count", 0),
+            dims,
+            source="model-derived chunk summaries",
+            invalidates_on=["artifact_schema", "summary_prompt_version", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "file_summary_embedding",
+            stats.get("file_summary_count", 0),
+            dims,
+            source="model-derived file summaries",
+            invalidates_on=["artifact_schema", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "file_label_embedding",
+            stats.get("file_count", 0),
+            dims,
+            source="file paths, labels, roles, and deterministic signals",
+            invalidates_on=["file_path", "signal_schema", "label_schema", "embedding_model"],
+        ),
+        vector_row_plan(
+            "memory_embedding",
+            counts.get("memory_count", 0),
+            dims,
+            source="durable memories in this Motoko realm",
+            invalidates_on=["memory_id", "memory_updated", "embedding_model", "source_realm"],
+        ),
+        vector_row_plan(
+            "conversation_summary_embedding",
+            counts.get("conversation_count", 0),
+            dims,
+            source="saved conversation summaries and titles",
+            invalidates_on=["conversation_id", "conversation_updated", "summary_schema", "embedding_model"],
+        ),
+        vector_row_plan(
+            "topic_dossier_embedding",
+            counts.get("topic_count", 0),
+            dims,
+            source="topic dossiers over indexed evidence",
+            invalidates_on=["topic_id", "topic_schema", "source_fingerprint", "embedding_model"],
+        ),
+        vector_row_plan(
+            "memory_dossier_embedding",
+            counts.get("dossier_count", 0),
+            dims,
+            source="memory/conversation dossiers",
+            invalidates_on=["dossier_id", "dossier_schema", "memory_updated", "conversation_updated", "embedding_model"],
+        ),
+    ]
+
+
+def vector_plan_readiness_gates(
+    *,
+    retrieval_eval: dict,
+    storage_audit: dict,
+    embedding_routes: list[dict],
+    reranker_routes: list[dict],
+    realm: str,
+) -> list[dict]:
+    return [
+        {
+            "name": "retrieval_eval",
+            "status": retrieval_eval.get("status", "not-run") if retrieval_eval else "not-run",
+            "detail": f"{retrieval_eval.get('passed', 0)}/{retrieval_eval.get('total', 0)} synthetic fixtures pass"
+            if retrieval_eval
+            else "not run for this report",
+        },
+        {
+            "name": "index_storage_audit",
+            "status": "pass"
+            if not storage_audit.get("missing_duplicate_target_count") and not storage_audit.get("missing_stored_chunk_count")
+            else "warn",
+            "detail": (
+                f"{storage_audit.get('missing_duplicate_target_count', 0)} missing duplicate target(s), "
+                f"{storage_audit.get('missing_stored_chunk_count', 0)} missing stored chunk(s)"
+            ),
+        },
+        {
+            "name": "embedding_route",
+            "status": "available" if embedding_routes else "not-configured",
+            "detail": ", ".join(
+                f"{row.get('route', '')} dims={row.get('embedding_dimensions') or '?'} paths={','.join(row.get('endpoint_paths', [])) or '-'}"
+                for row in embedding_routes
+            )
+            or "no catalog route advertises embedding tasks yet",
+        },
+        {
+            "name": "reranker_route",
+            "status": "available" if reranker_routes else "not-configured",
+            "detail": ", ".join(
+                f"{row.get('route', '')} paths={','.join(row.get('endpoint_paths', [])) or '-'}"
+                for row in reranker_routes
+            )
+            or "no catalog route advertises reranker tasks yet",
+        },
+        {
+            "name": "privacy_boundary",
+            "status": "pass",
+            "detail": f"store remains realm-local under {realm} Motoko state",
+        },
+    ]
+
+
 def dense_normalize(values) -> list[float]:
     vector = []
     for value in values if isinstance(values, list) else []:
