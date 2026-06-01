@@ -379,9 +379,9 @@ Current progress on this backlog:
   blocked/repair-first work are now built by the lifecycle service too.
   Conversation deletion cleanup has also moved another step into the lifecycle
   service: the service now owns the derived-family fanout, single-state-file
-  actions, slot-cache counters, and report shape, while root code still
-  resolves realm-local paths and performs filesystem mutation through explicit
-  callbacks.
+  actions, slot-cache counters, report shape, and path-key spec normalization,
+  while root code still resolves realm-local paths and performs filesystem
+  mutation through explicit callbacks.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

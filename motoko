@@ -461,6 +461,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     index_storage_cleanup_sections,
     index_snapshot_delete_specs,
     json_paths_referencing_index,
+    resolve_artifact_lifecycle_specs as resolve_artifact_lifecycle_specs_core,
     source_lifecycle_affected_paths,
     source_lifecycle_artifact_plan,
     source_lifecycle_cleanup_plan,
@@ -12767,16 +12768,7 @@ def artifact_lifecycle_path_for_key(key: str) -> pathlib.Path | None:
 
 
 def resolve_artifact_lifecycle_specs(specs: list[dict]) -> list[dict]:
-    resolved = []
-    for spec in specs:
-        key = str(spec.get("path_key", "")).strip()
-        path = artifact_lifecycle_path_for_key(key)
-        if path is None:
-            continue
-        item = {name: value for name, value in spec.items() if name != "path_key"}
-        item["path"] = path
-        resolved.append(item)
-    return resolved
+    return resolve_artifact_lifecycle_specs_core(specs, resolve_path=artifact_lifecycle_path_for_key)
 
 
 def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:

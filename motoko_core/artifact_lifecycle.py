@@ -294,6 +294,25 @@ def derived_delete_report_labels() -> list[tuple[str, str]]:
     ]
 
 
+def resolve_artifact_lifecycle_specs(
+    specs: list[dict],
+    *,
+    resolve_path: Callable[[str], pathlib.Path | None],
+) -> list[dict]:
+    """Resolve lifecycle family specs with a caller-owned path resolver."""
+
+    resolved = []
+    for spec in specs:
+        key = str(spec.get("path_key", "")).strip()
+        path = resolve_path(key)
+        if path is None:
+            continue
+        item = {name: value for name, value in spec.items() if name != "path_key"}
+        item["path"] = path
+        resolved.append(item)
+    return resolved
+
+
 def conversation_delete_report_template(conversation_id: str) -> dict:
     """Return the stable report shape for deleting a conversation.
 

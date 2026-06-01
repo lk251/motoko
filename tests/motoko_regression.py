@@ -47,6 +47,7 @@ from motoko_core.artifact_lifecycle import (
     json_matching_source_paths as json_matching_source_paths_core,
     json_paths_referencing_index as json_paths_referencing_index_core,
     json_references_index as json_references_index_core,
+    resolve_artifact_lifecycle_specs as resolve_artifact_lifecycle_specs_core,
     source_artifact_record as source_artifact_record_core,
     source_lifecycle_affected_paths as source_lifecycle_affected_paths_core,
     source_lifecycle_path_variants as source_lifecycle_path_variants_core,
@@ -10491,6 +10492,12 @@ def test_artifact_lifecycle_family_specs_are_service_owned(m):
     }
 
     with isolated_state() as tmp:
+        core_resolved = resolve_artifact_lifecycle_specs_core(
+            [{"path_key": "kept", "artifact_kind": "kept"}, {"path_key": "missing", "artifact_kind": "missing"}],
+            resolve_path=lambda key: tmp / f"{key}.json" if key == "kept" else None,
+        )
+        assert core_resolved == [{"artifact_kind": "kept", "path": tmp / "kept.json"}]
+
         resolved = m.resolve_artifact_lifecycle_specs(dependency_specs)
         assert len(resolved) == len(dependency_specs)
         assert all("path" in spec and "path_key" not in spec for spec in resolved)
