@@ -26,6 +26,38 @@ CANCELLATION_HELPERS = {
     "work_cancel_requested",
     "work_pause_requested",
 }
+MODEL_ROUTE_HELPERS = {
+    "call_model",
+    "call_model_with_callback",
+    "catalog_route_info",
+    "embed_texts",
+    "embed_texts_for_retrieval",
+    "embedding_route_info",
+    "local_model_catalog_routes",
+    "local_model_route_summary",
+    "local_model_routes_for_capability",
+    "local_model_routes_for_tasks",
+    "local_model_status_text",
+    "merged_local_model_route",
+    "model_request_metadata",
+    "model_request_timeout",
+    "model_route",
+    "model_route_for_request",
+    "model_route_manager",
+    "open_model_response",
+    "prepare_chat_route_residency",
+    "prepare_declared_exclusive_lane_residency",
+    "prepare_route_residency_for_request",
+    "prepare_worker_route_residency",
+    "rerank_documents",
+    "rerank_documents_for_retrieval",
+    "reranker_route_info",
+    "route_json_request",
+    "run_local_model_helper",
+    "select_chat_route",
+    "select_embedding_route",
+    "select_reranker_route",
+}
 
 
 def _maybe_cancel(cancel_check=None) -> None:
@@ -513,8 +545,15 @@ def _build_root_hotspots(symbols: list[dict], calls: list[dict], *, limit: int =
     return rows[:limit]
 
 
-def _build_cancellation_paths(calls: list[dict], symbols: list[dict], *, limit: int = 200) -> list[dict]:
-    """Return functions that visibly participate in cooperative cancellation."""
+def _build_helper_paths(
+    calls: list[dict],
+    symbols: list[dict],
+    helpers: set[str],
+    *,
+    role: str,
+    limit: int = 200,
+) -> list[dict]:
+    """Return functions that visibly call a known helper family."""
 
     symbol_lookup = {
         (str(row.get("path", "")), str(row.get("qualname", ""))): row
@@ -524,7 +563,7 @@ def _build_cancellation_paths(calls: list[dict], symbols: list[dict], *, limit: 
     for call in calls:
         callee = str(call.get("callee", ""))
         tail = callee.rsplit(".", 1)[-1]
-        if tail not in CANCELLATION_HELPERS:
+        if tail not in helpers:
             continue
         path = str(call.get("path", ""))
         caller = str(call.get("caller", ""))
@@ -540,7 +579,7 @@ def _build_cancellation_paths(calls: list[dict], symbols: list[dict], *, limit: 
                 "end_line": symbol.get("end_line", symbol.get("line", call.get("line", 1))),
                 "helpers": [],
                 "checks": [],
-                "role": "cooperative cancellation path durable interruption checkpoint",
+                "role": role,
             },
         )
         if tail not in row["helpers"]:
@@ -560,6 +599,30 @@ def _build_cancellation_paths(calls: list[dict], symbols: list[dict], *, limit: 
         )
     )
     return result[:limit]
+
+
+def _build_cancellation_paths(calls: list[dict], symbols: list[dict], *, limit: int = 200) -> list[dict]:
+    """Return functions that visibly participate in cooperative cancellation."""
+
+    return _build_helper_paths(
+        calls,
+        symbols,
+        CANCELLATION_HELPERS,
+        role="cooperative cancellation path durable interruption checkpoint",
+        limit=limit,
+    )
+
+
+def _build_model_route_paths(calls: list[dict], symbols: list[dict], *, limit: int = 200) -> list[dict]:
+    """Return functions that visibly select routes or perform model I/O."""
+
+    return _build_helper_paths(
+        calls,
+        symbols,
+        MODEL_ROUTE_HELPERS,
+        role="local model route selection request residency endpoint model I/O path",
+        limit=limit,
+    )
 
 
 def _build_service_boundaries(modules: list[dict], symbols: list[dict], imports: list[dict], call_edges: list[dict]) -> list[dict]:
@@ -732,6 +795,8 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     _maybe_cancel(cancel_check)
     cancellation_paths = _build_cancellation_paths(calls, symbols)
     _maybe_cancel(cancel_check)
+    model_route_paths = _build_model_route_paths(calls, symbols)
+    _maybe_cancel(cancel_check)
     root_hotspots = _build_root_hotspots(symbols, calls)
     _maybe_cancel(cancel_check)
     service_boundaries = _build_service_boundaries(modules, symbols, imports, call_edges)
@@ -756,6 +821,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
         "calls": calls,
         "call_edges": call_edges,
         "cancellation_paths": cancellation_paths,
+        "model_route_paths": model_route_paths,
         "commands": commands,
         "constants": constants,
         "command_traces": command_traces,
@@ -780,6 +846,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
             "calls": len(calls),
             "resolved_call_edges": len(call_edges),
             "cancellation_paths": len(cancellation_paths),
+            "model_route_paths": len(model_route_paths),
             "service_boundaries": len(service_boundaries),
             "validation_gates": len(validation_gates),
             "tests": len(tests),
@@ -857,6 +924,11 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
             ["caller", "qualname", "path", "helpers", "checks", "role"],
             name_field="qualname",
         ),
+        "model_route_paths": rank(
+            code_map.get("model_route_paths", []),
+            ["caller", "qualname", "path", "helpers", "checks", "role"],
+            name_field="qualname",
+        ),
         "service_boundaries": rank(
             code_map.get("service_boundaries", []),
             ["path", "doc", "public_symbols"],
@@ -895,6 +967,7 @@ def format_code_map_report(code_map: dict) -> str:
         (
             f"calls: {summary.get('calls', 0)}  resolved edges: {summary.get('resolved_call_edges', 0)}  "
             f"cancellation paths: {summary.get('cancellation_paths', 0)}  "
+            f"model route paths: {summary.get('model_route_paths', 0)}  "
             f"service boundaries: {summary.get('service_boundaries', 0)}  tests: {summary.get('tests', 0)}"
         ),
         (
@@ -920,6 +993,14 @@ def format_code_map_report(code_map: dict) -> str:
             helpers = ", ".join(row.get("helpers", [])[:4]) or "-"
             lines.append(
                 f"- {row.get('qualname', '')}: checks={row.get('check_count', 0)} "
+                f"helpers={helpers} {row.get('path', '')}:{row.get('line', '')}"
+            )
+    if code_map.get("model_route_paths"):
+        lines.append("model route paths:")
+        for row in code_map.get("model_route_paths", [])[:8]:
+            helpers = ", ".join(row.get("helpers", [])[:4]) or "-"
+            lines.append(
+                f"- {row.get('qualname', '')}: calls={row.get('check_count', 0)} "
                 f"helpers={helpers} {row.get('path', '')}:{row.get('line', '')}"
             )
     if code_map.get("service_boundaries"):
@@ -979,6 +1060,7 @@ def _format_rows(
     hotspot: bool = False,
     validation: bool = False,
     cancellation: bool = False,
+    model_route: bool = False,
 ) -> list[str]:
     lines = [title + ":"]
     if not rows:
@@ -1018,6 +1100,11 @@ def _format_rows(
             helpers = ",".join(row.get("helpers", [])[:4]) or "-"
             detail = f"checks={row.get('check_count', 0)} helpers={helpers}"
             location = f"{row.get('path', '')}:{row.get('line', 1)}"
+        elif model_route:
+            label = row.get("qualname") or row.get("caller", "")
+            helpers = ",".join(row.get("helpers", [])[:4]) or "-"
+            detail = f"calls={row.get('check_count', 0)} helpers={helpers}"
+            location = f"{row.get('path', '')}:{row.get('line', 1)}"
         elif "target" in row:
             label = f"{row.get('caller', '')} -> {row.get('target', '')}"
             detail = f"callee={row.get('callee', '')}"
@@ -1043,6 +1130,7 @@ def format_code_query_report(result: dict) -> str:
     lines.extend(_format_rows("symbols", result.get("symbols", [])))
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
     lines.extend(_format_rows("cancellation paths", result.get("cancellation_paths", []), cancellation=True))
+    lines.extend(_format_rows("model route paths", result.get("model_route_paths", []), model_route=True))
     lines.extend(_format_rows("service boundaries", result.get("service_boundaries", []), service=True))
     lines.extend(_format_rows("validation gates", result.get("validation_gates", []), validation=True))
     lines.extend(_format_rows("root facade hotspots", result.get("root_hotspots", []), hotspot=True))

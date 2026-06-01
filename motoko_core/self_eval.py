@@ -162,6 +162,15 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"top_path": (cancellation_paths or [{}])[0].get("qualname", "")},
         )
     )
+    model_route_paths = code_map.get("model_route_paths", []) if isinstance(code_map.get("model_route_paths"), list) else []
+    checks.append(
+        _check(
+            "code_map_model_route_paths_present",
+            bool(model_route_paths),
+            f"model_route_paths={len(model_route_paths)}",
+            evidence={"top_path": (model_route_paths or [{}])[0].get("qualname", "")},
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(
@@ -222,6 +231,18 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={
                 "top_path": (cancellation_query.get("cancellation_paths") or [{}])[0].get("qualname", ""),
                 "helpers": (cancellation_query.get("cancellation_paths") or [{}])[0].get("helpers", []),
+            },
+        )
+    )
+    model_route_query = query_code_map(code_map, "model route local endpoint call_model open_model_response", limit=8)
+    checks.append(
+        _check(
+            "code_query_finds_model_route_paths",
+            bool(model_route_query.get("model_route_paths")),
+            f"model_route_paths={len(model_route_query.get('model_route_paths', []))}",
+            evidence={
+                "top_path": (model_route_query.get("model_route_paths") or [{}])[0].get("qualname", ""),
+                "helpers": (model_route_query.get("model_route_paths") or [{}])[0].get("helpers", []),
             },
         )
     )

@@ -232,7 +232,10 @@ fresh evidence shows a better target:
    now exposes cooperative cancellation paths, so self-improvement work can
    query which functions use foreground cancel scopes, pause checks, or
    `raise_if_work_cancelled` before editing long-running index, vector,
-   dossier, memory, or report operations.
+   dossier, memory, or report operations. It also exposes model-route paths,
+   so changes to local-model routing, residency, worker scheduling, prompt
+   caching, embeddings, reranking, and model I/O can start from the functions
+   that select routes or call approved model endpoints.
 4. Keep skill learning review-first. Patch the existing umbrella skills before
    creating narrow new skills. Use support files for examples, debugging
    transcripts, validation checklists, and reusable design recipes that would

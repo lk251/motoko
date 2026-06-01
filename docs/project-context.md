@@ -1715,6 +1715,12 @@ Motoko self-code checkpoint, 2026-05-31:
   call helpers such as `foreground_cancel_scope`, `raise_if_work_cancelled`,
   `work_cancel_requested`, and `work_pause_requested`, alongside the relevant
   commands, tests, service modules, and root hotspots.
+- Code intelligence also exposes model-route paths. Queries about local model
+  routing, endpoints, worker scheduling, residency, embedding, reranking, or
+  `call_model` now show functions that select routes or perform model I/O,
+  including helpers such as `model_route_for_request`, `open_model_response`,
+  `prepare_route_residency_for_request`, `embed_texts`, and
+  `rerank_documents`.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.
