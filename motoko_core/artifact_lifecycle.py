@@ -1536,6 +1536,36 @@ def source_lifecycle_storage_plan_summary_from_index(
     )
 
 
+def source_lifecycle_storage_plan_summaries_from_indexes(
+    indexes: list[dict],
+    *,
+    summary_for_index: Callable[[dict], dict],
+    replacement_for_index: Callable[[dict, set[str], list[dict]], tuple[dict | None, bool, str]],
+    artifact_records_for_index: Callable[[str, set[str]], list[dict]],
+    check_cancelled: Callable[[], None] | None = None,
+) -> list[dict]:
+    """Return source-lifecycle storage summaries for index-storage audits."""
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    plans: list[dict] = []
+    for index in indexes or []:
+        maybe_cancel()
+        plan_summary = source_lifecycle_storage_plan_summary_from_index(
+            index,
+            summary_for_index=summary_for_index,
+            replacement_for_index=replacement_for_index,
+            artifact_records_for_index=artifact_records_for_index,
+            check_cancelled=check_cancelled,
+        )
+        if plan_summary is not None:
+            plans.append(plan_summary)
+    maybe_cancel()
+    return plans
+
+
 def index_storage_cleanup_sections(
     *,
     stale_superseded_indexes: list[dict],

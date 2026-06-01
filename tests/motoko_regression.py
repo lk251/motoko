@@ -61,6 +61,7 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_replacement_readiness as source_lifecycle_replacement_readiness_core,
     source_lifecycle_report as build_source_lifecycle_report,
     source_lifecycle_report_from_index as source_lifecycle_report_from_index_core,
+    source_lifecycle_storage_plan_summaries_from_indexes as source_lifecycle_storage_plan_summaries_from_indexes_core,
     source_lifecycle_storage_plan_summary_from_index as source_lifecycle_storage_plan_summary_from_index_core,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
@@ -12231,6 +12232,93 @@ def test_source_lifecycle_storage_plan_summary_from_index_is_service_owned(_m):
         assert "cancelled storage plan" in str(exc)
 
 
+def test_source_lifecycle_storage_plan_summaries_from_indexes_are_service_owned(_m):
+    indexes = [
+        {"id": "old-a", "name": "docs", "root": "/tmp/docs"},
+        {"id": "fresh-b", "name": "docs", "root": "/tmp/docs"},
+        {"id": "old-c", "name": "docs", "root": "/tmp/docs"},
+    ]
+    lifecycle_by_id = {
+        "old-a": [
+            {
+                "path": "/tmp/docs/a.org",
+                "status": "changed",
+                "recommended_action": "reprocess-from-source",
+            }
+        ],
+        "old-c": [
+            {
+                "path": "/tmp/docs/c.org",
+                "status": "ignored",
+                "recommended_action": "detach-derived-artifacts",
+            }
+        ],
+    }
+    calls = []
+
+    def summary_for_index(index):
+        index_id = index.get("id", "")
+        calls.append(("summary", index_id))
+        if index_id == "fresh-b":
+            return {"artifact_lifecycle_plan": {"status": "fresh"}, "source_lifecycle": []}
+        return {
+            "artifact_lifecycle_plan": {"status": "needs-work"},
+            "source_lifecycle": lifecycle_by_id[index_id],
+        }
+
+    def replacement_for_index(index, source_paths, source_lifecycle):
+        calls.append(("replacement", index.get("id", ""), sorted(source_paths), len(source_lifecycle)))
+        return {"id": f"new-{index.get('id', '')}"}, True, "replacement includes changed source"
+
+    def artifact_records_for_index(index_id, source_paths):
+        calls.append(("artifacts", index_id, sorted(source_paths)))
+        return [
+            {
+                "artifact_id": f"vec-{index_id}",
+                "artifact_kind": "vector_store",
+                "cleanup_policy": "delete-derived",
+                "bytes_estimate": 32,
+            }
+        ]
+
+    rows = source_lifecycle_storage_plan_summaries_from_indexes_core(
+        indexes,
+        summary_for_index=summary_for_index,
+        replacement_for_index=replacement_for_index,
+        artifact_records_for_index=artifact_records_for_index,
+    )
+    assert [row["index"] for row in rows] == ["old-a", "old-c"]
+    assert [row["replacement_index"] for row in rows] == ["new-old-a", "new-old-c"]
+    assert calls == [
+        ("summary", "old-a"),
+        ("artifacts", "old-a", ["/tmp/docs/a.org"]),
+        ("replacement", "old-a", ["/tmp/docs/a.org"], 1),
+        ("summary", "fresh-b"),
+        ("summary", "old-c"),
+        ("artifacts", "old-c", ["/tmp/docs/c.org"]),
+        ("replacement", "old-c", ["/tmp/docs/c.org"], 1),
+    ]
+
+    cancel_calls = {"count": 0}
+
+    def check_cancelled():
+        cancel_calls["count"] += 1
+        if cancel_calls["count"] >= 2:
+            raise RuntimeError("cancelled storage plan list")
+
+    try:
+        source_lifecycle_storage_plan_summaries_from_indexes_core(
+            indexes,
+            summary_for_index=summary_for_index,
+            replacement_for_index=replacement_for_index,
+            artifact_records_for_index=artifact_records_for_index,
+            check_cancelled=check_cancelled,
+        )
+        raise AssertionError("storage lifecycle summary list should honor cancellation")
+    except RuntimeError as exc:
+        assert "cancelled storage plan list" in str(exc)
+
+
 def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -15022,6 +15110,7 @@ def main() -> int:
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_report_from_index_owns_orchestration,
         test_source_lifecycle_storage_plan_summary_from_index_is_service_owned,
+        test_source_lifecycle_storage_plan_summaries_from_indexes_are_service_owned,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,

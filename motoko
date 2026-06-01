@@ -504,7 +504,7 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     source_lifecycle_replacement_readiness,
     source_lifecycle_report,
     source_lifecycle_report_from_index,
-    source_lifecycle_storage_plan_summary_from_index,
+    source_lifecycle_storage_plan_summaries_from_indexes,
     superseded_stale_index_candidates,
 )
 from motoko_core.observability import (  # noqa: E402
@@ -12250,22 +12250,17 @@ def index_storage_audit(*, cancel_event=None) -> dict:
 
     older_indexes = [index for index in indexes if index.get("id", "") not in latest_ids]
     stale_superseded_indexes = index_cleanup_candidates(indexes)
-    source_lifecycle_plans = []
-    for index in indexes:
-        raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-        plan_summary = source_lifecycle_storage_plan_summary_from_index(
-            index,
-            summary_for_index=index_change_summary,
-            replacement_for_index=source_lifecycle_replacement,
-            artifact_records_for_index=source_lifecycle_artifact_records,
-            check_cancelled=lambda: raise_if_work_cancelled(
-                cancel_event,
-                "index storage audit interrupted by request",
-                work_kind="index-storage",
-            ),
-        )
-        if plan_summary is not None:
-            source_lifecycle_plans.append(plan_summary)
+    source_lifecycle_plans = source_lifecycle_storage_plan_summaries_from_indexes(
+        indexes,
+        summary_for_index=index_change_summary,
+        replacement_for_index=source_lifecycle_replacement,
+        artifact_records_for_index=source_lifecycle_artifact_records,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "index storage audit interrupted by request",
+            work_kind="index-storage",
+        ),
+    )
     raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
     cleanup_sections = index_storage_cleanup_sections(
         stale_superseded_indexes=stale_superseded_indexes,

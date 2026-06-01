@@ -191,7 +191,9 @@ fresh evidence shows a better target:
    stale superseded-index candidate selection now live in the lifecycle
    service. Conversation deletion now also gets its JSON-dir, JSONL-ledger, and
    single-JSON-file cleanup families from the lifecycle service instead of
-   hard-coding those policies only in the root facade.
+   hard-coding those policies only in the root facade. Index-storage audit
+   source-lifecycle storage-plan rows are now collected by the lifecycle
+   service across indexes instead of a root-facade loop.
 2. Add finer cooperative cancellation checkpoints for long foreground study,
    index, vector, dossier, and report operations. The job supervisor exists;
    the remaining work is making the long functions yield durable stop/pause
@@ -393,8 +395,9 @@ Current progress on this backlog:
   checkpoints, and final report/apply delegation through injected callbacks.
   The root facade supplies current-state and filesystem authority, but no longer
   owns the report-input fanout itself. Index-storage audit source-lifecycle rows
-  now use the same service-owned orchestration path instead of rebuilding a
-  parallel plan in the root facade.
+  now use the same service-owned orchestration path, including multi-index
+  collection and cancellation checkpoints, instead of rebuilding a parallel
+  plan loop in the root facade.
 - Index-storage audit ownership has moved another pure slice inward:
   `motoko_core.index_storage` now owns duplicate-reference target analysis and
   final audit dictionary assembly. The root facade still owns filesystem
