@@ -331,7 +331,12 @@ from motoko_core.retrieval import (  # noqa: E402
 from motoko_core.retrieval_planner import build_retrieval_plan  # noqa: E402
 from motoko_core.vector_store import (  # noqa: E402
     bounded_vector_embedding_text,
+    collect_reusable_embedding_vector_rows as core_collect_reusable_embedding_vector_rows,
     dense_normalize,
+    embedding_candidate_batches as core_embedding_candidate_batches,
+    embedding_pending_batches as core_embedding_pending_batches,
+    embedding_refresh_mode as core_embedding_refresh_mode,
+    embedding_rows_vector_dims as core_embedding_rows_vector_dims,
     embedding_vector_progress_record as core_embedding_vector_progress_record,
     embedding_vector_progress_id as core_embedding_vector_progress_id,
     embedding_vector_progress_key as core_embedding_vector_progress_key,
@@ -2145,28 +2150,6 @@ def vector_refresh_cause_from_reason(reason: object, *, force: bool = False) -> 
     if "stale" in text:
         return "stale"
     return "refresh"
-
-
-def embedding_refresh_mode(
-    *,
-    checkpoint_reused_rows: int = 0,
-    previous_store_reused_rows: int = 0,
-    previous_store_row_count: int = 0,
-    pending_rows: int = 0,
-    refresh_cause: str = "",
-) -> str:
-    checkpoint_reused_rows = max(0, int(checkpoint_reused_rows or 0))
-    previous_store_reused_rows = max(0, int(previous_store_reused_rows or 0))
-    previous_store_row_count = max(0, int(previous_store_row_count or 0))
-    pending_rows = max(0, int(pending_rows or 0))
-    refresh_cause = str(refresh_cause or "")
-    if checkpoint_reused_rows:
-        return "resumed"
-    if previous_store_reused_rows:
-        return "reuse-only" if pending_rows == 0 else "incremental"
-    if previous_store_row_count or refresh_cause in {"schema", "route"}:
-        return "rebuild"
-    return "full"
 
 
 def safe_model_route_state(route_name: str) -> str:
@@ -14206,10 +14189,7 @@ def build_embedding_vector_store_from_index(
                     candidates.append((row_id, file_item, chunk, text, row_meta))
     batch_size = embedding_batch_size(route_info, len(candidates))
     dimensions = route_dims
-    batches = [
-        (offset, candidates[offset : offset + batch_size])
-        for offset in range(0, len(candidates), batch_size)
-    ]
+    batches = core_embedding_candidate_batches(candidates, batch_size)
     requested_parallelism = embedding_parallelism(route_info, len(batches))
     active_parallelism = requested_parallelism
     progress_key = core_embedding_vector_progress_key(
@@ -14286,15 +14266,14 @@ def build_embedding_vector_store_from_index(
             embedding_input_schema=EMBEDDING_INPUT_SCHEMA_VERSION,
         )
 
-    checkpoint_reused_rows = 0
-    for row_id, file_item, chunk, _text, row_meta in candidates:
-        row = reusable_completed_row(checkpoint_rows_by_id.get(row_id, {}), file_item, chunk, row_meta)
-        if row is None:
-            continue
-        completed_rows_by_id[row_id] = row
-        checkpoint_reused_rows += 1
-        if not dimensions and isinstance(row.get("vector"), list):
-            dimensions = len(row.get("vector", []))
+    checkpoint_reused = core_collect_reusable_embedding_vector_rows(
+        candidates,
+        checkpoint_rows_by_id,
+        reusable_completed_row,
+    )
+    completed_rows_by_id.update(checkpoint_reused)
+    checkpoint_reused_rows = len(checkpoint_reused)
+    dimensions = core_embedding_rows_vector_dims(checkpoint_reused.values(), current_dims=dimensions)
 
     previous_store = latest_reusable_embedding_vector_store(index, route_info) if write else None
     previous_rows_by_id = {
@@ -14304,16 +14283,15 @@ def build_embedding_vector_store_from_index(
     }
     previous_store_reused_rows = 0
     if previous_rows_by_id:
-        for row_id, file_item, chunk, _text, row_meta in candidates:
-            if row_id in completed_rows_by_id:
-                continue
-            row = reusable_completed_row(previous_rows_by_id.get(row_id, {}), file_item, chunk, row_meta)
-            if row is None:
-                continue
-            completed_rows_by_id[row_id] = row
-            previous_store_reused_rows += 1
-            if not dimensions and isinstance(row.get("vector"), list):
-                dimensions = len(row.get("vector", []))
+        previous_reused = core_collect_reusable_embedding_vector_rows(
+            candidates,
+            previous_rows_by_id,
+            reusable_completed_row,
+            skip_row_ids=completed_rows_by_id.keys(),
+        )
+        completed_rows_by_id.update(previous_reused)
+        previous_store_reused_rows = len(previous_reused)
+        dimensions = core_embedding_rows_vector_dims(previous_reused.values(), current_dims=dimensions)
     previous_store_row_count = len(previous_rows_by_id)
     previous_store_superseded_rows = max(0, previous_store_row_count - previous_store_reused_rows)
     initial_completed_rows = len(completed_rows_by_id)
@@ -14321,7 +14299,7 @@ def build_embedding_vector_store_from_index(
     session_start_completed_rows = initial_completed_rows
     refresh_cause = str(refresh_cause or "")
     pending_row_count = max(0, len(candidates) - initial_completed_rows)
-    refresh_mode = embedding_refresh_mode(
+    refresh_mode = core_embedding_refresh_mode(
         checkpoint_reused_rows=checkpoint_reused_rows,
         previous_store_reused_rows=previous_store_reused_rows,
         previous_store_row_count=previous_store_row_count,
@@ -14392,11 +14370,7 @@ def build_embedding_vector_store_from_index(
                 rows.append(row_from_vector(file_item, chunk, vector, row_meta))
         return rows, embedded_route
 
-    pending_batches = [
-        (offset, [item for item in batch if item[0] not in completed_rows_by_id])
-        for offset, batch in batches
-    ]
-    pending_batches = [(offset, batch) for offset, batch in pending_batches if batch]
+    pending_batches = core_embedding_pending_batches(batches, completed_rows_by_id.keys())
     completed_batches = len(batches) - len(pending_batches)
     if progress_callback is not None:
         progress_callback(
@@ -14442,11 +14416,7 @@ def build_embedding_vector_store_from_index(
             )
 
     def current_pending_batches() -> list[tuple[int, list[tuple[str, dict, dict, str, dict]]]]:
-        rows = [
-            (offset, [item for item in batch if item[0] not in completed_rows_by_id])
-            for offset, batch in batches
-        ]
-        return [(offset, batch) for offset, batch in rows if batch]
+        return core_embedding_pending_batches(batches, completed_rows_by_id.keys())
 
     def run_parallel_batches(run_batches, run_parallelism: int) -> None:
         failure = None

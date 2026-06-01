@@ -74,6 +74,11 @@ from motoko_core.skill_curator import (
     skill_curator_feedback_matches as skill_curator_feedback_matches_core,
 )
 from motoko_core.vector_store import (
+    collect_reusable_embedding_vector_rows as collect_reusable_embedding_vector_rows_core,
+    embedding_candidate_batches as embedding_candidate_batches_core,
+    embedding_pending_batches as embedding_pending_batches_core,
+    embedding_refresh_mode as embedding_refresh_mode_core,
+    embedding_rows_vector_dims as embedding_rows_vector_dims_core,
     embedding_vector_progress_record as embedding_vector_progress_record_core,
     embedding_vector_progress_id as embedding_vector_progress_id_core,
     embedding_vector_progress_key as embedding_vector_progress_key_core,
@@ -7985,6 +7990,47 @@ def test_embedding_vector_store_record_core_shapes_provenance_and_reuse(_m=None)
     assert store["rows"] == rows
 
 
+def test_embedding_vector_batch_and_reuse_helpers_are_core_owned(_m=None):
+    candidates = [
+        ("row-1", {"path": "a.org"}, {"chunk": 1}, "text 1", {"id": "row-1"}),
+        ("row-2", {"path": "a.org"}, {"chunk": 2}, "text 2", {"id": "row-2"}),
+        ("row-3", {"path": "b.org"}, {"chunk": 1}, "text 3", {"id": "row-3"}),
+    ]
+    existing_rows = {
+        "row-1": {"id": "row-1", "vector": [0.1, 0.2]},
+        "row-2": {"id": "row-2", "vector": [0.3, 0.4]},
+    }
+
+    def reusable(existing: dict, _file_item: dict, _chunk: dict, row_meta: dict) -> dict | None:
+        if existing.get("id") != row_meta.get("id"):
+            return None
+        return dict(existing)
+
+    batches = embedding_candidate_batches_core(candidates, 2)
+    pending = embedding_pending_batches_core(batches, {"row-1"})
+    reused = collect_reusable_embedding_vector_rows_core(
+        candidates,
+        existing_rows,
+        reusable,
+        skip_row_ids={"row-2"},
+    )
+
+    assert batches == [(0, candidates[:2]), (2, candidates[2:])]
+    assert pending == [(0, [candidates[1]]), (2, [candidates[2]])]
+    assert list(reused) == ["row-1"]
+    assert embedding_rows_vector_dims_core(reused.values()) == 2
+    assert embedding_rows_vector_dims_core(reused.values(), current_dims=1024) == 1024
+
+
+def test_embedding_refresh_mode_core_labels_reuse_and_rebuild(_m=None):
+    assert embedding_refresh_mode_core(checkpoint_reused_rows=1) == "resumed"
+    assert embedding_refresh_mode_core(previous_store_reused_rows=3, pending_rows=0) == "reuse-only"
+    assert embedding_refresh_mode_core(previous_store_reused_rows=3, pending_rows=2) == "incremental"
+    assert embedding_refresh_mode_core(previous_store_row_count=5) == "rebuild"
+    assert embedding_refresh_mode_core(refresh_cause="route") == "rebuild"
+    assert embedding_refresh_mode_core() == "full"
+
+
 def test_vector_build_and_query_lexical_baseline(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -14583,6 +14629,8 @@ def main() -> int:
         test_embedding_vector_progress_core_identity_and_matching,
         test_embedding_vector_progress_record_core_shapes_resume_checkpoint,
         test_embedding_vector_store_record_core_shapes_provenance_and_reuse,
+        test_embedding_vector_batch_and_reuse_helpers_are_core_owned,
+        test_embedding_refresh_mode_core_labels_reuse_and_rebuild,
         test_vector_build_and_query_lexical_baseline,
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,

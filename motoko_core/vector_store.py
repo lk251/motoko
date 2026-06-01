@@ -26,6 +26,75 @@ def _int_or_zero(value) -> int:
         return 0
 
 
+def embedding_refresh_mode(
+    *,
+    checkpoint_reused_rows: int = 0,
+    previous_store_reused_rows: int = 0,
+    previous_store_row_count: int = 0,
+    pending_rows: int = 0,
+    refresh_cause: str = "",
+) -> str:
+    checkpoint_reused_rows = max(0, _int_or_zero(checkpoint_reused_rows))
+    previous_store_reused_rows = max(0, _int_or_zero(previous_store_reused_rows))
+    previous_store_row_count = max(0, _int_or_zero(previous_store_row_count))
+    pending_rows = max(0, _int_or_zero(pending_rows))
+    refresh_cause = str(refresh_cause or "")
+    if checkpoint_reused_rows:
+        return "resumed"
+    if previous_store_reused_rows:
+        return "reuse-only" if pending_rows == 0 else "incremental"
+    if previous_store_row_count or refresh_cause in {"schema", "route"}:
+        return "rebuild"
+    return "full"
+
+
+def embedding_candidate_batches(candidates, batch_size: int) -> list[tuple[int, list]]:
+    rows = list(candidates or [])
+    size = max(1, _int_or_zero(batch_size))
+    return [(offset, rows[offset : offset + size]) for offset in range(0, len(rows), size)]
+
+
+def embedding_pending_batches(batches, completed_row_ids) -> list[tuple[int, list]]:
+    completed = set(completed_row_ids or [])
+    rows = [
+        (offset, [item for item in batch if item[0] not in completed])
+        for offset, batch in batches
+    ]
+    return [(offset, batch) for offset, batch in rows if batch]
+
+
+def collect_reusable_embedding_vector_rows(
+    candidates,
+    existing_rows_by_id: dict,
+    reusable_row: collections.abc.Callable[[dict, dict, dict, dict], dict | None],
+    *,
+    skip_row_ids=None,
+) -> dict[str, dict]:
+    skipped = set(skip_row_ids or [])
+    reused: dict[str, dict] = {}
+    for row_id, file_item, chunk, _text, row_meta in candidates or []:
+        if row_id in skipped:
+            continue
+        row = reusable_row(existing_rows_by_id.get(row_id, {}), file_item, chunk, row_meta)
+        if row is None:
+            continue
+        reused[str(row_id)] = row
+    return reused
+
+
+def embedding_rows_vector_dims(rows, *, current_dims: int = 0) -> int:
+    dims = _int_or_zero(current_dims)
+    if dims:
+        return dims
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        vector = row.get("vector")
+        if isinstance(vector, list) and vector:
+            return len(vector)
+    return 0
+
+
 def embedding_vector_progress_key(
     *,
     progress_schema: str,
