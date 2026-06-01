@@ -1435,6 +1435,57 @@ def source_lifecycle_report_from_index(
     )
 
 
+def source_lifecycle_storage_plan_summary_from_index(
+    index: dict,
+    *,
+    summary_for_index: Callable[[dict], dict],
+    replacement_for_index: Callable[[dict, set[str], list[dict]], tuple[dict | None, bool, str]],
+    artifact_records_for_index: Callable[[str, set[str]], list[dict]],
+    check_cancelled: Callable[[], None] | None = None,
+) -> dict | None:
+    """Return a storage-audit source lifecycle summary for one index.
+
+    This mirrors source lifecycle report preparation but returns only the
+    compact row used by index-storage audits. The service owns the orchestration;
+    the facade supplies state-reading callbacks.
+    """
+
+    def maybe_cancel() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    maybe_cancel()
+    summary = summary_for_index(index)
+    plan = summary.get("artifact_lifecycle_plan") or {}
+    if plan.get("status") != "needs-work":
+        return None
+    source_lifecycle = [
+        row for row in summary.get("source_lifecycle", []) or [] if isinstance(row, dict)
+    ]
+    source_paths = source_lifecycle_affected_paths(source_lifecycle)
+    maybe_cancel()
+    artifact_records = artifact_records_for_index(str(index.get("id", "")), source_paths)
+    maybe_cancel()
+    replacement, replacement_ready, replacement_reason = replacement_for_index(
+        index,
+        source_paths,
+        source_lifecycle,
+    )
+    maybe_cancel()
+    cleanup_plan = source_lifecycle_cleanup_plan(
+        index_id=str(index.get("id", "")),
+        source_lifecycle=source_lifecycle,
+        artifact_records=artifact_records,
+        replacement_index_id=str((replacement or {}).get("id", "")),
+        replacement_ready=replacement_ready,
+    )
+    return source_lifecycle_plan_summary(
+        index=index,
+        cleanup_plan=cleanup_plan,
+        replacement_reason=replacement_reason,
+    )
+
+
 def index_storage_cleanup_sections(
     *,
     stale_superseded_indexes: list[dict],

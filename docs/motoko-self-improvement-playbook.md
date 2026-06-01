@@ -387,7 +387,9 @@ Current progress on this backlog:
   derivation, replacement readiness, artifact-record lookup, cancellation
   checkpoints, and final report/apply delegation through injected callbacks.
   The root facade supplies current-state and filesystem authority, but no longer
-  owns the report-input fanout itself.
+  owns the report-input fanout itself. Index-storage audit source-lifecycle rows
+  now use the same service-owned orchestration path instead of rebuilding a
+  parallel plan in the root facade.
 - Skill curator review can now use saved private `feedback-eval` fixtures, not
   only raw response-feedback rows. Matching fixtures create review-first,
   content-safe support-file suggestions for existing learned skills, hiding raw

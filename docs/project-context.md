@@ -1630,7 +1630,9 @@ Motoko self-code checkpoint, 2026-05-31:
   service: it sequences summary lookup, affected-path derivation, replacement
   readiness, artifact-record lookup, cancellation checkpoints, and final
   report/apply delegation through injected callbacks. Root keeps current-state
-  and filesystem authority, but not the report-input fanout policy.
+  and filesystem authority, but not the report-input fanout policy. The
+  index-storage audit source-lifecycle summary now reuses that service-owned
+  orchestration instead of carrying a parallel root-facade plan builder.
 - Foreground cancellation coverage has expanded beyond active chat answers:
   evidence build/refresh, index cleanup, source-lifecycle reports, and
   `bg-now` now receive cooperative cancel events in both CLI and slash-command

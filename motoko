@@ -462,16 +462,14 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     index_snapshot_delete_specs,
     json_paths_referencing_index,
     resolve_artifact_lifecycle_specs as resolve_artifact_lifecycle_specs_core,
-    source_lifecycle_affected_paths,
     source_lifecycle_artifact_plan,
-    source_lifecycle_cleanup_plan,
     source_lifecycle_json_dir_specs,
     source_lifecycle_json_file_specs,
     source_lifecycle_jsonl_specs,
     source_lifecycle_replacement_readiness,
-    source_lifecycle_plan_summary,
     source_lifecycle_report,
     source_lifecycle_report_from_index,
+    source_lifecycle_storage_plan_summary_from_index,
     superseded_stale_index_candidates,
 )
 from motoko_core.observability import (  # noqa: E402
@@ -13073,32 +13071,19 @@ def index_storage_audit(*, cancel_event=None) -> dict:
     source_lifecycle_plans = []
     for index in indexes:
         raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
-        summary = index_change_summary(index)
-        plan = summary.get("artifact_lifecycle_plan") or {}
-        if plan.get("status") != "needs-work":
-            continue
-        source_lifecycle = summary.get("source_lifecycle", [])
-        source_paths = source_lifecycle_affected_paths(source_lifecycle)
-        records = source_lifecycle_artifact_records(str(index.get("id", "")), source_paths)
-        replacement, replacement_ready, replacement_reason = source_lifecycle_replacement(
+        plan_summary = source_lifecycle_storage_plan_summary_from_index(
             index,
-            source_paths,
-            source_lifecycle,
+            summary_for_index=index_change_summary,
+            replacement_for_index=source_lifecycle_replacement,
+            artifact_records_for_index=source_lifecycle_artifact_records,
+            check_cancelled=lambda: raise_if_work_cancelled(
+                cancel_event,
+                "index storage audit interrupted by request",
+                work_kind="index-storage",
+            ),
         )
-        cleanup_plan = source_lifecycle_cleanup_plan(
-            index_id=str(index.get("id", "")),
-            source_lifecycle=source_lifecycle,
-            artifact_records=records,
-            replacement_index_id=str((replacement or {}).get("id", "")),
-            replacement_ready=replacement_ready,
-        )
-        source_lifecycle_plans.append(
-            source_lifecycle_plan_summary(
-                index=index,
-                cleanup_plan=cleanup_plan,
-                replacement_reason=replacement_reason,
-            )
-        )
+        if plan_summary is not None:
+            source_lifecycle_plans.append(plan_summary)
     raise_if_work_cancelled(cancel_event, "index storage audit interrupted by request", work_kind="index-storage")
     cleanup_sections = index_storage_cleanup_sections(
         stale_superseded_indexes=stale_superseded_indexes,

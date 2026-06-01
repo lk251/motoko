@@ -59,6 +59,7 @@ from motoko_core.artifact_lifecycle import (
     source_lifecycle_replacement_readiness as source_lifecycle_replacement_readiness_core,
     source_lifecycle_report as build_source_lifecycle_report,
     source_lifecycle_report_from_index as source_lifecycle_report_from_index_core,
+    source_lifecycle_storage_plan_summary_from_index as source_lifecycle_storage_plan_summary_from_index_core,
     superseded_stale_index_candidates as superseded_stale_index_candidates_core,
 )
 
@@ -11167,6 +11168,91 @@ def test_source_lifecycle_report_from_index_owns_orchestration(_m):
         assert "cancelled orchestration" in str(exc)
 
 
+def test_source_lifecycle_storage_plan_summary_from_index_is_service_owned(_m):
+    index = {
+        "id": "old-index",
+        "name": "docs",
+        "root": "/tmp/docs",
+        "glob": "*.org",
+    }
+    lifecycle = [
+        {
+            "path": "/tmp/docs/a.org",
+            "status": "changed",
+            "recommended_action": "reprocess-from-source",
+        }
+    ]
+    calls = []
+
+    def summary_for_index(_index):
+        calls.append("summary")
+        return {
+            "artifact_lifecycle_plan": {"status": "needs-work"},
+            "source_lifecycle": lifecycle,
+        }
+
+    def replacement_for_index(_index, source_paths, source_lifecycle):
+        calls.append(("replacement", sorted(source_paths), len(source_lifecycle)))
+        return {"id": "new-index"}, True, "replacement includes changed source"
+
+    def artifact_records_for_index(index_id, source_paths):
+        calls.append(("artifacts", index_id, sorted(source_paths)))
+        return [
+            {
+                "artifact_id": "vec",
+                "artifact_kind": "vector_store",
+                "cleanup_policy": "delete-derived",
+                "bytes_estimate": 64,
+            }
+        ]
+
+    row = source_lifecycle_storage_plan_summary_from_index_core(
+        index,
+        summary_for_index=summary_for_index,
+        replacement_for_index=replacement_for_index,
+        artifact_records_for_index=artifact_records_for_index,
+    )
+    assert row is not None
+    assert row["index"] == "old-index"
+    assert row["replacement_index"] == "new-index"
+    assert row["replacement_reason"] == "replacement includes changed source"
+    assert row["derived_artifact_count"] == 1
+    assert calls == [
+        "summary",
+        ("artifacts", "old-index", ["/tmp/docs/a.org"]),
+        ("replacement", ["/tmp/docs/a.org"], 1),
+    ]
+
+    skipped_calls = []
+    skipped = source_lifecycle_storage_plan_summary_from_index_core(
+        index,
+        summary_for_index=lambda _index: skipped_calls.append("summary") or {"artifact_lifecycle_plan": {"status": "fresh"}},
+        replacement_for_index=lambda *_args: skipped_calls.append("replacement") or (None, False, ""),
+        artifact_records_for_index=lambda *_args: skipped_calls.append("artifacts") or [],
+    )
+    assert skipped is None
+    assert skipped_calls == ["summary"]
+
+    cancel_calls = {"count": 0}
+
+    def check_cancelled():
+        cancel_calls["count"] += 1
+        if cancel_calls["count"] >= 2:
+            raise RuntimeError("cancelled storage plan")
+
+    try:
+        source_lifecycle_storage_plan_summary_from_index_core(
+            index,
+            summary_for_index=summary_for_index,
+            replacement_for_index=replacement_for_index,
+            artifact_records_for_index=artifact_records_for_index,
+            check_cancelled=check_cancelled,
+        )
+        raise AssertionError("storage lifecycle summary should honor cancellation")
+    except RuntimeError as exc:
+        assert "cancelled storage plan" in str(exc)
+
+
 def test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -13847,6 +13933,7 @@ def main() -> int:
         test_index_storage_cleanup_sections_are_service_owned,
         test_source_lifecycle_report_service_owns_apply_decision,
         test_source_lifecycle_report_from_index_owns_orchestration,
+        test_source_lifecycle_storage_plan_summary_from_index_is_service_owned,
         test_source_lifecycle_apply_deletes_only_safe_superseded_derived_artifacts,
         test_report_highlighting_is_render_only,
         test_tui_role_markers_working_and_worked_line,
