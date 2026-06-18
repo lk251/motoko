@@ -6919,6 +6919,62 @@ def test_list_conversations_omits_empty_chats_but_keeps_queued_prompts(m):
         assert "queued-chat" in ids
 
 
+def test_record_user_turn_for_answer_saves_before_assistant_reply(m):
+    with isolated_state():
+        conv = m.new_conversation("Untitled")
+        conv["id"] = "durable-user-turn"
+
+        m.record_user_turn_for_answer(conv, "preserve this prompt before model work")
+
+        saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+        assert saved["messages"] == [
+            {"role": "user", "content": "preserve this prompt before model work"}
+        ]
+        assert saved["title"] != "Untitled"
+
+
+def test_line_mode_chat_saves_user_turn_before_model_failure(m):
+    old_tui_enabled = m.tui_enabled
+    old_setup_readline = m.setup_readline_completion
+    old_motoko_input = m.motoko_input
+    old_build_messages = m.build_messages
+    old_call_model = m.call_model
+    try:
+        with isolated_state():
+            conv = m.new_conversation("Line mode durability")
+            conv["id"] = "line-mode-durable"
+
+            prompts = iter(["line mode prompt survives endpoint failure"])
+            m.tui_enabled = lambda: False
+            m.setup_readline_completion = lambda: None
+            m.motoko_input = lambda _prompt: next(prompts)
+            m.build_messages = lambda conv, query, **kwargs: ([{"role": "user", "content": query}], [])
+
+            def failing_call_model(*_args, **_kwargs):
+                raise RuntimeError("model endpoint failed after user turn was recorded")
+
+            m.call_model = failing_call_model
+
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    m.chat_loop(conv)
+            except RuntimeError as exc:
+                assert "model endpoint failed" in str(exc)
+            else:
+                raise AssertionError("line-mode chat should propagate the synthetic model failure")
+
+            saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
+            assert saved["messages"] == [
+                {"role": "user", "content": "line mode prompt survives endpoint failure"}
+            ]
+    finally:
+        m.tui_enabled = old_tui_enabled
+        m.setup_readline_completion = old_setup_readline
+        m.motoko_input = old_motoko_input
+        m.build_messages = old_build_messages
+        m.call_model = old_call_model
+
+
 def test_tui_report_commands_do_not_persist_system_output(m):
     with isolated_state():
         conv = m.new_conversation("Reports")
@@ -15982,6 +16038,8 @@ def main() -> int:
         test_conversation_delete_removes_owned_derived_artifacts,
         test_memory_rows_without_conversation_is_service_owned,
         test_list_conversations_omits_empty_chats_but_keeps_queued_prompts,
+        test_record_user_turn_for_answer_saves_before_assistant_reply,
+        test_line_mode_chat_saves_user_turn_before_model_failure,
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,
         test_tui_prompt_is_saved_before_context_preparation,

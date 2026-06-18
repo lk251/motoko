@@ -343,7 +343,12 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
    `vectorizing`.
 5. Tighten conversation persistence. Queued prompts, resumed empty chats,
    feedback targeting, and deleted-chat artifact cleanup should have focused
-   regression coverage because they directly affect trust in daily use.
+   regression coverage because they directly affect trust in daily use. Current
+   progress: queued prompts are durable, empty chats are omitted from resume
+   lists, feedback targets the previous assistant answer when a prompt is
+   pending, deleted-chat cleanup covers owned derived artifacts, and line-mode
+   chat now saves the user turn before model work starts so endpoint failures
+   cannot erase the prompt.
 6. Strengthen code intelligence only with deterministic facts that help
    Motoko edit the right code: command-to-handler-to-test traces, schema
    constants, artifact-family ownership, route/cancellation call paths, and

@@ -20414,6 +20414,12 @@ def maybe_set_title(conv: dict, text: str) -> None:
         conv["title_kind"] = "provisional"
 
 
+def record_user_turn_for_answer(conv: dict, text: str) -> None:
+    maybe_set_title(conv, text)
+    conv.setdefault("messages", []).append({"role": "user", "content": text})
+    save_conversation(conv)
+
+
 def attached_index_ids(
     conv: dict,
     *,
@@ -21715,9 +21721,7 @@ class MotokoTui:
         self.dirty = True
 
     def start_generation(self, user_text: str) -> None:
-        maybe_set_title(self.conv, user_text)
-        self.conv.setdefault("messages", []).append({"role": "user", "content": user_text})
-        save_conversation(self.conv)
+        record_user_turn_for_answer(self.conv, user_text)
         self.append("user", user_text)
         explicit_saved = save_explicit_user_memories(user_text, self.conv["id"])
         if explicit_saved:
@@ -22705,7 +22709,7 @@ def chat_loop(conv: dict) -> None:
             print("unknown command; type /help")
             continue
 
-        maybe_set_title(conv, user_text)
+        record_user_turn_for_answer(conv, user_text)
         project_scope = project_scope_for_request(conv, user_text)
         topic = maybe_attach_relevant_existing_topic(conv, user_text, project_scope=project_scope)
         if topic:
@@ -22713,7 +22717,6 @@ def chat_loop(conv: dict) -> None:
         dossier = maybe_attach_relevant_existing_dossier(conv, user_text, project_scope=project_scope)
         if dossier:
             print(f"sys auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})")
-        conv.setdefault("messages", []).append({"role": "user", "content": user_text})
         explicit_saved = save_explicit_user_memories(user_text, conv["id"])
         if explicit_saved:
             print(f"sys memory saved from this prompt ({explicit_saved})")

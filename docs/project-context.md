@@ -1763,6 +1763,12 @@ Bird's-eye status on 2026-05-31:
   herself: lifecycle fanout, cancellation/job supervision, code-query quality,
   curated skill/support-file maintenance, feedback-to-eval flow, and narrow
   goal-loop review behavior.
+- Conversation persistence trust is also being tightened through focused
+  regressions: queued prompts are durable, empty chats stay out of resume
+  lists, feedback targets the prior assistant answer when a prompt is pending,
+  deleted-chat cleanup covers owned derived artifacts, and line-mode chat now
+  saves the user turn before model work so endpoint failures cannot erase the
+  submitted prompt.
 
 Lifecycle ownership checkpoint on 2026-05-31:
 
