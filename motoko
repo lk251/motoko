@@ -14038,6 +14038,7 @@ def build_embedding_vector_store_from_index(
 
     pending_batches = core_embedding_pending_batches(batches, completed_rows_by_id.keys())
     completed_batches = len(batches) - len(pending_batches)
+    write_progress()
     if progress_callback is not None:
         progress_callback(
             format_vector_progress_phase(

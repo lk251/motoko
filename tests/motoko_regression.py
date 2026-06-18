@@ -9500,10 +9500,18 @@ def test_embedding_vector_store_resumes_saved_progress(m):
 
             paused = {"requested": False}
             progress_messages = []
+            initial_checkpoint_seen = {"seen": False}
 
             def pause_after_first_batch(message: str) -> None:
                 progress_messages.append(message)
-                if not paused["requested"] and "rows 0/" not in message:
+                if "rows 0/" in message:
+                    progress_files = list(m.vector_progress_dir().glob("*.json"))
+                    assert len(progress_files) == 1
+                    progress = json.loads(progress_files[0].read_text(encoding="utf-8"))
+                    assert progress["completed_rows"] == 0
+                    assert progress["expected_rows"] >= 3
+                    initial_checkpoint_seen["seen"] = True
+                elif not paused["requested"]:
                     paused["requested"] = True
                     m.request_work_pause("test")
 
@@ -9517,6 +9525,7 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             except m.WorkPaused:
                 pass
 
+            assert initial_checkpoint_seen["seen"]
             progress_files = list(m.vector_progress_dir().glob("*.json"))
             assert len(progress_files) == 1
             progress = json.loads(progress_files[0].read_text(encoding="utf-8"))

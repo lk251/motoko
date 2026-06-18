@@ -55,6 +55,9 @@ playbook turns the current craft direction into reusable procedure.
   [INDEX_ID]`, and `/vector-doctor [INDEX_ID]`. `/status` shows
   content-free saved vector progress checkpoints, including rows, batches,
   parallelism, refresh mode/cause, elapsed/ETA, staleness, and route names.
+  Vector refresh writes its initial zero-row checkpoint before the first
+  embedding batch, so a missing checkpoint during visible vector work is a
+  bug, not expected startup behavior.
 - Classify retrieval failures precisely: recall, ranking, stale data, source
   lifecycle, chunking/span selection, prompt packing, or final synthesis.
 - Keep lexical, structured Org/task/date evidence, evidence rows, embeddings,

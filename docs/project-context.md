@@ -1471,6 +1471,11 @@ Skill Curator v2 roadmap:
   when it is not currently represented by the live TUI study-status line. The
   status rows expose only safe job hashes, row/batch counts, parallelism,
   mode/cause, elapsed/ETA, staleness, and route names.
+- Vector refresh now writes the initial zero-row checkpoint before the first
+  embedding batch begins. The visible `batch 0/N` phase therefore has a
+  durable progress record immediately, which improves early `/status`
+  diagnosis and gives an interruption before the first completed batch a
+  resumable checkpoint shape.
 
 ## Roadmap Candidates
 
