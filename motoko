@@ -1743,14 +1743,17 @@ def work_cancelled_from_model(
     return WorkPaused(message, work_id=work_id, work_kind=work_kind)
 
 
-def run_command_callable(func, *, cancel_event=None):
+def run_command_callable(func, *, cancel_event=None, phase_callback=None):
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
         return func()
+    kwargs = {}
     if "cancel_event" in signature.parameters:
-        return func(cancel_event=cancel_event)
-    return func()
+        kwargs["cancel_event"] = cancel_event
+    if "phase_callback" in signature.parameters:
+        kwargs["phase_callback"] = phase_callback
+    return func(**kwargs) if kwargs else func()
 
 
 def read_index_progress(index_id: str) -> dict | None:
@@ -19849,9 +19852,10 @@ def index_report_command_request(text: str, conv: dict):
     if primary == "/index-repair":
         selector = body or None
 
-        def run_repair(cancel_event=None) -> str:
+        def run_repair(cancel_event=None, phase_callback=None) -> str:
             _repaired, _changed, note = repair_index_artifacts(
                 load_index(selector),
+                phase_callback=phase_callback,
                 cancel_event=cancel_event,
             )
             return note
@@ -20393,9 +20397,9 @@ def blocking_command_request(text: str, conv: dict):
     if primary == "/bg-now" and not body:
         return foreground_command_request(
             "Running background catch-up...",
-            lambda cancel_event=None: run_background_now_text(
+            lambda cancel_event=None, phase_callback=None: run_background_now_text(
                 conv,
-                phase_callback=print_background_phase,
+                phase_callback=phase_callback,
                 cancel_event=cancel_event,
             ),
         )
@@ -20903,6 +20907,10 @@ class MotokoTui:
         self.report_status = ""
         self.report_token = 0
         self.active_report_token = 0
+        self.foreground_running = 0
+        self.foreground_status = ""
+        self.foreground_token = 0
+        self.active_foreground_token = 0
         self.maintaining = False
         self.study_running = False
         self.study_status = "study: starting"
@@ -20997,6 +21005,44 @@ class MotokoTui:
             save_conversation(self.conv)
         return text or persisted
 
+    def command_work_running(self) -> bool:
+        return bool(
+            int(getattr(self, "report_running", 0) or 0)
+            or int(getattr(self, "foreground_running", 0) or 0)
+        )
+
+    def maybe_start_queued_prompt(self) -> bool:
+        if not getattr(self, "pending_prompts", None):
+            return False
+        if (
+            getattr(self, "generating", False)
+            or getattr(self, "maintaining", False)
+            or getattr(self, "study_running", False)
+            or getattr(self, "cwd_indexing", False)
+            or self.command_work_running()
+            or getattr(self, "overlay_lines", None) is not None
+        ):
+            return False
+        next_prompt = self.pop_next_queued_prompt()
+        if not next_prompt:
+            return False
+        self.start_generation(next_prompt)
+        return True
+
+    def reset_conversation_view(self) -> None:
+        self.messages = self.seed_messages(self.conv)
+        self.history = self.seed_input_history(self.conv)
+        self.history_index = None
+        self.rendered_message_ids = set()
+        self.answer_entry = None
+        self.scroll = 0
+        self.bottom_rows_rendered = 0
+        self.bottom_cursor_row_offset = 0
+        self.bottom_frame_key = None
+        self.overlay_title = None
+        self.overlay_lines = None
+        self.overlay_scroll = 0
+
     def set_active_model_connection(self, conn) -> None:
         lock = getattr(self, "active_model_lock", None)
         if lock is None:
@@ -21066,6 +21112,7 @@ class MotokoTui:
         jobs = getattr(self, "jobs", None)
         if jobs is not None:
             stopped_work += jobs.request_stop_by_kind("report")
+            stopped_work += jobs.request_stop_by_kind("foreground")
             stopped_work += jobs.request_stop_by_kind("cwd-index")
             stopped_work += jobs.request_stop_by_kind("maintenance")
         if stopped_work:
@@ -21117,6 +21164,7 @@ class MotokoTui:
                     or self.maintaining
                     or self.study_running
                     or self.report_running
+                    or self.foreground_running
                     or self.kv_notice_active(now_ts)
                 )
                 timeout = 0.04 if active_work else 0.12
@@ -21155,7 +21203,7 @@ class MotokoTui:
             return utf8_key_from_first_byte(self.stdin_fd, first)
         seq = bytearray(first)
         while True:
-            readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0.01)
+            readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0.03)
             if not readable:
                 break
             nxt = os.read(self.stdin_fd, 1)
@@ -21192,7 +21240,7 @@ class MotokoTui:
 
     def handle_key(self, key: str) -> None:
         if key == "\x03":
-            if self.generating or self.pending_prompts:
+            if self.generating or self.pending_prompts or self.command_work_running():
                 self.stop_active_answer()
                 return
             close_conversation(self.conv)
@@ -21423,8 +21471,11 @@ class MotokoTui:
         if is_feedback_command(text):
             self.handle_command(text)
             return
-        if self.cwd_index_offer is not None and text.strip().lower() in {"y", "yes", "n", "no"}:
+        if getattr(self, "cwd_index_offer", None) is not None and text.strip().lower() in {"y", "yes", "n", "no"}:
             self.handle_cwd_index_answer(text)
+            return
+        if self.command_work_running():
+            self.queue_prompt(text, "prompt queued behind active command")
             return
         if self.cwd_indexing or (self.study_running and self.study_status.startswith("bg-heavy:")):
             self.queue_prompt(text, "prompt queued behind bg-heavy work")
@@ -21444,9 +21495,7 @@ class MotokoTui:
             elif text == "/new" or text.startswith("/new "):
                 title = text[len("/new") :].strip() or None
                 self.conv = start_new_conversation_from_current(self.conv, title)
-                self.messages = self.seed_messages(self.conv)
-                self.history = self.seed_input_history(self.conv)
-                self.history_index = None
+                self.reset_conversation_view()
                 self.status = "new conversation"
                 self.append("system", f"new conversation: {self.conv.get('title', 'Untitled')} [{self.conv.get('id', '')}]")
             elif text == "/stop":
@@ -21463,9 +21512,12 @@ class MotokoTui:
                 self.request_pause()
             elif (command_request := shared_command_request(text, self.conv)) is not None:
                 label, func = command_request
-                self.start_report_command(label, func)
+                if command_request.kind == COMMAND_KIND_FOREGROUND_JOB:
+                    self.run_blocking_command(label, func)
+                else:
+                    self.start_report_command(label, func)
             elif text == "/delete" or text.startswith("/delete "):
-                if self.generating or self.maintaining or self.study_running:
+                if self.generating or self.maintaining or self.study_running or self.command_work_running():
                     self.append("system", "finish or stop active work before deleting this conversation")
                     return
                 answer = text[len("/delete") :].strip().lower()
@@ -21476,9 +21528,7 @@ class MotokoTui:
                     )
                     return
                 self.conv, report = delete_conversation_then_new(self.conv)
-                self.messages = self.seed_messages(self.conv)
-                self.history = self.seed_input_history(self.conv)
-                self.history_index = None
+                self.reset_conversation_view()
                 self.status = "conversation deleted"
                 self.append("system", format_conversation_delete_report(report))
             elif text == "/resume" or text.startswith("/resume "):
@@ -21491,9 +21541,7 @@ class MotokoTui:
                     self.dirty = True
                     return
                 self.conv = resume_conversation_from_current(self.conv, selector)
-                self.messages = self.seed_messages(self.conv)
-                self.history = self.seed_input_history(self.conv)
-                self.history_index = None
+                self.reset_conversation_view()
                 message_count = len(self.conv.get("messages", []))
                 self.status = "conversation resumed" if message_count else "conversation resumed (0 messages)"
             elif (blocking_request := blocking_command_request(text, self.conv)) is not None:
@@ -21580,7 +21628,13 @@ class MotokoTui:
         )
 
     def request_pause(self) -> None:
-        active = self.generating or self.maintaining or self.study_running or self.cwd_indexing
+        active = (
+            self.generating
+            or self.maintaining
+            or self.study_running
+            or self.cwd_indexing
+            or self.command_work_running()
+        )
         if not active:
             self.append("system", "no active Motoko work to pause")
             return
@@ -21589,7 +21643,7 @@ class MotokoTui:
             self.cancel_event.set()
         jobs = getattr(self, "jobs", None)
         if jobs is not None:
-            for kind in ("answer", "report", "cwd-index", "maintenance"):
+            for kind in ("answer", "report", "foreground", "cwd-index", "maintenance"):
                 for snapshot in jobs.snapshots(include_done=False):
                     if snapshot.get("kind") == kind:
                         jobs.request_pause(str(snapshot.get("job_id", "")))
@@ -21603,9 +21657,9 @@ class MotokoTui:
         token = getattr(self, "report_token", 0) + 1
         self.report_token = token
         self.active_report_token = token
-        self.open_overlay(label, f"{label}: running...")
         self.report_running += 1
         self.report_status = label
+        self.status = label
         self.dirty = True
         cancel_event = threading.Event()
 
@@ -21637,106 +21691,48 @@ class MotokoTui:
         if self.generating:
             self.append("system", "Finish or wait for the current answer before running this blocking command.")
             return
-        post_message: tuple[str, str] | None = None
+        if getattr(self, "foreground_running", 0):
+            self.append("system", "another foreground command is already running")
+            return
+        token = getattr(self, "foreground_token", 0) + 1
+        self.foreground_token = token
+        self.active_foreground_token = token
+        self.foreground_running += 1
+        self.foreground_status = label
+        self.status = label
+        self.dirty = True
         cancel_event = threading.Event()
-        job = getattr(self, "jobs", LIVE_JOB_SUPERVISOR).begin(
+
+        def on_phase(phase: str) -> None:
+            self.put_event(("foreground_phase", token, str(phase)))
+
+        def worker() -> None:
+            try:
+                text = run_command_callable(
+                    func,
+                    cancel_event=cancel_event,
+                    phase_callback=on_phase,
+                )
+                self.put_event(("foreground_done", token, label, str(text).strip()))
+            except WorkPaused as exc:
+                self.put_event(("foreground_paused", token, label, str(exc).strip() or "work paused"))
+            except RuntimeError as exc:
+                if model_call_cancelled(exc):
+                    self.put_event(("foreground_paused", token, label, "work interrupted by request"))
+                else:
+                    self.put_event(("foreground_error", token, label, f"{type(exc).__name__}: {exc}"))
+            except SystemExit as exc:
+                self.put_event(("foreground_error", token, label, str(exc)))
+            except Exception as exc:
+                self.put_event(("foreground_error", token, label, f"{type(exc).__name__}: {exc}"))
+
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
             kind="foreground",
             lane="cpu",
             label=label,
+            target=worker,
             cancel_event=cancel_event,
         )
-        job_status = JOB_STATUS_COMPLETED
-        job_error = ""
-        old_sigint = None
-        installed_sigint_handler = False
-        self.restore_for_blocking()
-        try:
-            if threading.current_thread() is threading.main_thread():
-                old_sigint = signal.getsignal(signal.SIGINT)
-
-                def foreground_sigint(_signum, _frame):
-                    cancel_event.set()
-                    request_work_pause("keyboard interrupt during foreground command")
-                    print()
-                    print(
-                        style(
-                            "Interrupt requested; waiting for the next durable checkpoint...",
-                            "yellow",
-                        ),
-                        flush=True,
-                    )
-
-                signal.signal(signal.SIGINT, foreground_sigint)
-                installed_sigint_handler = True
-            print()
-            print(style(label, "turquoise", "bold"))
-            result = run_command_callable(func, cancel_event=cancel_event)
-            if result:
-                print_report(str(result))
-            print(style("Done. Returning to Motoko TUI.", "green"))
-        except WorkPaused as exc:
-            text = str(exc)
-            print(style(text, "yellow"))
-            post_message = ("system", text)
-        except RuntimeError as exc:
-            if not model_call_cancelled(exc):
-                job_status = JOB_STATUS_FAILED
-                job_error = type(exc).__name__
-                text = f"{type(exc).__name__}: {exc}"
-                print(style(text, "red"))
-                post_message = ("error", text)
-            else:
-                text = "work interrupted by request"
-                print(style(text, "yellow"))
-                post_message = ("system", text)
-        except SystemExit as exc:
-            job_status = JOB_STATUS_FAILED
-            job_error = "SystemExit"
-            text = str(exc)
-            print(style(text, "red"))
-            post_message = ("error", text)
-        except Exception as exc:
-            job_status = JOB_STATUS_FAILED
-            job_error = type(exc).__name__
-            text = f"{type(exc).__name__}: {exc}"
-            print(style(text, "red"))
-            post_message = ("error", text)
-        except KeyboardInterrupt:
-            cancel_event.set()
-            request_work_pause("keyboard interrupt during blocking command")
-            text = "Interrupted. Pause requested; unfinished work can resume from the next durable checkpoint if one exists."
-            print()
-            print(style(text, "yellow"))
-            post_message = ("system", text)
-        finally:
-            if installed_sigint_handler:
-                signal.signal(signal.SIGINT, old_sigint)
-            getattr(self, "jobs", LIVE_JOB_SUPERVISOR).finish(
-                job.job_id,
-                status=job_status,
-                error_type=job_error,
-            )
-            self.reenter_after_blocking()
-        self.messages = self.seed_messages(self.conv)
-        if post_message:
-            self.append(post_message[0], post_message[1])
-        self.dirty = True
-
-    def restore_for_blocking(self) -> None:
-        self.clear_bottom_area()
-        if getattr(self, "overlay_screen_active", False):
-            self.write("\033[?1049l")
-            self.overlay_screen_active = False
-        if self.old_termios is not None:
-            termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_termios)
-        self.write("\033[?7h\033[?25h\033[0m\n")
-
-    def reenter_after_blocking(self) -> None:
-        tty.setcbreak(self.stdin_fd)
-        self.write("\033[?25l\033[?7l")
-        self.bottom_rows_rendered = 0
-        self.bottom_cursor_row_offset = 0
-        self.bottom_frame_key = None
 
     def open_overlay(self, title: str, text: str) -> None:
         self.overlay_title = title
@@ -21758,6 +21754,7 @@ class MotokoTui:
             self.bottom_rows_rendered = 0
             self.bottom_cursor_row_offset = 0
             self.bottom_frame_key = None
+        self.maybe_start_queued_prompt()
         self.dirty = True
 
     def start_generation(self, user_text: str) -> None:
@@ -21910,11 +21907,7 @@ class MotokoTui:
                 self.answer_started_monotonic = 0.0
                 self.answer_phase_started_monotonic = 0.0
                 changed = True
-                if self.pending_prompts:
-                    next_prompt = self.pop_next_queued_prompt()
-                    if next_prompt:
-                        self.start_generation(next_prompt)
-                else:
+                if not self.maybe_start_queued_prompt():
                     self.start_maintenance()
             elif kind == "stopped":
                 partial = ""
@@ -21975,6 +21968,49 @@ class MotokoTui:
                     if not self.generating and not self.maintaining:
                         self.status = "ready"
                 changed = True
+            elif kind == "foreground_phase":
+                token, phase = event[1], event[2]
+                if token == getattr(self, "active_foreground_token", 0):
+                    self.foreground_status = phase
+                    self.status = phase
+                changed = True
+            elif kind == "foreground_done":
+                token, _label, text = event[1], event[2], event[3]
+                if token == getattr(self, "active_foreground_token", 0):
+                    if text:
+                        self.append("system", text)
+                    self.active_foreground_token = 0
+                self.foreground_running = max(0, self.foreground_running - 1)
+                if not self.foreground_running:
+                    self.foreground_status = ""
+                    if not self.generating and not self.maintaining:
+                        self.status = "ready"
+                self.maybe_start_queued_prompt()
+                changed = True
+            elif kind == "foreground_paused":
+                token, _label, text = event[1], event[2], event[3]
+                if token == getattr(self, "active_foreground_token", 0):
+                    self.append("system", text or "work paused")
+                    self.active_foreground_token = 0
+                self.foreground_running = max(0, self.foreground_running - 1)
+                if not self.foreground_running:
+                    self.foreground_status = ""
+                    if not self.generating and not self.maintaining:
+                        self.status = "paused"
+                self.maybe_start_queued_prompt()
+                changed = True
+            elif kind == "foreground_error":
+                token, _label, text = event[1], event[2], event[3]
+                if token == getattr(self, "active_foreground_token", 0):
+                    self.append("error", text)
+                    self.active_foreground_token = 0
+                self.foreground_running = max(0, self.foreground_running - 1)
+                if not self.foreground_running:
+                    self.foreground_status = ""
+                    if not self.generating and not self.maintaining:
+                        self.status = "ready"
+                self.maybe_start_queued_prompt()
+                changed = True
             elif kind == "maintenance_done":
                 self.maintaining = False
                 notes = event[1]
@@ -21982,10 +22018,7 @@ class MotokoTui:
                 self.maintenance_status = ""
                 if notes:
                     self.append("system", "; ".join(notes))
-                if self.pending_prompts and not self.generating:
-                    next_prompt = self.pop_next_queued_prompt()
-                    if next_prompt:
-                        self.start_generation(next_prompt)
+                self.maybe_start_queued_prompt()
                 changed = True
             elif kind == "maintenance_error":
                 self.maintaining = False
@@ -22018,10 +22051,7 @@ class MotokoTui:
                     notes = sync_notes + notes
                 self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
                 self.study_status = "study: idle"
-                if self.pending_prompts and not self.generating and not self.maintaining:
-                    next_prompt = self.pop_next_queued_prompt()
-                    if next_prompt:
-                        self.start_generation(next_prompt)
+                self.maybe_start_queued_prompt()
                 changed = True
             elif kind == "study_error":
                 if self.cwd_indexing:
@@ -22050,10 +22080,7 @@ class MotokoTui:
                 self.study_last_note = f"learned corpus index {index_id}"
                 self.study_status = "study: idle"
                 self.append("system", f"learned corpus index: {index_id}")
-                if self.pending_prompts and not self.generating and not self.maintaining:
-                    next_prompt = self.pop_next_queued_prompt()
-                    if next_prompt:
-                        self.start_generation(next_prompt)
+                self.maybe_start_queued_prompt()
                 changed = True
             elif kind == "cwd_index_paused":
                 self.cwd_indexing = False
@@ -22092,7 +22119,13 @@ class MotokoTui:
                 now_ts = time.monotonic()
                 if now_ts < next_run:
                     continue
-                if self.generating or self.maintaining or self.study_running or self.pending_prompts:
+                if (
+                    self.generating
+                    or self.maintaining
+                    or self.study_running
+                    or self.command_work_running()
+                    or self.pending_prompts
+                ):
                     next_run = now_ts + min(5, interval)
                     continue
                 if now_ts - self.last_input_at < idle_grace:
@@ -22375,6 +22408,10 @@ class MotokoTui:
     def status_display(self, width: int) -> list[str]:
         now_value = time.monotonic()
         notice = KV_OFFLOAD_NOTICE_TEXT if self.kv_notice_visible(now_value) else ""
+        report_running = int(getattr(self, "report_running", 0) or 0)
+        foreground_running = int(getattr(self, "foreground_running", 0) or 0)
+        report_status = str(getattr(self, "report_status", "") or "")
+        foreground_status = str(getattr(self, "foreground_status", "") or "")
         return render_status_display_lines(
             title=str(self.conv.get("title", "Untitled")),
             model_badge=model_badge(),
@@ -22382,8 +22419,8 @@ class MotokoTui:
             idle_status=str(getattr(self, "status", "") or ""),
             generating=bool(getattr(self, "generating", False)),
             maintaining=bool(getattr(self, "maintaining", False)),
-            report_running=int(getattr(self, "report_running", 0) or 0),
-            report_status=str(getattr(self, "report_status", "") or ""),
+            report_running=report_running + foreground_running,
+            report_status=report_status or foreground_status,
             maintenance_elapsed=int(now_value - getattr(self, "maintenance_phase_started", now_value)),
             maintenance_phase=str(getattr(self, "maintenance_status", "") or getattr(self, "status", "")),
             pending_count=len(getattr(self, "pending_prompts", [])),

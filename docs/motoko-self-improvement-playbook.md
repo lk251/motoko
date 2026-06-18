@@ -208,10 +208,13 @@ fresh evidence shows a better target:
    Current progress: active chat answers, queued prompts, foreground
    index/vector/study paths, evidence build/refresh, index cleanup,
    source-lifecycle reports, and `bg-now` now pass cancel events through their
-   CLI or slash-command paths. Lifecycle apply/report helpers now also accept
-   injected cancellation checkpoints before materialization or deletion. Index
-   artifact enrich/upgrade, quality repair, profile refresh, and model-backed
-   memory maintenance now carry cancellation through CLI/background/model-call
+   CLI or slash-command paths. TUI foreground commands now stay inside the
+   live composer/status loop instead of taking over the terminal, so prompts
+   can queue behind them while pause/stop still reaches durable checkpoints.
+   Lifecycle apply/report helpers now also accept injected cancellation
+   checkpoints before materialization or deletion. Index artifact
+   enrich/upgrade, quality repair, profile refresh, and model-backed memory
+   maintenance now carry cancellation through CLI/background/model-call
    paths. Queued memory proposals remain retryable when interrupted.
    Retrieval/vector/evidence report queries now also receive cancel events
    through TUI and CLI paths, including `/retrieval-debug`,

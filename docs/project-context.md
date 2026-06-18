@@ -309,7 +309,8 @@ Current UI direction:
 - TUI report commands that may touch indexes, helper processes, route status,
   or retrieval diagnostics should acknowledge Enter immediately and run their
   report-building work off the input/render path. They should open a temporary
-  page, not append routine report text to the chat body.
+  page only after report text is ready, not blank the chat while the command
+  is still running, and not append routine report text to the chat body.
 - Keep the composer visually close to the chat body; avoid fixed separator
   lines unless a future terminal architecture clearly needs them.
 - The TUI uses a Codex-style append-only transcript with a bottom composer and
@@ -859,12 +860,13 @@ Current implementation progress:
 - Step 9 now also routes `/title` and `/rename` through a shared conversation
   mutation helper backed by `motoko_core.conversations`, so manual title state
   is updated in one place across TUI and line mode.
-- Step 9 now also has a shared blocking-command request path for foreground
+- Step 9 now also has a shared foreground-command request path for foreground
   work commands: `/index`, `/index-resume`, `/resume-work`, `/topic`,
   `/deepen`, `/dossier`, `/study`, `/compact`, `/profile-refresh`, and
-  `/memorize`. The TUI still runs these as foreground blocking jobs so prompts
-  and durable checkpoints behave as before, but command parsing and context
-  attachment are no longer duplicated with line mode.
+  `/memorize`. The TUI runs these as supervised foreground jobs without
+  handing the terminal away from the composer, so prompts can queue behind
+  them and durable checkpoint behavior is preserved. Command parsing and
+  context attachment are no longer duplicated with line mode.
 - Step 9 now also has shared conversation lifecycle helpers for starting,
   resuming, deleting, and banner-formatting chats, plus a shared private
   feedback command request for `/feedback`, `/up`, `/down`, and plain
@@ -1301,10 +1303,12 @@ Current progress on this stretch:
   dimension, schema, or embedding-input-policy changes.
 - Complete: `Ctrl+C` now takes the same safe stop path as `/stop` while an
   answer is active, preserving the idle `Ctrl+C` exit behavior.
-- Progress: foreground blocking commands now register with the content-free job
-  supervisor while they run. Remaining foreground work is finer cooperative
-  cancellation checkpoints for study/index/vector operations after those APIs
-  narrow further.
+- Complete: TUI foreground commands now run as content-free supervised jobs
+  without restoring the terminal into a synchronous command mode. `/bg-now`,
+  `/index-repair`, `/study`, and similar foreground work keep the composer
+  responsive, show command/phase status in the bottom status area, accept
+  pause/stop through the same job supervisor path, and start queued prompts
+  after the foreground job finishes.
 - Progress: line-mode foreground study/index/vector/topic/dossier commands now
   create a cooperative cancel event and convert `Ctrl+C` into a pause request
   that long operations can observe at durable checkpoints. TUI blocking work

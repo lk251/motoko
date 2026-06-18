@@ -6652,6 +6652,50 @@ def test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt(m):
         assert ui.dirty
 
 
+def test_tui_resume_resets_render_state_for_scrollback(m):
+    with isolated_state():
+        current = m.new_conversation("Current")
+        current["id"] = "current-chat"
+        m.save_conversation(current)
+        old = m.new_conversation("Old")
+        old["id"] = "old-chat"
+        old["messages"] = [
+            {"role": "user", "content": "old first prompt"},
+            {"role": "assistant", "content": "old first answer"},
+            {"role": "user", "content": "old second prompt"},
+        ]
+        m.save_conversation(old)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = current
+        stale_row = {"role": "system", "content": "stale rendered row"}
+        ui.messages = [stale_row]
+        ui.rendered_message_ids = {id(stale_row)}
+        ui.history = []
+        ui.history_index = 3
+        ui.scroll = 12
+        ui.bottom_rows_rendered = 2
+        ui.bottom_cursor_row_offset = 1
+        ui.bottom_frame_key = ("stale",)
+        ui.overlay_title = "stale"
+        ui.overlay_lines = ["stale"]
+        ui.overlay_scroll = 4
+        ui.status = "ready"
+        ui.dirty = False
+
+        ui.handle_command("/resume old-chat")
+
+        assert ui.conv["id"] == "old-chat"
+        assert ui.rendered_message_ids == set()
+        assert ui.bottom_frame_key is None
+        assert ui.overlay_lines is None
+        assert ui.scroll == 0
+        contents = [row.get("content", "") for row in ui.messages]
+        assert "old first prompt" in contents
+        assert "old second prompt" in contents
+        assert ui.history[-1] == "old second prompt"
+
+
 def test_conversation_delete_removes_owned_derived_artifacts(m):
     with isolated_state() as tmp:
         conv = m.new_conversation("Delete Me")
@@ -7237,8 +7281,9 @@ def test_tui_report_command_does_not_block_render_thread(m):
             ui.handle_command("/status")
 
             assert ui.report_running == 1
-            assert ui.overlay_title == "/status"
-            assert ui.overlay_lines == ["/status: running..."]
+            assert ui.report_status == "/status"
+            assert ui.overlay_title is None
+            assert ui.overlay_lines is None
             assert started.wait(1)
 
             release.set()
@@ -7424,26 +7469,68 @@ def test_tui_clear_queue_discards_pending_prompts(m):
 
 
 def test_tui_blocking_command_records_foreground_job(m):
-    ui = object.__new__(m.MotokoTui)
-    ui.conv = {"messages": []}
-    ui.messages = []
-    ui.scroll = 0
-    ui.dirty = False
-    ui.generating = False
-    ui.jobs = m.JobSupervisor(id_factory=lambda: "foreground-job")
-    ui.restore_for_blocking = lambda: None
-    ui.reenter_after_blocking = lambda: None
-    ui.seed_messages = lambda conv: []
-    ui.append = lambda role, content: ui.messages.append({"role": role, "content": content})
+    with isolated_state():
+        conv = m.new_conversation("Foreground")
+        conv["id"] = "foreground"
+        write_conversation(m, conv)
 
-    with contextlib.redirect_stdout(io.StringIO()):
-        ui.run_blocking_command("Studying context...", lambda: "study done")
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.status = "ready"
+        ui.generating = False
+        ui.maintaining = False
+        ui.study_running = False
+        ui.cwd_indexing = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.foreground_running = 0
+        ui.foreground_status = ""
+        ui.foreground_token = 0
+        ui.active_foreground_token = 0
+        ui.pending_prompts = m.collections.deque()
+        ui.overlay_lines = None
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.jobs = m.JobSupervisor(id_factory=lambda: "foreground-job")
+        started_prompts = []
+        ui.start_generation = started_prompts.append
 
-    rows = ui.jobs.snapshots(include_done=True)
-    assert rows[0]["kind"] == "foreground"
-    assert rows[0]["lane"] == "cpu"
-    assert rows[0]["status"] == m.JOB_STATUS_COMPLETED
-    assert rows[0]["label"] == "Studying context..."
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_foreground(cancel_event=None, phase_callback=None):
+            started.set()
+            if phase_callback is not None:
+                phase_callback("bg-heavy: vectorizing(model) test")
+            assert release.wait(2)
+            return "study done"
+
+        ui.run_blocking_command("Studying context...", slow_foreground)
+        assert ui.foreground_running == 1
+        assert started.wait(1)
+        ui.drain_events()
+        assert ui.foreground_status == "bg-heavy: vectorizing(model) test"
+
+        ui.submit_text("queued behind foreground")
+        assert list(ui.pending_prompts) == ["queued behind foreground"]
+
+        release.set()
+        deadline = time.monotonic() + 2
+        while ui.foreground_running and time.monotonic() < deadline:
+            ui.drain_events()
+            time.sleep(0.01)
+        ui.drain_events()
+
+        rows = ui.jobs.snapshots(include_done=True)
+        assert rows[0]["kind"] == "foreground"
+        assert rows[0]["lane"] == "cpu"
+        assert rows[0]["status"] == m.JOB_STATUS_COMPLETED
+        assert rows[0]["label"] == "Studying context..."
+        assert any(row.get("content") == "study done" for row in ui.messages)
+        assert started_prompts == ["queued behind foreground"]
 
 
 def test_cli_heavy_commands_pass_cancel_events(m):
@@ -16183,6 +16270,7 @@ def main() -> int:
         test_tui_active_answer_streams_stable_lines_to_scrollback,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,
         test_tui_resume_without_id_uses_dropdown_instead_of_terminal_prompt,
+        test_tui_resume_resets_render_state_for_scrollback,
         test_conversation_delete_removes_owned_derived_artifacts,
         test_memory_rows_without_conversation_is_service_owned,
         test_list_conversations_omits_empty_chats_but_keeps_queued_prompts,
