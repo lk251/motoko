@@ -21,6 +21,31 @@ The TUI now:
 - Baseline commit: `f4ebe1073d6fe7b9a1e2036e2a6e923ea0a68116`
 - Harness: `MOTOKO_TUI_LATENCY_REPORT=1 nix develop --command python3 tests/motoko_tty.py`
 
+## Bounty Verification Command
+
+Acceptance command:
+
+```bash
+nix develop --command python3 tests/bounty_issue_1.py
+```
+
+This command is stdlib-only, uses isolated temporary Motoko state/config,
+requires no live model endpoint, exercises the real TUI through a PTY with
+ASCII, accented Latin, and non-Latin input, and prints one compact JSON object.
+It exits 0 only when accepted.
+
+Result:
+
+```json
+{"accepted":true,"failure_reasons":[],"input_integrity":true,"issue":1,"long_transcript":{"max_ms":2.723,"p50_ms":2.024,"p95_ms":2.669,"samples":100},"schema":"motoko-bounty-verification-v1","short_transcript":{"max_ms":2.806,"p50_ms":2.224,"p95_ms":2.753,"samples":100},"unicode_integrity":true}
+```
+
+Repeated-run stability:
+
+- 5/5 repeated runs accepted.
+- Short-transcript p95 range: 2.561 to 4.328 ms.
+- Long-transcript p95 range: 2.610 to 3.582 ms.
+
 ## Root Cause
 
 The measured root cause was not the idle `select()` timeout. `select()` wakes
