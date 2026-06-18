@@ -5,6 +5,12 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Reduced raw TUI typing latency. Ordinary input no longer scans the transcript
+  or recomputes route/config status on every key, and already-buffered input is
+  drained in a bounded batch before the next bottom-frame render. The TTY test
+  harness now measures PTY input-to-visible-composer latency, write/render
+  amplification, long-transcript behavior, slash suggestions, wrapped input,
+  Unicode, editing keys, and typing during streamed answers.
 - Added `motoko source-lifecycle [INDEX]` and `/source-lifecycle [ID]` to
   inspect changed, deleted, or newly ignored indexed source files across their
   dependent artifacts. The report covers indexes, vector/evidence stores,

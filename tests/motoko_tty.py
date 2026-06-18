@@ -8,9 +8,11 @@ terminal-size handling is closer to a tty/tmux session than pure string tests.
 from __future__ import annotations
 
 import collections
+import contextlib
 import fcntl
 import importlib.machinery
 import importlib.util
+import json
 import os
 import pathlib
 import pty
@@ -19,6 +21,7 @@ import struct
 import sys
 import termios
 import tempfile
+import threading
 import time
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -101,6 +104,475 @@ def read_available(fd: int) -> str:
         except OSError:
             break
     return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+class CountingMessageList(list):
+    def __init__(self, rows=()):
+        super().__init__(rows)
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += len(self)
+        return super().__iter__()
+
+
+def latency_percentile_ms(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = int(round((len(ordered) - 1) * (percentile / 100.0)))
+    idx = max(0, min(len(ordered) - 1, idx))
+    return round(ordered[idx] * 1000.0, 3)
+
+
+def read_until_visible(fd: int, target: str, *, timeout: float = 2.0) -> str:
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        readable, _writeable, _errors = select.select([fd], [], [], 0.02)
+        if not readable:
+            continue
+        try:
+            chunks.append(os.read(fd, 65536))
+        except OSError:
+            break
+        text = b"".join(chunks).decode("utf-8", errors="replace")
+        if target in strip_ansi(text):
+            return text
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def wait_for_prefixes(
+    fd: int,
+    *,
+    prefixes: list[str],
+    injected_at: list[float],
+    timeout: float = 3.0,
+) -> tuple[list[float], str]:
+    seen: dict[int, float] = {}
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and len(seen) < len(prefixes):
+        readable, _writeable, _errors = select.select([fd], [], [], 0.02)
+        if not readable:
+            continue
+        now_value = time.monotonic()
+        try:
+            chunks.append(os.read(fd, 65536))
+        except OSError:
+            break
+        visible = strip_ansi(b"".join(chunks).decode("utf-8", errors="replace"))
+        for idx, prefix in enumerate(prefixes):
+            if idx not in seen and prefix in visible:
+                seen[idx] = max(0.0, now_value - injected_at[idx])
+    output = b"".join(chunks).decode("utf-8", errors="replace")
+    latencies = [seen[idx] for idx in range(len(prefixes)) if idx in seen]
+    return latencies, output
+
+
+def make_latency_tui(
+    m,
+    slave_fd: int,
+    *,
+    title: str,
+    transcript_pairs: int,
+    initial_input: str = "",
+    width: int = 80,
+    during_streaming: bool = False,
+):
+    conv = m.new_conversation(title)
+    ui = m.MotokoTui(conv)
+    ui.stdin_fd = slave_fd
+    ui.stdout_fd = slave_fd
+    ui.start_study_loop = lambda: None
+    ui.start_maintenance = lambda *args, **kwargs: None
+    ui.resume_maintenance_on_start = False
+    ui.pending_prompts = collections.deque()
+    ui.report_running = 0
+    ui.foreground_running = 0
+    ui.maintaining = False
+    ui.study_running = False
+    ui.cwd_indexing = False
+    ui.index_progress = None
+    ui.status = "ready"
+    ui.input_buffer = initial_input
+    ui.cursor = len(initial_input)
+    ui.dropdown_index = 0
+    rows = []
+    for idx in range(transcript_pairs):
+        rows.append({"role": "user", "content": f"transcript user row {idx}"})
+        rows.append({"role": "assistant", "content": f"transcript answer row {idx}"})
+    if not rows:
+        rows = [{"role": "system", "content": "empty transcript probe"}]
+    ui.messages = CountingMessageList(rows)
+    ui.rendered_message_ids = set()
+    ui.bottom_rows_rendered = 0
+    ui.bottom_cursor_row_offset = 0
+    ui.bottom_frame_key = None
+    ui.answer_stream_width = 0
+    ui.answer_stream_emitted_lines = 0
+    if during_streaming:
+        ui.generating = True
+        ui.answer_phase = "answering"
+        ui.answer_started_monotonic = time.monotonic()
+        ui.answer_phase_started_monotonic = ui.answer_started_monotonic
+        ui.answer_reasoning = ""
+        ui.answer_entry = {"role": "assistant", "content": "streamed answer line held stable"}
+        ui.messages.append(ui.answer_entry)
+    else:
+        ui.generating = False
+        ui.answer_phase = ""
+        ui.answer_entry = None
+    set_winsz(slave_fd, 18, width)
+    return ui
+
+
+def run_tui_latency_probe(
+    m,
+    *,
+    name: str,
+    text: str,
+    width: int = 80,
+    transcript_pairs: int = 2,
+    initial_input: str = "",
+    burst: bool = False,
+    during_streaming: bool = False,
+    input_batch_limit: int | None = None,
+) -> dict:
+    old_env = {
+        "MOTOKO_STATE_HOME": os.environ.get("MOTOKO_STATE_HOME"),
+        "MOTOKO_CONFIG_HOME": os.environ.get("MOTOKO_CONFIG_HOME"),
+        "MOTOKO_BACKGROUND_STUDY": os.environ.get("MOTOKO_BACKGROUND_STUDY"),
+        "MOTOKO_TUI_INPUT_BATCH_LIMIT": os.environ.get("MOTOKO_TUI_INPUT_BATCH_LIMIT"),
+    }
+    old_model_badge = m.model_badge
+    old_assistant_color = m.assistant_color
+    counters = collections.Counter()
+    errors: list[str] = []
+    master_fd = slave_fd = None
+    ui = None
+    thread = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
+            os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
+            os.environ["MOTOKO_BACKGROUND_STUDY"] = "0"
+            if input_batch_limit is None:
+                os.environ.pop("MOTOKO_TUI_INPUT_BATCH_LIMIT", None)
+            else:
+                os.environ["MOTOKO_TUI_INPUT_BATCH_LIMIT"] = str(input_batch_limit)
+
+            def counted_model_badge():
+                counters["model_badge_calls"] += 1
+                return old_model_badge()
+
+            def counted_assistant_color():
+                counters["assistant_color_calls"] += 1
+                return old_assistant_color()
+
+            m.model_badge = counted_model_badge
+            m.assistant_color = counted_assistant_color
+            master_fd, slave_fd = pty.openpty()
+            ui = make_latency_tui(
+                m,
+                slave_fd,
+                title=f"Latency {name}",
+                transcript_pairs=transcript_pairs,
+                initial_input=initial_input,
+                width=width,
+                during_streaming=during_streaming,
+            )
+            original_write = ui.write
+            original_render = ui.render
+            original_draw = ui.draw_bottom_area
+
+            def counted_write(payload: str) -> None:
+                counters["writes"] += 1
+                counters["write_bytes"] += len(payload.encode("utf-8", errors="replace"))
+                original_write(payload)
+
+            def counted_render(*args, **kwargs):
+                counters["renders"] += 1
+                return original_render(*args, **kwargs)
+
+            def counted_draw(*args, **kwargs):
+                counters["bottom_draw_calls"] += 1
+                return original_draw(*args, **kwargs)
+
+            ui.write = counted_write
+            ui.render = counted_render
+            ui.draw_bottom_area = counted_draw
+
+            result: dict = {}
+
+            def driver() -> None:
+                initial_output = read_until_visible(master_fd, f"Latency {name}", timeout=2.0)
+                initial_output += read_available(master_fd)
+                if f"Latency {name}" not in strip_ansi(initial_output):
+                    errors.append("initial render did not become visible")
+                counters.clear()
+                if isinstance(ui.messages, CountingMessageList):
+                    ui.messages.iterations = 0
+
+                injected_at: list[float] = []
+                prefixes: list[str] = []
+                observed_latencies: list[float] = []
+                observed_output = ""
+                for idx, char in enumerate(text):
+                    injected_at.append(time.monotonic())
+                    os.write(master_fd, char.encode("utf-8"))
+                    prefixes.append(initial_input + text[: idx + 1])
+                    if not burst:
+                        current_latencies, current_output = wait_for_prefixes(
+                            master_fd,
+                            prefixes=[prefixes[-1]],
+                            injected_at=[injected_at[-1]],
+                        )
+                        observed_latencies.extend(current_latencies)
+                        observed_output += current_output
+                if burst:
+                    observed_latencies, observed_output = wait_for_prefixes(
+                        master_fd,
+                        prefixes=prefixes,
+                        injected_at=injected_at,
+                    )
+                observed_output += read_available(master_fd)
+                final_expected = initial_input + text
+                final_input = getattr(ui, "input_buffer", "")
+                if final_input != final_expected:
+                    errors.append(f"input mismatch: expected {final_expected!r}, got {final_input!r}")
+                if len(observed_latencies) != len(text):
+                    errors.append(f"latency samples missing: {len(observed_latencies)}/{len(text)}")
+                transcript_iterations = ui.messages.iterations if isinstance(ui.messages, CountingMessageList) else 0
+                char_count = max(1, len(text))
+                result.update(
+                    {
+                        "name": name,
+                        "text": text,
+                        "final_input": final_input,
+                        "expected_input": final_expected,
+                        "p50_ms": latency_percentile_ms(observed_latencies, 50),
+                        "p95_ms": latency_percentile_ms(observed_latencies, 95),
+                        "max_ms": round((max(observed_latencies) if observed_latencies else 0.0) * 1000.0, 3),
+                        "samples": len(observed_latencies),
+                        "writes": counters["writes"],
+                        "write_bytes": counters["write_bytes"],
+                        "renders": counters["renders"],
+                        "bottom_draw_calls": counters["bottom_draw_calls"],
+                        "model_badge_calls": counters["model_badge_calls"],
+                        "assistant_color_calls": counters["assistant_color_calls"],
+                        "writes_per_char": round(counters["writes"] / char_count, 3),
+                        "bytes_per_char": round(counters["write_bytes"] / char_count, 3),
+                        "renders_per_char": round(counters["renders"] / char_count, 3),
+                        "transcript_iterations": transcript_iterations,
+                        "output_contains_final": final_expected in strip_ansi(observed_output),
+                        "errors": errors,
+                    }
+                )
+                ui.running = False
+                with contextlib.suppress(OSError):
+                    os.write(master_fd, b"\x00")
+
+            thread = threading.Thread(target=driver, daemon=True)
+            thread.start()
+            try:
+                ui.run()
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+                ui.running = False
+            thread.join(timeout=2.0)
+            if not result:
+                result.update(
+                    {
+                        "name": name,
+                        "text": text,
+                        "final_input": getattr(ui, "input_buffer", ""),
+                        "expected_input": initial_input + text,
+                        "p50_ms": 0.0,
+                        "p95_ms": 0.0,
+                        "max_ms": 0.0,
+                        "samples": 0,
+                        "writes": counters["writes"],
+                        "write_bytes": counters["write_bytes"],
+                        "renders": counters["renders"],
+                        "bottom_draw_calls": counters["bottom_draw_calls"],
+                        "model_badge_calls": counters["model_badge_calls"],
+                        "assistant_color_calls": counters["assistant_color_calls"],
+                        "writes_per_char": 0.0,
+                        "bytes_per_char": 0.0,
+                        "renders_per_char": 0.0,
+                        "transcript_iterations": 0,
+                        "output_contains_final": False,
+                        "errors": errors + ["driver did not finish"],
+                    }
+                )
+            return result
+    finally:
+        m.model_badge = old_model_badge
+        m.assistant_color = old_assistant_color
+        if ui is not None:
+            ui.running = False
+        if master_fd is not None:
+            with contextlib.suppress(OSError):
+                os.write(master_fd, b"\x00")
+        if thread is not None:
+            thread.join(timeout=2.0)
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def run_tui_editing_probe(m) -> dict:
+    old_state = os.environ.get("MOTOKO_STATE_HOME")
+    old_config = os.environ.get("MOTOKO_CONFIG_HOME")
+    master_fd = slave_fd = None
+    ui = None
+    thread = None
+    errors: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
+            os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
+            master_fd, slave_fd = pty.openpty()
+            ui = make_latency_tui(m, slave_fd, title="Edit Probe", transcript_pairs=1, width=60)
+            ui.start_study_loop = lambda: None
+            ui.history = ["prior prompt"]
+            result: dict = {}
+
+            def driver() -> None:
+                read_until_visible(master_fd, "Edit Probe", timeout=2.0)
+                read_available(master_fd)
+                sequence = b"abc\x1b[D\x1b[D\x1b[3~Z\x05!\x01^\x0b"
+                os.write(master_fd, sequence)
+                read_until_visible(master_fd, "^", timeout=2.0)
+                read_available(master_fd)
+                if ui.input_buffer != "^":
+                    errors.append(f"editing expected '^', got {ui.input_buffer!r}")
+                os.write(master_fd, b"\x15\x1b[A")
+                read_until_visible(master_fd, "prior prompt", timeout=2.0)
+                read_available(master_fd)
+                if ui.input_buffer != "prior prompt":
+                    errors.append(f"history expected 'prior prompt', got {ui.input_buffer!r}")
+                result.update({"name": "editing", "final_input": ui.input_buffer, "errors": errors})
+                ui.running = False
+                with contextlib.suppress(OSError):
+                    os.write(master_fd, b"\x00")
+
+            thread = threading.Thread(target=driver, daemon=True)
+            thread.start()
+            try:
+                ui.run()
+            except Exception as exc:
+                errors.append(f"{type(exc).__name__}: {exc}")
+                ui.running = False
+            thread.join(timeout=2.0)
+            return result or {"name": "editing", "final_input": getattr(ui, "input_buffer", ""), "errors": errors}
+    finally:
+        if ui is not None:
+            ui.running = False
+        if master_fd is not None:
+            with contextlib.suppress(OSError):
+                os.write(master_fd, b"\x00")
+        if thread is not None:
+            thread.join(timeout=2.0)
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        if old_state is None:
+            os.environ.pop("MOTOKO_STATE_HOME", None)
+        else:
+            os.environ["MOTOKO_STATE_HOME"] = old_state
+        if old_config is None:
+            os.environ.pop("MOTOKO_CONFIG_HOME", None)
+        else:
+            os.environ["MOTOKO_CONFIG_HOME"] = old_config
+
+
+def run_tui_latency_suite(m) -> dict:
+    scenarios = {
+        "short": run_tui_latency_probe(
+            m,
+            name="short",
+            text="latency",
+            transcript_pairs=2,
+        ),
+        "long": run_tui_latency_probe(
+            m,
+            name="long",
+            text="latency",
+            transcript_pairs=700,
+        ),
+        "wrapped": run_tui_latency_probe(
+            m,
+            name="wrapped",
+            text="abcdefghijklmnopqrstuvwxyz0123456789",
+            width=24,
+            transcript_pairs=2,
+        ),
+        "slash": run_tui_latency_probe(
+            m,
+            name="slash",
+            text="status",
+            initial_input="/",
+            transcript_pairs=2,
+        ),
+        "burst": run_tui_latency_probe(
+            m,
+            name="burst",
+            text="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            transcript_pairs=2,
+            burst=True,
+        ),
+        "unicode": run_tui_latency_probe(
+            m,
+            name="unicode",
+            text="cafe-界-🙂",
+            transcript_pairs=2,
+            burst=True,
+        ),
+        "streaming": run_tui_latency_probe(
+            m,
+            name="streaming",
+            text="queued while streaming",
+            transcript_pairs=2,
+            during_streaming=True,
+            burst=True,
+        ),
+        "regression_single_key_batch": run_tui_latency_probe(
+            m,
+            name="regression",
+            text="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            transcript_pairs=700,
+            burst=True,
+            input_batch_limit=1,
+        ),
+        "editing": run_tui_editing_probe(m),
+    }
+    return {"schema": "motoko-tui-latency-v1", "scenarios": scenarios}
+
+
+def assert_tui_latency_report(report: dict) -> None:
+    scenarios = report["scenarios"]
+    for name, scenario in scenarios.items():
+        assert not scenario.get("errors"), f"{name}: {scenario.get('errors')}"
+    for name in ("short", "long", "wrapped", "slash", "burst", "unicode", "streaming"):
+        assert scenarios[name]["samples"] == len(scenarios[name]["text"])
+        assert scenarios[name]["output_contains_final"]
+        assert scenarios[name]["p95_ms"] <= 250.0, (name, scenarios[name])
+    assert scenarios["long"]["transcript_iterations"] == 0, scenarios["long"]
+    assert scenarios["burst"]["renders_per_char"] <= 0.35, scenarios["burst"]
+    assert scenarios["burst"]["writes_per_char"] <= 0.35, scenarios["burst"]
+    regression = scenarios["regression_single_key_batch"]
+    assert regression["renders_per_char"] >= 0.75, regression
+    assert regression["renders_per_char"] > scenarios["burst"]["renders_per_char"] * 2.0
+    assert regression["transcript_iterations"] == 0, regression
 
 
 def fake_tui(m, slave_fd: int):
@@ -409,7 +881,12 @@ def main() -> int:
                 os.environ.pop("MOTOKO_CONFIG_HOME", None)
             else:
                 os.environ["MOTOKO_CONFIG_HOME"] = old_config
-    print("3 motoko tty render/input checks passed")
+    latency_report = run_tui_latency_suite(m)
+    if os.environ.get("MOTOKO_TUI_LATENCY_REPORT"):
+        print(json.dumps(latency_report, indent=2, sort_keys=True))
+    else:
+        assert_tui_latency_report(latency_report)
+    print("4 motoko tty render/input checks passed")
     return 0
 
 

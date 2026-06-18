@@ -639,6 +639,8 @@ REASONING_PRESETS = {
 REASONING_LIVE_MAX_CHARS = 1600
 KV_OFFLOAD_NOTICE_TEXT = "KV not in GPU"
 KV_OFFLOAD_NOTICE_SECONDS = 3.0
+TUI_INPUT_BATCH_LIMIT = 64
+TUI_DISPLAY_CACHE_SECONDS = 2.0
 CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
 FILE_SUMMARY_SCHEMA_VERSION = "file-summary-v1"
 CORPUS_SUMMARY_SCHEMA_VERSION = "corpus-summary-v1"
@@ -20933,9 +20935,15 @@ class MotokoTui:
         self.active_model_response = None
         self.last_render = 0.0
         self.rendered_message_ids: set[int] = set()
+        self.transcript_dirty = True
         self.bottom_rows_rendered = 0
         self.bottom_cursor_row_offset = 0
         self.bottom_frame_key: tuple | None = None
+        self.input_batch_limit = env_int("MOTOKO_TUI_INPUT_BATCH_LIMIT", TUI_INPUT_BATCH_LIMIT, minimum=1)
+        self.display_cache_expires = 0.0
+        self.cached_model_badge = ""
+        self.cached_assistant_color = DEFAULT_ASSISTANT_COLOR
+        self.refresh_display_cache(force=True)
         self.overlay_screen_active = False
         self.overlay_title: str | None = None
         self.overlay_lines: list[str] | None = None
@@ -21034,6 +21042,7 @@ class MotokoTui:
         self.history = self.seed_input_history(self.conv)
         self.history_index = None
         self.rendered_message_ids = set()
+        self.transcript_dirty = True
         self.answer_entry = None
         self.scroll = 0
         self.bottom_rows_rendered = 0
@@ -21134,7 +21143,45 @@ class MotokoTui:
         self.messages.append(row)
         self.scroll = 0
         self.dirty = True
+        self.transcript_dirty = True
         return row
+
+    def refresh_display_cache(self, *, force: bool = False) -> None:
+        now_value = time.monotonic()
+        if not force and now_value < float(getattr(self, "display_cache_expires", 0.0) or 0.0):
+            return
+        self.cached_model_badge = model_badge()
+        self.cached_assistant_color = assistant_color()
+        self.display_cache_expires = now_value + TUI_DISPLAY_CACHE_SECONDS
+
+    def display_model_badge(self) -> str:
+        if not getattr(self, "cached_model_badge", ""):
+            self.refresh_display_cache(force=True)
+        else:
+            self.refresh_display_cache()
+        return str(getattr(self, "cached_model_badge", "") or model_badge())
+
+    def display_assistant_color(self) -> str:
+        if not getattr(self, "cached_assistant_color", ""):
+            self.refresh_display_cache(force=True)
+        else:
+            self.refresh_display_cache()
+        return str(getattr(self, "cached_assistant_color", DEFAULT_ASSISTANT_COLOR) or DEFAULT_ASSISTANT_COLOR)
+
+    def drain_pending_input(self) -> int:
+        limit = max(1, int(getattr(self, "input_batch_limit", TUI_INPUT_BATCH_LIMIT) or 1))
+        handled = 0
+        while self.running and handled < limit - 1:
+            readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0)
+            if not readable:
+                break
+            key = self.read_key()
+            if not key:
+                break
+            self.last_input_at = time.monotonic()
+            self.handle_key(key)
+            handled += 1
+        return handled
 
     def run(self) -> None:
         old_winch = signal.getsignal(signal.SIGWINCH)
@@ -21171,7 +21218,10 @@ class MotokoTui:
                 readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
                 if readable:
                     self.last_input_at = time.monotonic()
-                    self.handle_key(self.read_key())
+                    key = self.read_key()
+                    if key:
+                        self.handle_key(key)
+                        self.drain_pending_input()
                 if self.dirty or (active_work and now_ts - self.last_render > 0.08):
                     self.render()
         finally:
@@ -22414,7 +22464,7 @@ class MotokoTui:
         foreground_status = str(getattr(self, "foreground_status", "") or "")
         return render_status_display_lines(
             title=str(self.conv.get("title", "Untitled")),
-            model_badge=model_badge(),
+            model_badge=self.display_model_badge(),
             width=width,
             idle_status=str(getattr(self, "status", "") or ""),
             generating=bool(getattr(self, "generating", False)),
@@ -22525,6 +22575,8 @@ class MotokoTui:
         return ([""] * count + rows)[-count:]
 
     def sync_transcript(self, width: int, height: int, *, reserved_rows: int = 1) -> None:
+        if not getattr(self, "transcript_dirty", True):
+            return
         if not hasattr(self, "rendered_message_ids"):
             self.rendered_message_ids = set()
         rows = []
@@ -22536,6 +22588,7 @@ class MotokoTui:
                 continue
             rows.extend(self.message_display_lines(entry, width))
             self.rendered_message_ids.add(ident)
+        self.transcript_dirty = False
         if not rows:
             return
         self.clear_bottom_area()
@@ -22593,7 +22646,7 @@ class MotokoTui:
         return render_live_answer_display_lines(
             status_entry,
             width,
-            assistant_color=assistant_color(),
+            assistant_color=self.display_assistant_color(),
             answer_phase=getattr(self, "answer_phase", ""),
             answer_phase_elapsed=time.monotonic() - phase_started,
             answer_reasoning=self.active_answer_reasoning(),
@@ -22629,7 +22682,7 @@ class MotokoTui:
         return render_message_display_lines(
             entry,
             width,
-            assistant_color=assistant_color(),
+            assistant_color=self.display_assistant_color(),
             active_answer=active_answer,
             answer_phase=getattr(self, "answer_phase", ""),
             answer_phase_elapsed=phase_elapsed,
