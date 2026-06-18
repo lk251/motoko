@@ -1466,6 +1466,11 @@ Skill Curator v2 roadmap:
   `full/missing/new` cause chain. Incremental refreshes still report reuse and
   new-row counts, while detailed mode/cause fields remain in progress/store
   records for diagnostics.
+- `/status` now also reports content-free saved vector progress checkpoints.
+  This makes stale, resumed, incremental, or initial vector work visible even
+  when it is not currently represented by the live TUI study-status line. The
+  status rows expose only safe job hashes, row/batch counts, parallelism,
+  mode/cause, elapsed/ETA, staleness, and route names.
 
 ## Roadmap Candidates
 

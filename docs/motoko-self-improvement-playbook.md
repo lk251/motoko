@@ -51,6 +51,10 @@ playbook turns the current craft direction into reusable procedure.
 - Diagnose answer failures with `/sources`, `motoko retrieval-debug QUERY`,
   `motoko retrieval-preview QUERY`, `motoko evidence-query QUERY`, and
   `motoko vector-query --rerank QUERY` before changing prompts or ranking.
+- Diagnose vector refresh health with `/status`, `motoko vector-doctor
+  [INDEX_ID]`, and `/vector-doctor [INDEX_ID]`. `/status` shows
+  content-free saved vector progress checkpoints, including rows, batches,
+  parallelism, refresh mode/cause, elapsed/ETA, staleness, and route names.
 - Classify retrieval failures precisely: recall, ranking, stale data, source
   lifecycle, chunking/span selection, prompt packing, or final synthesis.
 - Keep lexical, structured Org/task/date evidence, evidence rows, embeddings,

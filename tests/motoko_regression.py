@@ -10483,6 +10483,76 @@ def test_status_uses_current_catalog_even_without_persisted_catalog(m):
         assert not m.context_catalog_path().exists()
 
 
+def test_status_reports_safe_vector_progress_jobs(m):
+    with isolated_state():
+        old_time = (
+            m._dt.datetime.now(m._dt.timezone.utc) - m._dt.timedelta(minutes=10)
+        ).astimezone().isoformat(timespec="seconds")
+        progress = {
+            "schema": m.VECTOR_PROGRESS_SCHEMA_VERSION,
+            "id": "embedding-secret-logbook-orgfiles",
+            "updated": old_time,
+            "source_index": {
+                "id": "secret-index-logbook",
+                "name": "orgfiles",
+                "root": "/home/mares/repos/orgfiles",
+            },
+            "embedding_route": {
+                "catalog_route": "qwen3-embedding-0b6",
+                "model": "qwen3-embedding-0.6b",
+            },
+            "embedding_batch_size": 10,
+            "embedding_requested_parallelism": 32,
+            "embedding_parallelism": 8,
+            "embedding_parallel_fallbacks": [{"from": 32, "to": 16}],
+            "embedding_refresh_mode": "incremental",
+            "embedding_refresh_cause": "source-change",
+            "expected_rows": 100,
+            "completed_rows": 25,
+            "elapsed_seconds": 600,
+            "eta_seconds": 300,
+            "rows": [
+                {
+                    "id": "private-row",
+                    "path": "/home/mares/repos/orgfiles/logbook.org",
+                    "summary": "private summary text",
+                    "evidence_excerpt": "private excerpt",
+                    "vector": [0.1, 0.2],
+                }
+            ],
+        }
+        m.atomic_write(
+            m.vector_progress_path(progress["id"]),
+            json.dumps(progress, ensure_ascii=False) + "\n",
+        )
+
+        status = m.format_status()
+
+        assert "vector progress jobs: 1" in status
+        assert "vector job: job:" in status
+        assert "kind=vector" in status
+        assert "state=stale" in status
+        assert "rows=25/100" in status
+        assert "batches=3/10" in status
+        assert "parallel=8" in status
+        assert "requested=32" in status
+        assert "fallbacks=1" in status
+        assert "mode=incremental" in status
+        assert "cause=source-change" in status
+        assert "elapsed=10m00s" in status
+        assert "eta=5m00s" in status
+        assert "route=qwen3-embedding-0b6" in status
+        for private_text in [
+            "secret",
+            "orgfiles",
+            "logbook",
+            "/home/mares",
+            "private summary",
+            "private excerpt",
+        ]:
+            assert private_text not in status
+
+
 def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -16031,6 +16101,7 @@ def main() -> int:
         test_vector_progress_phase_is_content_free_and_finalizing,
         test_safe_vector_progress_row_core_is_content_free_and_stale_aware,
         test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta,
+        test_status_reports_safe_vector_progress_jobs,
         test_tui_append_renderer_keeps_transcript_in_scrollback,
         test_tui_active_answer_streams_stable_lines_to_scrollback,
         test_tui_seed_messages_renders_full_saved_history_without_redundant_banner,

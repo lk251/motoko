@@ -19461,6 +19461,7 @@ def format_status(conv: dict | None = None) -> str:
     study_state = read_study_state()
     study_jobs = read_study_jobs(limit=1)
     index_jobs = active_index_progress()
+    vector_jobs = list_vector_progress()
     partial_indexes = list_resumable_partial_indexes()
     superseded_partial_indexes = list_superseded_partial_indexes()
     catalog = prompt_context_catalog()
@@ -19523,6 +19524,7 @@ def format_status(conv: dict | None = None) -> str:
         f"study loop: {study_state.get('phase', 'idle') if study_state else 'not started'}",
         f"last study job: {study_jobs[-1].get('event', '-') + ' ' + study_jobs[-1].get('job_id', '') if study_jobs else 'none'}",
         f"active index jobs: {len(index_jobs)}",
+        f"vector progress jobs: {len(vector_jobs)}",
         (
             f"partial indexes: {len(partial_indexes)} resumable"
             + (f", {len(superseded_partial_indexes)} superseded" if superseded_partial_indexes else "")
@@ -19558,6 +19560,8 @@ def format_status(conv: dict | None = None) -> str:
             lines.append(f"attached retrieval artifacts: {attached_artifact_status}")
     for job in index_jobs[:3]:
         lines.append(f"index job: {format_index_progress_line(job)}")
+    for job in vector_jobs[:3]:
+        lines.append(f"vector job: {format_safe_vector_progress_row(job).lstrip('- ')}")
     return "\n".join(lines)
 
 
