@@ -95,11 +95,21 @@ def memory_dossier_source_material_core(
     }
 
 
-def retrieve_from_dossier_core(dossier: dict, query: str, *, max_chars: int) -> tuple[str, list[dict]]:
+def retrieve_from_dossier_core(
+    dossier: dict,
+    query: str,
+    *,
+    max_chars: int,
+    check_cancelled=None,
+) -> tuple[str, list[dict]]:
+    if check_cancelled is not None:
+        check_cancelled()
     query_counts = token_counts(query or dossier.get("query", ""))
     memory_rows = list(dossier.get("source_memories", []))
     conversation_rows = list(dossier.get("source_conversations", []))
     if query_counts:
+        if check_cancelled is not None:
+            check_cancelled()
         memory_rows.sort(
             key=lambda item: score_text(
                 query_counts,
@@ -107,6 +117,8 @@ def retrieve_from_dossier_core(dossier: dict, query: str, *, max_chars: int) -> 
             ),
             reverse=True,
         )
+        if check_cancelled is not None:
+            check_cancelled()
         conversation_rows.sort(
             key=lambda item: score_text(
                 query_counts,
@@ -133,6 +145,8 @@ def retrieve_from_dossier_core(dossier: dict, query: str, *, max_chars: int) -> 
     if memory_rows:
         parts.append("Dossier memory excerpts:")
     for item in memory_rows:
+        if check_cancelled is not None:
+            check_cancelled()
         remaining = max_chars - used
         if remaining <= 0:
             break
@@ -154,6 +168,8 @@ def retrieve_from_dossier_core(dossier: dict, query: str, *, max_chars: int) -> 
     if conversation_rows and used < max_chars:
         parts.append("Dossier conversation excerpts:")
     for item in conversation_rows:
+        if check_cancelled is not None:
+            check_cancelled()
         remaining = max_chars - used
         if remaining <= 0:
             break

@@ -17327,10 +17327,12 @@ def query_vector_result(
     )
 
 
-def retrieve_from_topic(topic: dict, query: str) -> tuple[str, list[dict]]:
+def retrieve_from_topic(topic: dict, query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
+    raise_if_work_cancelled(cancel_event, "topic retrieval interrupted by request", work_kind="retrieval")
     query_counts = token_counts(query or topic.get("query", ""))
     evidence = list(topic.get("evidence", []))
     if query_counts:
+        raise_if_work_cancelled(cancel_event, "topic retrieval interrupted by request", work_kind="retrieval")
         evidence.sort(
             key=lambda item: score_text(
                 query_counts,
@@ -17362,6 +17364,7 @@ def retrieve_from_topic(topic: dict, query: str) -> tuple[str, list[dict]]:
     if evidence:
         parts.append("Topic evidence excerpts:")
     for item in evidence:
+        raise_if_work_cancelled(cancel_event, "topic retrieval interrupted by request", work_kind="retrieval")
         remaining = MAX_RETRIEVAL_CHARS - used
         if remaining <= 0:
             break
@@ -17384,8 +17387,17 @@ def retrieve_from_topic(topic: dict, query: str) -> tuple[str, list[dict]]:
     return "\n\n".join(part for part in parts if part), sources
 
 
-def retrieve_from_dossier(dossier: dict, query: str) -> tuple[str, list[dict]]:
-    return retrieve_from_dossier_core(dossier, query, max_chars=MAX_RETRIEVAL_CHARS)
+def retrieve_from_dossier(dossier: dict, query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
+    return retrieve_from_dossier_core(
+        dossier,
+        query,
+        max_chars=MAX_RETRIEVAL_CHARS,
+        check_cancelled=lambda: raise_if_work_cancelled(
+            cancel_event,
+            "dossier retrieval interrupted by request",
+            work_kind="retrieval",
+        ),
+    )
 
 
 def render_memories_with_sources(

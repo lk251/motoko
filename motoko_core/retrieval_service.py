@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import textwrap
 from dataclasses import dataclass, field
@@ -422,6 +423,31 @@ def build_retrieval_preview_result(
             "lane_count": len(context_package.lanes),
         },
     )
+
+
+def _callback_accepts_cancel_event(callback: Callable) -> bool | None:
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return None
+    for parameter in parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "cancel_event":
+            return True
+    return False
+
+
+def _call_retrieval_callback(callback: Callable, item: dict, query: str, *, cancel_event=None):
+    accepts_cancel = _callback_accepts_cancel_event(callback)
+    if cancel_event is not None and accepts_cancel is not False:
+        try:
+            return callback(item, query, cancel_event=cancel_event)
+        except TypeError:
+            if accepts_cancel is None:
+                return callback(item, query)
+            raise
+    return callback(item, query)
 
 
 @dataclass(frozen=True)
@@ -1651,6 +1677,9 @@ class RetrievalService:
         self._query_vector_store = query_vector_store
         self.hybrid_environment = hybrid_environment
 
+    def cancel_event(self):
+        return self.hybrid_environment.cancel_event if self.hybrid_environment is not None else None
+
     def retrieve_index(self, index: dict, query: str) -> RetrievalServiceResult:
         if self.hybrid_environment is not None:
             return retrieve_index_hybrid(index, query, self.hybrid_environment)
@@ -1662,6 +1691,7 @@ class RetrievalService:
         )
 
     def render_attached_context(self, items: list[dict], query: str) -> RetrievalServiceResult:
+        cancel_event = self.cancel_event()
         if not items:
             return RetrievalServiceResult(
                 text="No explicit documents are attached.",
@@ -1677,6 +1707,7 @@ class RetrievalService:
         sources = []
         warning_exceptions = (KeyError, SystemExit, OSError, json.JSONDecodeError)
         for item in items:
+            raise_if_cancelled(cancel_event)
             kind = item.get("kind")
             if kind == "index":
                 try:
@@ -1698,7 +1729,12 @@ class RetrievalService:
                 except warning_exceptions as exc:
                     sources.append(unavailable_context_source("topic", item, exc))
                     continue
-                text, topic_sources = self.retrieve_topic(topic, query)
+                text, topic_sources = _call_retrieval_callback(
+                    self.retrieve_topic,
+                    topic,
+                    query,
+                    cancel_event=cancel_event,
+                )
                 parts.append(text)
                 sources.extend(topic_sources)
                 continue
@@ -1708,7 +1744,12 @@ class RetrievalService:
                 except warning_exceptions as exc:
                     sources.append(unavailable_context_source("dossier", item, exc))
                     continue
-                text, dossier_sources = self.retrieve_dossier(dossier, query)
+                text, dossier_sources = _call_retrieval_callback(
+                    self.retrieve_dossier,
+                    dossier,
+                    query,
+                    cancel_event=cancel_event,
+                )
                 parts.append(text)
                 sources.extend(dossier_sources)
                 continue

@@ -1702,7 +1702,9 @@ Motoko self-code checkpoint, 2026-05-31:
   construction, and span-level embedding/rerank selection. Topic dossier
   pre-model chunk ranking now also checks the foreground cancel token before and
   during index scans, so `/stop` no longer has to wait for ranking to finish
-  before the first model call. This is still not the final
+  before the first model call. Attached topic and dossier context rendering now
+  also threads the cancel token through the retrieval service into the concrete
+  topic/dossier retrieval helpers. This is still not the final
   durable-job design; it is the next careful checkpoint toward making all
   visible foreground work interruptible without corrupting indexes, vectors,
   evidence stores, memories, or ledgers.

@@ -11042,6 +11042,25 @@ def test_topic_chunk_ranking_honors_cancel_event(m):
         raise AssertionError("topic chunk ranking should honor a pre-set cancel event")
 
 
+def test_attached_topic_retrieval_honors_cancel_event(m):
+    event = threading.Event()
+    event.set()
+    topic = {
+        "id": "topic-1",
+        "name": "Topic",
+        "query": "alpha",
+        "summary": "summary",
+        "evidence": [{"excerpt": "alpha evidence", "chunk_summary": "alpha", "file_summary": "file"}],
+    }
+    try:
+        m.retrieve_from_topic(topic, "alpha", cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "retrieval"
+    else:
+        raise AssertionError("attached topic retrieval should honor a pre-set cancel event")
+
+
 def test_topic_dossier_passes_cancel_event_to_chunk_ranking(m):
     old_load_index = m.load_index
     old_index_staleness = m.index_staleness
@@ -11104,6 +11123,26 @@ def test_memory_dossier_passes_cancel_event_to_retrieval_ranking(m):
         m.ranked_memories = old_ranked_memories
 
     assert seen["cancel_event"] is event
+
+
+def test_attached_dossier_retrieval_honors_cancel_event(m):
+    event = threading.Event()
+    event.set()
+    dossier = {
+        "id": "dossier-1",
+        "name": "Dossier",
+        "query": "craft",
+        "summary": "summary",
+        "source_memories": [{"id": "mem-1", "excerpt": "craft note"}],
+        "source_conversations": [{"id": "conv-1", "title": "Craft", "excerpt": "craft chat"}],
+    }
+    try:
+        m.retrieve_from_dossier(dossier, "craft", cancel_event=event)
+    except m.WorkPaused as exc:
+        assert "interrupted" in str(exc)
+        assert exc.work_kind == "retrieval"
+    else:
+        raise AssertionError("attached dossier retrieval should honor a pre-set cancel event")
 
 
 def test_recent_conversation_ranking_honors_cancel_event(m):
@@ -13359,6 +13398,101 @@ def test_retrieval_service_renders_attached_context_without_generic_callback(m):
     assert vector.report["store_id"] == "vec-1"
     assert vector.diagnostics["kind"] == "vector-query"
     assert vector.diagnostics["row_count"] == 1
+
+
+def test_retrieval_service_passes_cancel_event_to_topic_and_dossier_callbacks(m):
+    event = threading.Event()
+    seen = {}
+
+    class Env:
+        cancel_event = event
+
+    def retrieve_topic(topic, query, *, cancel_event=None):
+        seen["topic_cancel_event"] = cancel_event
+        return "topic", [{"kind": "topic", "id": topic["id"]}]
+
+    def retrieve_dossier(dossier, query, *, cancel_event=None):
+        seen["dossier_cancel_event"] = cancel_event
+        return "dossier", [{"kind": "dossier", "id": dossier["id"]}]
+
+    service = m.RetrievalService(
+        load_index=lambda index_id: {"id": index_id},
+        retrieve_index_query=lambda index, query: ("index", [{"kind": "index", "id": index["id"]}]),
+        render_index_overview=lambda index: ("overview", [{"kind": "index", "id": index["id"]}]),
+        load_topic=lambda topic_id: {"id": topic_id},
+        retrieve_topic=retrieve_topic,
+        load_dossier=lambda dossier_id: {"id": dossier_id},
+        retrieve_dossier=retrieve_dossier,
+        hybrid_environment=Env(),
+    )
+
+    result = service.render_attached_context(
+        [{"kind": "topic", "id": "topic-1"}, {"kind": "dossier", "id": "dossier-1"}],
+        "alpha",
+    )
+
+    assert "topic" in result.text
+    assert "dossier" in result.text
+    assert seen["topic_cancel_event"] is event
+    assert seen["dossier_cancel_event"] is event
+
+
+def test_retrieval_service_preserves_legacy_topic_and_dossier_callbacks_with_cancel_event(m):
+    event = threading.Event()
+
+    class Env:
+        cancel_event = event
+
+    def retrieve_topic(topic, query):
+        return "topic legacy", [{"kind": "topic", "id": topic["id"]}]
+
+    def retrieve_dossier(dossier, query):
+        return "dossier legacy", [{"kind": "dossier", "id": dossier["id"]}]
+
+    service = m.RetrievalService(
+        load_index=lambda index_id: {"id": index_id},
+        retrieve_index_query=lambda index, query: ("index", [{"kind": "index", "id": index["id"]}]),
+        render_index_overview=lambda index: ("overview", [{"kind": "index", "id": index["id"]}]),
+        load_topic=lambda topic_id: {"id": topic_id},
+        retrieve_topic=retrieve_topic,
+        load_dossier=lambda dossier_id: {"id": dossier_id},
+        retrieve_dossier=retrieve_dossier,
+        hybrid_environment=Env(),
+    )
+
+    result = service.render_attached_context(
+        [{"kind": "topic", "id": "topic-1"}, {"kind": "dossier", "id": "dossier-1"}],
+        "alpha",
+    )
+
+    assert "topic legacy" in result.text
+    assert "dossier legacy" in result.text
+
+
+def test_retrieval_service_attached_context_honors_pre_cancelled_event(m):
+    event = threading.Event()
+    event.set()
+
+    class Env:
+        cancel_event = event
+
+    service = m.RetrievalService(
+        load_index=lambda index_id: {"id": index_id},
+        retrieve_index_query=lambda index, query: ("index", [{"kind": "index", "id": index["id"]}]),
+        render_index_overview=lambda index: ("overview", [{"kind": "index", "id": index["id"]}]),
+        load_topic=lambda topic_id: {"id": topic_id},
+        retrieve_topic=lambda topic, query, *, cancel_event=None: ("topic", [{"kind": "topic", "id": topic["id"]}]),
+        load_dossier=lambda dossier_id: {"id": dossier_id},
+        retrieve_dossier=lambda dossier, query, *, cancel_event=None: ("dossier", [{"kind": "dossier", "id": dossier["id"]}]),
+        hybrid_environment=Env(),
+    )
+
+    try:
+        service.render_attached_context([{"kind": "topic", "id": "topic-1"}], "alpha")
+    except RuntimeError as exc:
+        assert str(exc) == "__motoko_stopped__"
+    else:
+        raise AssertionError("attached context rendering should honor a pre-set cancel event")
 
 
 def test_core_recent_conversation_renderer_is_injectable(m):
@@ -15792,6 +15926,9 @@ def main() -> int:
         test_retrieval_preview_shows_context_without_model_call,
         test_core_retrieval_sufficiency_planner_selects_bounded_extra_pass,
         test_retrieval_service_builds_sufficiency_expansion,
+        test_retrieval_service_passes_cancel_event_to_topic_and_dossier_callbacks,
+        test_retrieval_service_preserves_legacy_topic_and_dossier_callbacks_with_cancel_event,
+        test_retrieval_service_attached_context_honors_pre_cancelled_event,
         test_prompt_context_runs_bounded_retrieval_sufficiency_pass,
         test_index_storage_audit_reports_duplicates_and_cleanup_plan,
         test_index_storage_core_builds_duplicate_and_summary_report,
@@ -15845,9 +15982,11 @@ def main() -> int:
         test_index_pause_resume_rescans_new_files_without_overwriting_chunks,
         test_summarize_blocks_cancel_event_raises_work_paused,
         test_topic_chunk_ranking_honors_cancel_event,
+        test_attached_topic_retrieval_honors_cancel_event,
         test_topic_dossier_passes_cancel_event_to_chunk_ranking,
         test_memory_dossier_honors_cancel_event_before_ranking,
         test_memory_dossier_passes_cancel_event_to_retrieval_ranking,
+        test_attached_dossier_retrieval_honors_cancel_event,
         test_recent_conversation_ranking_honors_cancel_event,
         test_profile_source_material_honors_cancel_event,
         test_profile_refresh_passes_cancel_event_to_source_material,
