@@ -1335,8 +1335,11 @@ Current progress on this stretch:
   refreshes the catalog from the TUI event handler. `/sources` fallback for
   attached index context now reports current evidence/vector artifact ids, row
   counts, freshness, and vector refresh labels from live state. Fresh
-  dossier/remaining TUI attachment summaries are still candidates for the next
-  always-fresh context pass.
+  attached index records now also persist current evidence/vector artifact
+  metadata during sync, and `/status` resyncs the current conversation before
+  reporting attached retrieval artifact freshness. Fresh dossier/remaining TUI
+  attachment summaries are still candidates for the next always-fresh context
+  pass.
 
 Completion criteria for this next stretch:
 

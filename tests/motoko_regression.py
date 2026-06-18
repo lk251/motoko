@@ -10518,6 +10518,81 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
             os.chdir(old_cwd)
 
 
+def test_status_refreshes_attached_index_artifact_metadata(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "logbook.org"
+        source.write_text("* TODO Fresh attached artifact task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "20260524-140000-statusart",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-24T14:00:00+00:00",
+            "corpus_summary": "status artifact-aware attached index",
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        conv = m.new_conversation("Attached artifact status")
+        conv["context_items"] = [m.context_item_from_index(index)]
+        assert "evidence_store" not in conv["context_items"][0]
+        assert "vector_store" not in conv["context_items"][0]
+
+        evidence_store = {
+            "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
+            "id": "evidence-status-current",
+            "evidence_input_schema": m.EVIDENCE_INPUT_SCHEMA_VERSION,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.evidence_store_source_fingerprint(index),
+            },
+            "rows": [],
+            "row_count": 5,
+        }
+        vector_store = {
+            "schema": m.VECTOR_STORE_SCHEMA_VERSION,
+            "id": "vector-status-current",
+            "method": m.LEXICAL_VECTOR_METHOD,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.vector_store_source_fingerprint(index),
+            },
+            "rows": [],
+            "row_count": 9,
+        }
+        m.atomic_write(m.evidence_store_path(evidence_store["id"]), json.dumps(evidence_store, ensure_ascii=False, indent=2) + "\n")
+        m.atomic_write(m.vector_store_path(vector_store["id"]), json.dumps(vector_store, ensure_ascii=False, indent=2) + "\n")
+
+        status = m.format_status(conv)
+
+        attached = conv["context_items"][0]
+        assert attached["evidence_store"] == "evidence-status-current"
+        assert attached["evidence_rows"] == 5
+        assert attached["evidence_status"] == "fresh"
+        assert attached["vector_store"] == "vector-status-current"
+        assert attached["vector_rows"] == 9
+        assert attached["vector_status"] == "fresh"
+        assert "attached retrieval artifacts: evidence fresh 5 row(s); vector fresh 9 row(s) lexical-hash-v1" in status
+
+
 def test_context_catalog_reports_current_memory_and_profile_freshness(m):
     with isolated_state():
         m.write_memory_rows(
@@ -15976,6 +16051,7 @@ def main() -> int:
         test_prompt_context_uses_current_catalog_not_stale_catalog_file,
         test_status_uses_current_catalog_even_without_persisted_catalog,
         test_context_catalog_reports_current_evidence_and_vector_artifacts,
+        test_status_refreshes_attached_index_artifact_metadata,
         test_context_catalog_reports_current_memory_and_profile_freshness,
         test_index_resume_after_model_timeout,
         test_index_model_residency_defer_is_resumable_not_failed,

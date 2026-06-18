@@ -15883,6 +15883,8 @@ def resume_document_index(index_id: str, progress_callback=None, cancel_event=No
 
 def context_item_from_index(index: dict) -> dict:
     status, warnings = index_staleness(index)
+    artifact_fields = index_retrieval_artifact_source_fields(index)
+    artifact_warnings = artifact_fields.pop("artifact_warnings", [])
     summary = index.get("corpus_summary", "")
     signal_summary = index.get("signal_summary", "")
     if signal_summary:
@@ -15897,8 +15899,9 @@ def context_item_from_index(index: dict) -> dict:
         "root": index.get("root", ""),
         "glob": index.get("glob") or AUTO_INDEX_GLOB,
         "status": status,
-        "warnings": warnings[:5],
+        "warnings": (warnings[:5] + artifact_warnings)[:8],
         "summary": summary,
+        **artifact_fields,
     }
 
 
@@ -19393,7 +19396,43 @@ def print_sources(conv: dict) -> None:
     print_report(format_conversation_sources(conv))
 
 
+def attached_context_artifact_status(index_items: list[dict]) -> str:
+    evidence = []
+    vectors = []
+    for item in index_items:
+        if item.get("evidence_store"):
+            evidence.append(
+                {
+                    "status": item.get("evidence_status", "unknown"),
+                    "rows": int(item.get("evidence_rows", 0) or 0),
+                }
+            )
+        if item.get("vector_store"):
+            vectors.append(
+                {
+                    "status": item.get("vector_status", "unknown"),
+                    "rows": int(item.get("vector_rows", 0) or 0),
+                    "method": item.get("vector_method", ""),
+                }
+            )
+
+    def summarize(label: str, rows: list[dict]) -> str:
+        if not rows:
+            return ""
+        first = rows[0]
+        detail = f"{label} {first.get('status', 'unknown')} {first.get('rows', 0)} row(s)"
+        if first.get("method"):
+            detail += f" {first.get('method')}"
+        if len(rows) > 1:
+            detail += f" +{len(rows) - 1}"
+        return detail
+
+    return "; ".join(part for part in [summarize("evidence", evidence), summarize("vector", vectors)] if part)
+
+
 def format_status(conv: dict | None = None) -> str:
+    if conv:
+        sync_attached_indexes_to_latest(conv)
     memories = load_memories(limit=500)
     pinned = sum(1 for row in memories if row.get("pinned"))
     skills = list_skills()
@@ -19429,6 +19468,7 @@ def format_status(conv: dict | None = None) -> str:
     selected_conversations = ranked_recent_conversations(conv, query="") if conv else []
     context_items = conv.get("context_items", []) if conv else []
     index_items = [item for item in context_items if item.get("kind") == "index"]
+    attached_artifact_status = attached_context_artifact_status(index_items)
     topic_items = [item for item in context_items if item.get("kind") == "topic"]
     dossier_items = [item for item in context_items if item.get("kind") == "dossier"]
     file_items = [item for item in context_items if item.get("kind") == "file"]
@@ -19514,6 +19554,8 @@ def format_status(conv: dict | None = None) -> str:
                 f"auto-selected recent conversations: {len(selected_conversations)}",
             ]
         )
+        if attached_artifact_status:
+            lines.append(f"attached retrieval artifacts: {attached_artifact_status}")
     for job in index_jobs[:3]:
         lines.append(f"index job: {format_index_progress_line(job)}")
     return "\n".join(lines)

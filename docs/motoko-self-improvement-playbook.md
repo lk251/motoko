@@ -333,7 +333,10 @@ of usage. It is ordered by likely value to intelligence, competence, and craft:
    `/pause`, or clean shutdown.
 3. Improve always-fresh context behavior. When background refresh finishes while
    a TUI session is open, the session should notice fresh indexes, evidence
-   stores, vectors, memories, and dossiers without needing a restart.
+   stores, vectors, memories, and dossiers without needing a restart. Current
+   progress: attached index records now persist live evidence/vector artifact
+   metadata when refreshed, and `/status` resyncs the current conversation's
+   attachments before reporting attached retrieval artifact freshness.
 4. Improve incremental vector and evidence refresh diagnostics. Status should
    say whether a refresh is full, resumed, schema-forced, route-forced, or
    source-change-only, with concise rows/ETA/progress rather than opaque
