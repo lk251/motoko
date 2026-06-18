@@ -9563,6 +9563,74 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             os.environ["MOTOKO_EMBEDDING_PARALLEL"] = old_parallel
 
 
+def test_background_study_pauses_when_vector_refresh_pauses(m):
+    old_refresh_vector_stores = m.refresh_vector_stores
+    old_vector_refresh = os.environ.get("MOTOKO_BACKGROUND_VECTOR_REFRESH")
+    old_vector_limit = os.environ.get("MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT")
+    try:
+        os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH"] = "1"
+        os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT"] = "1"
+        with isolated_state():
+            conv = m.new_conversation("Paused vector")
+            conv["id"] = "paused-vector"
+            phases = []
+            calls = []
+
+            def fake_refresh_vector_stores(**kwargs):
+                calls.append(kwargs)
+                phase_callback = kwargs.get("phase_callback")
+                if phase_callback is not None:
+                    phase_callback("bg-heavy: vectorizing(model) paused-test")
+                return {
+                    "schema": "vector-refresh-v1",
+                    "created": "2026-06-18T00:00:00+00:00",
+                    "method": m.EMBEDDING_VECTOR_METHOD,
+                    "status": "paused",
+                    "built": 0,
+                    "items": [
+                        {
+                            "status": "paused",
+                            "index": "paused-index",
+                            "name": "docs",
+                            "note": "vectorization paused at durable checkpoint",
+                            "progress_id": "progress-abc",
+                        }
+                    ],
+                }
+
+            m.refresh_vector_stores = fake_refresh_vector_stores
+            try:
+                m.background_study_step(conv, phase_callback=phases.append, manual=True)
+            except m.WorkPaused as exc:
+                assert "background catch-up paused during vector refresh" in str(exc)
+                assert exc.work_id == "progress-abc"
+                assert exc.work_kind == "vector"
+            else:
+                raise AssertionError("background study should pause when vector refresh pauses")
+
+            assert calls
+            assert any("paused-test" in phase for phase in phases)
+            state = m.read_study_state()
+            assert state["status"] == "paused"
+            assert state["phase"] == "study: paused"
+            assert state["child_work_id"] == "progress-abc"
+            assert state["child_work_kind"] == "vector"
+            assert any(
+                "background catch-up paused during vector refresh" in note
+                for note in state.get("notes", [])
+            )
+    finally:
+        m.refresh_vector_stores = old_refresh_vector_stores
+        if old_vector_refresh is None:
+            os.environ.pop("MOTOKO_BACKGROUND_VECTOR_REFRESH", None)
+        else:
+            os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH"] = old_vector_refresh
+        if old_vector_limit is None:
+            os.environ.pop("MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT", None)
+        else:
+            os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT"] = old_vector_limit
+
+
 def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -16172,6 +16240,7 @@ def main() -> int:
         test_embedding_vector_store_stale_when_route_model_changes,
         test_vector_doctor_reports_embedding_parallelism_without_private_rows,
         test_embedding_vector_store_resumes_saved_progress,
+        test_background_study_pauses_when_vector_refresh_pauses,
         test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh,
         test_diagnose_safe_redacts_private_progress_metadata,
         test_embedding_vector_store_falls_back_from_excess_parallelism,

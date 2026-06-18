@@ -17028,6 +17028,29 @@ def background_study_step(
             clear_work_pause_request()
             raise WorkPaused("background study paused by request", work_id=job_id, work_kind="study")
 
+    def pause_from_child(message: str, *, child_work_id: str = "", child_work_kind: str = "") -> None:
+        pause_notes = notes + [message]
+        state = {
+            "updated": now(),
+            "phase": "study: paused",
+            "status": "paused",
+            "mode": mode,
+            "job_id": job_id,
+            "notes": pause_notes[:8],
+            "child_work_id": child_work_id,
+            "child_work_kind": child_work_kind,
+        }
+        write_study_state(state)
+        append_study_job_event(
+            job_id,
+            "paused",
+            notes=pause_notes[:8],
+            child_work_id=child_work_id,
+            child_work_kind=child_work_kind,
+        )
+        clear_work_pause_request()
+        raise WorkPaused(message, work_id=child_work_id or job_id, work_kind=child_work_kind or "study")
+
     set_phase("study: catalog")
     catalog = write_context_catalog()
     notes = []
@@ -17137,6 +17160,18 @@ def background_study_step(
                     label = item.get("name") or item.get("index", "")
                     detail = item.get("error") or item.get("note") or item.get("reason", "")
                     notes.append(f"vector refresh {item.get('status')}: {label} {detail}".strip())
+            if vector_report.get("status") == "paused":
+                paused_item = next(
+                    (item for item in vector_report.get("items", []) if item.get("status") == "paused"),
+                    {},
+                )
+                label = paused_item.get("name") or paused_item.get("index", "")
+                detail = paused_item.get("note") or paused_item.get("reason", "") or "paused"
+                pause_from_child(
+                    f"background catch-up paused during vector refresh: {label} {detail}".strip(),
+                    child_work_id=str(paused_item.get("progress_id") or ""),
+                    child_work_kind="vector",
+                )
     if env_flag("MOTOKO_BACKGROUND_PROFILE", False) and profile_refresh_due(catalog):
         set_phase("study: profile", notes=notes)
         try:

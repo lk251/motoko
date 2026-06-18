@@ -1327,6 +1327,11 @@ Current progress on this stretch:
   fixed-temp race. Realm-local atomic writes use unique same-directory temp
   files, retry once if a temp file disappears before replace, and vector
   checkpoint writes serialize through a content-free per-progress lock file.
+- Complete: manual background catch-up now treats a paused vector refresh as a
+  paused parent study job, not as a completed catch-up with a note. The study
+  state records the child vector progress id/kind so `/bg-now` and the TUI can
+  resume from the durable vector checkpoint instead of silently continuing
+  later planning phases.
 - Progress: long-lived TUI sessions now refresh attached index references after
   background study completion, complementing the existing prompt-time resync.
   `/status` also builds its context-catalog line from current user-owned state

@@ -411,6 +411,9 @@ Current progress on this backlog:
   vector-progress checkpoint instead of resetting to the current TUI session.
   Evidence refresh reports now expose the same style of mode/cause diagnostics
   for missing, forced, schema, stale, and source-change rebuilds.
+- Manual background catch-up now promotes a paused vector refresh into a paused
+  study state with the child vector progress id/kind, so the parent work does
+  not report completion after a resumable vector checkpoint pause.
 - Artifact lifecycle policy has moved another step into
   `motoko_core.artifact_lifecycle`: delete-derived families, manual-review
   families, single-file durable state families, and derived delete-report labels
