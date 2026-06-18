@@ -1135,6 +1135,7 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert summary["validation_gates"] >= 6
         assert summary["cancellation_paths"] > 0
         assert summary["model_route_paths"] > 0
+        assert summary["artifact_lifecycle_paths"] > 0
         assert summary["root_hotspots"]
         assert any(row["name"] == "nix-flake" for row in code_map["validation_gates"])
         assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in code_map["constants"])
@@ -1146,6 +1147,11 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         )
         assert any("raise_if_work_cancelled" in row.get("helpers", []) for row in code_map["cancellation_paths"])
         assert any("open_model_response" in row.get("helpers", []) for row in code_map["model_route_paths"])
+        assert any(
+            "source_lifecycle_report" in row.get("helpers", [])
+            or "delete_index_snapshot_artifacts" in row.get("helpers", [])
+            for row in code_map["artifact_lifecycle_paths"]
+        )
         source_trace = next(row for row in code_map["command_traces"] if row["command"] == "source-lifecycle")
         assert source_trace["handler"] == "command_source_lifecycle"
         assert source_trace["handler_found"] is True
@@ -1174,6 +1180,13 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         route_query = m.motoko_code_query("model route local endpoint call_model open_model_response")
         assert route_query["model_route_paths"]
         assert any("open_model_response" in row.get("helpers", []) for row in route_query["model_route_paths"])
+        lifecycle_path_query = m.motoko_code_query("artifact lifecycle cleanup source reprocessing delete derived")
+        assert lifecycle_path_query["artifact_lifecycle_paths"]
+        assert any(
+            "source_lifecycle_report" in row.get("helpers", [])
+            or "delete_index_snapshot_artifacts" in row.get("helpers", [])
+            for row in lifecycle_path_query["artifact_lifecycle_paths"]
+        )
         rendered = m.format_motoko_code_query("Motoko skill plan command implementation tests")
         assert "Motoko code query:" in rendered
         assert "command traces:" in rendered
@@ -1182,11 +1195,13 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert "symbols:" in rendered
         assert "cancellation paths:" in m.format_motoko_code_query("foreground cancellation vector index cleanup interruption")
         assert "model route paths:" in m.format_motoko_code_query("model route local endpoint call_model")
+        assert "artifact lifecycle paths:" in m.format_motoko_code_query("artifact lifecycle cleanup source reprocessing")
         assert "validation gates:" in m.format_motoko_code_query("validation gates nix flake check")
         map_rendered = m.format_motoko_code_map()
         assert "root facade hotspots:" in map_rendered
         assert "cancellation paths:" in map_rendered
         assert "model route paths:" in map_rendered
+        assert "artifact lifecycle paths:" in map_rendered
         assert "artifact families:" in map_rendered
         assert "service boundaries:" in map_rendered
         assert "schema/artifact constants:" in map_rendered
@@ -1261,6 +1276,8 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "code_query_finds_model_route_paths" in names
         assert "code_map_artifact_families_present" in names
         assert "code_query_finds_artifact_families" in names
+        assert "code_map_artifact_lifecycle_paths_present" in names
+        assert "code_query_finds_artifact_lifecycle_paths" in names
         assert "code_query_finds_feedback_eval_curator_path" in names
         assert "skill_scanner_detects_risky_script" in names
         curator_check = next(

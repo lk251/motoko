@@ -183,6 +183,22 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             },
         )
     )
+    artifact_lifecycle_paths = (
+        code_map.get("artifact_lifecycle_paths", [])
+        if isinstance(code_map.get("artifact_lifecycle_paths"), list)
+        else []
+    )
+    checks.append(
+        _check(
+            "code_map_artifact_lifecycle_paths_present",
+            bool(artifact_lifecycle_paths),
+            f"artifact_lifecycle_paths={len(artifact_lifecycle_paths)}",
+            evidence={
+                "top_path": (artifact_lifecycle_paths or [{}])[0].get("qualname", ""),
+                "helpers": (artifact_lifecycle_paths or [{}])[0].get("helpers", []),
+            },
+        )
+    )
 
     code_query = query_code_map(code_map, "Motoko skill plan command implementation tests", limit=8)
     checks.append(
@@ -267,6 +283,22 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={
                 "top_family": (artifact_family_query.get("artifact_families") or [{}])[0].get("path_key", ""),
                 "top_policy": (artifact_family_query.get("artifact_families") or [{}])[0].get("cleanup_policy", ""),
+            },
+        )
+    )
+    artifact_lifecycle_query = query_code_map(
+        code_map,
+        "artifact lifecycle cleanup source reprocessing delete derived",
+        limit=8,
+    )
+    checks.append(
+        _check(
+            "code_query_finds_artifact_lifecycle_paths",
+            bool(artifact_lifecycle_query.get("artifact_lifecycle_paths")),
+            f"artifact_lifecycle_paths={len(artifact_lifecycle_query.get('artifact_lifecycle_paths', []))}",
+            evidence={
+                "top_path": (artifact_lifecycle_query.get("artifact_lifecycle_paths") or [{}])[0].get("qualname", ""),
+                "helpers": (artifact_lifecycle_query.get("artifact_lifecycle_paths") or [{}])[0].get("helpers", []),
             },
         )
     )

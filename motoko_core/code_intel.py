@@ -58,6 +58,34 @@ MODEL_ROUTE_HELPERS = {
     "select_embedding_route",
     "select_reranker_route",
 }
+ARTIFACT_LIFECYCLE_HELPERS = {
+    "collect_source_lifecycle_artifact_records",
+    "conversation_delete_json_dir_specs",
+    "conversation_delete_json_file_specs",
+    "conversation_delete_jsonl_specs",
+    "delete_index_snapshot_artifacts",
+    "delete_json_artifacts_referencing_index",
+    "dependency_json_artifact_specs",
+    "derived_delete_report_labels",
+    "format_source_lifecycle_report",
+    "index_snapshot_delete_file_specs",
+    "index_snapshot_delete_specs",
+    "index_source_lifecycle_scan",
+    "resolve_artifact_lifecycle_specs",
+    "source_lifecycle_affected_paths",
+    "source_lifecycle_artifact_plan",
+    "source_lifecycle_cleanup_plan",
+    "source_lifecycle_json_dir_specs",
+    "source_lifecycle_json_file_specs",
+    "source_lifecycle_jsonl_specs",
+    "source_lifecycle_replacement_readiness",
+    "source_lifecycle_report",
+    "source_lifecycle_report_for_index",
+    "source_lifecycle_report_from_index",
+    "source_lifecycle_state",
+    "source_lifecycle_storage_plan_summaries_from_indexes",
+    "source_lifecycle_storage_plan_summary_from_index",
+}
 
 
 def _maybe_cancel(cancel_check=None) -> None:
@@ -747,6 +775,18 @@ def _build_model_route_paths(calls: list[dict], symbols: list[dict], *, limit: i
     )
 
 
+def _build_artifact_lifecycle_paths(calls: list[dict], symbols: list[dict], *, limit: int = 200) -> list[dict]:
+    """Return functions that visibly apply artifact lifecycle policy."""
+
+    return _build_helper_paths(
+        calls,
+        symbols,
+        ARTIFACT_LIFECYCLE_HELPERS,
+        role="artifact lifecycle cleanup rebuild migration source reprocessing derived family policy path",
+        limit=limit,
+    )
+
+
 def _build_service_boundaries(modules: list[dict], symbols: list[dict], imports: list[dict], call_edges: list[dict]) -> list[dict]:
     public_by_path: dict[str, list[dict]] = {}
     for symbol in symbols:
@@ -927,6 +967,8 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     _maybe_cancel(cancel_check)
     model_route_paths = _build_model_route_paths(calls, symbols)
     _maybe_cancel(cancel_check)
+    artifact_lifecycle_paths = _build_artifact_lifecycle_paths(calls, symbols)
+    _maybe_cancel(cancel_check)
     root_hotspots = _build_root_hotspots(symbols, calls)
     _maybe_cancel(cancel_check)
     service_boundaries = _build_service_boundaries(modules, symbols, imports, call_edges)
@@ -952,6 +994,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
         "call_edges": call_edges,
         "cancellation_paths": cancellation_paths,
         "model_route_paths": model_route_paths,
+        "artifact_lifecycle_paths": artifact_lifecycle_paths,
         "artifact_families": artifact_families,
         "commands": commands,
         "constants": constants,
@@ -979,6 +1022,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
             "resolved_call_edges": len(call_edges),
             "cancellation_paths": len(cancellation_paths),
             "model_route_paths": len(model_route_paths),
+            "artifact_lifecycle_paths": len(artifact_lifecycle_paths),
             "service_boundaries": len(service_boundaries),
             "validation_gates": len(validation_gates),
             "tests": len(tests),
@@ -1079,6 +1123,11 @@ def query_code_map(code_map: dict, query: str, *, limit: int = 12, cancel_check=
             ["caller", "qualname", "path", "helpers", "checks", "role"],
             name_field="qualname",
         ),
+        "artifact_lifecycle_paths": rank(
+            code_map.get("artifact_lifecycle_paths", []),
+            ["caller", "qualname", "path", "helpers", "checks", "role"],
+            name_field="qualname",
+        ),
         "service_boundaries": rank(
             code_map.get("service_boundaries", []),
             ["path", "doc", "public_symbols"],
@@ -1118,6 +1167,7 @@ def format_code_map_report(code_map: dict) -> str:
             f"calls: {summary.get('calls', 0)}  resolved edges: {summary.get('resolved_call_edges', 0)}  "
             f"cancellation paths: {summary.get('cancellation_paths', 0)}  "
             f"model route paths: {summary.get('model_route_paths', 0)}  "
+            f"artifact lifecycle paths: {summary.get('artifact_lifecycle_paths', 0)}  "
             f"service boundaries: {summary.get('service_boundaries', 0)}  tests: {summary.get('tests', 0)}"
         ),
         (
@@ -1150,6 +1200,14 @@ def format_code_map_report(code_map: dict) -> str:
     if code_map.get("model_route_paths"):
         lines.append("model route paths:")
         for row in code_map.get("model_route_paths", [])[:8]:
+            helpers = ", ".join(row.get("helpers", [])[:4]) or "-"
+            lines.append(
+                f"- {row.get('qualname', '')}: calls={row.get('check_count', 0)} "
+                f"helpers={helpers} {row.get('path', '')}:{row.get('line', '')}"
+            )
+    if code_map.get("artifact_lifecycle_paths"):
+        lines.append("artifact lifecycle paths:")
+        for row in code_map.get("artifact_lifecycle_paths", [])[:8]:
             helpers = ", ".join(row.get("helpers", [])[:4]) or "-"
             lines.append(
                 f"- {row.get('qualname', '')}: calls={row.get('check_count', 0)} "
@@ -1223,6 +1281,7 @@ def _format_rows(
     validation: bool = False,
     cancellation: bool = False,
     model_route: bool = False,
+    artifact_lifecycle: bool = False,
     artifact_family: bool = False,
 ) -> list[str]:
     lines = [title + ":"]
@@ -1268,6 +1327,11 @@ def _format_rows(
             helpers = ",".join(row.get("helpers", [])[:4]) or "-"
             detail = f"calls={row.get('check_count', 0)} helpers={helpers}"
             location = f"{row.get('path', '')}:{row.get('line', 1)}"
+        elif artifact_lifecycle:
+            label = row.get("qualname") or row.get("caller", "")
+            helpers = ",".join(row.get("helpers", [])[:4]) or "-"
+            detail = f"calls={row.get('check_count', 0)} helpers={helpers}"
+            location = f"{row.get('path', '')}:{row.get('line', 1)}"
         elif artifact_family:
             label = row.get("path_key") or row.get("artifact_kind", "")
             detail = (
@@ -1303,6 +1367,13 @@ def format_code_query_report(result: dict) -> str:
     lines.extend(_format_rows("call edges", result.get("call_edges", [])))
     lines.extend(_format_rows("cancellation paths", result.get("cancellation_paths", []), cancellation=True))
     lines.extend(_format_rows("model route paths", result.get("model_route_paths", []), model_route=True))
+    lines.extend(
+        _format_rows(
+            "artifact lifecycle paths",
+            result.get("artifact_lifecycle_paths", []),
+            artifact_lifecycle=True,
+        )
+    )
     lines.extend(_format_rows("service boundaries", result.get("service_boundaries", []), service=True))
     lines.extend(_format_rows("validation gates", result.get("validation_gates", []), validation=True))
     lines.extend(_format_rows("root facade hotspots", result.get("root_hotspots", []), hotspot=True))

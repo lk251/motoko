@@ -1726,6 +1726,12 @@ Motoko self-code checkpoint, 2026-05-31:
   including helpers such as `model_route_for_request`, `open_model_response`,
   `prepare_route_residency_for_request`, `embed_texts`, and
   `rerank_documents`.
+- Code intelligence also exposes artifact-lifecycle paths. Queries about
+  derived-artifact cleanup, source reprocessing, rebuilds, migrations, deleted
+  or ignored sources, and lifecycle apply/report work now show functions that
+  call helpers such as `source_lifecycle_report`,
+  `delete_index_snapshot_artifacts`, `source_lifecycle_artifact_plan`, and
+  `collect_source_lifecycle_artifact_records`.
 - Added `docs/motoko-self-improvement-playbook.md` as the durable checklist
   for Motoko improving her own repo: codebase lookup, skill/tool hygiene,
   retrieval diagnosis, refactor boundaries, validation, and deployment soak.

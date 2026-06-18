@@ -235,7 +235,10 @@ fresh evidence shows a better target:
    dossier, memory, or report operations. It also exposes model-route paths,
    so changes to local-model routing, residency, worker scheduling, prompt
    caching, embeddings, reranking, and model I/O can start from the functions
-   that select routes or call approved model endpoints.
+   that select routes or call approved model endpoints. It now also exposes
+   artifact-lifecycle paths, so cleanup, source-reprocessing, derived-artifact
+   deletion, and rebuild/migration work can start from the functions that
+   apply lifecycle policy instead of searching the root facade manually.
 4. Keep skill learning review-first. Patch the existing umbrella skills before
    creating narrow new skills. Use support files for examples, debugging
    transcripts, validation checklists, and reusable design recipes that would
