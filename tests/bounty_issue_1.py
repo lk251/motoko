@@ -22,6 +22,9 @@ ISSUE = 1
 SAMPLES = 100
 SHORT_P95_LIMIT_MS = 30.0
 LONG_P95_LIMIT_MS = 40.0
+BACKGROUND_P95_LIMIT_MS = 50.0
+BACKGROUND_MAX_LIMIT_MS = 250.0
+BACKGROUND_STALL_LIMIT_MS = 1600.0
 MAX_TRANSCRIPT_GROWTH_MS = 10.0
 
 
@@ -53,6 +56,20 @@ def scenario_metrics(row: dict) -> dict:
     }
 
 
+def background_metrics(row: dict) -> dict:
+    return {
+        "phase": str(row.get("phase", "")),
+        "samples": int(row.get("samples", 0) or 0),
+        "p50_ms": float(row.get("p50_ms", 0.0) or 0.0),
+        "p95_ms": float(row.get("p95_ms", 0.0) or 0.0),
+        "max_ms": float(row.get("max_ms", 0.0) or 0.0),
+        "longest_stall_ms": float(row.get("longest_stall_ms", 0.0) or 0.0),
+        "visible_before_phase_end": bool(row.get("visible_before_phase_end")),
+        "input_integrity": bool(row.get("input_integrity")),
+        "background_completed": bool(row.get("background_completed")),
+    }
+
+
 def verify() -> dict:
     helpers = load_tty_helpers()
     motoko = helpers.load_motoko()
@@ -81,6 +98,12 @@ def verify() -> dict:
         width=140,
         transcript_pairs=900,
         burst=True,
+    )
+    background_text = "background study input Café mañana résumé 東京界 Привет "[:72]
+    background = helpers.run_background_study_latency_probe(
+        motoko,
+        text=background_text,
+        width=140,
     )
 
     failure_reasons: list[str] = []
@@ -114,6 +137,23 @@ def verify() -> dict:
         failure_reasons.append(f"long_transcript p95 exceeded {LONG_P95_LIMIT_MS:g} ms")
     if long_metrics["p95_ms"] - short_metrics["p95_ms"] > MAX_TRANSCRIPT_GROWTH_MS:
         failure_reasons.append("long transcript materially increased p95 latency")
+    background_report = background_metrics(background)
+    if background.get("errors"):
+        failure_reasons.append("background_study: verifier scenario reported errors")
+    if background_report["samples"] != len(background_text):
+        failure_reasons.append(f"background_study: expected {len(background_text)} samples")
+    if not background_report["visible_before_phase_end"]:
+        failure_reasons.append("background_study: input was withheld until the background phase ended")
+    if not background_report["input_integrity"]:
+        failure_reasons.append("background_study: exact input integrity failed")
+    if not background_report["background_completed"]:
+        failure_reasons.append("background_study: synthetic evidence-store work did not complete")
+    if background_report["p95_ms"] > BACKGROUND_P95_LIMIT_MS:
+        failure_reasons.append(f"background_study p95 exceeded {BACKGROUND_P95_LIMIT_MS:g} ms")
+    if background_report["max_ms"] > BACKGROUND_MAX_LIMIT_MS:
+        failure_reasons.append(f"background_study max exceeded {BACKGROUND_MAX_LIMIT_MS:g} ms")
+    if background_report["longest_stall_ms"] > BACKGROUND_STALL_LIMIT_MS:
+        failure_reasons.append(f"background_study visible-progress stall exceeded {BACKGROUND_STALL_LIMIT_MS:g} ms")
 
     return {
         "schema": SCHEMA,
@@ -121,6 +161,7 @@ def verify() -> dict:
         "accepted": not failure_reasons,
         "short_transcript": short_metrics,
         "long_transcript": long_metrics,
+        "background_study": background_report,
         "input_integrity": input_integrity,
         "unicode_integrity": unicode_integrity,
         "failure_reasons": failure_reasons,
@@ -134,6 +175,17 @@ def rejected_report(reason: str) -> dict:
         "accepted": False,
         "short_transcript": {"samples": 0, "p50_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0},
         "long_transcript": {"samples": 0, "p50_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0},
+        "background_study": {
+            "phase": "study: evidence-store",
+            "samples": 0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "max_ms": 0.0,
+            "longest_stall_ms": 0.0,
+            "visible_before_phase_end": False,
+            "input_integrity": False,
+            "background_completed": False,
+        },
         "input_integrity": False,
         "unicode_integrity": False,
         "failure_reasons": [reason],

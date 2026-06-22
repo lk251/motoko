@@ -17,6 +17,7 @@ import os
 import pathlib
 import pty
 import select
+import subprocess
 import struct
 import sys
 import termios
@@ -168,6 +169,298 @@ def wait_for_prefixes(
     output = b"".join(chunks).decode("utf-8", errors="replace")
     latencies = [seen[idx] for idx in range(len(prefixes)) if idx in seen]
     return latencies, output
+
+
+def write_json(path: pathlib.Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def build_background_study_fixture(
+    m,
+    tmp_root: pathlib.Path,
+    *,
+    file_count: int = 20,
+    chunks_per_file: int = 2,
+    headings_per_chunk: int = 10,
+) -> dict:
+    docs = tmp_root / "docs"
+    docs.mkdir(parents=True, exist_ok=True)
+    index_id = "20260621-000000-badfed"
+    files = []
+    for file_idx in range(file_count):
+        chunks = []
+        file_parts = []
+        source = docs / f"background-{file_idx:04d}.org"
+        for chunk_idx in range(chunks_per_file):
+            lines = []
+            for heading_idx in range(headings_per_chunk):
+                ordinal = file_idx * chunks_per_file * headings_per_chunk + chunk_idx * headings_per_chunk + heading_idx
+                lines.extend(
+                    [
+                        f"* [2026-06-{(ordinal % 28) + 1:02d} Mon 10:{ordinal % 60:02d}] Synthetic background day {ordinal}",
+                        "** do",
+                        f"*** TODO Preserve responsive typing during evidence build {ordinal} :latency:",
+                        "** log",
+                        (
+                            "This deterministic fixture exists only to keep the real background "
+                            "evidence-store code busy while the PTY verifier types into Motoko."
+                        ),
+                    ]
+                )
+            content = "\n".join(lines) + "\n"
+            file_parts.append(content)
+            chunks.append(
+                {
+                    "chunk": chunk_idx + 1,
+                    "summary": f"Synthetic background evidence chunk {file_idx}-{chunk_idx}.",
+                    "content": content,
+                    "content_sha256": m.sha256_hex(content.encode("utf-8")),
+                    "content_bytes": len(content.encode("utf-8")),
+                }
+            )
+        source.write_text("".join(file_parts), encoding="utf-8")
+        files.append(
+            {
+                "path": str(source),
+                "source_fingerprint": m.source_fingerprint(source),
+                "summary": "Synthetic background-study latency fixture.",
+                "chunks": chunks,
+            }
+        )
+    index = {
+        "id": index_id,
+        "name": "background-study-latency",
+        "root": str(docs),
+        "glob": "*.org",
+        "created": m.now(),
+        "files": files,
+    }
+    write_json(m.index_path(index_id), index)
+    return index
+
+
+def read_pty_until(
+    fd: int,
+    predicate,
+    *,
+    timeout: float,
+) -> tuple[str, bool]:
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        readable, _writeable, _errors = select.select([fd], [], [], 0.02)
+        if not readable:
+            continue
+        try:
+            chunks.append(os.read(fd, 65536))
+        except OSError:
+            break
+        text = b"".join(chunks).decode("utf-8", errors="replace")
+        if predicate(strip_ansi(text)):
+            return text, True
+    return b"".join(chunks).decode("utf-8", errors="replace"), False
+
+
+def observe_child_prompt_latency(
+    fd: int,
+    *,
+    text: str,
+    phase_end_markers: tuple[str, ...],
+    timeout: float,
+) -> dict:
+    prefixes = [text[: idx + 1] for idx in range(len(text))]
+    injected_at: list[float] = []
+    seen: dict[int, float] = {}
+    chunks: list[bytes] = []
+    phase_end_seen_at: float | None = None
+    first_prefix_at: float | None = None
+    last_visible_change = time.monotonic()
+    longest_stall = 0.0
+
+    for char in text:
+        injected_at.append(time.monotonic())
+        os.write(fd, char.encode("utf-8"))
+
+    deadline = time.monotonic() + timeout
+    last_visible = ""
+    while time.monotonic() < deadline and (len(seen) < len(prefixes) or phase_end_seen_at is None):
+        readable, _writeable, _errors = select.select([fd], [], [], 0.02)
+        now_value = time.monotonic()
+        if not readable:
+            longest_stall = max(longest_stall, now_value - last_visible_change)
+            continue
+        try:
+            chunks.append(os.read(fd, 65536))
+        except OSError:
+            break
+        visible = strip_ansi(b"".join(chunks).decode("utf-8", errors="replace"))
+        if visible != last_visible:
+            longest_stall = max(longest_stall, now_value - last_visible_change)
+            last_visible_change = now_value
+            last_visible = visible
+        if phase_end_seen_at is None and any(marker in visible for marker in phase_end_markers):
+            phase_end_seen_at = now_value
+        for idx, prefix in enumerate(prefixes):
+            if idx not in seen and prefix in visible:
+                seen[idx] = max(0.0, now_value - injected_at[idx])
+                if first_prefix_at is None:
+                    first_prefix_at = now_value
+    output = b"".join(chunks).decode("utf-8", errors="replace")
+    latencies = [seen[idx] for idx in range(len(prefixes)) if idx in seen]
+    return {
+        "latencies": latencies,
+        "output": output,
+        "visible_text": strip_ansi(output),
+        "phase_end_seen": phase_end_seen_at is not None,
+        "visible_before_phase_end": (
+            first_prefix_at is not None
+            and (phase_end_seen_at is None or first_prefix_at <= phase_end_seen_at)
+        ),
+        "longest_stall_ms": round(longest_stall * 1000.0, 3),
+    }
+
+
+def wait_for_background_artifact(state_dir: pathlib.Path, fd: int, *, timeout: float = 5.0) -> tuple[bool, str]:
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if list((state_dir / "evidence-stores").glob("*.json")):
+            return True, b"".join(chunks).decode("utf-8", errors="replace")
+        readable, _writeable, _errors = select.select([fd], [], [], 0.05)
+        if not readable:
+            continue
+        try:
+            chunks.append(os.read(fd, 65536))
+        except OSError:
+            break
+    return bool(list((state_dir / "evidence-stores").glob("*.json"))), b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def run_background_study_latency_probe(
+    m,
+    *,
+    text: str,
+    width: int = 140,
+) -> dict:
+    old_env = {
+        "MOTOKO_STATE_HOME": os.environ.get("MOTOKO_STATE_HOME"),
+        "MOTOKO_CONFIG_HOME": os.environ.get("MOTOKO_CONFIG_HOME"),
+    }
+    master_fd = slave_fd = None
+    proc: subprocess.Popen | None = None
+    errors: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = pathlib.Path(tmp_name)
+            state_dir = tmp / "state"
+            config_dir = tmp / "config"
+            os.environ["MOTOKO_STATE_HOME"] = str(state_dir)
+            os.environ["MOTOKO_CONFIG_HOME"] = str(config_dir)
+            build_background_study_fixture(m, tmp)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "MOTOKO_STATE_HOME": str(state_dir),
+                    "MOTOKO_CONFIG_HOME": str(config_dir),
+                    "MOTOKO_TUI": "1",
+                    "TERM": "xterm-256color",
+                    "MOTOKO_BACKGROUND_STUDY": "1",
+                    "MOTOKO_BACKGROUND_STUDY_INTERVAL": "1",
+                    "MOTOKO_BACKGROUND_STUDY_IDLE_GRACE": "1",
+                    "MOTOKO_BACKGROUND_INDEX_ENRICH": "0",
+                    "MOTOKO_BACKGROUND_HEAVY_INDEX": "0",
+                    "MOTOKO_BACKGROUND_INDEX_CLEANUP": "0",
+                    "MOTOKO_BACKGROUND_INDEX_REPAIR": "0",
+                    "MOTOKO_BACKGROUND_VECTOR_REFRESH": "0",
+                    "MOTOKO_BACKGROUND_PROFILE": "0",
+                    "MOTOKO_BACKGROUND_EVIDENCE_REFRESH": "1",
+                    "MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT": "1",
+                    "MOTOKO_TUI_INPUT_BATCH_LIMIT": "64",
+                }
+            )
+            master_fd, slave_fd = pty.openpty()
+            set_winsz(slave_fd, 24, width)
+            proc = subprocess.Popen(
+                [sys.executable, str(REPO_ROOT / "motoko"), "chat", "--title", "Background Study Latency"],
+                cwd=str(tmp),
+                env=env,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd,
+                close_fds=True,
+            )
+            os.close(slave_fd)
+            slave_fd = None
+
+            initial, ready = read_pty_until(master_fd, lambda visible: "Background Study Latency" in visible, timeout=5.0)
+            if not ready:
+                errors.append("child TUI did not render initial conversation title")
+            phase_output, phase_seen = read_pty_until(
+                master_fd,
+                lambda visible: "study: evidence-store" in visible,
+                timeout=12.0,
+            )
+            cumulative_before_input = strip_ansi(initial + phase_output)
+            phase_seen = phase_seen or "study: evidence-store" in cumulative_before_input
+            if not phase_seen:
+                errors.append("background study evidence-store phase was not observed")
+
+            observed = observe_child_prompt_latency(
+                master_fd,
+                text=text,
+                phase_end_markers=("study: idle", "evidence store(s) refreshed", "catalog fresh"),
+                timeout=20.0,
+            )
+            completed, completion_output = wait_for_background_artifact(state_dir, master_fd, timeout=5.0)
+            final_visible = strip_ansi(initial + phase_output + observed["output"] + completion_output)
+            if len(observed["latencies"]) != len(text):
+                errors.append(f"background latency samples missing: {len(observed['latencies'])}/{len(text)}")
+            if text not in final_visible:
+                errors.append("background composer final text was not observed")
+            if not observed["visible_before_phase_end"]:
+                errors.append("typed text was not visible before background phase ended")
+            background_completed = completed
+            if not background_completed:
+                errors.append("background evidence store was not written")
+
+            with contextlib.suppress(OSError):
+                os.write(master_fd, b"\x03")
+            try:
+                proc.wait(timeout=3.0)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=2.0)
+            latencies = observed["latencies"]
+            return {
+                "phase": "study: evidence-store",
+                "samples": len(latencies),
+                "p50_ms": latency_percentile_ms(latencies, 50),
+                "p95_ms": latency_percentile_ms(latencies, 95),
+                "max_ms": round((max(latencies) if latencies else 0.0) * 1000.0, 3),
+                "longest_stall_ms": observed["longest_stall_ms"],
+                "visible_before_phase_end": observed["visible_before_phase_end"],
+                "input_integrity": text in final_visible,
+                "background_completed": background_completed,
+                "errors": errors,
+            }
+    finally:
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2.0)
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def make_latency_tui(

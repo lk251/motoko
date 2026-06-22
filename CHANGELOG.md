@@ -5,6 +5,14 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Fixed TUI typing latency during real background study. Background
+  evidence-store refresh now runs in a supervised subprocess so deterministic
+  CPU-heavy parsing/JSON work cannot hold the TUI process GIL, and TUI
+  progress events are coalesced and drained within a bounded slice. The issue
+  #1 verifier now includes a real child-process PTY scenario that types while
+  `study: evidence-store` is active and requires exact input integrity,
+  foreground visibility before phase completion, completed synthetic
+  evidence-store output, and p95 <= 50 ms.
 - Reduced raw TUI typing latency. Ordinary input no longer scans the transcript
   or recomputes route/config status on every key, and already-buffered input is
   drained in a bounded batch before the next bottom-frame render. The TTY test

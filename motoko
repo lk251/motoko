@@ -640,6 +640,8 @@ REASONING_LIVE_MAX_CHARS = 1600
 KV_OFFLOAD_NOTICE_TEXT = "KV not in GPU"
 KV_OFFLOAD_NOTICE_SECONDS = 3.0
 TUI_INPUT_BATCH_LIMIT = 64
+TUI_EVENT_BATCH_LIMIT = 96
+TUI_EVENT_DRAIN_BUDGET_SECONDS = 0.010
 TUI_DISPLAY_CACHE_SECONDS = 2.0
 CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
 FILE_SUMMARY_SCHEMA_VERSION = "file-summary-v1"
@@ -5149,6 +5151,16 @@ def env_int(name: str, default: int, *, minimum: int = 0) -> int:
         return default
     try:
         return max(minimum, int(raw))
+    except ValueError:
+        return default
+
+
+def env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return max(minimum, float(raw))
     except ValueError:
         return default
 
@@ -12110,7 +12122,7 @@ def index_is_persisted(index: dict) -> bool:
     return bool(re.fullmatch(r"\d{8}-\d{6}-[0-9a-f]{6}", index_id) and index_path(index_id).exists())
 
 
-def evidence_store_source_fingerprint(index: dict) -> str:
+def evidence_store_source_fingerprint(index: dict, *, yield_callback=None) -> str:
     items = [
         {
             "id": index.get("id", ""),
@@ -12119,9 +12131,13 @@ def evidence_store_source_fingerprint(index: dict) -> str:
             "schema": EVIDENCE_INPUT_SCHEMA_VERSION,
         }
     ]
-    for file_item in index.get("files", []):
+    for file_idx, file_item in enumerate(index.get("files", []), 1):
+        if yield_callback is not None and file_idx % 10 == 0:
+            yield_callback()
         chunks = []
-        for chunk in file_item.get("chunks", []):
+        for chunk_idx, chunk in enumerate(file_item.get("chunks", []), 1):
+            if yield_callback is not None and chunk_idx % 20 == 0:
+                yield_callback()
             chunks.append(
                 {
                     "chunk": chunk.get("chunk", ""),
@@ -12136,6 +12152,8 @@ def evidence_store_source_fingerprint(index: dict) -> str:
                 "chunks": chunks,
             }
         )
+    if yield_callback is not None:
+        yield_callback()
     return sha256_hex(json.dumps(items, sort_keys=True, ensure_ascii=False).encode("utf-8"))
 
 
@@ -12163,11 +12181,13 @@ def org_heading_metadata(title: str) -> dict:
     }
 
 
-def org_heading_sections(content: str) -> list[dict]:
+def org_heading_sections(content: str, *, yield_callback=None) -> list[dict]:
     headings = []
     stack = []
     offset = 0
-    for line in content.splitlines(keepends=True):
+    for line_number, line in enumerate(content.splitlines(keepends=True), 1):
+        if yield_callback is not None and line_number % 50 == 0:
+            yield_callback()
         stripped = line.rstrip()
         match = re.match(r"^(\*+)\s+(.*)$", stripped)
         if match:
@@ -12205,6 +12225,8 @@ def org_heading_sections(content: str) -> list[dict]:
         offset += len(line)
     sections = []
     for idx, heading in enumerate(headings):
+        if yield_callback is not None and idx % 50 == 0:
+            yield_callback()
         level = int(heading.get("level", 1) or 1)
         end = len(content)
         for next_heading in headings[idx + 1 :]:
@@ -12357,14 +12379,14 @@ def make_evidence_object(
     return {key: value for key, value in row.items() if value not in ("", [], {}, None)}
 
 
-def evidence_objects_for_chunk(index: dict, file_item: dict, chunk: dict) -> list[dict]:
+def evidence_objects_for_chunk(index: dict, file_item: dict, chunk: dict, *, yield_callback=None) -> list[dict]:
     content = read_chunk_content(index, chunk)
     if not content.strip():
         return []
     rows = []
     path = str(file_item.get("path", "")).lower()
     if path.endswith(".org") or re.search(r"(?m)^\*+\s+", content):
-        for section in org_heading_sections(content):
+        for section in org_heading_sections(content, yield_callback=yield_callback):
             kind = "org_heading"
             if section.get("date"):
                 kind = "org_day"
@@ -12390,6 +12412,8 @@ def evidence_objects_for_chunk(index: dict, file_item: dict, chunk: dict) -> lis
             )
             if row:
                 rows.append(row)
+            if yield_callback is not None and len(rows) % 50 == 0:
+                yield_callback()
     if path.endswith((".md", ".markdown")) or re.search(r"(?m)^#{1,6}\s+", content):
         for section in markdown_heading_sections(content):
             row = make_evidence_object(
@@ -12451,13 +12475,25 @@ def build_evidence_store_from_index(
 ) -> dict:
     raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    source_fingerprint = evidence_store_source_fingerprint(index)
     rows = []
+    last_yield = time.monotonic()
+
+    def cooperative_checkpoint() -> None:
+        nonlocal last_yield
+        now_value = time.monotonic()
+        if now_value - last_yield < 0.002:
+            return
+        raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
+        time.sleep(0)
+        last_yield = time.monotonic()
+
+    source_fingerprint = evidence_store_source_fingerprint(index, yield_callback=cooperative_checkpoint)
     for file_item in index.get("files", []):
         raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
         for chunk in file_item.get("chunks", []):
             raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
-            rows.extend(evidence_objects_for_chunk(index, file_item, chunk))
+            rows.extend(evidence_objects_for_chunk(index, file_item, chunk, yield_callback=cooperative_checkpoint))
+            cooperative_checkpoint()
     kind_counts = dict(collections.Counter(row.get("kind", "unknown") for row in rows))
     store = {
         "schema": EVIDENCE_STORE_SCHEMA_VERSION,
@@ -12701,6 +12737,75 @@ def refresh_evidence_stores(
         report["items"].append(item)
     report["built"] = built
     report["status"] = "built" if built else ("empty" if not report["items"] else "no-build")
+    return report
+
+
+def refresh_evidence_stores_subprocess(
+    *,
+    index_id: str | None = None,
+    force: bool = False,
+    limit: int = 1,
+    cancel_event=None,
+) -> dict:
+    command = [
+        sys.executable,
+        str(pathlib.Path(__file__).resolve()),
+        "evidence-refresh",
+        "--limit",
+        str(max(1, int(limit or 1))),
+        "--json",
+    ]
+    if force:
+        command.append("--force")
+    if index_id:
+        command.append(index_id)
+    env = os.environ.copy()
+    env["MOTOKO_TUI"] = "0"
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+
+    def terminate_child() -> None:
+        if proc.poll() is not None:
+            return
+        with contextlib.suppress(Exception):
+            proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(Exception):
+                proc.kill()
+
+    while True:
+        if work_cancel_requested(cancel_event):
+            terminate_child()
+            clear_work_pause_request()
+            raise WorkPaused("evidence refresh interrupted by request", work_kind="evidence")
+        if work_pause_requested():
+            terminate_child()
+            clear_work_pause_request()
+            raise WorkPaused("evidence refresh paused by request", work_kind="evidence")
+        try:
+            stdout, stderr = proc.communicate(timeout=0.05)
+            break
+        except subprocess.TimeoutExpired:
+            continue
+    if proc.returncode != 0:
+        detail = (stderr or stdout or "").strip()
+        raise SystemExit(compact_text(detail or f"evidence refresh subprocess exited {proc.returncode}", 500))
+    try:
+        report = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"evidence refresh subprocess returned invalid JSON: {exc}") from exc
+    if not isinstance(report, dict):
+        raise SystemExit("evidence refresh subprocess returned non-object JSON")
     return report
 
 
@@ -17116,7 +17221,10 @@ def background_study_step(
         evidence_candidates = evidence_refresh_candidates()
         if evidence_candidates:
             set_phase("study: evidence-store", notes=notes)
-            evidence_report = refresh_evidence_stores(limit=evidence_limit, cancel_event=cancel_event)
+            if env_flag("MOTOKO_BACKGROUND_EVIDENCE_SUBPROCESS", True):
+                evidence_report = refresh_evidence_stores_subprocess(limit=evidence_limit, cancel_event=cancel_event)
+            else:
+                evidence_report = refresh_evidence_stores(limit=evidence_limit, cancel_event=cancel_event)
             built = int(evidence_report.get("built", 0) or 0)
             if built:
                 notes.append(f"evidence store(s) refreshed: {built}")
@@ -20940,6 +21048,12 @@ class MotokoTui:
         self.bottom_cursor_row_offset = 0
         self.bottom_frame_key: tuple | None = None
         self.input_batch_limit = env_int("MOTOKO_TUI_INPUT_BATCH_LIMIT", TUI_INPUT_BATCH_LIMIT, minimum=1)
+        self.event_batch_limit = env_int("MOTOKO_TUI_EVENT_BATCH_LIMIT", TUI_EVENT_BATCH_LIMIT, minimum=1)
+        self.event_drain_budget_seconds = env_float(
+            "MOTOKO_TUI_EVENT_DRAIN_BUDGET_SECONDS",
+            TUI_EVENT_DRAIN_BUDGET_SECONDS,
+            minimum=0.001,
+        )
         self.display_cache_expires = 0.0
         self.cached_model_badge = ""
         self.cached_assistant_color = DEFAULT_ASSISTANT_COLOR
@@ -21909,15 +22023,28 @@ class MotokoTui:
 
     def put_event(self, event: tuple) -> None:
         with self.events_lock:
+            if event and event[0] in {"study_phase", "cwd_index_progress", "maintenance_phase", "foreground_phase"}:
+                for idx in range(len(self.events) - 1, -1, -1):
+                    queued = self.events[idx]
+                    if queued and queued[0] == event[0]:
+                        self.events[idx] = event
+                        return
             self.events.append(event)
 
     def drain_events(self) -> None:
         changed = False
+        processed = 0
+        limit = max(1, int(getattr(self, "event_batch_limit", TUI_EVENT_BATCH_LIMIT) or 1))
+        deadline = time.monotonic() + max(
+            0.001,
+            float(getattr(self, "event_drain_budget_seconds", TUI_EVENT_DRAIN_BUDGET_SECONDS) or 0.001),
+        )
         while True:
             with self.events_lock:
                 if not self.events:
                     break
                 event = self.events.popleft()
+            processed += 1
             kind = event[0]
             if kind == "token":
                 if self.answer_entry is not None:
@@ -22152,6 +22279,12 @@ class MotokoTui:
             elif kind == "system_note":
                 self.append("system", event[1])
                 changed = True
+            if processed >= limit or time.monotonic() >= deadline:
+                with self.events_lock:
+                    more_events = bool(self.events)
+                if more_events:
+                    changed = True
+                break
         if changed:
             self.dirty = True
 
