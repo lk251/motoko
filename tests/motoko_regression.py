@@ -7475,6 +7475,153 @@ def test_tui_report_command_does_not_block_render_thread(m):
             m.format_status = old_format_status
 
 
+def test_tui_event_drain_is_bounded_and_coalesces_progress(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.events = m.collections.deque()
+    ui.events_lock = threading.Lock()
+    ui.messages = []
+    ui.scroll = 0
+    ui.dirty = False
+    ui.transcript_dirty = False
+    ui.event_batch_limit = 2
+    ui.event_drain_budget_seconds = 10.0
+    ui.cwd_indexing = False
+    ui.study_running = False
+    ui.study_status = "study: idle"
+    ui.study_phase_started = time.monotonic()
+    ui.study_phase_updated = ui.study_phase_started
+
+    for idx in range(10):
+        ui.put_event(("study_phase", f"study: evidence-store {idx}"))
+    assert len(ui.events) == 1
+    assert ui.events[0] == ("study_phase", "study: evidence-store 9")
+
+    for idx in range(5):
+        ui.put_event(("system_note", f"note {idx}"))
+    ui.drain_events()
+    assert len(ui.messages) == 1
+    assert ui.messages[0]["content"] == "note 0"
+    assert len(ui.events) == 4
+    assert ui.dirty is True
+
+
+def test_tui_input_batching_and_display_cache_skip_hot_work(m):
+    read_fd, write_fd = os.pipe()
+    try:
+        ui = object.__new__(m.MotokoTui)
+        ui.stdin_fd = read_fd
+        ui.input_batch_limit = 4
+        keys = []
+        ui.handle_key = lambda key: keys.append(key)
+        os.write(write_fd, b"abc")
+        ui.drain_pending_input()
+        assert keys == ["a", "b", "c"]
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+    old_model_badge = m.model_badge
+    old_assistant_color = m.assistant_color
+    calls = {"model_badge": 0, "assistant_color": 0}
+    try:
+        def counted_model_badge():
+            calls["model_badge"] += 1
+            return "badge"
+
+        def counted_assistant_color():
+            calls["assistant_color"] += 1
+            return "cyan"
+
+        m.model_badge = counted_model_badge
+        m.assistant_color = counted_assistant_color
+        ui = object.__new__(m.MotokoTui)
+        ui.display_cache_expires = 0.0
+        ui.cached_model_badge = ""
+        ui.cached_assistant_color = "purple"
+        assert ui.display_model_badge() == "badge"
+        assert ui.display_model_badge() == "badge"
+        assert ui.display_assistant_color() == "cyan"
+        assert ui.display_assistant_color() == "cyan"
+        assert calls == {"model_badge": 1, "assistant_color": 1}
+    finally:
+        m.model_badge = old_model_badge
+        m.assistant_color = old_assistant_color
+
+    class ExplodingMessages(list):
+        def __iter__(self):
+            raise AssertionError("sync_transcript should skip unchanged transcripts")
+
+    ui = object.__new__(m.MotokoTui)
+    ui.transcript_dirty = False
+    ui.messages = ExplodingMessages([{"role": "user", "content": "old"}])
+    ui.sync_transcript(80, 24)
+
+
+def test_background_study_uses_subprocess_for_evidence_refresh(m):
+    old_candidates = m.evidence_refresh_candidates
+    old_subprocess_refresh = m.refresh_evidence_stores_subprocess
+    old_inprocess_refresh = m.refresh_evidence_stores
+    old_env = {
+        key: os.environ.get(key)
+        for key in (
+            "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+            "MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT",
+            "MOTOKO_BACKGROUND_EVIDENCE_SUBPROCESS",
+            "MOTOKO_BACKGROUND_INDEX_ENRICH",
+            "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+            "MOTOKO_BACKGROUND_INDEX_REPAIR",
+            "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+            "MOTOKO_BACKGROUND_PROFILE",
+        )
+    }
+    try:
+        os.environ["MOTOKO_BACKGROUND_EVIDENCE_REFRESH"] = "1"
+        os.environ["MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT"] = "1"
+        os.environ["MOTOKO_BACKGROUND_EVIDENCE_SUBPROCESS"] = "1"
+        os.environ["MOTOKO_BACKGROUND_INDEX_ENRICH"] = "0"
+        os.environ["MOTOKO_BACKGROUND_INDEX_CLEANUP"] = "0"
+        os.environ["MOTOKO_BACKGROUND_INDEX_REPAIR"] = "0"
+        os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH"] = "0"
+        os.environ["MOTOKO_BACKGROUND_PROFILE"] = "0"
+        calls = []
+
+        def fake_candidates(*_args, **_kwargs):
+            return [({"id": "idx-evidence", "name": "docs", "root": "/tmp/docs"}, "missing")]
+
+        def fake_subprocess_refresh(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema": "evidence-refresh-v1",
+                "created": "2026-06-21T00:00:00+00:00",
+                "limit": 1,
+                "built": 1,
+                "status": "built",
+                "items": [{"status": "built", "index": "idx-evidence", "store_id": "store-1"}],
+            }
+
+        def forbidden_inprocess_refresh(**_kwargs):
+            raise AssertionError("background study should not run evidence refresh in the TUI process")
+
+        m.evidence_refresh_candidates = fake_candidates
+        m.refresh_evidence_stores_subprocess = fake_subprocess_refresh
+        m.refresh_evidence_stores = forbidden_inprocess_refresh
+        with isolated_state():
+            conv = m.new_conversation("Evidence subprocess")
+            notes = m.background_study_step(conv, phase_callback=lambda _phase: None)
+        assert calls
+        assert calls[0]["limit"] == 1
+        assert any("evidence store(s) refreshed: 1" in note for note in notes)
+    finally:
+        m.evidence_refresh_candidates = old_candidates
+        m.refresh_evidence_stores_subprocess = old_subprocess_refresh
+        m.refresh_evidence_stores = old_inprocess_refresh
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_tui_prompt_is_saved_before_context_preparation(m):
     with isolated_state():
         conv = m.new_conversation("Immediate prompt")
@@ -16458,6 +16605,9 @@ def main() -> int:
         test_line_mode_chat_saves_user_turn_before_model_failure,
         test_tui_report_commands_do_not_persist_system_output,
         test_tui_report_command_does_not_block_render_thread,
+        test_tui_event_drain_is_bounded_and_coalesces_progress,
+        test_tui_input_batching_and_display_cache_skip_hot_work,
+        test_background_study_uses_subprocess_for_evidence_refresh,
         test_tui_prompt_is_saved_before_context_preparation,
         test_tui_queued_prompt_is_durable_and_history_seeded,
         test_tui_stop_during_preparing_cancels_before_model_call,
