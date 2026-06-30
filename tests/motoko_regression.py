@@ -6173,6 +6173,30 @@ def test_tui_startup_hides_unfinished_work_from_other_project_roots(m):
             os.environ["MOTOKO_CWD_LEARN"] = old_cwd_learn
 
 
+def test_tui_constructor_defers_cwd_index_planning(m):
+    old_cwd = os.getcwd()
+    old_plan_document_index = m.plan_document_index
+    try:
+        with isolated_state() as tmp:
+            docs = tmp / "docs"
+            docs.mkdir()
+            (docs / "notes.org").write_text("* TODO Deferred startup scan\n", encoding="utf-8")
+            m.add_allowed_dir(str(docs))
+            os.chdir(docs)
+
+            def fail_if_called(*_args, **_kwargs):
+                raise AssertionError("TUI constructor must not scan cwd before first render")
+
+            m.plan_document_index = fail_if_called
+            ui = m.MotokoTui(m.new_conversation("Deferred Cwd Startup"))
+            startup_text = "\n".join(row.get("content", "") for row in ui.messages)
+            assert "Learn this directory tree now?" not in startup_text
+            assert ui.cwd_index_offer is None
+    finally:
+        m.plan_document_index = old_plan_document_index
+        os.chdir(old_cwd)
+
+
 def test_permissions_config(m):
     old_permissions = os.environ.get("MOTOKO_PERMISSIONS")
     try:
@@ -11102,15 +11126,15 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
         catalog_index = next(row for row in catalog["indexes"] if row["id"] == index["id"])
         assert catalog_index["evidence_store"]["id"] == "evidence-current"
         assert catalog_index["evidence_store"]["row_count"] == 7
-        assert catalog_index["evidence_store"]["status"] == "fresh"
+        assert catalog_index["evidence_store"]["status"] == "available"
         assert catalog_index["vector_store"]["id"] == "vector-current"
         assert catalog_index["vector_store"]["row_count"] == 11
-        assert catalog_index["vector_store"]["status"] == "fresh"
+        assert catalog_index["vector_store"]["status"] == "available"
 
         text = m.format_context_catalog(catalog, project_roots={str(docs.resolve())})
-        assert "evidence=evidence-current rows=7 status=fresh" in text
+        assert "evidence=evidence-current rows=7 status=available" in text
         assert "vector=vector-current method=lexical" in text
-        assert "rows=11 status=fresh" in text
+        assert "rows=11 status=available" in text
         conv = m.new_conversation("Attached artifact sources")
         conv["context_items"] = [m.context_item_from_index(index)]
         old_cwd = os.getcwd()
@@ -11120,15 +11144,99 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
             attached_index = next(row for row in attached_sources if row.get("kind") == "index")
             assert attached_index["evidence_store"] == "evidence-current"
             assert attached_index["evidence_rows"] == 7
-            assert attached_index["evidence_status"] == "fresh"
+            assert attached_index["evidence_status"] == "available"
             assert attached_index["vector_store"] == "vector-current"
             assert attached_index["vector_rows"] == 11
-            assert attached_index["vector_status"] == "fresh"
+            assert attached_index["vector_status"] == "available"
             source_text = m.format_conversation_sources(conv)
-            assert "evidence: 7 row(s) from evidence-current status=fresh" in source_text
-            assert "vector: 11 row(s) from vector-current method=lexical-hash-v1 status=fresh" in source_text
+            assert "evidence: 7 row(s) from evidence-current status=available" in source_text
+            assert "vector: 11 row(s) from vector-current method=lexical-hash-v1 status=available" in source_text
         finally:
             os.chdir(old_cwd)
+
+
+def test_context_catalog_uses_artifact_sidecars_without_deep_freshness(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "logbook.org"
+        source.write_text("* TODO Sidecar catalog artifact task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "20260524-131000-sidecar",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-24T13:10:00+00:00",
+            "corpus_summary": "sidecar catalog index",
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        evidence_store = {
+            "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
+            "id": "evidence-sidecar",
+            "evidence_input_schema": m.EVIDENCE_INPUT_SCHEMA_VERSION,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.evidence_store_source_fingerprint(index),
+            },
+            "row_count": 3,
+        }
+        vector_store = {
+            "schema": m.VECTOR_STORE_SCHEMA_VERSION,
+            "id": "vector-sidecar",
+            "method": m.EMBEDDING_VECTOR_METHOD,
+            "embedding_input_schema": m.EMBEDDING_INPUT_SCHEMA_VERSION,
+            "vector_row_id_schema": m.VECTOR_ROW_ID_SCHEMA_VERSION,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.vector_store_source_fingerprint(index),
+            },
+            "row_count": 4,
+        }
+        m.atomic_write(m.evidence_store_path(evidence_store["id"]), "{not json " + ("x" * 600000))
+        m.atomic_write(m.vector_store_path(vector_store["id"]), "{not json " + ("x" * 600000))
+        m.atomic_write(
+            m.evidence_store_catalog_path(evidence_store["id"]),
+            json.dumps(m.evidence_store_catalog_record(evidence_store), ensure_ascii=False, indent=2) + "\n",
+        )
+        m.atomic_write(
+            m.vector_store_catalog_path(vector_store["id"]),
+            json.dumps(m.vector_store_catalog_record(vector_store), ensure_ascii=False, indent=2) + "\n",
+        )
+        old_evidence_freshness = m.evidence_store_freshness
+        old_vector_freshness = m.vector_store_freshness
+        try:
+            m.evidence_store_freshness = lambda _store: (_ for _ in ()).throw(AssertionError("deep evidence freshness used"))
+            m.vector_store_freshness = lambda _store: (_ for _ in ()).throw(AssertionError("deep vector freshness used"))
+            catalog = m.build_context_catalog()
+        finally:
+            m.evidence_store_freshness = old_evidence_freshness
+            m.vector_store_freshness = old_vector_freshness
+
+        catalog_index = next(row for row in catalog["indexes"] if row["id"] == index["id"])
+        assert catalog_index["evidence_store"]["id"] == "evidence-sidecar"
+        assert catalog_index["evidence_store"]["row_count"] == 3
+        assert catalog_index["evidence_store"]["status"] == "available"
+        assert catalog_index["vector_store"]["id"] == "vector-sidecar"
+        assert catalog_index["vector_store"]["row_count"] == 4
+        assert catalog_index["vector_store"]["status"] == "available"
 
 
 def test_status_refreshes_attached_index_artifact_metadata(m):
@@ -11199,11 +11307,11 @@ def test_status_refreshes_attached_index_artifact_metadata(m):
         attached = conv["context_items"][0]
         assert attached["evidence_store"] == "evidence-status-current"
         assert attached["evidence_rows"] == 5
-        assert attached["evidence_status"] == "fresh"
+        assert attached["evidence_status"] == "available"
         assert attached["vector_store"] == "vector-status-current"
         assert attached["vector_rows"] == 9
-        assert attached["vector_status"] == "fresh"
-        assert "attached retrieval artifacts: evidence fresh 5 row(s); vector fresh 9 row(s) lexical-hash-v1" in status
+        assert attached["vector_status"] == "available"
+        assert "attached retrieval artifacts: evidence available 5 row(s); vector available 9 row(s) lexical-hash-v1" in status
 
 
 def test_context_catalog_reports_current_memory_and_profile_freshness(m):
@@ -16557,6 +16665,7 @@ def main() -> int:
         test_cwd_learning_plan_and_existing_index,
         test_unfinished_work_notice_can_scope_to_current_directory,
         test_tui_startup_hides_unfinished_work_from_other_project_roots,
+        test_tui_constructor_defers_cwd_index_planning,
         test_permissions_config,
         test_identity_config,
         test_context_package_builds_sources_and_plan,
@@ -16676,6 +16785,7 @@ def main() -> int:
         test_prompt_context_uses_current_catalog_not_stale_catalog_file,
         test_status_uses_current_catalog_even_without_persisted_catalog,
         test_context_catalog_reports_current_evidence_and_vector_artifacts,
+        test_context_catalog_uses_artifact_sidecars_without_deep_freshness,
         test_status_refreshes_attached_index_artifact_metadata,
         test_context_catalog_reports_current_memory_and_profile_freshness,
         test_index_resume_after_model_timeout,

@@ -648,6 +648,10 @@ TUI_INPUT_BATCH_LIMIT = 64
 TUI_EVENT_BATCH_LIMIT = 96
 TUI_EVENT_DRAIN_BUDGET_SECONDS = 0.010
 TUI_DISPLAY_CACHE_SECONDS = 2.0
+STARTUP_DISCOVERY_IDLE_GRACE_SECONDS = 2.0
+STARTUP_DISCOVERY_POLL_SECONDS = 0.25
+STARTUP_DISCOVERY_TIMEOUT_SECONDS = 45.0
+ARTIFACT_CATALOG_FULL_STORE_FALLBACK_BYTES = 512 * 1024
 CHUNK_SUMMARY_SCHEMA_VERSION = "chunk-summary-v1"
 FILE_SUMMARY_SCHEMA_VERSION = "file-summary-v1"
 CORPUS_SUMMARY_SCHEMA_VERSION = "corpus-summary-v1"
@@ -671,6 +675,7 @@ INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
 INDEX_CLEANUP_SCHEMA_VERSION = INDEX_CLEANUP_SCHEMA
 VECTOR_PLAN_SCHEMA_VERSION = "vector-plan-v1"
 VECTOR_STORE_SCHEMA_VERSION = "vector-store-v2"
+ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION = "artifact-catalog-record-v1"
 VECTOR_PROGRESS_SCHEMA_VERSION = "vector-progress-v1"
 VECTOR_ROW_ID_SCHEMA_VERSION = "vector-row-id-v2"
 SAFE_DIAGNOSE_SCHEMA_VERSION = "diagnose-safe-v1"
@@ -9920,12 +9925,224 @@ def load_dossier_if_exists(dossier_id: str) -> dict | None:
     return None
 
 
-def artifact_store_freshness_summary(store: dict, checker) -> tuple[str, list[str]]:
+def artifact_store_row_count(store: dict) -> int:
     try:
-        status, warnings = checker(store)
-    except SystemExit as exc:
-        return "unknown", [compact_text(str(exc), 180)]
-    return str(status or "unknown"), [compact_text(str(warning), 180) for warning in (warnings or [])[:2]]
+        return int(store.get("row_count", 0) or 0)
+    except (TypeError, ValueError):
+        rows = store.get("rows")
+        return len(rows) if isinstance(rows, list) else 0
+
+
+def artifact_store_source_record(store: dict) -> dict:
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    return {
+        key: source.get(key, "")
+        for key in ["id", "name", "root", "created", "glob", "family_key", "fingerprint"]
+        if source.get(key, "") not in ("", None)
+    }
+
+
+def evidence_store_catalog_path(store_id: str) -> pathlib.Path:
+    return evidence_store_path(store_id).with_suffix(".catalog")
+
+
+def vector_store_catalog_path(store_id: str) -> pathlib.Path:
+    return vector_store_path(store_id).with_suffix(".catalog")
+
+
+def evidence_store_catalog_record(store: dict) -> dict:
+    record = {
+        "catalog_schema": ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION,
+        "artifact_kind": "evidence_store",
+        "schema": store.get("schema", ""),
+        "id": store.get("id", ""),
+        "created": store.get("created", ""),
+        "realm": store.get("realm", ""),
+        "evidence_input_schema": store.get("evidence_input_schema", ""),
+        "source_index": artifact_store_source_record(store),
+        "row_count": artifact_store_row_count(store),
+        "kind_counts": store.get("kind_counts", {}) if isinstance(store.get("kind_counts"), dict) else {},
+        "path": store.get("path", ""),
+    }
+    return {key: value for key, value in record.items() if value not in ("", [], {}, None)}
+
+
+def vector_store_catalog_record(store: dict) -> dict:
+    record = {
+        "catalog_schema": ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION,
+        "artifact_kind": "vector_store",
+        "schema": store.get("schema", ""),
+        "id": store.get("id", ""),
+        "created": store.get("created", ""),
+        "realm": store.get("realm", ""),
+        "method": store.get("method", ""),
+        "vector_format": store.get("vector_format", ""),
+        "dims": store.get("dims", 0),
+        "production_embedding": bool(store.get("production_embedding")),
+        "embedding_route": store.get("embedding_route", {}) if isinstance(store.get("embedding_route"), dict) else {},
+        "embedding_input_schema": store.get("embedding_input_schema", ""),
+        "embedding_input_chars": store.get("embedding_input_chars", 0),
+        "embedding_max_parts_per_chunk": store.get("embedding_max_parts_per_chunk", 0),
+        "vector_row_id_schema": store.get("vector_row_id_schema", ""),
+        "embedding_batch_size": store.get("embedding_batch_size", 0),
+        "embedding_batch_count": store.get("embedding_batch_count", 0),
+        "embedding_requested_parallelism": store.get("embedding_requested_parallelism", 0),
+        "embedding_parallelism": store.get("embedding_parallelism", 0),
+        "embedding_parallel_fallbacks": store.get("embedding_parallel_fallbacks", [])
+        if isinstance(store.get("embedding_parallel_fallbacks"), list)
+        else [],
+        "embedding_refresh_mode": store.get("embedding_refresh_mode", ""),
+        "embedding_refresh_cause": store.get("embedding_refresh_cause", ""),
+        "embedding_reused_rows": store.get("embedding_reused_rows", 0),
+        "embedding_embedded_rows": store.get("embedding_embedded_rows", 0),
+        "embedding_superseded_rows": store.get("embedding_superseded_rows", 0),
+        "source_index": artifact_store_source_record(store),
+        "row_count": artifact_store_row_count(store),
+        "path": store.get("path", ""),
+    }
+    return {key: value for key, value in record.items() if value not in ("", [], {}, None)}
+
+
+def write_evidence_store_catalog_record(store: dict) -> None:
+    store_id = str(store.get("id", "")).strip()
+    if not store_id:
+        return
+    record = evidence_store_catalog_record(store)
+    if not record.get("path"):
+        record["path"] = str(evidence_store_path(store_id))
+    atomic_write(evidence_store_catalog_path(store_id), json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_vector_store_catalog_record(store: dict) -> None:
+    store_id = str(store.get("id", "")).strip()
+    if not store_id:
+        return
+    record = vector_store_catalog_record(store)
+    if not record.get("path"):
+        record["path"] = str(vector_store_path(store_id))
+    atomic_write(vector_store_catalog_path(store_id), json.dumps(record, ensure_ascii=False, indent=2) + "\n")
+
+
+def load_artifact_catalog_record(meta_path: pathlib.Path, full_path: pathlib.Path) -> dict | None:
+    record = safe_load_json(meta_path)
+    if not isinstance(record, dict):
+        return None
+    if record.get("catalog_schema") != ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION:
+        return None
+    record = dict(record)
+    record.setdefault("path", str(full_path))
+    return record
+
+
+def list_evidence_store_catalog_records() -> list[dict]:
+    rows = []
+    root = evidence_stores_dir()
+    if not root.exists():
+        return []
+    for path in sorted(root.glob("*.json"), reverse=True):
+        record = load_artifact_catalog_record(path.with_suffix(".catalog"), path)
+        if record is not None:
+            rows.append(record)
+            continue
+        try:
+            if path.stat().st_size > ARTIFACT_CATALOG_FULL_STORE_FALLBACK_BYTES:
+                rows.append(
+                    {
+                        "catalog_schema": ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION,
+                        "artifact_kind": "evidence_store",
+                        "id": path.stem,
+                        "path": str(path),
+                        "catalog_warnings": ["metadata sidecar missing; explicit refresh or rebuild will recreate it"],
+                    }
+                )
+                continue
+        except OSError:
+            continue
+        try:
+            store = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(store, dict):
+            store.setdefault("path", str(path))
+            record = evidence_store_catalog_record(store)
+            rows.append(record)
+            with contextlib.suppress(OSError):
+                write_evidence_store_catalog_record(store)
+    return rows
+
+
+def list_vector_store_catalog_records() -> list[dict]:
+    rows = []
+    root = vector_stores_dir()
+    if not root.exists():
+        return []
+    for path in sorted(root.glob("*.json"), reverse=True):
+        record = load_artifact_catalog_record(path.with_suffix(".catalog"), path)
+        if record is not None:
+            rows.append(record)
+            continue
+        try:
+            if path.stat().st_size > ARTIFACT_CATALOG_FULL_STORE_FALLBACK_BYTES:
+                rows.append(
+                    {
+                        "catalog_schema": ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION,
+                        "artifact_kind": "vector_store",
+                        "id": path.stem,
+                        "path": str(path),
+                        "catalog_warnings": ["metadata sidecar missing; explicit refresh or rebuild will recreate it"],
+                    }
+                )
+                continue
+        except OSError:
+            continue
+        try:
+            store = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(store, dict):
+            store.setdefault("path", str(path))
+            record = vector_store_catalog_record(store)
+            rows.append(record)
+            with contextlib.suppress(OSError):
+                write_vector_store_catalog_record(store)
+    return rows
+
+
+def evidence_store_catalog_status(store: dict) -> tuple[str, list[str]]:
+    warnings = []
+    if str(store.get("schema") or "") != EVIDENCE_STORE_SCHEMA_VERSION:
+        warnings.append(f"evidence store schema is {store.get('schema') or 'missing'}; rebuild for {EVIDENCE_STORE_SCHEMA_VERSION}")
+    if str(store.get("evidence_input_schema") or "") != EVIDENCE_INPUT_SCHEMA_VERSION:
+        warnings.append(
+            f"evidence input schema is {store.get('evidence_input_schema') or 'missing'}; rebuild for {EVIDENCE_INPUT_SCHEMA_VERSION}"
+        )
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    if not source.get("id"):
+        warnings.append("store has no source index id")
+    return ("stale" if warnings else "available"), [compact_text(warning, 180) for warning in warnings[:2]]
+
+
+def vector_store_catalog_status(store: dict) -> tuple[str, list[str]]:
+    warnings = []
+    schema = str(store.get("schema") or "")
+    method = str(store.get("method") or "")
+    if schema != VECTOR_STORE_SCHEMA_VERSION:
+        warnings.append(f"vector store schema is {schema or 'missing'}; rebuild for {VECTOR_STORE_SCHEMA_VERSION}")
+    if method not in {LEXICAL_VECTOR_METHOD, EMBEDDING_VECTOR_METHOD}:
+        warnings.append(f"vector store method is {method or 'missing'}; rebuild this vector store")
+    if method == EMBEDDING_VECTOR_METHOD:
+        if str(store.get("embedding_input_schema") or "") != EMBEDDING_INPUT_SCHEMA_VERSION:
+            warnings.append(
+                f"embedding input schema is {store.get('embedding_input_schema') or 'missing'}; rebuild for {EMBEDDING_INPUT_SCHEMA_VERSION}"
+            )
+        if str(store.get("vector_row_id_schema") or "") != VECTOR_ROW_ID_SCHEMA_VERSION:
+            warnings.append(
+                f"vector row id schema is {store.get('vector_row_id_schema') or 'missing'}; refresh for {VECTOR_ROW_ID_SCHEMA_VERSION}"
+            )
+    source = store.get("source_index") if isinstance(store.get("source_index"), dict) else {}
+    if not source.get("id"):
+        warnings.append("store has no source index id")
+    return ("stale" if warnings else "available"), [compact_text(warning, 180) for warning in warnings[:2]]
 
 
 def latest_catalog_vector_store_for_index(index: dict, vector_stores: list[dict]) -> dict | None:
@@ -9947,22 +10164,22 @@ def context_catalog_retrieval_artifacts(
     artifacts = {}
     evidence_store = next((store for store in evidence_stores if evidence_store_matches_index(store, index)), None)
     if evidence_store:
-        status, warnings = artifact_store_freshness_summary(evidence_store, evidence_store_freshness)
+        status, warnings = evidence_store_catalog_status(evidence_store)
         artifacts["evidence_store"] = {
             "id": evidence_store.get("id", ""),
             "schema": evidence_store.get("schema", ""),
-            "row_count": evidence_store.get("row_count", len(evidence_store.get("rows", []))),
+            "row_count": artifact_store_row_count(evidence_store),
             "status": status,
             "warnings": warnings,
         }
     vector_store = latest_catalog_vector_store_for_index(index, vector_stores)
     if vector_store:
-        status, warnings = artifact_store_freshness_summary(vector_store, vector_store_freshness)
+        status, warnings = vector_store_catalog_status(vector_store)
         artifacts["vector_store"] = {
             "id": vector_store.get("id", ""),
             "schema": vector_store.get("schema", ""),
             "method": vector_store.get("method", ""),
-            "row_count": vector_store.get("row_count", len(vector_store.get("rows", []))),
+            "row_count": artifact_store_row_count(vector_store),
             "status": status,
             "warnings": warnings,
             "reused_rows": vector_store.get("embedding_reused_rows", 0),
@@ -9976,8 +10193,8 @@ def context_catalog_retrieval_artifacts(
 def index_retrieval_artifact_source_fields(index: dict) -> dict:
     artifacts = context_catalog_retrieval_artifacts(
         index,
-        evidence_stores=list_evidence_stores(),
-        vector_stores=list_vector_stores(),
+        evidence_stores=list_evidence_store_catalog_records(),
+        vector_stores=list_vector_store_catalog_records(),
     )
     fields: dict = {}
     warnings: list[str] = []
@@ -10010,8 +10227,8 @@ def index_retrieval_artifact_source_fields(index: dict) -> dict:
 
 
 def build_context_catalog() -> dict:
-    evidence_stores = list_evidence_stores()
-    vector_stores = list_vector_stores()
+    evidence_stores = list_evidence_store_catalog_records()
+    vector_stores = list_vector_store_catalog_records()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
         status, warnings = index_staleness(index)
@@ -12702,6 +12919,7 @@ def build_evidence_store_from_index(
         path = evidence_store_path(store_id)
         store["path"] = str(path)
         atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+        write_evidence_store_catalog_record(store)
     return store
 
 
@@ -13910,6 +14128,7 @@ def build_vector_store_from_index(
         path = vector_store_path(store_id)
         store["path"] = str(path)
         atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+        write_vector_store_catalog_record(store)
     return store
 
 
@@ -14553,6 +14772,7 @@ def build_embedding_vector_store_from_index(
         path = vector_store_path(store_id)
         store["path"] = str(path)
         atomic_write(path, json.dumps(store, ensure_ascii=False, indent=2) + "\n")
+        write_vector_store_catalog_record(store)
         with contextlib.suppress(OSError):
             progress_path.unlink()
     return store
@@ -16966,6 +17186,148 @@ def cwd_learning_plan(root: pathlib.Path | None = None, pattern: str = AUTO_INDE
         "existing": matching_cwd_indexes(root, pattern),
         "partials": matching_cwd_partial_indexes(root, pattern),
     }
+
+
+def cwd_learning_plan_to_json(plan: dict) -> dict:
+    return {
+        "root": str(pathlib.Path(plan["root"]).resolve()),
+        "glob": plan.get("glob") or AUTO_INDEX_GLOB,
+        "files": int(plan.get("files", 0) or 0),
+        "bytes": int(plan.get("bytes", 0) or 0),
+        "estimated_chunks": int(plan.get("estimated_chunks", 0) or 0),
+        "estimated_model_calls": int(plan.get("estimated_model_calls", 0) or 0),
+        "existing": [
+            {
+                "id": item.get("id", ""),
+                "created": item.get("created", ""),
+                "name": item.get("name", ""),
+                "root": item.get("root", ""),
+            }
+            for item in plan.get("existing", [])[:8]
+        ],
+        "partials": [
+            {
+                "id": item.get("id", ""),
+                "status": item.get("status", ""),
+                "created": item.get("created", ""),
+                "root": item.get("root", ""),
+                "completed_files": item.get("completed_files", 0),
+                "total_files": item.get("total_files", 0),
+            }
+            for item in plan.get("partials", [])[:8]
+        ],
+    }
+
+
+def cwd_learning_plan_from_json(plan: dict) -> dict:
+    restored = dict(plan)
+    restored["root"] = pathlib.Path(str(plan.get("root", "."))).expanduser().resolve()
+    restored["glob"] = plan.get("glob") or AUTO_INDEX_GLOB
+    restored["existing"] = list(plan.get("existing", []) or [])
+    restored["partials"] = list(plan.get("partials", []) or [])
+    return restored
+
+
+def startup_cwd_discovery(root: pathlib.Path | None = None, pattern: str = AUTO_INDEX_GLOB) -> dict:
+    root = (root or pathlib.Path.cwd()).expanduser().resolve()
+    result = {
+        "schema": "startup-cwd-discovery-v1",
+        "root": str(root),
+        "glob": pattern or AUTO_INDEX_GLOB,
+    }
+    existing = matching_cwd_indexes(root, pattern)
+    if existing:
+        result["attach_index_id"] = existing[0].get("id", "")
+        unfinished = unfinished_work_notice(root=root, pattern=pattern)
+        if unfinished:
+            result["unfinished_notice"] = unfinished
+        return result
+    unfinished = unfinished_work_notice(root=root, pattern=pattern)
+    if unfinished:
+        result["unfinished_notice"] = unfinished
+    if not env_flag("MOTOKO_CWD_LEARN", True):
+        return result
+    plan = cwd_learning_plan(root, pattern)
+    if plan is not None and not cwd_learning_declined_recently(plan["root"], plan["glob"]):
+        result["offer_plan"] = cwd_learning_plan_to_json(plan)
+    return result
+
+
+def _stop_helper_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    with contextlib.suppress(OSError):
+        process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=2)
+
+
+def startup_cwd_discovery_subprocess(
+    root: pathlib.Path,
+    *,
+    pattern: str = AUTO_INDEX_GLOB,
+    timeout: float = STARTUP_DISCOVERY_TIMEOUT_SECONDS,
+    cancel_event=None,
+) -> dict:
+    payload = json.dumps({"root": str(root), "pattern": pattern}, ensure_ascii=False)
+    env = dict(os.environ)
+    env["MOTOKO_INTERNAL"] = "1"
+    raise_if_work_cancelled(cancel_event, "startup discovery interrupted by request", work_kind="startup-discovery")
+    process = subprocess.Popen(
+        [sys.executable, motoko_program_path(), "__internal-startup-discovery"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    sent_input = False
+    deadline = time.monotonic() + max(1.0, float(timeout or STARTUP_DISCOVERY_TIMEOUT_SECONDS))
+    try:
+        while True:
+            raise_if_work_cancelled(cancel_event, "startup discovery interrupted by request", work_kind="startup-discovery")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_helper_process(process)
+                raise TimeoutError("startup discovery helper timed out")
+            try:
+                if not sent_input:
+                    sent_input = True
+                    stdout, stderr = process.communicate(input=payload, timeout=min(0.2, remaining))
+                else:
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except WorkPaused:
+        _stop_helper_process(process)
+        raise
+    if process.returncode != 0:
+        detail = (stderr or stdout).strip()
+        raise RuntimeError(f"startup discovery helper failed: {detail or 'no diagnostic'}")
+    try:
+        result = json.loads(stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("startup discovery helper returned invalid JSON") from exc
+    return result if isinstance(result, dict) else {}
+
+
+def command_internal_startup_discovery() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        root = pathlib.Path(str(payload.get("root") or pathlib.Path.cwd())).expanduser().resolve()
+        pattern = str(payload.get("pattern") or AUTO_INDEX_GLOB)
+        result = startup_cwd_discovery(root, pattern)
+    except BaseException as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
 
 
 def attach_best_cwd_index(conv: dict, plan: dict) -> dict | None:
@@ -21259,6 +21621,7 @@ class MotokoTui:
         self.cwd_index_offer: dict | None = None
         self.cwd_indexing = False
         self.index_progress: dict | None = None
+        self.startup_discovery_started = False
         self.messages = self.seed_messages(conv)
         self.append("system", startup_tips_text())
         for queued_text in list(self.pending_prompts):
@@ -21269,11 +21632,6 @@ class MotokoTui:
         elif queued_memory_proposal_count():
             self.resume_maintenance_on_start = True
             self.append("system", f"resuming {queued_memory_proposal_count()} queued memory proposal(s)")
-        self.maybe_offer_cwd_learning()
-        if self.cwd_index_offer is None:
-            note = unfinished_work_notice(root=pathlib.Path.cwd())
-            if note:
-                self.append("system", note)
 
     def seed_messages(self, conv: dict) -> list[dict]:
         rows = []
@@ -21326,6 +21684,11 @@ class MotokoTui:
             int(getattr(self, "report_running", 0) or 0)
             or int(getattr(self, "foreground_running", 0) or 0)
         )
+
+    def stop_startup_discovery(self) -> None:
+        jobs = getattr(self, "jobs", None)
+        if jobs is not None:
+            jobs.request_stop_by_kind("startup-discovery")
 
     def maybe_start_queued_prompt(self) -> bool:
         if not getattr(self, "pending_prompts", None):
@@ -21432,6 +21795,7 @@ class MotokoTui:
             stopped_work += jobs.request_stop_by_kind("foreground")
             stopped_work += jobs.request_stop_by_kind("cwd-index")
             stopped_work += jobs.request_stop_by_kind("maintenance")
+            stopped_work += jobs.request_stop_by_kind("startup-discovery")
         if stopped_work:
             request_work_pause("manual TUI stop command")
             note = f"stop requested for {stopped_work} active job(s)"
@@ -21499,6 +21863,7 @@ class MotokoTui:
             signal.signal(signal.SIGWINCH, on_winch)
             self.write("\033[?25l\033[?7l")
             self.render(force=True)
+            self.start_startup_discovery()
             self.start_study_loop()
             if self.resume_maintenance_on_start:
                 self.resume_maintenance_on_start = False
@@ -21597,6 +21962,7 @@ class MotokoTui:
             if self.generating or self.pending_prompts or self.command_work_running():
                 self.stop_active_answer()
                 return
+            self.stop_startup_discovery()
             close_conversation(self.conv)
             self.running = False
             return
@@ -21606,6 +21972,7 @@ class MotokoTui:
                 self.dropdown_index = 0
                 self.dirty = True
             elif not self.input_buffer:
+                self.stop_startup_discovery()
                 close_conversation(self.conv)
                 self.running = False
             return
@@ -21844,6 +22211,7 @@ class MotokoTui:
             if text in {"/", "/commands"}:
                 self.append("system", self.compact_command_menu())
             elif text == "/exit":
+                self.stop_startup_discovery()
                 close_conversation(self.conv)
                 self.running = False
             elif text == "/new" or text.startswith("/new "):
@@ -21928,6 +22296,71 @@ class MotokoTui:
             return
         self.cwd_index_offer = plan
         self.append("system", cwd_learning_offer_text(plan))
+
+    def start_startup_discovery(self) -> None:
+        if getattr(self, "startup_discovery_started", False):
+            return
+        self.startup_discovery_started = True
+        root = pathlib.Path.cwd()
+        cancel_event = threading.Event()
+
+        def worker() -> None:
+            try:
+                while self.running:
+                    if (
+                        self.generating
+                        or self.maintaining
+                        or self.study_running
+                        or self.command_work_running()
+                        or self.pending_prompts
+                    ):
+                        time.sleep(STARTUP_DISCOVERY_POLL_SECONDS)
+                        continue
+                    if time.monotonic() - self.last_input_at < STARTUP_DISCOVERY_IDLE_GRACE_SECONDS:
+                        time.sleep(STARTUP_DISCOVERY_POLL_SECONDS)
+                        continue
+                    break
+                if not self.running:
+                    return
+                result = startup_cwd_discovery_subprocess(
+                    root,
+                    pattern=AUTO_INDEX_GLOB,
+                    timeout=env_seconds("MOTOKO_STARTUP_DISCOVERY_TIMEOUT", STARTUP_DISCOVERY_TIMEOUT_SECONDS),
+                    cancel_event=cancel_event,
+                )
+                self.put_event(("startup_discovery", result))
+            except WorkPaused as exc:
+                self.put_event(("startup_discovery_error", str(exc)))
+            except Exception as exc:
+                self.put_event(("startup_discovery_error", f"{type(exc).__name__}: {exc}"))
+
+        getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
+            kind="startup-discovery",
+            lane="cpu",
+            label="startup discovery",
+            target=worker,
+            cancel_event=cancel_event,
+        )
+
+    def apply_startup_discovery(self, result: dict) -> None:
+        if self.conv.get("context_items"):
+            return
+        attach_index_id = str(result.get("attach_index_id", "")).strip()
+        if attach_index_id:
+            index = load_index_if_exists(attach_index_id)
+            if index is not None:
+                attach_context_item(self.conv, context_item_from_index(index))
+                save_conversation(self.conv)
+                return
+        offer_plan = result.get("offer_plan") if isinstance(result.get("offer_plan"), dict) else None
+        if offer_plan is not None:
+            plan = cwd_learning_plan_from_json(offer_plan)
+            self.cwd_index_offer = plan
+            self.append("system", cwd_learning_offer_text(plan))
+            return
+        note = str(result.get("unfinished_notice", "")).strip()
+        if note:
+            self.append("system", note)
 
     def handle_cwd_index_answer(self, text: str) -> None:
         plan = self.cwd_index_offer
@@ -22465,6 +22898,12 @@ class MotokoTui:
                 self.study_status = "study: idle"
                 self.study_last_note = f"corpus learning failed: {event[1]}"
                 self.append("error", f"corpus learning failed: {event[1]}")
+                changed = True
+            elif kind == "startup_discovery":
+                self.apply_startup_discovery(event[1] if isinstance(event[1], dict) else {})
+                changed = True
+            elif kind == "startup_discovery_error":
+                self.study_last_note = f"startup discovery skipped: {event[1]}"
                 changed = True
             elif kind == "system_note":
                 self.append("system", event[1])
@@ -24944,6 +25383,8 @@ def command_remember(args) -> None:
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "__internal-propose-memories":
         return command_internal_propose_memories()
+    if argv and argv[0] == "__internal-startup-discovery":
+        return command_internal_startup_discovery()
     parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
     sub = parser.add_subparsers(dest="command")
 
