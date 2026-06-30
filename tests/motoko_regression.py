@@ -6106,6 +6106,73 @@ def test_cwd_learning_plan_and_existing_index(m):
             os.chdir(old_cwd)
 
 
+def test_unfinished_work_notice_can_scope_to_current_directory(m):
+    with isolated_state() as tmp:
+        motoko_repo = tmp / "motoko"
+        orgfiles_repo = tmp / "orgfiles"
+        motoko_repo.mkdir()
+        orgfiles_repo.mkdir()
+        partial = {
+            "id": "orgfiles-partial",
+            "name": "orgfiles",
+            "root": str(orgfiles_repo.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-06-30T00:00:00+00:00",
+            "files": [{"path": str(orgfiles_repo / "logbook.org")}],
+            "completed_files": 1,
+            "total_files": 2,
+        }
+        m.write_partial_index(partial, status="failed")
+
+        global_notice = m.unfinished_work_notice()
+        scoped_motoko_notice = m.unfinished_work_notice(root=motoko_repo)
+        scoped_orgfiles_notice = m.unfinished_work_notice(root=orgfiles_repo)
+
+        assert "orgfiles-partial" in global_notice
+        assert scoped_motoko_notice == ""
+        assert "orgfiles-partial" in scoped_orgfiles_notice
+        assert str(orgfiles_repo.resolve()) in scoped_orgfiles_notice
+
+
+def test_tui_startup_hides_unfinished_work_from_other_project_roots(m):
+    old_cwd = os.getcwd()
+    old_cwd_learn = os.environ.get("MOTOKO_CWD_LEARN")
+    try:
+        os.environ["MOTOKO_CWD_LEARN"] = "0"
+        with isolated_state() as tmp:
+            motoko_repo = tmp / "motoko"
+            orgfiles_repo = tmp / "orgfiles"
+            motoko_repo.mkdir()
+            orgfiles_repo.mkdir()
+            m.write_partial_index(
+                {
+                    "id": "orgfiles-partial",
+                    "name": "orgfiles",
+                    "root": str(orgfiles_repo.resolve()),
+                    "glob": m.AUTO_INDEX_GLOB,
+                    "created": "2026-06-30T00:00:00+00:00",
+                    "files": [{"path": str(orgfiles_repo / "logbook.org")}],
+                    "completed_files": 1,
+                    "total_files": 2,
+                },
+                status="failed",
+            )
+            os.chdir(motoko_repo)
+
+            ui = m.MotokoTui(m.new_conversation("Project scoped startup"))
+            startup_text = "\n".join(row.get("content", "") for row in ui.messages)
+
+            assert "Unfinished Motoko work" not in startup_text
+            assert "orgfiles-partial" not in startup_text
+            assert str(orgfiles_repo.resolve()) not in startup_text
+    finally:
+        os.chdir(old_cwd)
+        if old_cwd_learn is None:
+            os.environ.pop("MOTOKO_CWD_LEARN", None)
+        else:
+            os.environ["MOTOKO_CWD_LEARN"] = old_cwd_learn
+
+
 def test_permissions_config(m):
     old_permissions = os.environ.get("MOTOKO_PERMISSIONS")
     try:
@@ -16341,6 +16408,8 @@ def main() -> int:
         test_index_plan,
         test_nix_managed_allowdirs_message,
         test_cwd_learning_plan_and_existing_index,
+        test_unfinished_work_notice_can_scope_to_current_directory,
+        test_tui_startup_hides_unfinished_work_from_other_project_roots,
         test_permissions_config,
         test_identity_config,
         test_context_package_builds_sources_and_plan,

@@ -16829,6 +16829,16 @@ def matching_cwd_partial_indexes(root: pathlib.Path, pattern: str = AUTO_INDEX_G
     return rows
 
 
+def scoped_resumable_partial_indexes(
+    *,
+    root: pathlib.Path | None = None,
+    pattern: str = AUTO_INDEX_GLOB,
+) -> list[dict]:
+    if root is None:
+        return list_resumable_partial_indexes()
+    return matching_cwd_partial_indexes(root, pattern)
+
+
 def cwd_learning_plan(root: pathlib.Path | None = None, pattern: str = AUTO_INDEX_GLOB) -> dict | None:
     if not env_flag("MOTOKO_CWD_LEARN", True):
         return None
@@ -16908,11 +16918,19 @@ def resume_partial_index(index_id: str | None = None, *, progress_callback=None,
     return resume_document_index(str(partial.get("id", "")), progress_callback=progress_callback, cancel_event=cancel_event)
 
 
-def unfinished_work_notice(limit: int = 3) -> str:
-    partials = list_resumable_partial_indexes()
+def unfinished_work_notice(
+    limit: int = 3,
+    *,
+    root: pathlib.Path | None = None,
+    pattern: str = AUTO_INDEX_GLOB,
+) -> str:
+    partials = scoped_resumable_partial_indexes(root=root, pattern=pattern)
     if not partials:
         return ""
-    lines = ["Unfinished Motoko work:"]
+    if root is not None:
+        lines = [f"Unfinished Motoko work for {root.resolve()}:"]
+    else:
+        lines = ["Unfinished Motoko work:"]
     for partial in partials[:limit]:
         completed = int(partial.get("completed_files", len(partial.get("files", []))) or 0)
         total = int(partial.get("total_files", completed) or completed)
@@ -21128,7 +21146,7 @@ class MotokoTui:
             self.append("system", f"resuming {queued_memory_proposal_count()} queued memory proposal(s)")
         self.maybe_offer_cwd_learning()
         if self.cwd_index_offer is None:
-            note = unfinished_work_notice()
+            note = unfinished_work_notice(root=pathlib.Path.cwd())
             if note:
                 self.append("system", note)
 
