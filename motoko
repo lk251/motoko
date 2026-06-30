@@ -21968,16 +21968,60 @@ class MotokoTui:
             self.handle_key(key)
 
     def run(self) -> None:
+        ui_thread: threading.Thread | None = None
         old_winch = signal.getsignal(signal.SIGWINCH)
 
         def on_winch(_signum, _frame):
-            self.dirty = True
+            self.request_terminal_resize()
 
         try:
             self.old_termios = termios.tcgetattr(self.stdin_fd)
             tty.setcbreak(self.stdin_fd)
             signal.signal(signal.SIGWINCH, on_winch)
             self.write("\033[?25l\033[?7l")
+            self.terminal_resize_requested = False
+            self.ui_owner_thread_id = None
+            self.ui_owner_thread_error = None
+            ui_thread = threading.Thread(
+                target=self.run_terminal_owner_loop,
+                name="motoko-tui-render-input",
+                daemon=False,
+            )
+            self.ui_owner_thread = ui_thread
+            ui_thread.start()
+            while ui_thread.is_alive():
+                try:
+                    ui_thread.join(0.2)
+                except KeyboardInterrupt:
+                    self.request_terminal_interrupt()
+            if getattr(self, "ui_owner_thread_error", None) is not None:
+                raise self.ui_owner_thread_error
+        except KeyboardInterrupt:
+            self.request_terminal_interrupt()
+            ui_thread = ui_thread or getattr(self, "ui_owner_thread", None)
+            if ui_thread is not None and ui_thread.is_alive():
+                while ui_thread.is_alive() and self.running:
+                    ui_thread.join(0.1)
+            else:
+                self.running = False
+        finally:
+            self.running = False
+            self.stop_startup_discovery()
+            ui_thread = ui_thread or getattr(self, "ui_owner_thread", None)
+            if ui_thread is not None and ui_thread.is_alive():
+                ui_thread.join(1.0)
+            signal.signal(signal.SIGWINCH, old_winch)
+            self.restore_terminal()
+
+    def request_terminal_resize(self) -> None:
+        self.terminal_resize_requested = True
+
+    def request_terminal_interrupt(self) -> None:
+        self.put_event(("terminal_interrupt",))
+
+    def run_terminal_owner_loop(self) -> None:
+        self.ui_owner_thread_id = threading.get_ident()
+        try:
             self.render(force=True)
             self.start_startup_discovery()
             self.start_study_loop()
@@ -21990,6 +22034,7 @@ class MotokoTui:
                     self.start_generation(next_prompt)
             while self.running:
                 self.drain_events()
+                self.drain_terminal_flags()
                 now_ts = time.monotonic()
                 active_work = (
                     self.generating
@@ -22009,9 +22054,15 @@ class MotokoTui:
                         self.drain_pending_input()
                 if self.dirty or (active_work and now_ts - self.last_render > 0.08):
                     self.render()
-        finally:
-            signal.signal(signal.SIGWINCH, old_winch)
-            self.restore_terminal()
+        except BaseException as exc:
+            self.ui_owner_thread_error = exc
+            self.running = False
+
+    def drain_terminal_flags(self) -> None:
+        if getattr(self, "terminal_resize_requested", False):
+            self.terminal_resize_requested = False
+            self.bottom_frame_key = None
+            self.dirty = True
 
     def restore_terminal(self) -> None:
         try:
@@ -22786,7 +22837,13 @@ class MotokoTui:
                 event = self.events.popleft()
             processed += 1
             kind = event[0]
-            if kind == "token":
+            if kind == "terminal_resize":
+                self.bottom_frame_key = None
+                changed = True
+            elif kind == "terminal_interrupt":
+                self.handle_key("\x03")
+                changed = True
+            elif kind == "token":
                 if self.answer_entry is not None:
                     if self.answer_phase == "thinking":
                         self.answer_phase = "answering"

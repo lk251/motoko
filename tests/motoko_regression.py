@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import pty
 import shutil
 import socketserver
 import subprocess
@@ -6689,6 +6690,72 @@ def test_tui_bottom_renderer_skips_identical_frames(m):
         assert len(captured) == writes_after_first_draw + 1
         assert captured[-1].count("\033[J") == 1
         assert "draft" in m.strip_ansi(captured[-1])
+
+
+def test_tui_run_uses_independent_terminal_owner_thread(m):
+    master_fd, slave_fd = pty.openpty()
+    try:
+        ui = object.__new__(m.MotokoTui)
+        ui.stdin_fd = slave_fd
+        ui.stdout_fd = slave_fd
+        ui.old_termios = None
+        ui.running = True
+        ui.overlay_screen_active = False
+        ui.bottom_rows_rendered = 0
+        ui.bottom_cursor_row_offset = 0
+        ui.bottom_frame_key = None
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.stop_startup_discovery = lambda: None
+        caller_thread = threading.get_ident()
+        owner_threads = []
+
+        def fake_owner_loop():
+            owner_thread = threading.get_ident()
+            ui.ui_owner_thread_id = owner_thread
+            owner_threads.append(owner_thread)
+            ui.running = False
+
+        ui.run_terminal_owner_loop = fake_owner_loop
+        ui.run()
+
+        assert owner_threads
+        assert owner_threads[0] != caller_thread
+        assert getattr(ui, "ui_owner_thread").name == "motoko-tui-render-input"
+        assert getattr(ui, "ui_owner_thread_id", None) == owner_threads[0]
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
+def test_tui_terminal_interrupt_is_routed_through_owner_events(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.events = m.collections.deque([("terminal_interrupt",)])
+    ui.events_lock = threading.Lock()
+    ui.generating = True
+    ui.pending_prompts = m.collections.deque()
+    ui.dirty = False
+    stopped = []
+    ui.command_work_running = lambda: False
+    ui.stop_active_answer = lambda: stopped.append(True) or True
+
+    ui.drain_events()
+
+    assert stopped == [True]
+    assert ui.dirty
+
+
+def test_tui_terminal_resize_flag_is_drained_by_owner_loop(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.terminal_resize_requested = True
+    ui.bottom_frame_key = ("old",)
+    ui.dirty = False
+
+    ui.drain_terminal_flags()
+
+    assert ui.terminal_resize_requested is False
+    assert ui.bottom_frame_key is None
+    assert ui.dirty
 
 
 def test_tui_append_renderer_keeps_transcript_in_scrollback(m):
@@ -16775,6 +16842,9 @@ def main() -> int:
         test_help_overlay_closes,
         test_tui_about_opens_overlay,
         test_tui_overlay_highlights_report_labels,
+        test_tui_run_uses_independent_terminal_owner_thread,
+        test_tui_terminal_interrupt_is_routed_through_owner_events,
+        test_tui_terminal_resize_flag_is_drained_by_owner_loop,
         test_fake_openai_stream,
         test_chat_reasoning_payload_and_stream,
         test_unix_socket_model_loading_retries,

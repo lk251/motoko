@@ -158,6 +158,10 @@ Current UI direction:
 - The bottom status line should not duplicate chat activity from the in-chat
   active answer row. It should keep the conversation title, model identity, and
   background/maintenance status such as `bg: idle`, `bg-light`, or `bg-heavy`.
+- The terminal UI has a dedicated render/input owner thread. Model calls,
+  slash-command work, startup discovery, indexing, memory maintenance, and other
+  long-running work should report through events instead of doing CPU/model
+  work on the terminal owner path.
 - Prose in the prompt and main chat should wrap on word boundaries when
   possible; code/preformatted text should remain literal and easy to copy.
 - User input prompt should be just `>`, not `You>`.
