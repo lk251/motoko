@@ -2127,7 +2127,7 @@ def sanitize_background_phase(phase: object) -> str:
         return text.split(":", 1)[0] + ":" + text.split(":", 1)[1].strip().split(" ", 1)[0]
     if text.startswith("memory:") or text.startswith("mem:"):
         return text.split(" ", 1)[0]
-    if text.startswith("bg-heavy:") or text.startswith("bg:"):
+    if text.startswith("bg-heavy:") or text.startswith("bg-light:") or text.startswith("bg:"):
         return text.split(" ", 1)[0]
     return "active"
 
@@ -10155,16 +10155,28 @@ def latest_catalog_vector_store_for_index(index: dict, vector_stores: list[dict]
     return None
 
 
+def artifact_store_freshness_summary(store: dict, checker) -> tuple[str, list[str]]:
+    try:
+        status, warnings = checker(store)
+    except SystemExit as exc:
+        return "unknown", [compact_text(str(exc), 180)]
+    return str(status or "unknown"), [compact_text(str(warning), 180) for warning in (warnings or [])[:2]]
+
+
 def context_catalog_retrieval_artifacts(
     index: dict,
     *,
     evidence_stores: list[dict],
     vector_stores: list[dict],
+    deep_artifacts: bool = False,
 ) -> dict:
     artifacts = {}
     evidence_store = next((store for store in evidence_stores if evidence_store_matches_index(store, index)), None)
     if evidence_store:
-        status, warnings = evidence_store_catalog_status(evidence_store)
+        if deep_artifacts:
+            status, warnings = artifact_store_freshness_summary(evidence_store, evidence_store_freshness)
+        else:
+            status, warnings = evidence_store_catalog_status(evidence_store)
         artifacts["evidence_store"] = {
             "id": evidence_store.get("id", ""),
             "schema": evidence_store.get("schema", ""),
@@ -10174,7 +10186,10 @@ def context_catalog_retrieval_artifacts(
         }
     vector_store = latest_catalog_vector_store_for_index(index, vector_stores)
     if vector_store:
-        status, warnings = vector_store_catalog_status(vector_store)
+        if deep_artifacts:
+            status, warnings = artifact_store_freshness_summary(vector_store, vector_store_freshness)
+        else:
+            status, warnings = vector_store_catalog_status(vector_store)
         artifacts["vector_store"] = {
             "id": vector_store.get("id", ""),
             "schema": vector_store.get("schema", ""),
@@ -10190,12 +10205,31 @@ def context_catalog_retrieval_artifacts(
     return artifacts
 
 
+def persisted_deep_catalog_artifacts_for_index(index: dict) -> dict:
+    catalog = read_context_catalog()
+    if not isinstance(catalog, dict) or catalog.get("artifact_freshness") != "deep":
+        return {}
+    for item in catalog.get("indexes", []) or []:
+        if item.get("id") == index.get("id"):
+            return {
+                key: value
+                for key, value in {
+                    "evidence_store": item.get("evidence_store"),
+                    "vector_store": item.get("vector_store"),
+                }.items()
+                if isinstance(value, dict)
+            }
+    return {}
+
+
 def index_retrieval_artifact_source_fields(index: dict) -> dict:
-    artifacts = context_catalog_retrieval_artifacts(
-        index,
-        evidence_stores=list_evidence_store_catalog_records(),
-        vector_stores=list_vector_store_catalog_records(),
-    )
+    artifacts = persisted_deep_catalog_artifacts_for_index(index)
+    if not artifacts:
+        artifacts = context_catalog_retrieval_artifacts(
+            index,
+            evidence_stores=list_evidence_store_catalog_records(),
+            vector_stores=list_vector_store_catalog_records(),
+        )
     fields: dict = {}
     warnings: list[str] = []
     evidence_store = artifacts.get("evidence_store") if isinstance(artifacts.get("evidence_store"), dict) else {}
@@ -10226,9 +10260,9 @@ def index_retrieval_artifact_source_fields(index: dict) -> dict:
     return fields
 
 
-def build_context_catalog() -> dict:
-    evidence_stores = list_evidence_store_catalog_records()
-    vector_stores = list_vector_store_catalog_records()
+def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
+    evidence_stores = list_evidence_stores() if deep_artifacts else list_evidence_store_catalog_records()
+    vector_stores = list_vector_stores() if deep_artifacts else list_vector_store_catalog_records()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
         status, warnings = index_staleness(index)
@@ -10241,7 +10275,14 @@ def build_context_catalog() -> dict:
             "summary": compact_text(index.get("corpus_summary", ""), CONTEXT_CATALOG_SUMMARY_CHARS),
             "corpus_profile": compact_text(corpus_profile_text(index), CONTEXT_CATALOG_SUMMARY_CHARS),
         }
-        item.update(context_catalog_retrieval_artifacts(index, evidence_stores=evidence_stores, vector_stores=vector_stores))
+        item.update(
+            context_catalog_retrieval_artifacts(
+                index,
+                evidence_stores=evidence_stores,
+                vector_stores=vector_stores,
+                deep_artifacts=deep_artifacts,
+            )
+        )
         indexes.append(item)
     topics = []
     for topic in list_topics()[:CONTEXT_CATALOG_DOSSIER_LIMIT]:
@@ -10280,16 +10321,77 @@ def build_context_catalog() -> dict:
         "profile_updated": profile.get("updated", "") if profile else "",
         "profile_memory_count": len(profile.get("memory_ids", [])) if profile else 0,
         "profile_conversation_count": len(profile.get("conversation_ids", [])) if profile else 0,
+        "artifact_freshness": "deep" if deep_artifacts else "metadata",
         "indexes": indexes,
         "topics": topics,
         "dossiers": dossiers,
     }
 
 
-def write_context_catalog(catalog: dict | None = None) -> dict:
-    catalog = catalog or build_context_catalog()
+def write_context_catalog(catalog: dict | None = None, *, deep_artifacts: bool = False) -> dict:
+    catalog = catalog or build_context_catalog(deep_artifacts=deep_artifacts)
     atomic_write(context_catalog_path(), json.dumps(catalog, ensure_ascii=False, indent=2) + "\n")
     return catalog
+
+
+def write_context_catalog_subprocess(
+    *,
+    deep_artifacts: bool = True,
+    timeout: float = 120.0,
+    cancel_event=None,
+) -> dict:
+    payload = json.dumps({"deep_artifacts": bool(deep_artifacts)}, ensure_ascii=False)
+    env = dict(os.environ)
+    env["MOTOKO_INTERNAL"] = "1"
+    raise_if_work_cancelled(cancel_event, "context catalog refresh interrupted by request", work_kind="catalog")
+    process = subprocess.Popen(
+        [sys.executable, motoko_program_path(), "__internal-context-catalog"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    sent_input = False
+    deadline = time.monotonic() + max(1.0, float(timeout or 120.0))
+    try:
+        while True:
+            raise_if_work_cancelled(cancel_event, "context catalog refresh interrupted by request", work_kind="catalog")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_helper_process(process)
+                raise TimeoutError("context catalog helper timed out")
+            try:
+                if not sent_input:
+                    sent_input = True
+                    stdout, stderr = process.communicate(input=payload, timeout=min(0.2, remaining))
+                else:
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except WorkPaused:
+        _stop_helper_process(process)
+        raise
+    if process.returncode != 0:
+        detail = (stderr or stdout).strip()
+        raise RuntimeError(f"context catalog helper failed: {detail or 'no diagnostic'}")
+    try:
+        catalog = json.loads(stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("context catalog helper returned invalid JSON") from exc
+    return catalog if isinstance(catalog, dict) else {}
+
+
+def command_internal_context_catalog() -> int:
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        catalog = write_context_catalog(deep_artifacts=bool(payload.get("deep_artifacts", True)))
+    except BaseException as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(catalog, ensure_ascii=False))
+    return 0
 
 
 def read_context_catalog() -> dict | None:
@@ -17691,6 +17793,8 @@ def background_study_step(
             clear_work_pause_request()
             raise WorkPaused("background study paused by request", work_id=job_id, work_kind="study")
 
+    notes: list[str] = []
+
     def pause_from_child(message: str, *, child_work_id: str = "", child_work_kind: str = "") -> None:
         pause_notes = notes + [message]
         state = {
@@ -17714,13 +17818,25 @@ def background_study_step(
         clear_work_pause_request()
         raise WorkPaused(message, work_id=child_work_id or job_id, work_kind=child_work_kind or "study")
 
-    set_phase("study: catalog")
-    catalog = write_context_catalog()
-    notes = []
+    def refresh_catalog() -> dict:
+        set_phase("bg-light: catalog(cpu)", notes=notes)
+        try:
+            return write_context_catalog_subprocess(
+                deep_artifacts=True,
+                timeout=env_seconds("MOTOKO_CONTEXT_CATALOG_HELPER_TIMEOUT", 120.0),
+                cancel_event=cancel_event,
+            )
+        except WorkPaused:
+            raise
+        except Exception as exc:
+            notes.append(f"deep catalog refresh failed: {type(exc).__name__}: {compact_text(str(exc), 120)}")
+            return write_context_catalog(deep_artifacts=False)
+
+    catalog = refresh_catalog()
     sync_notes = sync_attached_indexes_to_latest(conv)
     if sync_notes:
         notes.extend(sync_notes)
-        catalog = write_context_catalog()
+        catalog = refresh_catalog()
     if previous_job:
         notes.append(
             f"resumed after interrupted study job {previous_job} "
@@ -17746,7 +17862,7 @@ def background_study_step(
         if enrichment_candidates:
             set_phase("study: upgrading indexes", notes=notes)
             notes.extend(upgrade_indexes_needing_artifacts(limit=max(1, enrich_limit), cancel_event=cancel_event))
-            catalog = write_context_catalog()
+            catalog = refresh_catalog()
     heavy_notes = refresh_heavy_attached_indexes(
         conv,
         phase_callback=lambda phase: set_phase(phase, notes=notes),
@@ -17755,7 +17871,7 @@ def background_study_step(
     )
     if heavy_notes:
         notes.extend(heavy_notes)
-        catalog = write_context_catalog()
+        catalog = refresh_catalog()
     cleanup_limit = env_int("MOTOKO_BACKGROUND_INDEX_CLEANUP_LIMIT", BACKGROUND_INDEX_CLEANUP_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_INDEX_CLEANUP", True) and cleanup_limit:
         cleanup_candidates = index_cleanup_candidates()
@@ -17766,7 +17882,7 @@ def background_study_step(
             blocked_count = len(cleanup_report.get("blocked", []) or [])
             if deleted_count:
                 notes.append(f"stale superseded index artifact(s) cleaned: {deleted_count}")
-                catalog = write_context_catalog()
+                catalog = refresh_catalog()
             if blocked_count:
                 notes.append(f"index cleanup blocked: {blocked_count}")
     evidence_limit = env_int("MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT", BACKGROUND_EVIDENCE_REFRESH_LIMIT)
@@ -17784,7 +17900,7 @@ def background_study_step(
             built = int(evidence_report.get("built", 0) or 0)
             if built:
                 notes.append(f"evidence store(s) refreshed: {built}")
-                catalog = write_context_catalog()
+                catalog = refresh_catalog()
             for item in evidence_report.get("items", [])[:3]:
                 if item.get("status") in {"skipped", "failed"}:
                     label = item.get("name") or item.get("index", "")
@@ -17807,7 +17923,7 @@ def background_study_step(
             )
             if repair_notes:
                 notes.extend(repair_notes)
-                catalog = write_context_catalog()
+                catalog = refresh_catalog()
     vector_limit = env_int("MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT", BACKGROUND_VECTOR_REFRESH_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_VECTOR_REFRESH", True) and vector_limit:
         try:
@@ -17823,7 +17939,7 @@ def background_study_step(
             built = int(vector_report.get("built", 0) or 0)
             if built:
                 notes.append(f"vector store(s) refreshed: {built}")
-                catalog = write_context_catalog()
+                catalog = refresh_catalog()
             for item in vector_report.get("items", [])[:3]:
                 if item.get("status") in {"skipped", "failed", "paused", "deferred"}:
                     label = item.get("name") or item.get("index", "")
@@ -17853,7 +17969,7 @@ def background_study_step(
             notes.append(f"profile refresh failed: {type(exc).__name__}: {exc}")
         else:
             notes.append("profile dossier refreshed")
-            catalog = write_context_catalog()
+            catalog = refresh_catalog()
     elif catalog.get("memory_count", 0) and not catalog.get("profile_updated"):
         notes.append("profile dossier is not built yet")
     set_phase("study: planning", notes=notes)
@@ -22322,6 +22438,7 @@ class MotokoTui:
                     break
                 if not self.running:
                     return
+                self.put_event(("startup_discovery_phase", "bg-light: startup(cpu)"))
                 result = startup_cwd_discovery_subprocess(
                     root,
                     pattern=AUTO_INDEX_GLOB,
@@ -22901,8 +23018,21 @@ class MotokoTui:
                 changed = True
             elif kind == "startup_discovery":
                 self.apply_startup_discovery(event[1] if isinstance(event[1], dict) else {})
+                if self.study_status.startswith("bg-light: startup"):
+                    self.study_running = False
+                    self.study_status = "study: idle"
+                    self.study_last_note = "startup ready"
+                changed = True
+            elif kind == "startup_discovery_phase":
+                self.study_running = True
+                self.study_status = str(event[1])
+                self.study_phase_started = time.monotonic()
+                self.study_phase_updated = self.study_phase_started
                 changed = True
             elif kind == "startup_discovery_error":
+                if self.study_status.startswith("bg-light: startup"):
+                    self.study_running = False
+                    self.study_status = "study: idle"
                 self.study_last_note = f"startup discovery skipped: {event[1]}"
                 changed = True
             elif kind == "system_note":
@@ -25383,6 +25513,8 @@ def command_remember(args) -> None:
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "__internal-propose-memories":
         return command_internal_propose_memories()
+    if argv and argv[0] == "__internal-context-catalog":
+        return command_internal_context_catalog()
     if argv and argv[0] == "__internal-startup-discovery":
         return command_internal_startup_discovery()
     parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")

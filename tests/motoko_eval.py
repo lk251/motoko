@@ -142,7 +142,7 @@ def test_background_study_state(m):
     phases = []
     notes = m.background_study_step(conv, phase_callback=phases.append)
     state = m.read_study_state()
-    assert "study: catalog" in phases
+    assert "bg-light: catalog(cpu)" in phases
     assert "study: planning" in phases
     assert state["phase"] == "study: idle"
     assert isinstance(notes, list)

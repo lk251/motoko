@@ -11239,6 +11239,172 @@ def test_context_catalog_uses_artifact_sidecars_without_deep_freshness(m):
         assert catalog_index["vector_store"]["status"] == "available"
 
 
+def test_deep_context_catalog_reports_fresh_artifacts(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        source = docs / "logbook.org"
+        source.write_text("* TODO Deep catalog artifact task\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "20260524-132000-deepcat",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-24T13:20:00+00:00",
+            "corpus_summary": "deep catalog index",
+            "files": [
+                {
+                    "path": str(source.resolve()),
+                    "source_fingerprint": m.source_fingerprint(source),
+                    "chunks": [],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
+        evidence_store = {
+            "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
+            "id": "evidence-deepcat",
+            "evidence_input_schema": m.EVIDENCE_INPUT_SCHEMA_VERSION,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.evidence_store_source_fingerprint(index),
+            },
+            "rows": [],
+            "row_count": 2,
+        }
+        vector_store = {
+            "schema": m.VECTOR_STORE_SCHEMA_VERSION,
+            "id": "vector-deepcat",
+            "method": m.LEXICAL_VECTOR_METHOD,
+            "source_index": {
+                "id": index["id"],
+                "name": index["name"],
+                "root": index["root"],
+                "created": index["created"],
+                "glob": index["glob"],
+                "family_key": m.index_family_key(index),
+                "fingerprint": m.vector_store_source_fingerprint(index),
+            },
+            "rows": [],
+            "row_count": 6,
+        }
+        m.atomic_write(m.evidence_store_path(evidence_store["id"]), json.dumps(evidence_store, ensure_ascii=False) + "\n")
+        m.atomic_write(m.vector_store_path(vector_store["id"]), json.dumps(vector_store, ensure_ascii=False) + "\n")
+
+        catalog = m.build_context_catalog(deep_artifacts=True)
+        catalog_index = next(row for row in catalog["indexes"] if row["id"] == index["id"])
+        assert catalog["artifact_freshness"] == "deep"
+        assert catalog_index["evidence_store"]["status"] == "fresh"
+        assert catalog_index["vector_store"]["status"] == "fresh"
+
+
+def test_attached_artifact_fields_use_persisted_deep_catalog(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        index = {
+            "id": "20260524-133000-deepfields",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "created": "2026-05-24T13:30:00+00:00",
+            "files": [],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False) + "\n")
+        m.atomic_write(
+            m.context_catalog_path(),
+            json.dumps(
+                {
+                    "updated": m.now(),
+                    "artifact_freshness": "deep",
+                    "indexes": [
+                        {
+                            "id": index["id"],
+                            "evidence_store": {
+                                "id": "evidence-deepfields",
+                                "row_count": 9,
+                                "status": "fresh",
+                                "warnings": [],
+                            },
+                            "vector_store": {
+                                "id": "vector-deepfields",
+                                "method": m.EMBEDDING_VECTOR_METHOD,
+                                "row_count": 12,
+                                "status": "fresh",
+                                "warnings": [],
+                                "refresh_mode": "incremental",
+                                "refresh_cause": "source-change",
+                            },
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
+
+        fields = m.index_retrieval_artifact_source_fields(index)
+        assert fields["evidence_status"] == "fresh"
+        assert fields["evidence_rows"] == 9
+        assert fields["vector_status"] == "fresh"
+        assert fields["vector_rows"] == 12
+        assert fields["vector_refresh_mode"] == "incremental"
+
+
+def test_background_study_refreshes_deep_catalog_in_subprocess(m):
+    old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_INDEX_ENRICH",
+        "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+        "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR",
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+        "MOTOKO_BACKGROUND_PROFILE",
+    ]}
+    old_helper = m.write_context_catalog_subprocess
+    calls = []
+    try:
+        for key in old_env:
+            os.environ[key] = "0"
+        with isolated_state():
+            conv = m.new_conversation("Deep catalog background")
+
+            def fake_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
+                calls.append((deep_artifacts, timeout, cancel_event is not None))
+                catalog = {
+                    "updated": m.now(),
+                    "artifact_freshness": "deep" if deep_artifacts else "metadata",
+                    "memory_count": 0,
+                    "indexes": [],
+                    "topics": [],
+                    "dossiers": [],
+                }
+                m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+                return catalog
+
+            m.write_context_catalog_subprocess = fake_helper
+            notes = m.background_study_step(conv, cancel_event=threading.Event())
+
+            assert calls
+            assert calls[0][0] is True
+            assert calls[0][2] is True
+            assert m.read_context_catalog()["artifact_freshness"] == "deep"
+            assert notes == []
+    finally:
+        m.write_context_catalog_subprocess = old_helper
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_status_refreshes_attached_index_artifact_metadata(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -16786,6 +16952,9 @@ def main() -> int:
         test_status_uses_current_catalog_even_without_persisted_catalog,
         test_context_catalog_reports_current_evidence_and_vector_artifacts,
         test_context_catalog_uses_artifact_sidecars_without_deep_freshness,
+        test_deep_context_catalog_reports_fresh_artifacts,
+        test_attached_artifact_fields_use_persisted_deep_catalog,
+        test_background_study_refreshes_deep_catalog_in_subprocess,
         test_status_refreshes_attached_index_artifact_metadata,
         test_context_catalog_reports_current_memory_and_profile_freshness,
         test_index_resume_after_model_timeout,
