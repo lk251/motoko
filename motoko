@@ -627,6 +627,11 @@ CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
 CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
 CHAT_CONTEXT_MAX_SOFT_TOKENS = 262_144
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
+SUMMARY_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 3
+SUMMARY_CONTEXT_MIN_RESERVE_TOKENS = 512
+SUMMARY_CONTEXT_MAX_RESERVE_TOKENS = 1024
+SUMMARY_CONTEXT_MIN_INPUT_CHARS = 800
+SUMMARY_CONTEXT_RETRY_SHRINK = 0.65
 REASONING_MODE_ENV = "MOTOKO_REASONING"
 REASONING_FORMAT = "deepseek"
 REASONING_PRESETS = {
@@ -3133,6 +3138,29 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
         total += estimate_text_tokens(str(msg.get("role", "")))
         total += estimate_text_tokens(str(msg.get("content", "")))
     return total + 3
+
+
+def estimate_text_tokens_for_context_fit(text: str) -> int:
+    if not text:
+        return 0
+    chars = len(text)
+    words = len(re.findall(r"\S+", text))
+    return max(
+        1,
+        words,
+        (chars + SUMMARY_CONTEXT_ESTIMATE_CHARS_PER_TOKEN - 1) // SUMMARY_CONTEXT_ESTIMATE_CHARS_PER_TOKEN,
+    )
+
+
+def estimate_messages_tokens_for_context_fit(messages: list[dict]) -> int:
+    total = 0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        total += 6
+        total += estimate_text_tokens_for_context_fit(str(msg.get("role", "")))
+        total += estimate_text_tokens_for_context_fit(str(msg.get("content", "")))
+    return total + 8
 
 
 def chat_context_mode() -> str:
@@ -11237,6 +11265,7 @@ def summarize_for_repair(
     timeout: float = INDEX_MODEL_TIMEOUT_SECONDS,
     cancel_event=None,
 ) -> tuple[str, dict]:
+    summary_metadata: dict = {}
     summary = summarize_text(
         label,
         text,
@@ -11245,15 +11274,19 @@ def summarize_for_repair(
         route=route,
         prompt_version=prompt_version,
         cancel_event=cancel_event,
+        metadata=summary_metadata,
     ).strip()
     source_sha = sha256_hex(text.encode("utf-8"))
     if summary:
-        return summary, artifact_provenance(
-            prompt_version.removesuffix("-v1"),
-            prompt_version,
-            route=route,
-            prompt_version=prompt_version,
-            source_sha256=source_sha,
+        return summary, add_summary_input_metadata_to_artifact(
+            artifact_provenance(
+                prompt_version.removesuffix("-v1"),
+                prompt_version,
+                route=route,
+                prompt_version=prompt_version,
+                source_sha256=source_sha,
+            ),
+            summary_metadata,
         )
     return extractive_summary(text), artifact_provenance(
         prompt_version.removesuffix("-v1"),
@@ -11273,7 +11306,7 @@ def repair_chunk_summary(index: dict, file_item: dict, chunk: dict, *, cancel_ev
     label = f"{file_item.get('path', '')} chunk {chunk.get('chunk')}"
     summary, provenance = summarize_for_repair(
         label,
-        content[:SUMMARY_INPUT_CHARS],
+        content,
         "Repair this retrieval chunk summary. Preserve names, dates, TODOs, obligations, decisions, and concrete details.",
         route=MODEL_ROUTE_INDEX_CHUNK,
         prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
@@ -11547,6 +11580,109 @@ def quiet_model(
     ).strip()
 
 
+def summary_context_reserve_tokens(ctx_size: int) -> int:
+    if ctx_size <= 0:
+        return 0
+    reserve = max(SUMMARY_CONTEXT_MIN_RESERVE_TOKENS, ctx_size // 5)
+    return min(SUMMARY_CONTEXT_MAX_RESERVE_TOKENS, reserve)
+
+
+def summary_messages(label: str, text: str, instruction: str) -> list[dict]:
+    prompt = textwrap.dedent(
+        f"""
+        {instruction}
+
+        Label: {label}
+
+        Text:
+        {text}
+        """
+    ).strip()
+    return [
+        {
+            "role": "system",
+            "content": "Create compact, faithful summaries for retrieval. Do not invent facts.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+
+def fit_summary_text_to_route_context(
+    label: str,
+    text: str,
+    instruction: str,
+    route_info: dict,
+) -> tuple[str, dict]:
+    clipped = text[:SUMMARY_INPUT_CHARS]
+    ctx_size = route_context_limit(route_info)
+    reserve_tokens = summary_context_reserve_tokens(ctx_size)
+    prompt_budget = max(256, ctx_size - reserve_tokens) if ctx_size > 0 else 0
+    metadata = {
+        "source_chars": len(text),
+        "input_chars": len(clipped),
+        "ctx_size": ctx_size,
+        "reserve_tokens": reserve_tokens,
+        "prompt_budget_tokens": prompt_budget,
+        "prompt_tokens_estimate": estimate_messages_tokens_for_context_fit(
+            summary_messages(label, clipped, instruction)
+        ),
+        "input_truncated": len(clipped) < len(text),
+        "fit_reason": "summary-input-char-cap" if len(clipped) < len(text) else "full-input",
+    }
+    if not prompt_budget:
+        return clipped, metadata
+    if metadata["prompt_tokens_estimate"] <= prompt_budget:
+        return clipped, metadata
+
+    low = 0
+    high = len(clipped)
+    best = clipped[: min(len(clipped), SUMMARY_CONTEXT_MIN_INPUT_CHARS)]
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = clipped[:mid]
+        estimate = estimate_messages_tokens_for_context_fit(summary_messages(label, candidate, instruction))
+        if estimate <= prompt_budget:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    min_candidate = clipped[: min(len(clipped), SUMMARY_CONTEXT_MIN_INPUT_CHARS)]
+    if (
+        len(best) < len(min_candidate)
+        and estimate_messages_tokens_for_context_fit(summary_messages(label, min_candidate, instruction)) <= prompt_budget
+    ):
+        best = min_candidate
+    metadata.update(
+        {
+            "input_chars": len(best),
+            "prompt_tokens_estimate": estimate_messages_tokens_for_context_fit(
+                summary_messages(label, best, instruction)
+            ),
+            "input_truncated": len(best) < len(text),
+            "fit_reason": "route-context-budget",
+        }
+    )
+    return best, metadata
+
+
+def model_context_overflow_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "exceeds the available context size" in text
+        or "exceed_context_size" in text
+        or ("n_prompt_tokens" in text and "n_ctx" in text)
+    )
+
+
+def shrink_summary_text_after_context_overflow(text: str) -> str:
+    if len(text) <= SUMMARY_CONTEXT_MIN_INPUT_CHARS:
+        return text
+    target = max(SUMMARY_CONTEXT_MIN_INPUT_CHARS, int(len(text) * SUMMARY_CONTEXT_RETRY_SHRINK))
+    if target >= len(text):
+        target = len(text) - 1
+    return text[:target]
+
+
 def summarize_text(
     label: str,
     text: str,
@@ -11556,64 +11692,96 @@ def summarize_text(
     route: str = MODEL_ROUTE_CHAT,
     prompt_version: str = "summary-v1",
     cancel_event=None,
+    metadata: dict | None = None,
 ) -> str:
     raise_if_cancelled(cancel_event)
-    clipped = text[:SUMMARY_INPUT_CHARS]
-    prompt = textwrap.dedent(
-        f"""
-        {instruction}
-
-        Label: {label}
-
-        Text:
-        {clipped}
-        """
-    ).strip()
-    messages = [
-        {
-            "role": "system",
-            "content": "Create compact, faithful summaries for retrieval. Do not invent facts.",
-        },
-        {"role": "user", "content": prompt},
-    ]
     route_info = model_route(route)
     sampling_preset = selected_sampling_preset(route_info, route_info["route"])
     request_options = {"sampling_preset": sampling_preset} if sampling_preset else {}
-    if model_output_cache_enabled(route_info["route"]):
-        cache_key, input_sha256 = model_output_cache_key(
-            messages,
-            route_info=route_info,
-            temperature=0.2,
-            prompt_version=prompt_version,
-            request_options=request_options,
-        )
-        cached = read_model_output_cache(cache_key, route_info=route_info, prompt_version=prompt_version)
-        if cached is not None:
-            return cached
-    else:
-        cache_key = ""
-        input_sha256 = ""
+    clipped, fit_metadata = fit_summary_text_to_route_context(label, text, instruction, route_info)
+    overflow_retries = 0
+    while True:
+        messages = summary_messages(label, clipped, instruction)
+        fit_metadata["input_chars"] = len(clipped)
+        fit_metadata["prompt_tokens_estimate"] = estimate_messages_tokens_for_context_fit(messages)
+        if model_output_cache_enabled(route_info["route"]):
+            cache_key, input_sha256 = model_output_cache_key(
+                messages,
+                route_info=route_info,
+                temperature=0.2,
+                prompt_version=prompt_version,
+                request_options=request_options,
+            )
+            cached = read_model_output_cache(cache_key, route_info=route_info, prompt_version=prompt_version)
+            if cached is not None:
+                if metadata is not None:
+                    metadata.update(fit_metadata)
+                    metadata["overflow_retries"] = overflow_retries
+                    metadata["cache_hit"] = True
+                return cached
+        else:
+            cache_key = ""
+            input_sha256 = ""
 
-    result = quiet_model(
-        messages,
-        temperature=0.2,
-        timeout=timeout,
-        route=route_info["route"],
-        sampling_preset=sampling_preset,
-        cancel_event=cancel_event,
-    )
-    if cache_key:
-        write_model_output_cache(
-            cache_key,
-            route_info=route_info,
-            temperature=0.2,
-            prompt_version=prompt_version,
-            input_sha256=input_sha256,
-            label=label,
-            output=result,
-            request_options=request_options,
-        )
-    return result
+        try:
+            result = quiet_model(
+                messages,
+                temperature=0.2,
+                timeout=timeout,
+                route=route_info["route"],
+                sampling_preset=sampling_preset,
+                cancel_event=cancel_event,
+            )
+        except SystemExit as exc:
+            next_clipped = shrink_summary_text_after_context_overflow(clipped)
+            if not model_context_overflow_error(exc) or next_clipped == clipped or overflow_retries >= 3:
+                raise
+            overflow_retries += 1
+            clipped = next_clipped
+            fit_metadata.update(
+                {
+                    "input_truncated": len(clipped) < len(text),
+                    "fit_reason": "context-overflow-retry",
+                    "overflow_retries": overflow_retries,
+                }
+            )
+            continue
+
+        if cache_key:
+            write_model_output_cache(
+                cache_key,
+                route_info=route_info,
+                temperature=0.2,
+                prompt_version=prompt_version,
+                input_sha256=input_sha256,
+                label=label,
+                output=result,
+                request_options=request_options,
+            )
+        if metadata is not None:
+            metadata.update(fit_metadata)
+            metadata["overflow_retries"] = overflow_retries
+            metadata["cache_hit"] = False
+        return result
+
+
+def add_summary_input_metadata_to_artifact(artifact: dict, metadata: dict | None) -> dict:
+    if not isinstance(metadata, dict) or not metadata:
+        return artifact
+    if not metadata.get("input_truncated") and not metadata.get("overflow_retries"):
+        return artifact
+    artifact = dict(artifact)
+    artifact["quality_status"] = "current-bounded-input"
+    artifact["model_input"] = {
+        "source_chars": int(metadata.get("source_chars") or 0),
+        "input_chars": int(metadata.get("input_chars") or 0),
+        "ctx_size": int(metadata.get("ctx_size") or 0),
+        "prompt_budget_tokens": int(metadata.get("prompt_budget_tokens") or 0),
+        "prompt_tokens_estimate": int(metadata.get("prompt_tokens_estimate") or 0),
+        "fit_reason": str(metadata.get("fit_reason") or ""),
+        "overflow_retries": int(metadata.get("overflow_retries") or 0),
+    }
+    return artifact
 
 
 def chunk_content_relpath(index_id: str, ordinal: int, chunk_idx: int) -> str:
@@ -14918,15 +15086,17 @@ def summarize_and_store_chunk(
     if progress is not None:
         progress["current_chunk"] = chunk_idx
     index_progress_begin_model(progress, "summarizing chunk", label, progress_callback, route=MODEL_ROUTE_INDEX_CHUNK)
+    summary_metadata: dict = {}
     try:
         summary = summarize_text(
             label,
-            content[:SUMMARY_INPUT_CHARS],
+            content,
             "Summarize this document chunk in 4-8 dense bullets. Preserve names, dates, decisions, obligations, and unusual details.",
             timeout=model_timeout,
             route=MODEL_ROUTE_INDEX_CHUNK,
             prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
             cancel_event=cancel_event,
+            metadata=summary_metadata,
         )
     except RuntimeError as exc:
         paused = work_cancelled_from_model(exc, "indexing interrupted by request", work_kind="index")
@@ -14944,12 +15114,15 @@ def summarize_and_store_chunk(
         "content_bytes": content_bytes,
         "stored_content_bytes": content_bytes,
         "content_sha256": content_digest,
-        "summary_artifact": artifact_provenance(
-            "chunk-summary",
-            CHUNK_SUMMARY_SCHEMA_VERSION,
-            route=MODEL_ROUTE_INDEX_CHUNK,
-            prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
-            source_sha256=content_digest,
+        "summary_artifact": add_summary_input_metadata_to_artifact(
+            artifact_provenance(
+                "chunk-summary",
+                CHUNK_SUMMARY_SCHEMA_VERSION,
+                route=MODEL_ROUTE_INDEX_CHUNK,
+                prompt_version=CHUNK_SUMMARY_SCHEMA_VERSION,
+                source_sha256=content_digest,
+            ),
+            summary_metadata,
         ),
     }
     signals = extract_document_signals(path, content)

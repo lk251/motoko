@@ -2704,6 +2704,115 @@ def test_model_route_config_and_summary_cache(m):
             os.environ["MOTOKO_MODEL_CACHE"] = old_cache
 
 
+def test_summary_input_is_bounded_to_declared_worker_context(m):
+    old_cache = os.environ.get("MOTOKO_MODEL_CACHE")
+    old_model_route = m.model_route
+    old_quiet_model = m.quiet_model
+    try:
+        os.environ["MOTOKO_MODEL_CACHE"] = "0"
+
+        def small_worker_route(route):
+            return {
+                "route": route,
+                "endpoint": "http://127.0.0.1:9/v1/chat/completions",
+                "model": "qwen-small-test",
+                "ctx_size": 4096,
+                "context_tokens": 4096,
+                "request_policy": {},
+            }
+
+        calls = []
+
+        def bounded_quiet_model(messages, **_kwargs):
+            calls.append(messages)
+            prompt_budget = 4096 - m.summary_context_reserve_tokens(4096)
+            assert m.estimate_messages_tokens_for_context_fit(messages) <= prompt_budget
+            return "bounded summary"
+
+        m.model_route = small_worker_route
+        m.quiet_model = bounded_quiet_model
+        metadata = {}
+        source = ("alpha beta gamma " * 1200) + "tail-marker"
+        summary = m.summarize_text(
+            "music_plan.org chunk 3",
+            source,
+            "Summarize this chunk.",
+            route=m.MODEL_ROUTE_INDEX_CHUNK,
+            prompt_version="test-summary-v1",
+            metadata=metadata,
+        )
+
+        assert summary == "bounded summary"
+        assert len(calls) == 1
+        assert metadata["input_truncated"] is True
+        assert metadata["input_chars"] < len(source)
+        assert metadata["fit_reason"] == "route-context-budget"
+        assert "tail-marker" not in calls[0][-1]["content"]
+    finally:
+        m.model_route = old_model_route
+        m.quiet_model = old_quiet_model
+        if old_cache is None:
+            os.environ.pop("MOTOKO_MODEL_CACHE", None)
+        else:
+            os.environ["MOTOKO_MODEL_CACHE"] = old_cache
+
+
+def test_summary_context_overflow_retries_with_smaller_prompt(m):
+    old_cache = os.environ.get("MOTOKO_MODEL_CACHE")
+    old_model_route = m.model_route
+    old_quiet_model = m.quiet_model
+    try:
+        os.environ["MOTOKO_MODEL_CACHE"] = "0"
+
+        def small_worker_route(route):
+            return {
+                "route": route,
+                "endpoint": "http://127.0.0.1:9/v1/chat/completions",
+                "model": "qwen-small-test",
+                "ctx_size": 4096,
+                "context_tokens": 4096,
+                "request_policy": {},
+            }
+
+        prompt_lengths = []
+
+        def flaky_quiet_model(messages, **_kwargs):
+            prompt_lengths.append(len(messages[-1]["content"]))
+            if len(prompt_lengths) == 1:
+                raise SystemExit(
+                    'model request failed: model endpoint returned HTTP 400: '
+                    '{"error":{"code":400,"message":"request (4120 tokens) exceeds '
+                    'the available context size (4096 tokens), try increasing it",'
+                    '"type":"exceed_context_size_error","n_prompt_tokens":4120,"n_ctx":4096}}'
+                )
+            return "retry summary"
+
+        m.model_route = small_worker_route
+        m.quiet_model = flaky_quiet_model
+        metadata = {}
+        summary = m.summarize_text(
+            "music_plan.org chunk 3",
+            "delta " * 1000,
+            "Summarize this chunk.",
+            route=m.MODEL_ROUTE_INDEX_CHUNK,
+            prompt_version="test-summary-v1",
+            metadata=metadata,
+        )
+
+        assert summary == "retry summary"
+        assert len(prompt_lengths) == 2
+        assert prompt_lengths[1] < prompt_lengths[0]
+        assert metadata["overflow_retries"] == 1
+        assert metadata["fit_reason"] == "context-overflow-retry"
+    finally:
+        m.model_route = old_model_route
+        m.quiet_model = old_quiet_model
+        if old_cache is None:
+            os.environ.pop("MOTOKO_MODEL_CACHE", None)
+        else:
+            os.environ["MOTOKO_MODEL_CACHE"] = old_cache
+
+
 def test_local_model_catalog_unix_socket_route(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -16184,6 +16293,8 @@ def main() -> int:
         test_unix_socket_connection_reset_retries_while_activating,
         test_unix_socket_connection_reset_retries_while_active,
         test_model_route_config_and_summary_cache,
+        test_summary_input_is_bounded_to_declared_worker_context,
+        test_summary_context_overflow_retries_with_smaller_prompt,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
         test_slot_cache_capability_respects_route_gates,
