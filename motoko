@@ -21911,6 +21911,7 @@ class MotokoTui:
             stopped_work += jobs.request_stop_by_kind("foreground")
             stopped_work += jobs.request_stop_by_kind("cwd-index")
             stopped_work += jobs.request_stop_by_kind("maintenance")
+            stopped_work += jobs.request_stop_by_kind("study-loop")
             stopped_work += jobs.request_stop_by_kind("startup-discovery")
         if stopped_work:
             request_work_pause("manual TUI stop command")
@@ -22598,7 +22599,7 @@ class MotokoTui:
             self.cancel_event.set()
         jobs = getattr(self, "jobs", None)
         if jobs is not None:
-            for kind in ("answer", "report", "foreground", "cwd-index", "maintenance"):
+            for kind in ("answer", "report", "foreground", "cwd-index", "maintenance", "study-loop"):
                 for snapshot in jobs.snapshots(include_done=False):
                     if snapshot.get("kind") == kind:
                         jobs.request_pause(str(snapshot.get("job_id", "")))
@@ -23110,11 +23111,17 @@ class MotokoTui:
             return
         interval = env_seconds("MOTOKO_BACKGROUND_STUDY_INTERVAL", BACKGROUND_STUDY_INTERVAL_SECONDS)
         idle_grace = env_seconds("MOTOKO_BACKGROUND_STUDY_IDLE_GRACE", BACKGROUND_STUDY_IDLE_GRACE_SECONDS)
+        cancel_event = threading.Event()
+        self.study_loop_cancel_event = cancel_event
 
         def worker() -> None:
             next_run = time.monotonic() + 1
             while self.running:
+                if work_cancel_requested(cancel_event):
+                    break
                 time.sleep(1)
+                if work_cancel_requested(cancel_event):
+                    break
                 now_ts = time.monotonic()
                 if now_ts < next_run:
                     continue
@@ -23136,19 +23143,25 @@ class MotokoTui:
                     notes = background_study_step(
                         self.conv,
                         phase_callback=lambda phase: self.put_event(("study_phase", phase)),
+                        cancel_event=cancel_event,
                     )
                 except WorkPaused as exc:
                     self.put_event(("study_done", [str(exc)]))
+                    if work_cancel_requested(cancel_event):
+                        break
                 except Exception as exc:  # Background study must not break chat.
                     self.put_event(("study_error", f"{type(exc).__name__}: {exc}"))
                 else:
                     self.put_event(("study_done", notes))
+                    if work_cancel_requested(cancel_event):
+                        break
 
         getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
             kind="study-loop",
             lane="cpu",
             label="background study loop",
             target=worker,
+            cancel_event=cancel_event,
         )
 
     def start_maintenance(self, *, resumed: bool = False) -> None:

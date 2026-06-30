@@ -12315,6 +12315,65 @@ def test_tui_stop_requests_report_job_cancel(m):
         assert not ui.pending_prompts
 
 
+def test_tui_stop_requests_background_study_cancel(m):
+    with isolated_state():
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = m.new_conversation("Stop study")
+        ui.messages = []
+        ui.pending_prompts = m.collections.deque()
+        ui.generating = False
+        ui.report_running = 0
+        ui.foreground_running = 0
+        ui.maintaining = False
+        ui.study_running = True
+        ui.cwd_indexing = False
+        ui.status = "ready"
+        ui.scroll = 0
+        ui.dirty = False
+        ui.jobs = m.JobSupervisor()
+        event = threading.Event()
+        job = ui.jobs.begin(kind="study-loop", lane="cpu", label="background study loop", cancel_event=event)
+
+        assert ui.stop_active_answer()
+
+        snapshot = ui.jobs.snapshots(include_done=False)[0]
+        assert snapshot["job_id"] == job.job_id
+        assert snapshot["status"] == "stop-requested"
+        assert event.is_set()
+        assert "stop requested" in ui.status
+
+
+def test_background_study_loop_registers_cancel_event(m):
+    old_background_study_step = m.background_study_step
+    old_flag = m.env_flag
+    old_seconds = m.env_seconds
+    captured = {}
+
+    class FakeJobs:
+        def start_thread(self, **kwargs):
+            captured.update(kwargs)
+            return {"job_id": "study-job"}
+
+    try:
+        m.background_study_step = lambda *_args, **_kwargs: []
+        m.env_flag = lambda key, default=True: True if key == "MOTOKO_BACKGROUND_STUDY" else default
+        m.env_seconds = lambda _key, default: default
+        ui = object.__new__(m.MotokoTui)
+        ui.study_status = "study: starting"
+        ui.jobs = FakeJobs()
+
+        ui.start_study_loop()
+
+        assert captured["kind"] == "study-loop"
+        assert captured["lane"] == "cpu"
+        assert isinstance(captured["cancel_event"], threading.Event)
+        assert captured["cancel_event"] is ui.study_loop_cancel_event
+    finally:
+        m.background_study_step = old_background_study_step
+        m.env_flag = old_flag
+        m.env_seconds = old_seconds
+
+
 def test_report_query_commands_pass_cancel_events(m):
     with isolated_state():
         conv = m.new_conversation("Report cancellation")
@@ -17043,6 +17102,8 @@ def main() -> int:
         test_index_cancel_event_writes_paused_partial,
         test_vector_build_cancel_event_stops_before_work,
         test_tui_stop_requests_report_job_cancel,
+        test_tui_stop_requests_background_study_cancel,
+        test_background_study_loop_registers_cancel_event,
         test_report_query_commands_pass_cancel_events,
         test_report_query_helpers_stop_when_pre_cancelled,
         test_org_task_signals_drive_retrieval,
