@@ -7705,11 +7705,14 @@ def test_tui_input_batching_and_display_cache_skip_hot_work(m):
         m.assistant_color = counted_assistant_color
         ui = object.__new__(m.MotokoTui)
         ui.display_cache_expires = 0.0
+        ui.display_cache_seconds = 0.0
         ui.cached_model_badge = ""
         ui.cached_assistant_color = "purple"
         assert ui.display_model_badge() == "badge"
+        ui.display_cache_expires = 0.0
         assert ui.display_model_badge() == "badge"
         assert ui.display_assistant_color() == "cyan"
+        ui.display_cache_expires = 0.0
         assert ui.display_assistant_color() == "cyan"
         assert calls == {"model_badge": 1, "assistant_color": 1}
     finally:
