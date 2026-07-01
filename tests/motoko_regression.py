@@ -11587,6 +11587,137 @@ def test_manual_background_study_keeps_deep_catalog_refresh(m):
                 os.environ[key] = value
 
 
+def test_background_study_reuses_recent_metadata_catalog(m):
+    old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL",
+        "MOTOKO_BACKGROUND_INDEX_ENRICH",
+        "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+        "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR",
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+        "MOTOKO_BACKGROUND_PROFILE",
+        "MOTOKO_BACKGROUND_DEEP_CATALOG",
+    ]}
+    old_helper = m.write_context_catalog_subprocess
+    try:
+        os.environ["MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL"] = "300"
+        for key in old_env:
+            if key != "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL":
+                os.environ[key] = "0"
+        with isolated_state():
+            catalog = {
+                "updated": m.now(),
+                "artifact_freshness": "metadata",
+                "memory_count": 0,
+                "indexes": [],
+                "topics": [],
+                "dossiers": [],
+            }
+            m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            conv = m.new_conversation("Recent catalog")
+            phases = []
+
+            def forbidden_helper(**_kwargs):
+                raise AssertionError("recent metadata catalog should be reused during idle study")
+
+            m.write_context_catalog_subprocess = forbidden_helper
+            notes = m.background_study_step(
+                conv,
+                phase_callback=phases.append,
+                cancel_event=threading.Event(),
+            )
+            state = m.read_study_state()
+
+            assert notes == []
+            assert not any("catalog" in phase for phase in phases)
+            assert "study: planning" in phases
+            assert state.get("catalog_updated") == catalog["updated"]
+            assert state.get("catalog_refresh_deferred") is False
+    finally:
+        m.write_context_catalog_subprocess = old_helper
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_background_study_refreshes_recent_catalog_after_deferred_change(m):
+    old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL",
+        "MOTOKO_BACKGROUND_INDEX_ENRICH",
+        "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+        "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR",
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+        "MOTOKO_BACKGROUND_PROFILE",
+        "MOTOKO_BACKGROUND_DEEP_CATALOG",
+    ]}
+    old_helper = m.write_context_catalog_subprocess
+    calls = []
+    try:
+        os.environ["MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL"] = "300"
+        for key in old_env:
+            if key != "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL":
+                os.environ[key] = "0"
+        with isolated_state():
+            previous_catalog = {
+                "updated": m.now(),
+                "artifact_freshness": "metadata",
+                "memory_count": 0,
+                "indexes": [],
+                "topics": [],
+                "dossiers": [],
+            }
+            m.atomic_write(m.context_catalog_path(), json.dumps(previous_catalog, ensure_ascii=False) + "\n")
+            m.write_study_state(
+                {
+                    "updated": m.now(),
+                    "phase": "study: idle",
+                    "status": "completed",
+                    "mode": "catalog-and-planning",
+                    "job_id": "previous-job",
+                    "catalog_refresh_deferred": True,
+                }
+            )
+            conv = m.new_conversation("Deferred catalog")
+            phases = []
+
+            def fake_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
+                calls.append((deep_artifacts, cancel_event is not None))
+                catalog = {
+                    "updated": m.now(),
+                    "artifact_freshness": "metadata",
+                    "memory_count": 0,
+                    "indexes": [],
+                    "topics": [],
+                    "dossiers": [],
+                }
+                m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+                return catalog
+
+            m.write_context_catalog_subprocess = fake_helper
+            notes = m.background_study_step(
+                conv,
+                phase_callback=phases.append,
+                cancel_event=threading.Event(),
+            )
+            state = m.read_study_state()
+
+            assert notes == []
+            assert calls == [(False, True)]
+            assert phases.count("bg-light: catalog-meta(cpu)") == 1
+            assert state.get("catalog_refresh_deferred") is False
+            assert state.get("catalog_updated") == m.read_context_catalog().get("updated")
+    finally:
+        m.write_context_catalog_subprocess = old_helper
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_context_catalog_helper_waits_without_pipe_catalog_polling(m):
     old_popen = m.subprocess.Popen
     old_nice = os.environ.get("MOTOKO_CONTEXT_CATALOG_HELPER_NICE")
@@ -17281,6 +17412,8 @@ def main() -> int:
         test_attached_artifact_fields_use_persisted_deep_catalog,
         test_background_study_refreshes_metadata_catalog_in_subprocess_by_default,
         test_manual_background_study_keeps_deep_catalog_refresh,
+        test_background_study_reuses_recent_metadata_catalog,
+        test_background_study_refreshes_recent_catalog_after_deferred_change,
         test_context_catalog_helper_waits_without_pipe_catalog_polling,
         test_status_refreshes_attached_index_artifact_metadata,
         test_context_catalog_reports_current_memory_and_profile_freshness,

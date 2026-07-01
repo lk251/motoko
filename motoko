@@ -774,6 +774,7 @@ CONTEXT_CATALOG_SUMMARY_CHARS = 900
 CONTEXT_PLAN_BUDGET_CHARS = 180000
 BACKGROUND_STUDY_INTERVAL_SECONDS = 60
 BACKGROUND_STUDY_IDLE_GRACE_SECONDS = 8
+BACKGROUND_CATALOG_MIN_INTERVAL_SECONDS = 5 * 60
 BACKGROUND_PROFILE_REFRESH_INTERVAL_SECONDS = 6 * 60 * 60
 BACKGROUND_HEAVY_INDEX_COOLDOWN_SECONDS = 30 * 60
 BACKGROUND_HEAVY_INDEX_MIN_NEW_FILES = 3
@@ -17780,6 +17781,11 @@ def background_study_step(
     previous_job = previous_state.get("job_id") if study_state_incomplete(previous_state) else None
     mode = "manual-background-catchup" if manual else "catalog-and-planning"
     deep_catalog = manual or env_flag("MOTOKO_BACKGROUND_DEEP_CATALOG", False)
+    catalog_max_age = env_int(
+        "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL",
+        BACKGROUND_CATALOG_MIN_INTERVAL_SECONDS,
+        minimum=0,
+    )
     append_study_job_event(
         job_id,
         "started",
@@ -17860,7 +17866,27 @@ def background_study_step(
             notes.append(f"{catalog_kind} catalog refresh failed: {type(exc).__name__}: {compact_text(str(exc), 120)}")
             return write_context_catalog(deep_artifacts=False)
 
-    catalog = refresh_catalog()
+    def reusable_idle_catalog() -> dict | None:
+        if manual:
+            return None
+        if catalog_max_age <= 0:
+            return None
+        if isinstance(previous_state, dict) and bool(previous_state.get("catalog_refresh_deferred")):
+            return None
+        catalog = read_context_catalog()
+        if not isinstance(catalog, dict):
+            return None
+        artifact_freshness = str(catalog.get("artifact_freshness") or "")
+        if artifact_freshness not in {"metadata", "deep"}:
+            return None
+        updated_age = age_seconds_from_timestamp(catalog.get("updated"))
+        if updated_age is None or updated_age > catalog_max_age:
+            return None
+        return catalog
+
+    catalog = reusable_idle_catalog()
+    if catalog is None:
+        catalog = refresh_catalog()
     sync_notes = sync_attached_indexes_to_latest(conv)
     if sync_notes:
         notes.extend(sync_notes)
