@@ -15258,7 +15258,35 @@ def test_cwd_indexing_ignores_light_study_done(m):
     assert ui.study_last_note == ""
 
 
-def test_cwd_index_done_attaches_index_and_refreshes_catalog(m):
+def test_study_done_does_not_sync_attached_indexes_in_tui_event_path(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.events = m.collections.deque([("study_done", ["catalog fresh"])])
+    ui.events_lock = m.threading.Lock()
+    ui.cwd_indexing = False
+    ui.study_running = True
+    ui.study_status = "bg-light: catalog-meta(cpu)"
+    ui.study_last_note = ""
+    ui.pending_prompts = m.collections.deque()
+    ui.generating = False
+    ui.maintaining = False
+    ui.dirty = False
+    ui.maybe_start_queued_prompt = lambda: False
+    old_sync = m.sync_attached_indexes_to_latest
+    try:
+        m.sync_attached_indexes_to_latest = lambda _conv: (_ for _ in ()).throw(
+            AssertionError("study_done should not sync indexes in the TUI event path")
+        )
+        ui.drain_events()
+    finally:
+        m.sync_attached_indexes_to_latest = old_sync
+
+    assert not ui.study_running
+    assert ui.study_status == "study: idle"
+    assert ui.study_last_note == "catalog fresh"
+    assert ui.dirty
+
+
+def test_cwd_index_done_attaches_index_without_tui_catalog_refresh(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
@@ -15288,7 +15316,7 @@ def test_cwd_index_done_attaches_index_and_refreshes_catalog(m):
         ui.conv = conv
         ui.messages = []
         ui.scroll = 0
-        ui.events = m.collections.deque([("cwd_index_done", index["id"])])
+        ui.events = m.collections.deque([("cwd_index_done", index["id"], m.context_item_from_index(index))])
         ui.events_lock = m.threading.Lock()
         ui.cwd_indexing = True
         ui.study_running = True
@@ -15299,16 +15327,27 @@ def test_cwd_index_done_attaches_index_and_refreshes_catalog(m):
         ui.generating = False
         ui.maintaining = False
         ui.dirty = False
+        old_load_index = m.load_index_if_exists
+        old_write_context_catalog = m.write_context_catalog
+        try:
+            m.load_index_if_exists = lambda _index_id: (_ for _ in ()).throw(
+                AssertionError("cwd_index_done should not load indexes in the TUI event path")
+            )
+            m.write_context_catalog = lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("cwd_index_done should not refresh the catalog in the TUI event path")
+            )
 
-        ui.drain_events()
+            ui.drain_events()
+        finally:
+            m.load_index_if_exists = old_load_index
+            m.write_context_catalog = old_write_context_catalog
 
         assert not ui.cwd_indexing
         assert not ui.study_running
         assert ui.conv["context_items"][0]["id"] == index["id"]
         saved = json.loads(m.conversation_path(conv["id"]).read_text(encoding="utf-8"))
         assert saved["context_items"][0]["id"] == index["id"]
-        catalog = json.loads(m.context_catalog_path().read_text(encoding="utf-8"))
-        assert catalog["indexes"][0]["id"] == index["id"]
+        assert not m.context_catalog_path().exists()
 
 
 def test_color_survives_quiet_index_redirect(m):
@@ -17498,7 +17537,8 @@ def main() -> int:
         test_retrieval_service_renders_attached_context_without_generic_callback,
         test_blocking_profile_refresh_passes_cancel_event,
         test_cwd_indexing_ignores_light_study_done,
-        test_cwd_index_done_attaches_index_and_refreshes_catalog,
+        test_study_done_does_not_sync_attached_indexes_in_tui_event_path,
+        test_cwd_index_done_attaches_index_without_tui_catalog_refresh,
         test_color_survives_quiet_index_redirect,
         test_live_command_request_metadata,
         test_procedural_skills_are_realm_local_and_retrievable,

@@ -22634,7 +22634,14 @@ class MotokoTui:
                     quiet=True,
                     cancel_event=cancel_event,
                 )
-                self.put_event(("cwd_index_done", index.get("id", "")))
+                context_item = context_item_from_index(index)
+                with contextlib.suppress(Exception):
+                    write_context_catalog_subprocess(
+                        deep_artifacts=False,
+                        timeout=env_seconds("MOTOKO_CONTEXT_CATALOG_HELPER_TIMEOUT", 120.0),
+                        cancel_event=cancel_event,
+                    )
+                self.put_event(("cwd_index_done", index.get("id", ""), context_item))
             except WorkPaused as exc:
                 self.put_event(("cwd_index_paused", exc.work_id or ""))
             except SystemExit as exc:
@@ -23088,9 +23095,6 @@ class MotokoTui:
                     continue
                 self.study_running = False
                 notes = list(event[1] or [])
-                sync_notes = sync_attached_indexes_to_latest(self.conv)
-                if sync_notes:
-                    notes = sync_notes + notes
                 self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
                 self.study_status = "study: idle"
                 self.maybe_start_queued_prompt()
@@ -23114,11 +23118,9 @@ class MotokoTui:
                 self.study_running = False
                 self.index_progress = None
                 index_id = event[1]
-                index = load_index_if_exists(str(index_id))
-                if index is not None:
-                    attach_context_item(self.conv, context_item_from_index(index))
-                    with contextlib.suppress(Exception):
-                        write_context_catalog()
+                context_item = event[2] if len(event) > 2 and isinstance(event[2], dict) else None
+                if context_item is not None:
+                    attach_context_item(self.conv, context_item)
                 self.study_last_note = f"learned corpus index {index_id}"
                 self.study_status = "study: idle"
                 self.append("system", f"learned corpus index: {index_id}")
