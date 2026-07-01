@@ -126,6 +126,8 @@ def fake_tui(m, slave_fd: int):
     ui.generating = False
     ui.report_running = 0
     ui.report_status = ""
+    ui.foreground_running = 0
+    ui.foreground_status = ""
     ui.maintaining = False
     ui.study_running = False
     ui.study_status = "study: idle"
@@ -135,12 +137,20 @@ def fake_tui(m, slave_fd: int):
     ui.cancel_event = m.threading.Event()
     ui.pending_prompts = collections.deque()
     ui.answer_entry = None
+    ui.answer_phase = ""
+    ui.answer_started_monotonic = 0.0
+    ui.answer_phase_started_monotonic = 0.0
+    ui.answer_reasoning = ""
+    ui.kv_notice_started_monotonic = 0.0
+    ui.kv_notice_until_monotonic = 0.0
     ui.last_render = 0.0
     ui.tui_spinner_frames = m.spinner_frames() or ["*"]
     ui.tui_spinner_index = 0
     ui.overlay_title = None
     ui.overlay_lines = None
     ui.overlay_scroll = 0
+    ui.ui_owner_thread_id = None
+    ui.ui_owner_thread_error = None
     ui.messages = ui.seed_messages(ui.conv)
     ui.messages.append({"role": "user", "content": "resize redraw probe"})
     ui.messages.append({"role": "assistant", "content": "checking pty dimensions"})
@@ -401,6 +411,44 @@ def main() -> int:
             finally:
                 termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
 
+            loop_ui = fake_tui(m, slave_fd)
+            loop_ui.input_buffer = ""
+            loop_ui.cursor = 0
+            loop_ui.resume_maintenance_on_start = False
+            loop_ui.pending_prompts = collections.deque()
+            loop_ui.start_startup_discovery = lambda: None
+            pressure_started = False
+            input_before_background_events = []
+            original_drain_events = loop_ui.drain_events
+
+            def start_background_pressure():
+                nonlocal pressure_started
+                pressure_started = True
+                with loop_ui.events_lock:
+                    for idx in range(32):
+                        loop_ui.events.append(("system_note", f"background event {idx}"))
+                os.write(master_fd, b"z")
+
+            def checked_drain_events():
+                if pressure_started:
+                    input_before_background_events.append(loop_ui.input_buffer)
+                original_drain_events()
+                if pressure_started:
+                    loop_ui.running = False
+
+            loop_ui.start_study_loop = start_background_pressure
+            loop_ui.drain_events = checked_drain_events
+            old_tty = termios.tcgetattr(slave_fd)
+            try:
+                tty.setcbreak(slave_fd)
+                loop_ui.run_terminal_owner_loop()
+            finally:
+                termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
+            assert input_before_background_events
+            assert input_before_background_events[0] == "z"
+            assert loop_ui.ui_owner_thread_error is None
+            read_available(master_fd)
+
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72
             ui.render(force=True)
@@ -420,7 +468,7 @@ def main() -> int:
                 os.environ.pop("MOTOKO_CONFIG_HOME", None)
             else:
                 os.environ["MOTOKO_CONFIG_HOME"] = old_config
-    print("3 motoko tty render/input checks passed")
+    print("4 motoko tty render/input checks passed")
     return 0
 
 
