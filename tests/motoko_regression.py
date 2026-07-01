@@ -7679,12 +7679,15 @@ def test_background_study_uses_subprocess_for_evidence_refresh(m):
     old_candidates = m.evidence_refresh_candidates
     old_subprocess_refresh = m.refresh_evidence_stores_subprocess
     old_inprocess_refresh = m.refresh_evidence_stores
+    old_catalog_helper = m.write_context_catalog_subprocess
     old_env = {
         key: os.environ.get(key)
         for key in (
             "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
             "MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT",
             "MOTOKO_BACKGROUND_EVIDENCE_SUBPROCESS",
+            "MOTOKO_BACKGROUND_DEEP_CATALOG",
+            "MOTOKO_BACKGROUND_REFRESH_CATALOG_AFTER_CHANGE",
             "MOTOKO_BACKGROUND_INDEX_ENRICH",
             "MOTOKO_BACKGROUND_INDEX_CLEANUP",
             "MOTOKO_BACKGROUND_INDEX_REPAIR",
@@ -7696,12 +7699,15 @@ def test_background_study_uses_subprocess_for_evidence_refresh(m):
         os.environ["MOTOKO_BACKGROUND_EVIDENCE_REFRESH"] = "1"
         os.environ["MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT"] = "1"
         os.environ["MOTOKO_BACKGROUND_EVIDENCE_SUBPROCESS"] = "1"
+        os.environ["MOTOKO_BACKGROUND_DEEP_CATALOG"] = "0"
+        os.environ["MOTOKO_BACKGROUND_REFRESH_CATALOG_AFTER_CHANGE"] = "0"
         os.environ["MOTOKO_BACKGROUND_INDEX_ENRICH"] = "0"
         os.environ["MOTOKO_BACKGROUND_INDEX_CLEANUP"] = "0"
         os.environ["MOTOKO_BACKGROUND_INDEX_REPAIR"] = "0"
         os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH"] = "0"
         os.environ["MOTOKO_BACKGROUND_PROFILE"] = "0"
         calls = []
+        catalog_calls = []
 
         def fake_candidates(*_args, **_kwargs):
             return [({"id": "idx-evidence", "name": "docs", "root": "/tmp/docs"}, "missing")]
@@ -7720,19 +7726,45 @@ def test_background_study_uses_subprocess_for_evidence_refresh(m):
         def forbidden_inprocess_refresh(**_kwargs):
             raise AssertionError("background study should not run evidence refresh in the TUI process")
 
+        def fake_catalog_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
+            catalog_calls.append((deep_artifacts, timeout, cancel_event is not None))
+            catalog = {
+                "updated": m.now(),
+                "artifact_freshness": "metadata",
+                "memory_count": 0,
+                "indexes": [],
+                "topics": [],
+                "dossiers": [],
+            }
+            m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            return catalog
+
         m.evidence_refresh_candidates = fake_candidates
         m.refresh_evidence_stores_subprocess = fake_subprocess_refresh
         m.refresh_evidence_stores = forbidden_inprocess_refresh
+        m.write_context_catalog_subprocess = fake_catalog_helper
         with isolated_state():
             conv = m.new_conversation("Evidence subprocess")
-            notes = m.background_study_step(conv, phase_callback=lambda _phase: None)
+            phases = []
+            notes = m.background_study_step(
+                conv,
+                phase_callback=phases.append,
+                cancel_event=threading.Event(),
+            )
+            state = m.read_study_state()
         assert calls
         assert calls[0]["limit"] == 1
+        assert len(catalog_calls) == 1
+        assert catalog_calls[0][0] is False
+        assert catalog_calls[0][2] is True
+        assert phases.count("bg-light: catalog-meta(cpu)") == 1
+        assert state.get("catalog_refresh_deferred") is True
         assert any("evidence store(s) refreshed: 1" in note for note in notes)
     finally:
         m.evidence_refresh_candidates = old_candidates
         m.refresh_evidence_stores_subprocess = old_subprocess_refresh
         m.refresh_evidence_stores = old_inprocess_refresh
+        m.write_context_catalog_subprocess = old_catalog_helper
         for key, value in old_env.items():
             if value is None:
                 os.environ.pop(key, None)

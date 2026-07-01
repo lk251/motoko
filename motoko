@@ -17812,6 +17812,7 @@ def background_study_step(
             raise WorkPaused("background study paused by request", work_id=job_id, work_kind="study")
 
     notes: list[str] = []
+    catalog_refresh_deferred = False
 
     def pause_from_child(message: str, *, child_work_id: str = "", child_work_kind: str = "") -> None:
         pause_notes = notes + [message]
@@ -17836,7 +17837,15 @@ def background_study_step(
         clear_work_pause_request()
         raise WorkPaused(message, work_id=child_work_id or job_id, work_kind=child_work_kind or "study")
 
-    def refresh_catalog() -> dict:
+    def refresh_catalog(*, after_change: bool = False) -> dict:
+        nonlocal catalog_refresh_deferred
+        if (
+            after_change
+            and not manual
+            and not env_flag("MOTOKO_BACKGROUND_REFRESH_CATALOG_AFTER_CHANGE", False)
+        ):
+            catalog_refresh_deferred = True
+            return catalog
         catalog_kind = "deep" if deep_catalog else "meta"
         set_phase(f"bg-light: catalog-{catalog_kind}(cpu)", notes=notes)
         try:
@@ -17855,7 +17864,7 @@ def background_study_step(
     sync_notes = sync_attached_indexes_to_latest(conv)
     if sync_notes:
         notes.extend(sync_notes)
-        catalog = refresh_catalog()
+        catalog = refresh_catalog(after_change=True)
     if previous_job:
         notes.append(
             f"resumed after interrupted study job {previous_job} "
@@ -17881,7 +17890,7 @@ def background_study_step(
         if enrichment_candidates:
             set_phase("study: upgrading indexes", notes=notes)
             notes.extend(upgrade_indexes_needing_artifacts(limit=max(1, enrich_limit), cancel_event=cancel_event))
-            catalog = refresh_catalog()
+            catalog = refresh_catalog(after_change=True)
     heavy_notes = refresh_heavy_attached_indexes(
         conv,
         phase_callback=lambda phase: set_phase(phase, notes=notes),
@@ -17890,7 +17899,7 @@ def background_study_step(
     )
     if heavy_notes:
         notes.extend(heavy_notes)
-        catalog = refresh_catalog()
+        catalog = refresh_catalog(after_change=True)
     cleanup_limit = env_int("MOTOKO_BACKGROUND_INDEX_CLEANUP_LIMIT", BACKGROUND_INDEX_CLEANUP_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_INDEX_CLEANUP", True) and cleanup_limit:
         cleanup_candidates = index_cleanup_candidates()
@@ -17901,7 +17910,7 @@ def background_study_step(
             blocked_count = len(cleanup_report.get("blocked", []) or [])
             if deleted_count:
                 notes.append(f"stale superseded index artifact(s) cleaned: {deleted_count}")
-                catalog = refresh_catalog()
+                catalog = refresh_catalog(after_change=True)
             if blocked_count:
                 notes.append(f"index cleanup blocked: {blocked_count}")
     evidence_limit = env_int("MOTOKO_BACKGROUND_EVIDENCE_REFRESH_LIMIT", BACKGROUND_EVIDENCE_REFRESH_LIMIT)
@@ -17919,7 +17928,7 @@ def background_study_step(
             built = int(evidence_report.get("built", 0) or 0)
             if built:
                 notes.append(f"evidence store(s) refreshed: {built}")
-                catalog = refresh_catalog()
+                catalog = refresh_catalog(after_change=True)
             for item in evidence_report.get("items", [])[:3]:
                 if item.get("status") in {"skipped", "failed"}:
                     label = item.get("name") or item.get("index", "")
@@ -17942,7 +17951,7 @@ def background_study_step(
             )
             if repair_notes:
                 notes.extend(repair_notes)
-                catalog = refresh_catalog()
+                catalog = refresh_catalog(after_change=True)
     vector_limit = env_int("MOTOKO_BACKGROUND_VECTOR_REFRESH_LIMIT", BACKGROUND_VECTOR_REFRESH_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_VECTOR_REFRESH", True) and vector_limit:
         try:
@@ -17958,7 +17967,7 @@ def background_study_step(
             built = int(vector_report.get("built", 0) or 0)
             if built:
                 notes.append(f"vector store(s) refreshed: {built}")
-                catalog = refresh_catalog()
+                catalog = refresh_catalog(after_change=True)
             for item in vector_report.get("items", [])[:3]:
                 if item.get("status") in {"skipped", "failed", "paused", "deferred"}:
                     label = item.get("name") or item.get("index", "")
@@ -17988,7 +17997,7 @@ def background_study_step(
             notes.append(f"profile refresh failed: {type(exc).__name__}: {exc}")
         else:
             notes.append("profile dossier refreshed")
-            catalog = refresh_catalog()
+            catalog = refresh_catalog(after_change=True)
     elif catalog.get("memory_count", 0) and not catalog.get("profile_updated"):
         notes.append("profile dossier is not built yet")
     set_phase("study: planning", notes=notes)
@@ -18012,9 +18021,16 @@ def background_study_step(
         "job_id": job_id,
         "notes": notes[:8],
         "catalog_updated": catalog.get("updated", ""),
+        "catalog_refresh_deferred": catalog_refresh_deferred,
     }
     write_study_state(state)
-    append_study_job_event(job_id, "completed", notes=notes[:8], catalog_updated=catalog.get("updated", ""))
+    append_study_job_event(
+        job_id,
+        "completed",
+        notes=notes[:8],
+        catalog_updated=catalog.get("updated", ""),
+        catalog_refresh_deferred=catalog_refresh_deferred,
+    )
     return notes[:12] if manual else notes[:3]
 
 
