@@ -7716,6 +7716,33 @@ def test_tui_input_batching_and_display_cache_skip_hot_work(m):
         m.model_badge = old_model_badge
         m.assistant_color = old_assistant_color
 
+    old_list_indexes = m.list_indexes
+    calls = {"list_indexes": 0}
+    try:
+        def counted_list_indexes():
+            calls["list_indexes"] += 1
+            return [{"id": "idx-1", "root": "/tmp/project", "freshness": "fresh"}]
+
+        m.list_indexes = counted_list_indexes
+        ui = object.__new__(m.MotokoTui)
+        ui.input_buffer = "/attach-index "
+        ui.cursor = len(ui.input_buffer)
+        ui.dropdown_cache_key = None
+        ui.dropdown_cache_options = []
+        ui.dropdown_cache_expires = 0.0
+        ui.dropdown_cache_seconds = 60.0
+
+        assert ui.dropdown_options()[0]["value"] == "idx-1"
+        assert ui.dropdown_options()[0]["value"] == "idx-1"
+        assert calls["list_indexes"] == 1
+
+        ui.input_buffer = "/index-repair "
+        ui.cursor = len(ui.input_buffer)
+        assert ui.dropdown_options()[0]["value"] == "idx-1"
+        assert calls["list_indexes"] == 2
+    finally:
+        m.list_indexes = old_list_indexes
+
     class ExplodingMessages(list):
         def __iter__(self):
             raise AssertionError("sync_transcript should skip unchanged transcripts")

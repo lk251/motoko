@@ -648,6 +648,7 @@ TUI_INPUT_BATCH_LIMIT = 64
 TUI_EVENT_BATCH_LIMIT = 96
 TUI_EVENT_DRAIN_BUDGET_SECONDS = 0.010
 TUI_DISPLAY_CACHE_SECONDS = 2.0
+TUI_DROPDOWN_CACHE_SECONDS = 0.25
 STARTUP_DISCOVERY_IDLE_GRACE_SECONDS = 2.0
 STARTUP_DISCOVERY_POLL_SECONDS = 0.25
 STARTUP_DISCOVERY_TIMEOUT_SECONDS = 45.0
@@ -21741,6 +21742,14 @@ class MotokoTui:
         self.history_index: int | None = None
         self.scroll = 0
         self.dropdown_index = 0
+        self.dropdown_cache_key: tuple | None = None
+        self.dropdown_cache_options: list[dict] = []
+        self.dropdown_cache_expires = 0.0
+        self.dropdown_cache_seconds = env_float(
+            "MOTOKO_TUI_DROPDOWN_CACHE_SECONDS",
+            TUI_DROPDOWN_CACHE_SECONDS,
+            minimum=0.0,
+        )
         self.events: collections.deque[tuple] = collections.deque()
         self.events_lock = threading.Lock()
         self.jobs = LIVE_JOB_SUPERVISOR
@@ -23278,7 +23287,31 @@ class MotokoTui:
     def compact_command_menu(self) -> str:
         return command_menu_text(SLASH_COMMANDS)
 
+    def invalidate_dropdown_cache(self) -> None:
+        self.dropdown_cache_key = None
+        self.dropdown_cache_options = []
+        self.dropdown_cache_expires = 0.0
+
     def dropdown_options(self) -> list[dict]:
+        key = (
+            getattr(self, "input_buffer", ""),
+            int(getattr(self, "cursor", 0) or 0),
+        )
+        now_value = time.monotonic()
+        cache_seconds = float(getattr(self, "dropdown_cache_seconds", TUI_DROPDOWN_CACHE_SECONDS) or 0.0)
+        if (
+            cache_seconds > 0
+            and getattr(self, "dropdown_cache_key", None) == key
+            and now_value < float(getattr(self, "dropdown_cache_expires", 0.0) or 0.0)
+        ):
+            return list(getattr(self, "dropdown_cache_options", []))
+        options = self.compute_dropdown_options()
+        self.dropdown_cache_key = key
+        self.dropdown_cache_options = list(options)
+        self.dropdown_cache_expires = now_value + cache_seconds
+        return list(options)
+
+    def compute_dropdown_options(self) -> list[dict]:
         text = self.input_buffer[: self.cursor]
         stripped = text.lstrip()
         if not stripped.startswith("/"):
