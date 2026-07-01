@@ -23469,7 +23469,6 @@ class MotokoTui:
             self.dirty = True
 
     def render(self, *, force: bool = False) -> None:
-        self.drain_events()
         size = self.terminal_size()
         width, height = size.columns, size.lines
         width = max(40, width)

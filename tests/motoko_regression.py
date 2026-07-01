@@ -6865,7 +6865,9 @@ def test_tui_append_renderer_keeps_transcript_in_scrollback(m):
         ui.scroll = 0
         ui.last_render = 0.0
         ui.dirty = True
-        ui.drain_events = lambda: None
+        ui.drain_events = lambda: (_ for _ in ()).throw(
+            AssertionError("render should not drain background events")
+        )
         ui.terminal_size = lambda: os.terminal_size((80, 12))
         ui.write = captured.append
 
