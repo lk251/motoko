@@ -11,6 +11,7 @@ import collections
 import fcntl
 import importlib.machinery
 import importlib.util
+import json
 import os
 import pathlib
 import pty
@@ -160,7 +161,102 @@ def fake_tui(m, slave_fd: int):
     return ui
 
 
+def catalog_latency_probe_on_pty(m, master_fd: int, slave_fd: int) -> dict:
+    catalog_ui = fake_tui(m, slave_fd)
+    catalog_ui.input_buffer = ""
+    catalog_ui.cursor = 0
+    catalog_ui.resume_maintenance_on_start = False
+    catalog_ui.pending_prompts = collections.deque()
+    catalog_ui.start_startup_discovery = lambda: None
+    input_before_events = []
+    catalog_started_at = 0.0
+    catalog_seen_at = 0.0
+    original_drain_events = catalog_ui.drain_events
+
+    def start_catalog_pressure():
+        nonlocal catalog_started_at
+        catalog_ui.study_running = True
+        catalog_ui.study_status = "bg-light: catalog-meta(cpu)"
+        catalog_ui.study_phase_started = time.monotonic()
+        catalog_ui.study_phase_updated = catalog_ui.study_phase_started
+        with catalog_ui.events_lock:
+            catalog_ui.events.append(("study_phase", "bg-light: catalog-meta(cpu)"))
+            for idx in range(32):
+                catalog_ui.events.append(("system_note", f"catalog pressure event {idx}"))
+        catalog_started_at = time.monotonic()
+        os.write(master_fd, b"c")
+
+    def checked_drain_events():
+        nonlocal catalog_seen_at
+        if catalog_started_at:
+            input_before_events.append(catalog_ui.input_buffer)
+            if catalog_ui.input_buffer:
+                catalog_seen_at = time.monotonic()
+        original_drain_events()
+        if catalog_started_at:
+            catalog_ui.running = False
+
+    catalog_ui.start_study_loop = start_catalog_pressure
+    catalog_ui.drain_events = checked_drain_events
+    old_tty = termios.tcgetattr(slave_fd)
+    try:
+        tty.setcbreak(slave_fd)
+        catalog_ui.run_terminal_owner_loop()
+    finally:
+        termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
+    read_available(master_fd)
+    latency = catalog_seen_at - catalog_started_at if catalog_seen_at and catalog_started_at else None
+    passed = (
+        bool(input_before_events)
+        and input_before_events[0] == "c"
+        and latency is not None
+        and latency < 0.2
+        and catalog_ui.ui_owner_thread_error is None
+    )
+    return {
+        "schema": "motoko-tui-catalog-latency-probe-v1",
+        "status": "pass" if passed else "fail",
+        "phase": "bg-light: catalog-meta(cpu)",
+        "event_pressure": 33,
+        "input_before_events": bool(input_before_events and input_before_events[0] == "c"),
+        "latency_ms": round(latency * 1000, 3) if latency is not None else None,
+        "latency_threshold_ms": 200,
+        "owner_error": "" if catalog_ui.ui_owner_thread_error is None else str(catalog_ui.ui_owner_thread_error),
+    }
+
+
+def run_catalog_latency_probe() -> dict:
+    old_state = os.environ.get("MOTOKO_STATE_HOME")
+    old_config = os.environ.get("MOTOKO_CONFIG_HOME")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
+            os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
+            m = load_motoko()
+            master_fd, slave_fd = pty.openpty()
+            try:
+                set_winsz(slave_fd, 14, 50)
+                return catalog_latency_probe_on_pty(m, master_fd, slave_fd)
+            finally:
+                os.close(master_fd)
+                os.close(slave_fd)
+    finally:
+        if old_state is None:
+            os.environ.pop("MOTOKO_STATE_HOME", None)
+        else:
+            os.environ["MOTOKO_STATE_HOME"] = old_state
+        if old_config is None:
+            os.environ.pop("MOTOKO_CONFIG_HOME", None)
+        else:
+            os.environ["MOTOKO_CONFIG_HOME"] = old_config
+
+
 def main() -> int:
+    if "--catalog-latency-json" in sys.argv:
+        result = run_catalog_latency_probe()
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result.get("status") == "pass" else 1
+
     old_state = os.environ.get("MOTOKO_STATE_HOME")
     old_config = os.environ.get("MOTOKO_CONFIG_HOME")
     assert move_word_left("alpha beta", 10) == 6
@@ -452,53 +548,8 @@ def main() -> int:
             assert loop_ui.ui_owner_thread_error is None
             read_available(master_fd)
 
-            catalog_ui = fake_tui(m, slave_fd)
-            catalog_ui.input_buffer = ""
-            catalog_ui.cursor = 0
-            catalog_ui.resume_maintenance_on_start = False
-            catalog_ui.pending_prompts = collections.deque()
-            catalog_ui.start_startup_discovery = lambda: None
-            catalog_input_before_events = []
-            catalog_started_at = 0.0
-            catalog_seen_at = 0.0
-            original_catalog_drain_events = catalog_ui.drain_events
-
-            def start_catalog_pressure():
-                nonlocal catalog_started_at
-                catalog_ui.study_running = True
-                catalog_ui.study_status = "bg-light: catalog-meta(cpu)"
-                catalog_ui.study_phase_started = time.monotonic()
-                catalog_ui.study_phase_updated = catalog_ui.study_phase_started
-                with catalog_ui.events_lock:
-                    catalog_ui.events.append(("study_phase", "bg-light: catalog-meta(cpu)"))
-                    for idx in range(32):
-                        catalog_ui.events.append(("system_note", f"catalog pressure event {idx}"))
-                catalog_started_at = time.monotonic()
-                os.write(master_fd, b"c")
-
-            def checked_catalog_drain_events():
-                nonlocal catalog_seen_at
-                if catalog_started_at:
-                    catalog_input_before_events.append(catalog_ui.input_buffer)
-                    if catalog_ui.input_buffer:
-                        catalog_seen_at = time.monotonic()
-                original_catalog_drain_events()
-                if catalog_started_at:
-                    catalog_ui.running = False
-
-            catalog_ui.start_study_loop = start_catalog_pressure
-            catalog_ui.drain_events = checked_catalog_drain_events
-            old_tty = termios.tcgetattr(slave_fd)
-            try:
-                tty.setcbreak(slave_fd)
-                catalog_ui.run_terminal_owner_loop()
-            finally:
-                termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
-            assert catalog_input_before_events
-            assert catalog_input_before_events[0] == "c"
-            assert catalog_seen_at and catalog_seen_at - catalog_started_at < 0.2
-            assert catalog_ui.ui_owner_thread_error is None, catalog_ui.ui_owner_thread_error
-            read_available(master_fd)
+            catalog_probe = catalog_latency_probe_on_pty(m, master_fd, slave_fd)
+            assert catalog_probe["status"] == "pass", catalog_probe
 
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72
@@ -519,7 +570,7 @@ def main() -> int:
                 os.environ.pop("MOTOKO_CONFIG_HOME", None)
             else:
                 os.environ["MOTOKO_CONFIG_HOME"] = old_config
-    print("4 motoko tty render/input checks passed")
+    print("5 motoko tty render/input checks passed")
     return 0
 
 
