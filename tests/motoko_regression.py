@@ -6772,6 +6772,55 @@ def test_tui_terminal_interrupt_is_routed_through_owner_events(m):
     assert ui.dirty
 
 
+def test_tui_owner_loop_checks_input_before_background_events(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.running = True
+    ui.resume_maintenance_on_start = False
+    ui.pending_prompts = m.collections.deque()
+    ui.generating = False
+    ui.maintaining = False
+    ui.study_running = True
+    ui.report_running = 0
+    ui.foreground_running = 0
+    ui.dirty = False
+    ui.last_render = time.monotonic()
+    ui.ui_owner_thread_error = None
+    order = []
+    input_timeouts = []
+
+    def fake_render(*, force=False):
+        order.append(("render", force))
+        ui.last_render = time.monotonic()
+        ui.dirty = False
+
+    def fake_handle_ready_input(timeout=0.0):
+        order.append(("input", timeout))
+        input_timeouts.append(timeout)
+        if len(input_timeouts) == 1:
+            return True
+        ui.running = False
+        return False
+
+    ui.render = fake_render
+    ui.start_startup_discovery = lambda: order.append(("startup",))
+    ui.start_study_loop = lambda: order.append(("study-loop",))
+    ui.start_maintenance = lambda *args, **kwargs: order.append(("maintenance",))
+    ui.pop_next_queued_prompt = lambda: None
+    ui.start_generation = lambda _text: None
+    ui.handle_ready_input = fake_handle_ready_input
+    ui.drain_events = lambda: order.append(("events",))
+    ui.drain_terminal_flags = lambda: order.append(("flags",))
+    ui.kv_notice_active = lambda _now: False
+
+    ui.run_terminal_owner_loop()
+
+    first_input = order.index(("input", 0.0))
+    first_events = order.index(("events",))
+    assert first_input < first_events
+    assert input_timeouts[:2] == [0.0, 0.0]
+    assert ui.ui_owner_thread_error is None
+
+
 def test_tui_terminal_resize_flag_is_drained_by_owner_loop(m):
     ui = object.__new__(m.MotokoTui)
     ui.terminal_resize_requested = True
@@ -17229,6 +17278,7 @@ def main() -> int:
         test_tui_overlay_highlights_report_labels,
         test_tui_run_uses_independent_terminal_owner_thread,
         test_tui_terminal_interrupt_is_routed_through_owner_events,
+        test_tui_owner_loop_checks_input_before_background_events,
         test_tui_terminal_resize_flag_is_drained_by_owner_loop,
         test_fake_openai_stream,
         test_chat_reasoning_payload_and_stream,
