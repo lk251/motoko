@@ -13,6 +13,7 @@ import collections
 import concurrent.futures
 import contextlib
 import datetime as _dt
+import fcntl
 import hashlib
 import http.client
 import io
@@ -20,11 +21,13 @@ import inspect
 import json
 import os
 import pathlib
+import pty
 import re
 import select
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import termios
@@ -23797,6 +23800,142 @@ class MotokoTui:
             return os.terminal_size((80, 24))
 
 
+def set_pty_window_size(fd: int, *, rows: int = 14, cols: int = 50) -> None:
+    with contextlib.suppress(OSError):
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def read_pty_available(fd: int, *, seconds: float = 0.05) -> str:
+    chunks = []
+    deadline = time.monotonic() + max(0.0, float(seconds or 0.0))
+    while time.monotonic() < deadline:
+        readable, _writeable, _errors = select.select([fd], [], [], 0.005)
+        if not readable:
+            continue
+        try:
+            chunks.append(os.read(fd, 65536))
+        except OSError:
+            break
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
+def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int) -> dict:
+    conv = new_conversation("TUI catalog latency probe")
+    ui = MotokoTui(conv)
+    ui.stdin_fd = slave_fd
+    ui.stdout_fd = slave_fd
+    ui.input_buffer = ""
+    ui.cursor = 0
+    ui.resume_maintenance_on_start = False
+    ui.pending_prompts = collections.deque()
+    ui.start_startup_discovery = lambda: None
+    ui.ui_owner_thread_error = None
+    input_before_events: list[str] = []
+    catalog_started_at = 0.0
+    catalog_seen_at = 0.0
+    original_drain_events = ui.drain_events
+
+    def start_catalog_pressure() -> None:
+        nonlocal catalog_started_at
+        ui.study_running = True
+        ui.study_status = "bg-light: catalog-meta(cpu)"
+        ui.study_phase_started = time.monotonic()
+        ui.study_phase_updated = ui.study_phase_started
+        with ui.events_lock:
+            ui.events.append(("study_phase", "bg-light: catalog-meta(cpu)"))
+            for idx in range(32):
+                ui.events.append(("system_note", f"catalog pressure event {idx}"))
+        catalog_started_at = time.monotonic()
+        os.write(master_fd, b"c")
+
+    def checked_drain_events() -> None:
+        nonlocal catalog_seen_at
+        if catalog_started_at:
+            input_before_events.append(ui.input_buffer)
+            if ui.input_buffer:
+                catalog_seen_at = time.monotonic()
+        original_drain_events()
+        if catalog_started_at:
+            ui.running = False
+
+    ui.start_study_loop = start_catalog_pressure
+    ui.drain_events = checked_drain_events
+    old_tty = termios.tcgetattr(slave_fd)
+    try:
+        tty.setcbreak(slave_fd)
+        ui.run_terminal_owner_loop()
+    finally:
+        termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
+    read_pty_available(master_fd)
+    latency = catalog_seen_at - catalog_started_at if catalog_seen_at and catalog_started_at else None
+    passed = (
+        bool(input_before_events)
+        and input_before_events[0] == "c"
+        and latency is not None
+        and latency < 0.2
+        and ui.ui_owner_thread_error is None
+    )
+    return {
+        "schema": "motoko-tui-catalog-latency-probe-v1",
+        "status": "pass" if passed else "fail",
+        "phase": "bg-light: catalog-meta(cpu)",
+        "event_pressure": 33,
+        "input_before_events": bool(input_before_events and input_before_events[0] == "c"),
+        "latency_ms": round(latency * 1000, 3) if latency is not None else None,
+        "latency_threshold_ms": 200,
+        "owner_error": "" if ui.ui_owner_thread_error is None else str(ui.ui_owner_thread_error),
+    }
+
+
+def run_tui_catalog_latency_probe() -> dict:
+    old_state = os.environ.get("MOTOKO_STATE_HOME")
+    old_config = os.environ.get("MOTOKO_CONFIG_HOME")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
+            os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
+            master_fd, slave_fd = pty.openpty()
+            try:
+                set_pty_window_size(slave_fd)
+                return build_tui_catalog_latency_probe(master_fd, slave_fd)
+            finally:
+                os.close(master_fd)
+                os.close(slave_fd)
+    finally:
+        if old_state is None:
+            os.environ.pop("MOTOKO_STATE_HOME", None)
+        else:
+            os.environ["MOTOKO_STATE_HOME"] = old_state
+        if old_config is None:
+            os.environ.pop("MOTOKO_CONFIG_HOME", None)
+        else:
+            os.environ["MOTOKO_CONFIG_HOME"] = old_config
+
+
+def format_tui_catalog_latency_probe(report: dict) -> str:
+    return "\n".join(
+        [
+            "TUI catalog latency probe:",
+            f"status: {report.get('status', '')}",
+            f"phase: {report.get('phase', '')}",
+            f"input before events: {report.get('input_before_events')}",
+            f"latency: {report.get('latency_ms')} ms (threshold {report.get('latency_threshold_ms')} ms)",
+            f"event pressure: {report.get('event_pressure')}",
+            f"owner error: {report.get('owner_error') or '-'}",
+        ]
+    )
+
+
+def command_tui_latency_probe(args) -> None:
+    report = run_tui_catalog_latency_probe()
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        print(format_tui_catalog_latency_probe(report))
+    if report.get("status") != "pass":
+        raise SystemExit(1)
+
+
 def chat_loop(conv: dict) -> None:
     if tui_enabled():
         try:
@@ -25760,6 +25899,13 @@ def main(argv: list[str]) -> int:
     context_bench.add_argument("--json", action="store_true", help="print JSON")
     context_bench.add_argument("--target-tokens", type=int, action="append", help="estimated prompt-token target")
     context_bench.set_defaults(func=command_context_bench)
+
+    tui_latency_probe = sub.add_parser(
+        "tui-latency-probe",
+        help="run a content-free PTY probe for catalog-phase TUI input latency",
+    )
+    tui_latency_probe.add_argument("--json", action="store_true", help="print JSON report")
+    tui_latency_probe.set_defaults(func=command_tui_latency_probe)
 
     feedback = sub.add_parser("feedback", help="rate the last answer in a saved conversation")
     feedback.add_argument("rating", choices=["up", "down", "ok", "good", "bad"])

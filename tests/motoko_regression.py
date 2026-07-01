@@ -7756,6 +7756,54 @@ def test_tui_input_batching_and_display_cache_skip_hot_work(m):
     ui.sync_transcript(80, 24)
 
 
+def test_tui_latency_probe_command_contract(m):
+    old_probe = m.run_tui_catalog_latency_probe
+    try:
+        m.run_tui_catalog_latency_probe = lambda: {
+            "schema": "motoko-tui-catalog-latency-probe-v1",
+            "status": "pass",
+            "phase": "bg-light: catalog-meta(cpu)",
+            "event_pressure": 33,
+            "input_before_events": True,
+            "latency_ms": 0.12,
+            "latency_threshold_ms": 200,
+            "owner_error": "",
+        }
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert m.main(["tui-latency-probe", "--json"]) == 0
+        report = json.loads(buf.getvalue())
+        assert report["schema"] == "motoko-tui-catalog-latency-probe-v1"
+        assert report["status"] == "pass"
+        assert report["phase"] == "bg-light: catalog-meta(cpu)"
+        assert report["input_before_events"] is True
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            assert m.main(["tui-latency-probe"]) == 0
+        assert "TUI catalog latency probe:" in buf.getvalue()
+        assert "status: pass" in buf.getvalue()
+
+        m.run_tui_catalog_latency_probe = lambda: {
+            "schema": "motoko-tui-catalog-latency-probe-v1",
+            "status": "fail",
+            "phase": "bg-light: catalog-meta(cpu)",
+            "event_pressure": 33,
+            "input_before_events": False,
+            "latency_ms": None,
+            "latency_threshold_ms": 200,
+            "owner_error": "test error",
+        }
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                m.main(["tui-latency-probe", "--json"])
+            raise AssertionError("failing TUI latency probe should exit non-zero")
+        except SystemExit as exc:
+            assert exc.code == 1
+    finally:
+        m.run_tui_catalog_latency_probe = old_probe
+
+
 def test_background_study_uses_subprocess_for_evidence_refresh(m):
     old_candidates = m.evidence_refresh_candidates
     old_subprocess_refresh = m.refresh_evidence_stores_subprocess
@@ -17509,6 +17557,7 @@ def main() -> int:
         test_tui_report_command_does_not_block_render_thread,
         test_tui_event_drain_is_bounded_and_coalesces_progress,
         test_tui_input_batching_and_display_cache_skip_hot_work,
+        test_tui_latency_probe_command_contract,
         test_background_study_uses_subprocess_for_evidence_refresh,
         test_tui_prompt_is_saved_before_context_preparation,
         test_tui_queued_prompt_is_durable_and_history_seeded,
