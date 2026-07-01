@@ -20,6 +20,7 @@ import sys
 import termios
 import tempfile
 import time
+import tty
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -389,6 +390,16 @@ def main() -> int:
             ui.render(force=True)
             cleared_dropdown = read_available(master_fd)
             assert "checking pty dimensions" in cleared_dropdown
+
+            old_tty = termios.tcgetattr(slave_fd)
+            try:
+                tty.setcbreak(slave_fd)
+                os.write(master_fd, b"a")
+                assert ui.handle_ready_input(0.1) is True
+                assert ui.input_buffer == "a"
+                assert ui.cursor == 1
+            finally:
+                termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
 
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72

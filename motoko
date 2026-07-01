@@ -22029,6 +22029,17 @@ class MotokoTui:
                 break
             self.handle_key(key)
 
+    def handle_ready_input(self, timeout: float = 0.0) -> bool:
+        readable, _writeable, _errors = select.select([self.stdin_fd], [], [], max(0.0, float(timeout or 0.0)))
+        if not readable:
+            return False
+        self.last_input_at = time.monotonic()
+        key = self.read_key()
+        if key:
+            self.handle_key(key)
+            self.drain_pending_input()
+        return True
+
     def run(self) -> None:
         ui_thread: threading.Thread | None = None
         old_winch = signal.getsignal(signal.SIGWINCH)
@@ -22095,6 +22106,7 @@ class MotokoTui:
                 if next_prompt:
                     self.start_generation(next_prompt)
             while self.running:
+                handled_input = self.handle_ready_input(timeout=0.0)
                 self.drain_events()
                 self.drain_terminal_flags()
                 now_ts = time.monotonic()
@@ -22106,14 +22118,8 @@ class MotokoTui:
                     or self.foreground_running
                     or self.kv_notice_active(now_ts)
                 )
-                timeout = 0.04 if active_work else 0.12
-                readable, _writeable, _errors = select.select([self.stdin_fd], [], [], timeout)
-                if readable:
-                    self.last_input_at = time.monotonic()
-                    key = self.read_key()
-                    if key:
-                        self.handle_key(key)
-                        self.drain_pending_input()
+                timeout = 0.0 if handled_input or self.dirty else (0.04 if active_work else 0.12)
+                self.handle_ready_input(timeout=timeout)
                 if self.dirty or (active_work and now_ts - self.last_render > 0.08):
                     self.render()
         except BaseException as exc:
