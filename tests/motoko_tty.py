@@ -130,9 +130,12 @@ def fake_tui(m, slave_fd: int):
     ui.foreground_status = ""
     ui.maintaining = False
     ui.study_running = False
+    ui.cwd_indexing = False
     ui.study_status = "study: idle"
     ui.study_last_note = ""
     ui.study_phase_started = time.monotonic()
+    ui.study_phase_updated = ui.study_phase_started
+    ui.index_progress = None
     ui.last_input_at = time.monotonic()
     ui.cancel_event = m.threading.Event()
     ui.pending_prompts = collections.deque()
@@ -447,6 +450,54 @@ def main() -> int:
             assert input_before_background_events
             assert input_before_background_events[0] == "z"
             assert loop_ui.ui_owner_thread_error is None
+            read_available(master_fd)
+
+            catalog_ui = fake_tui(m, slave_fd)
+            catalog_ui.input_buffer = ""
+            catalog_ui.cursor = 0
+            catalog_ui.resume_maintenance_on_start = False
+            catalog_ui.pending_prompts = collections.deque()
+            catalog_ui.start_startup_discovery = lambda: None
+            catalog_input_before_events = []
+            catalog_started_at = 0.0
+            catalog_seen_at = 0.0
+            original_catalog_drain_events = catalog_ui.drain_events
+
+            def start_catalog_pressure():
+                nonlocal catalog_started_at
+                catalog_ui.study_running = True
+                catalog_ui.study_status = "bg-light: catalog-meta(cpu)"
+                catalog_ui.study_phase_started = time.monotonic()
+                catalog_ui.study_phase_updated = catalog_ui.study_phase_started
+                with catalog_ui.events_lock:
+                    catalog_ui.events.append(("study_phase", "bg-light: catalog-meta(cpu)"))
+                    for idx in range(32):
+                        catalog_ui.events.append(("system_note", f"catalog pressure event {idx}"))
+                catalog_started_at = time.monotonic()
+                os.write(master_fd, b"c")
+
+            def checked_catalog_drain_events():
+                nonlocal catalog_seen_at
+                if catalog_started_at:
+                    catalog_input_before_events.append(catalog_ui.input_buffer)
+                    if catalog_ui.input_buffer:
+                        catalog_seen_at = time.monotonic()
+                original_catalog_drain_events()
+                if catalog_started_at:
+                    catalog_ui.running = False
+
+            catalog_ui.start_study_loop = start_catalog_pressure
+            catalog_ui.drain_events = checked_catalog_drain_events
+            old_tty = termios.tcgetattr(slave_fd)
+            try:
+                tty.setcbreak(slave_fd)
+                catalog_ui.run_terminal_owner_loop()
+            finally:
+                termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
+            assert catalog_input_before_events
+            assert catalog_input_before_events[0] == "c"
+            assert catalog_seen_at and catalog_seen_at - catalog_started_at < 0.2
+            assert catalog_ui.ui_owner_thread_error is None, catalog_ui.ui_owner_thread_error
             read_available(master_fd)
 
             set_winsz(slave_fd, 18, 72)
