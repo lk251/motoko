@@ -24,6 +24,10 @@ def study_status_label_core(study_status: str, index_progress: dict | None, *, p
         return "bg-heavy: profile(model)"
     if "index" in phase:
         return "bg-heavy: indexing(model)"
+    if "catalog-deep" in phase:
+        return "bg-light: catalog-deep(cpu)"
+    if "catalog-meta" in phase:
+        return "bg-light: catalog-meta(cpu)"
     if "catalog" in phase:
         return "bg-light: catalog(cpu)"
     if "planning" in phase:

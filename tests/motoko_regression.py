@@ -6653,6 +6653,33 @@ def test_tui_vector_status_reports_stale_progress(m):
         assert "ready" not in status
 
 
+def test_tui_catalog_status_distinguishes_metadata_and_deep_refresh(m):
+    with isolated_state():
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = {"title": "Catalog Status"}
+        ui.generating = False
+        ui.maintaining = False
+        ui.report_running = 0
+        ui.report_status = ""
+        ui.pending_prompts = m.collections.deque()
+        ui.study_running = True
+        ui.study_phase_started = m.time.monotonic()
+        ui.study_phase_updated = ui.study_phase_started
+        ui.study_last_note = ""
+        ui.status = "ready"
+        ui.index_progress = None
+
+        ui.study_status = "bg-light: catalog-meta(cpu)"
+        metadata_status = m.strip_ansi(" ".join(ui.status_display(100)))
+        assert "bg-light: catalog-meta(cpu)" in metadata_status
+        assert "bg-light: catalog(cpu)" not in metadata_status
+
+        ui.study_status = "bg-light: catalog-deep(cpu)"
+        deep_status = m.strip_ansi(" ".join(ui.status_display(100)))
+        assert "bg-light: catalog-deep(cpu)" in deep_status
+        assert "bg-light: catalog(cpu)" not in deep_status
+
+
 def test_tui_bottom_renderer_skips_identical_frames(m):
     with isolated_state():
         captured = []
@@ -11425,8 +11452,9 @@ def test_attached_artifact_fields_use_persisted_deep_catalog(m):
         assert fields["vector_refresh_mode"] == "incremental"
 
 
-def test_background_study_refreshes_deep_catalog_in_subprocess(m):
+def test_background_study_refreshes_metadata_catalog_in_subprocess_by_default(m):
     old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_DEEP_CATALOG",
         "MOTOKO_BACKGROUND_INDEX_ENRICH",
         "MOTOKO_BACKGROUND_INDEX_CLEANUP",
         "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
@@ -11440,7 +11468,7 @@ def test_background_study_refreshes_deep_catalog_in_subprocess(m):
         for key in old_env:
             os.environ[key] = "0"
         with isolated_state():
-            conv = m.new_conversation("Deep catalog background")
+            conv = m.new_conversation("Metadata catalog background")
 
             def fake_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
                 calls.append((deep_artifacts, timeout, cancel_event is not None))
@@ -11459,8 +11487,63 @@ def test_background_study_refreshes_deep_catalog_in_subprocess(m):
             notes = m.background_study_step(conv, cancel_event=threading.Event())
 
             assert calls
+            assert calls[0][0] is False
+            assert calls[0][2] is True
+            assert m.read_context_catalog()["artifact_freshness"] == "metadata"
+            assert notes == []
+    finally:
+        m.write_context_catalog_subprocess = old_helper
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_manual_background_study_keeps_deep_catalog_refresh(m):
+    old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_DEEP_CATALOG",
+        "MOTOKO_BACKGROUND_INDEX_ENRICH",
+        "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+        "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR",
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+        "MOTOKO_BACKGROUND_PROFILE",
+    ]}
+    old_helper = m.write_context_catalog_subprocess
+    calls = []
+    phases = []
+    try:
+        for key in old_env:
+            os.environ[key] = "0"
+        with isolated_state():
+            conv = m.new_conversation("Manual deep catalog")
+
+            def fake_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
+                calls.append((deep_artifacts, timeout, cancel_event is not None))
+                catalog = {
+                    "updated": m.now(),
+                    "artifact_freshness": "deep" if deep_artifacts else "metadata",
+                    "memory_count": 0,
+                    "indexes": [],
+                    "topics": [],
+                    "dossiers": [],
+                }
+                m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+                return catalog
+
+            m.write_context_catalog_subprocess = fake_helper
+            notes = m.background_study_step(
+                conv,
+                phase_callback=phases.append,
+                manual=True,
+                cancel_event=threading.Event(),
+            )
+
+            assert calls
             assert calls[0][0] is True
             assert calls[0][2] is True
+            assert "bg-light: catalog-deep(cpu)" in phases
             assert m.read_context_catalog()["artifact_freshness"] == "deep"
             assert notes == []
     finally:
@@ -11474,6 +11557,7 @@ def test_background_study_refreshes_deep_catalog_in_subprocess(m):
 
 def test_context_catalog_helper_waits_without_pipe_catalog_polling(m):
     old_popen = m.subprocess.Popen
+    old_nice = os.environ.get("MOTOKO_CONTEXT_CATALOG_HELPER_NICE")
     captured = {}
 
     class FakeStdin:
@@ -11528,6 +11612,7 @@ def test_context_catalog_helper_waits_without_pipe_catalog_polling(m):
 
     try:
         m.subprocess.Popen = fake_popen
+        os.environ.pop("MOTOKO_CONTEXT_CATALOG_HELPER_NICE", None)
         with isolated_state():
             catalog = m.write_context_catalog_subprocess(deep_artifacts=True, cancel_event=threading.Event())
 
@@ -11544,6 +11629,10 @@ def test_context_catalog_helper_waits_without_pipe_catalog_polling(m):
             assert payload["helper_nice"] >= 1
     finally:
         m.subprocess.Popen = old_popen
+        if old_nice is None:
+            os.environ.pop("MOTOKO_CONTEXT_CATALOG_HELPER_NICE", None)
+        else:
+            os.environ["MOTOKO_CONTEXT_CATALOG_HELPER_NICE"] = old_nice
 
 
 def test_status_refreshes_attached_index_artifact_metadata(m):
@@ -17067,6 +17156,7 @@ def main() -> int:
         test_tui_alt_backspace_deletes_previous_word,
         test_tui_bottom_status_omits_chat_phase_and_spinner,
         test_tui_vector_status_reports_stale_progress,
+        test_tui_catalog_status_distinguishes_metadata_and_deep_refresh,
         test_vector_progress_phase_is_content_free_and_finalizing,
         test_safe_vector_progress_row_core_is_content_free_and_stale_aware,
         test_vector_progress_timing_core_uses_checkpoint_elapsed_and_session_eta,
@@ -17157,7 +17247,8 @@ def main() -> int:
         test_context_catalog_uses_artifact_sidecars_without_deep_freshness,
         test_deep_context_catalog_reports_fresh_artifacts,
         test_attached_artifact_fields_use_persisted_deep_catalog,
-        test_background_study_refreshes_deep_catalog_in_subprocess,
+        test_background_study_refreshes_metadata_catalog_in_subprocess_by_default,
+        test_manual_background_study_keeps_deep_catalog_refresh,
         test_context_catalog_helper_waits_without_pipe_catalog_polling,
         test_status_refreshes_attached_index_artifact_metadata,
         test_context_catalog_reports_current_memory_and_profile_freshness,

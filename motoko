@@ -17779,6 +17779,7 @@ def background_study_step(
     previous_state = read_study_state()
     previous_job = previous_state.get("job_id") if study_state_incomplete(previous_state) else None
     mode = "manual-background-catchup" if manual else "catalog-and-planning"
+    deep_catalog = manual or env_flag("MOTOKO_BACKGROUND_DEEP_CATALOG", False)
     append_study_job_event(
         job_id,
         "started",
@@ -17836,17 +17837,18 @@ def background_study_step(
         raise WorkPaused(message, work_id=child_work_id or job_id, work_kind=child_work_kind or "study")
 
     def refresh_catalog() -> dict:
-        set_phase("bg-light: catalog(cpu)", notes=notes)
+        catalog_kind = "deep" if deep_catalog else "meta"
+        set_phase(f"bg-light: catalog-{catalog_kind}(cpu)", notes=notes)
         try:
             return write_context_catalog_subprocess(
-                deep_artifacts=True,
+                deep_artifacts=deep_catalog,
                 timeout=env_seconds("MOTOKO_CONTEXT_CATALOG_HELPER_TIMEOUT", 120.0),
                 cancel_event=cancel_event,
             )
         except WorkPaused:
             raise
         except Exception as exc:
-            notes.append(f"deep catalog refresh failed: {type(exc).__name__}: {compact_text(str(exc), 120)}")
+            notes.append(f"{catalog_kind} catalog refresh failed: {type(exc).__name__}: {compact_text(str(exc), 120)}")
             return write_context_catalog(deep_artifacts=False)
 
     catalog = refresh_catalog()
