@@ -11613,6 +11613,56 @@ def test_background_study_refreshes_metadata_catalog_in_subprocess_by_default(m)
                 os.environ[key] = value
 
 
+def test_background_catalog_helper_failure_does_not_build_inprocess(m):
+    old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_DEEP_CATALOG",
+        "MOTOKO_BACKGROUND_INDEX_ENRICH",
+        "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+        "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR",
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+        "MOTOKO_BACKGROUND_PROFILE",
+        "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL",
+    ]}
+    old_helper = m.write_context_catalog_subprocess
+    old_write_context_catalog = m.write_context_catalog
+    try:
+        for key in old_env:
+            os.environ[key] = "0"
+        os.environ["MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL"] = "0"
+        with isolated_state():
+            conv = m.new_conversation("Catalog helper failure")
+            phases = []
+
+            def failing_helper(*_args, **_kwargs):
+                raise RuntimeError("helper unavailable")
+
+            def forbidden_inprocess_catalog(*_args, **_kwargs):
+                raise AssertionError("background study must not build context catalog in the TUI process")
+
+            m.write_context_catalog_subprocess = failing_helper
+            m.write_context_catalog = forbidden_inprocess_catalog
+            notes = m.background_study_step(
+                conv,
+                phase_callback=phases.append,
+                cancel_event=threading.Event(),
+            )
+            state = m.read_study_state()
+
+            assert "bg-light: catalog-meta(cpu)" in phases
+            assert any("meta catalog refresh failed: RuntimeError: helper unavailable" in note for note in notes)
+            assert state.get("phase") == "study: idle"
+            assert not state.get("catalog_artifact_freshness")
+    finally:
+        m.write_context_catalog_subprocess = old_helper
+        m.write_context_catalog = old_write_context_catalog
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_manual_background_study_keeps_deep_catalog_refresh(m):
     old_env = {key: os.environ.get(key) for key in [
         "MOTOKO_BACKGROUND_DEEP_CATALOG",
@@ -17532,6 +17582,7 @@ def main() -> int:
         test_deep_context_catalog_reports_fresh_artifacts,
         test_attached_artifact_fields_use_persisted_deep_catalog,
         test_background_study_refreshes_metadata_catalog_in_subprocess_by_default,
+        test_background_catalog_helper_failure_does_not_build_inprocess,
         test_manual_background_study_keeps_deep_catalog_refresh,
         test_background_study_reuses_recent_metadata_catalog,
         test_background_study_refreshes_recent_catalog_after_deferred_change,

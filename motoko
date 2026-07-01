@@ -17865,7 +17865,10 @@ def background_study_step(
             raise
         except Exception as exc:
             notes.append(f"{catalog_kind} catalog refresh failed: {type(exc).__name__}: {compact_text(str(exc), 120)}")
-            return write_context_catalog(deep_artifacts=False)
+            existing = read_context_catalog()
+            if isinstance(existing, dict):
+                return existing
+            return dict(catalog) if isinstance(catalog, dict) else {}
 
     def reusable_idle_catalog() -> dict | None:
         if manual:
