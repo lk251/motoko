@@ -11472,6 +11472,80 @@ def test_background_study_refreshes_deep_catalog_in_subprocess(m):
                 os.environ[key] = value
 
 
+def test_context_catalog_helper_waits_without_pipe_catalog_polling(m):
+    old_popen = m.subprocess.Popen
+    captured = {}
+
+    class FakeStdin:
+        def __init__(self):
+            self.text = ""
+            self.closed = False
+
+        def write(self, text):
+            self.text += text
+            return len(text)
+
+        def close(self):
+            self.closed = True
+
+    class FakeStderr:
+        def read(self):
+            return ""
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stderr = FakeStderr()
+            self.returncode = None
+            self.wait_calls = 0
+            self.communicate_calls = 0
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            assert timeout <= 0.5
+            catalog = {
+                "updated": m.now(),
+                "artifact_freshness": "deep",
+                "memory_count": 0,
+                "indexes": [],
+                "topics": [],
+                "dossiers": [],
+            }
+            m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            self.returncode = 0
+            return 0
+
+        def communicate(self, *args, **kwargs):
+            self.communicate_calls += 1
+            raise AssertionError("catalog helper should not stream catalog JSON through communicate()")
+
+    def fake_popen(*args, **kwargs):
+        proc = FakeProcess()
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        captured["process"] = proc
+        return proc
+
+    try:
+        m.subprocess.Popen = fake_popen
+        with isolated_state():
+            catalog = m.write_context_catalog_subprocess(deep_artifacts=True, cancel_event=threading.Event())
+
+            assert catalog["artifact_freshness"] == "deep"
+            assert captured["kwargs"]["stdout"] == m.subprocess.DEVNULL
+            assert captured["kwargs"]["stderr"] == m.subprocess.PIPE
+            proc = captured["process"]
+            assert proc.wait_calls == 1
+            assert proc.communicate_calls == 0
+            assert proc.stdin.closed is True
+            payload = json.loads(proc.stdin.text)
+            assert payload["deep_artifacts"] is True
+            assert payload["return_catalog"] is False
+            assert payload["helper_nice"] >= 1
+    finally:
+        m.subprocess.Popen = old_popen
+
+
 def test_status_refreshes_attached_index_artifact_metadata(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -17084,6 +17158,7 @@ def main() -> int:
         test_deep_context_catalog_reports_fresh_artifacts,
         test_attached_artifact_fields_use_persisted_deep_catalog,
         test_background_study_refreshes_deep_catalog_in_subprocess,
+        test_context_catalog_helper_waits_without_pipe_catalog_polling,
         test_status_refreshes_attached_index_artifact_metadata,
         test_context_catalog_reports_current_memory_and_profile_freshness,
         test_index_resume_after_model_timeout,
