@@ -23819,7 +23819,9 @@ def read_pty_available(fd: int, *, seconds: float = 0.05) -> str:
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
-def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int) -> dict:
+def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_worker=None) -> dict:
+    phase = "bg-light: catalog-meta(cpu)"
+    workload = "live-catalog" if catalog_worker is not None else "synthetic-events"
     conv = new_conversation("TUI catalog latency probe")
     ui = MotokoTui(conv)
     ui.stdin_fd = slave_fd
@@ -23830,32 +23832,67 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int) -> dict:
     ui.pending_prompts = collections.deque()
     ui.start_startup_discovery = lambda: None
     ui.ui_owner_thread_error = None
-    input_before_events: list[str] = []
+    ui.event_batch_limit = 2
     catalog_started_at = 0.0
-    catalog_seen_at = 0.0
+    phase_seen_at = 0.0
+    input_written_at = 0.0
+    input_seen_at = 0.0
+    remaining_events_before_input_drain: int | None = None
+    input_seen_status = ""
+    worker_thread: threading.Thread | None = None
+    worker_result = {
+        "status": "not-run" if catalog_worker is None else "pending",
+        "elapsed_ms": None,
+        "error": "",
+    }
     original_drain_events = ui.drain_events
 
     def start_catalog_pressure() -> None:
-        nonlocal catalog_started_at
+        nonlocal catalog_started_at, worker_thread
         ui.study_running = True
-        ui.study_status = "bg-light: catalog-meta(cpu)"
+        ui.study_status = phase
         ui.study_phase_started = time.monotonic()
         ui.study_phase_updated = ui.study_phase_started
         with ui.events_lock:
-            ui.events.append(("study_phase", "bg-light: catalog-meta(cpu)"))
+            ui.events.append(("study_phase", phase))
             for idx in range(32):
                 ui.events.append(("system_note", f"catalog pressure event {idx}"))
         catalog_started_at = time.monotonic()
-        os.write(master_fd, b"c")
+        if catalog_worker is not None:
+            def run_catalog_worker() -> None:
+                started = time.monotonic()
+                try:
+                    catalog_worker()
+                except Exception as exc:  # The probe reports only type/message, never catalog content.
+                    worker_result["status"] = "failed"
+                    worker_result["error"] = f"{type(exc).__name__}: {compact_text(str(exc), 160)}"
+                else:
+                    worker_result["status"] = "completed"
+                finally:
+                    worker_result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+
+            worker_thread = threading.Thread(
+                target=run_catalog_worker,
+                name="motoko-tui-catalog-probe-worker",
+                daemon=False,
+            )
+            worker_thread.start()
 
     def checked_drain_events() -> None:
-        nonlocal catalog_seen_at
-        if catalog_started_at:
-            input_before_events.append(ui.input_buffer)
+        nonlocal phase_seen_at, input_written_at, input_seen_at
+        nonlocal remaining_events_before_input_drain, input_seen_status
+        if input_written_at and not input_seen_at:
+            with ui.events_lock:
+                remaining_events_before_input_drain = len(ui.events)
             if ui.input_buffer:
-                catalog_seen_at = time.monotonic()
+                input_seen_at = time.monotonic()
+                input_seen_status = str(getattr(ui, "study_status", ""))
         original_drain_events()
-        if catalog_started_at:
+        if catalog_started_at and not input_written_at and str(getattr(ui, "study_status", "")) == phase:
+            phase_seen_at = time.monotonic()
+            os.write(master_fd, b"c")
+            input_written_at = time.monotonic()
+        if input_seen_at or (input_written_at and time.monotonic() - input_written_at > 0.5):
             ui.running = False
 
     ui.start_study_loop = start_catalog_pressure
@@ -23866,38 +23903,64 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int) -> dict:
         ui.run_terminal_owner_loop()
     finally:
         termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
+    if worker_thread is not None:
+        worker_thread.join()
     read_pty_available(master_fd)
-    latency = catalog_seen_at - catalog_started_at if catalog_seen_at and catalog_started_at else None
+    latency = input_seen_at - input_written_at if input_seen_at and input_written_at else None
     passed = (
-        bool(input_before_events)
-        and input_before_events[0] == "c"
+        bool(phase_seen_at)
+        and input_seen_status == phase
         and latency is not None
         and latency < 0.2
         and ui.ui_owner_thread_error is None
+        and worker_result["status"] != "failed"
     )
     return {
-        "schema": "motoko-tui-catalog-latency-probe-v1",
+        "schema": "motoko-tui-catalog-latency-probe-v2",
         "status": "pass" if passed else "fail",
-        "phase": "bg-light: catalog-meta(cpu)",
+        "phase": phase,
+        "workload": workload,
         "event_pressure": 33,
-        "input_before_events": bool(input_before_events and input_before_events[0] == "c"),
+        "phase_visible_before_input": bool(phase_seen_at),
+        "input_seen_while_catalog_active": input_seen_status == phase,
+        "input_before_events": bool(
+            input_seen_at
+            and remaining_events_before_input_drain is not None
+            and remaining_events_before_input_drain > 0
+        ),
+        "remaining_events_before_input_drain": remaining_events_before_input_drain,
         "latency_ms": round(latency * 1000, 3) if latency is not None else None,
         "latency_threshold_ms": 200,
+        "catalog_worker_status": worker_result["status"],
+        "catalog_worker_elapsed_ms": worker_result["elapsed_ms"],
+        "catalog_worker_error": worker_result["error"],
         "owner_error": "" if ui.ui_owner_thread_error is None else str(ui.ui_owner_thread_error),
     }
 
 
-def run_tui_catalog_latency_probe() -> dict:
+def run_tui_catalog_latency_probe(*, live_catalog: bool = False) -> dict:
+    def live_catalog_worker() -> None:
+        write_context_catalog_subprocess(
+            deep_artifacts=False,
+            timeout=env_seconds("MOTOKO_CONTEXT_CATALOG_HELPER_TIMEOUT", 120.0),
+        )
+
     old_state = os.environ.get("MOTOKO_STATE_HOME")
     old_config = os.environ.get("MOTOKO_CONFIG_HOME")
     try:
-        with tempfile.TemporaryDirectory() as tmp:
-            os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
-            os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
+        with contextlib.ExitStack() as stack:
+            if not live_catalog:
+                tmp = stack.enter_context(tempfile.TemporaryDirectory())
+                os.environ["MOTOKO_STATE_HOME"] = str(pathlib.Path(tmp) / "state")
+                os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
             master_fd, slave_fd = pty.openpty()
             try:
                 set_pty_window_size(slave_fd)
-                return build_tui_catalog_latency_probe(master_fd, slave_fd)
+                return build_tui_catalog_latency_probe(
+                    master_fd,
+                    slave_fd,
+                    catalog_worker=live_catalog_worker if live_catalog else None,
+                )
             finally:
                 os.close(master_fd)
                 os.close(slave_fd)
@@ -23918,16 +23981,22 @@ def format_tui_catalog_latency_probe(report: dict) -> str:
             "TUI catalog latency probe:",
             f"status: {report.get('status', '')}",
             f"phase: {report.get('phase', '')}",
+            f"workload: {report.get('workload', '')}",
+            f"phase visible before input: {report.get('phase_visible_before_input')}",
+            f"input while catalog active: {report.get('input_seen_while_catalog_active')}",
             f"input before events: {report.get('input_before_events')}",
+            f"remaining events before input drain: {report.get('remaining_events_before_input_drain')}",
             f"latency: {report.get('latency_ms')} ms (threshold {report.get('latency_threshold_ms')} ms)",
             f"event pressure: {report.get('event_pressure')}",
+            f"catalog worker: {report.get('catalog_worker_status')} ({report.get('catalog_worker_elapsed_ms')} ms)",
+            f"catalog worker error: {report.get('catalog_worker_error') or '-'}",
             f"owner error: {report.get('owner_error') or '-'}",
         ]
     )
 
 
 def command_tui_latency_probe(args) -> None:
-    report = run_tui_catalog_latency_probe()
+    report = run_tui_catalog_latency_probe(live_catalog=args.live_catalog)
     if args.json:
         print(json.dumps(report, sort_keys=True))
     else:
@@ -25905,6 +25974,11 @@ def main(argv: list[str]) -> int:
         help="run a content-free PTY probe for catalog-phase TUI input latency",
     )
     tui_latency_probe.add_argument("--json", action="store_true", help="print JSON report")
+    tui_latency_probe.add_argument(
+        "--live-catalog",
+        action="store_true",
+        help="exercise the current realm catalog helper instead of a temporary synthetic catalog",
+    )
     tui_latency_probe.set_defaults(func=command_tui_latency_probe)
 
     feedback = sub.add_parser("feedback", help="rate the last answer in a saved conversation")

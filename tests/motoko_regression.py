@@ -7758,40 +7758,67 @@ def test_tui_input_batching_and_display_cache_skip_hot_work(m):
 
 def test_tui_latency_probe_command_contract(m):
     old_probe = m.run_tui_catalog_latency_probe
+    calls = []
     try:
-        m.run_tui_catalog_latency_probe = lambda: {
-            "schema": "motoko-tui-catalog-latency-probe-v1",
-            "status": "pass",
-            "phase": "bg-light: catalog-meta(cpu)",
-            "event_pressure": 33,
-            "input_before_events": True,
-            "latency_ms": 0.12,
-            "latency_threshold_ms": 200,
-            "owner_error": "",
-        }
+        def passing_probe(**kwargs):
+            calls.append(kwargs)
+            return {
+                "schema": "motoko-tui-catalog-latency-probe-v2",
+                "status": "pass",
+                "phase": "bg-light: catalog-meta(cpu)",
+                "workload": "synthetic-events",
+                "event_pressure": 33,
+                "phase_visible_before_input": True,
+                "input_seen_while_catalog_active": True,
+                "input_before_events": True,
+                "remaining_events_before_input_drain": 12,
+                "latency_ms": 0.12,
+                "latency_threshold_ms": 200,
+                "catalog_worker_status": "not-run",
+                "catalog_worker_elapsed_ms": None,
+                "catalog_worker_error": "",
+                "owner_error": "",
+            }
+
+        m.run_tui_catalog_latency_probe = passing_probe
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             assert m.main(["tui-latency-probe", "--json"]) == 0
+        assert calls[-1] == {"live_catalog": False}
         report = json.loads(buf.getvalue())
-        assert report["schema"] == "motoko-tui-catalog-latency-probe-v1"
+        assert report["schema"] == "motoko-tui-catalog-latency-probe-v2"
         assert report["status"] == "pass"
         assert report["phase"] == "bg-light: catalog-meta(cpu)"
-        assert report["input_before_events"] is True
+        assert report["phase_visible_before_input"] is True
+        assert report["input_seen_while_catalog_active"] is True
 
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             assert m.main(["tui-latency-probe"]) == 0
         assert "TUI catalog latency probe:" in buf.getvalue()
         assert "status: pass" in buf.getvalue()
+        assert "input while catalog active: True" in buf.getvalue()
+        assert "catalog worker: not-run" in buf.getvalue()
 
-        m.run_tui_catalog_latency_probe = lambda: {
-            "schema": "motoko-tui-catalog-latency-probe-v1",
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert m.main(["tui-latency-probe", "--live-catalog"]) == 0
+        assert calls[-1] == {"live_catalog": True}
+
+        m.run_tui_catalog_latency_probe = lambda **_kwargs: {
+            "schema": "motoko-tui-catalog-latency-probe-v2",
             "status": "fail",
             "phase": "bg-light: catalog-meta(cpu)",
+            "workload": "synthetic-events",
             "event_pressure": 33,
+            "phase_visible_before_input": False,
+            "input_seen_while_catalog_active": False,
             "input_before_events": False,
+            "remaining_events_before_input_drain": None,
             "latency_ms": None,
             "latency_threshold_ms": 200,
+            "catalog_worker_status": "failed",
+            "catalog_worker_elapsed_ms": 1.0,
+            "catalog_worker_error": "test error",
             "owner_error": "test error",
         }
         try:
