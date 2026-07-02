@@ -7770,12 +7770,16 @@ def test_tui_latency_probe_command_contract(m):
                 "phase": "bg-light: catalog-meta(cpu)",
                 "workload": "synthetic-events",
                 "event_pressure": 33,
+                "probe_text": "ZQJX",
+                "input_char_count": 4,
                 "phase_visible_before_input": True,
                 "input_seen_while_catalog_active": True,
                 "input_before_events": True,
                 "remaining_events_before_input_drain": 12,
                 "latency_ms": 0.12,
                 "visible_latency_ms": 0.15,
+                "visible_latencies_ms": [0.1, 0.11, 0.13, 0.15],
+                "all_input_visible": True,
                 "latency_threshold_ms": 200,
                 "catalog_worker_status": "not-run",
                 "catalog_worker_elapsed_ms": None,
@@ -7802,6 +7806,7 @@ def test_tui_latency_probe_command_contract(m):
         assert "TUI catalog latency probe:" in buf.getvalue()
         assert "status: pass" in buf.getvalue()
         assert "input while catalog active: True" in buf.getvalue()
+        assert "visible chars: 4 all_visible=True" in buf.getvalue()
         assert "catalog worker: not-run" in buf.getvalue()
 
         with contextlib.redirect_stdout(io.StringIO()):
@@ -7814,12 +7819,16 @@ def test_tui_latency_probe_command_contract(m):
             "phase": "bg-light: catalog-meta(cpu)",
             "workload": "synthetic-events",
             "event_pressure": 33,
+            "probe_text": "ZQJX",
+            "input_char_count": 4,
             "phase_visible_before_input": False,
             "input_seen_while_catalog_active": False,
             "input_before_events": False,
             "remaining_events_before_input_drain": None,
             "latency_ms": None,
             "visible_latency_ms": None,
+            "visible_latencies_ms": [],
+            "all_input_visible": False,
             "latency_threshold_ms": 200,
             "catalog_worker_status": "failed",
             "catalog_worker_elapsed_ms": 1.0,

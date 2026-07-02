@@ -23839,7 +23839,7 @@ def read_pty_available(fd: int, *, seconds: float = 0.05) -> str:
 def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_worker=None) -> dict:
     phase = "bg-light: catalog-meta(cpu)"
     workload = "live-catalog" if catalog_worker is not None else "synthetic-events"
-    probe_text = "Z"
+    probe_text = "ZQJX"
     probe_bytes = probe_text.encode("utf-8")
     conv = new_conversation("TUI catalog latency probe")
     ui = MotokoTui(conv)
@@ -23857,10 +23857,15 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
     input_written_at = 0.0
     input_seen_at = 0.0
     input_visible_at = 0.0
+    probe_requested = False
+    probe_write_times = [0.0 for _byte in probe_bytes]
+    probe_visible_times = [0.0 for _byte in probe_bytes]
+    probe_output = b""
     remaining_events_before_input_drain: int | None = None
     input_seen_status = ""
     worker_thread: threading.Thread | None = None
     reader_stop = threading.Event()
+    writer_start = threading.Event()
     reader_error = ""
     worker_result = {
         "status": "not-run" if catalog_worker is None else "pending",
@@ -23870,7 +23875,7 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
     original_drain_events = ui.drain_events
 
     def read_terminal_output() -> None:
-        nonlocal input_visible_at, reader_error
+        nonlocal input_visible_at, probe_output, reader_error
         try:
             while not reader_stop.is_set():
                 readable, _writeable, _errors = select.select([master_fd], [], [], 0.002)
@@ -23880,8 +23885,31 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
                     chunk = os.read(master_fd, 65536)
                 except OSError:
                     break
-                if input_written_at and not input_visible_at and probe_bytes in chunk:
-                    input_visible_at = time.monotonic()
+                if input_written_at:
+                    now_value = time.monotonic()
+                    probe_output = (probe_output + chunk)[-65536:]
+                    for idx in range(len(probe_bytes)):
+                        if probe_write_times[idx] and not probe_visible_times[idx]:
+                            if probe_bytes[: idx + 1] in probe_output:
+                                probe_visible_times[idx] = now_value
+                    if not input_visible_at and probe_visible_times[-1]:
+                        input_visible_at = probe_visible_times[-1]
+        except Exception as exc:  # pragma: no cover - diagnostic detail in probe output.
+            reader_error = f"{type(exc).__name__}: {compact_text(str(exc), 160)}"
+
+    def write_probe_input() -> None:
+        nonlocal input_written_at, reader_error
+        try:
+            writer_start.wait(timeout=2.0)
+            if not writer_start.is_set():
+                return
+            for idx, byte_value in enumerate(probe_bytes):
+                now_value = time.monotonic()
+                probe_write_times[idx] = now_value
+                if not input_written_at:
+                    input_written_at = now_value
+                os.write(master_fd, bytes([byte_value]))
+                time.sleep(0.015)
         except Exception as exc:  # pragma: no cover - diagnostic detail in probe output.
             reader_error = f"{type(exc).__name__}: {compact_text(str(exc), 160)}"
 
@@ -23891,6 +23919,12 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         daemon=False,
     )
     reader_thread.start()
+    writer_thread = threading.Thread(
+        target=write_probe_input,
+        name="motoko-tui-catalog-probe-writer",
+        daemon=False,
+    )
+    writer_thread.start()
 
     def start_catalog_pressure() -> None:
         nonlocal catalog_started_at, worker_thread
@@ -23924,7 +23958,7 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
             worker_thread.start()
 
     def checked_drain_events() -> None:
-        nonlocal phase_seen_at, input_written_at, input_seen_at
+        nonlocal phase_seen_at, probe_requested, input_seen_at
         nonlocal remaining_events_before_input_drain, input_seen_status
         if input_written_at and not input_seen_at:
             with ui.events_lock:
@@ -23933,11 +23967,12 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
                 input_seen_at = time.monotonic()
                 input_seen_status = str(getattr(ui, "study_status", ""))
         original_drain_events()
-        if catalog_started_at and not input_written_at and str(getattr(ui, "study_status", "")) == phase:
+        if catalog_started_at and not probe_requested and str(getattr(ui, "study_status", "")) == phase:
             phase_seen_at = time.monotonic()
-            os.write(master_fd, probe_bytes)
-            input_written_at = time.monotonic()
-        if (input_seen_at and input_visible_at) or (input_written_at and time.monotonic() - input_written_at > 0.5):
+            probe_requested = True
+            writer_start.set()
+        all_visible = bool(probe_visible_times) and all(probe_visible_times)
+        if (input_seen_at and all_visible) or (input_written_at and time.monotonic() - input_written_at > 1.0):
             ui.running = False
 
     ui.start_study_loop = start_catalog_pressure
@@ -23950,10 +23985,17 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         termios.tcsetattr(slave_fd, termios.TCSADRAIN, old_tty)
         reader_stop.set()
     reader_thread.join(timeout=1.0)
+    writer_thread.join(timeout=1.0)
     if worker_thread is not None:
         worker_thread.join()
     input_latency = input_seen_at - input_written_at if input_seen_at and input_written_at else None
-    visible_latency = input_visible_at - input_written_at if input_visible_at and input_written_at else None
+    visible_latencies = [
+        visible_at - written_at
+        for written_at, visible_at in zip(probe_write_times, probe_visible_times, strict=False)
+        if written_at and visible_at
+    ]
+    visible_latency = max(visible_latencies) if visible_latencies else None
+    all_input_visible = len(visible_latencies) == len(probe_bytes)
     passed = (
         bool(phase_seen_at)
         and input_seen_status == phase
@@ -23961,6 +24003,7 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         and input_latency < 0.2
         and visible_latency is not None
         and visible_latency < 0.2
+        and all_input_visible
         and ui.ui_owner_thread_error is None
         and worker_result["status"] != "failed"
         and not reader_error
@@ -23971,6 +24014,8 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         "phase": phase,
         "workload": workload,
         "event_pressure": 33,
+        "probe_text": probe_text,
+        "input_char_count": len(probe_bytes),
         "phase_visible_before_input": bool(phase_seen_at),
         "input_seen_while_catalog_active": input_seen_status == phase,
         "input_before_events": bool(
@@ -23981,6 +24026,8 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         "remaining_events_before_input_drain": remaining_events_before_input_drain,
         "latency_ms": round(input_latency * 1000, 3) if input_latency is not None else None,
         "visible_latency_ms": round(visible_latency * 1000, 3) if visible_latency is not None else None,
+        "visible_latencies_ms": [round(value * 1000, 3) for value in visible_latencies],
+        "all_input_visible": all_input_visible,
         "latency_threshold_ms": 200,
         "catalog_worker_status": worker_result["status"],
         "catalog_worker_elapsed_ms": worker_result["elapsed_ms"],
@@ -24038,8 +24085,11 @@ def format_tui_catalog_latency_probe(report: dict) -> str:
             f"input while catalog active: {report.get('input_seen_while_catalog_active')}",
             f"input before events: {report.get('input_before_events')}",
             f"remaining events before input drain: {report.get('remaining_events_before_input_drain')}",
+            f"probe text: {report.get('probe_text', '')}",
+            f"visible chars: {report.get('input_char_count')} all_visible={report.get('all_input_visible')}",
             f"input latency: {report.get('latency_ms')} ms (threshold {report.get('latency_threshold_ms')} ms)",
             f"visible latency: {report.get('visible_latency_ms')} ms (threshold {report.get('latency_threshold_ms')} ms)",
+            f"visible latencies: {report.get('visible_latencies_ms')}",
             f"event pressure: {report.get('event_pressure')}",
             f"catalog worker: {report.get('catalog_worker_status')} ({report.get('catalog_worker_elapsed_ms')} ms)",
             f"catalog worker error: {report.get('catalog_worker_error') or '-'}",
