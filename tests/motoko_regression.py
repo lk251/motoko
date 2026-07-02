@@ -6808,6 +6808,7 @@ def test_tui_owner_loop_checks_input_before_background_events(m):
     ui.pop_next_queued_prompt = lambda: None
     ui.start_generation = lambda _text: None
     ui.handle_ready_input = fake_handle_ready_input
+    ui.render_input_echo = lambda: order.append(("echo",))
     ui.drain_events = lambda: order.append(("events",))
     ui.drain_terminal_flags = lambda: order.append(("flags",))
     ui.kv_notice_active = lambda _now: False
@@ -6815,8 +6816,9 @@ def test_tui_owner_loop_checks_input_before_background_events(m):
     ui.run_terminal_owner_loop()
 
     first_input = order.index(("input", 0.0))
+    first_echo = order.index(("echo",))
     first_events = order.index(("events",))
-    assert first_input < first_events
+    assert first_input < first_echo < first_events
     assert input_timeouts[:2] == [0.0, 0.0]
     assert ui.ui_owner_thread_error is None
 
@@ -7773,11 +7775,13 @@ def test_tui_latency_probe_command_contract(m):
                 "input_before_events": True,
                 "remaining_events_before_input_drain": 12,
                 "latency_ms": 0.12,
+                "visible_latency_ms": 0.15,
                 "latency_threshold_ms": 200,
                 "catalog_worker_status": "not-run",
                 "catalog_worker_elapsed_ms": None,
                 "catalog_worker_error": "",
                 "owner_error": "",
+                "reader_error": "",
             }
 
         m.run_tui_catalog_latency_probe = passing_probe
@@ -7815,11 +7819,13 @@ def test_tui_latency_probe_command_contract(m):
             "input_before_events": False,
             "remaining_events_before_input_drain": None,
             "latency_ms": None,
+            "visible_latency_ms": None,
             "latency_threshold_ms": 200,
             "catalog_worker_status": "failed",
             "catalog_worker_elapsed_ms": 1.0,
             "catalog_worker_error": "test error",
             "owner_error": "test error",
+            "reader_error": "test error",
         }
         try:
             with contextlib.redirect_stdout(io.StringIO()):
@@ -7829,6 +7835,66 @@ def test_tui_latency_probe_command_contract(m):
             assert exc.code == 1
     finally:
         m.run_tui_catalog_latency_probe = old_probe
+
+
+def test_tui_input_echo_does_not_drop_transcript_work(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.overlay_lines = None
+    ui.dirty = True
+    ui.transcript_dirty = True
+    ui.last_render = 0.0
+    ui.terminal_size = lambda: os.terminal_size((80, 24))
+    frames = []
+    ui.bottom_area_frame = lambda width, height: (["prompt"], 0, 2)
+    ui.draw_bottom_area = lambda width, height, frame=None, **_kwargs: frames.append((width, height, frame))
+    ui.render_input_echo()
+    assert frames == [(79, 24, (["prompt"], 0, 2))]
+    assert ui.transcript_dirty is True
+    assert ui.dirty is True
+
+    ui.transcript_dirty = False
+    ui.dirty = True
+    ui.render_input_echo()
+    assert ui.dirty is False
+
+
+def test_tui_owner_loop_paints_input_before_background_events(m):
+    ui = object.__new__(m.MotokoTui)
+    ui.running = True
+    ui.dirty = False
+    ui.generating = False
+    ui.maintaining = False
+    ui.study_running = True
+    ui.report_running = 0
+    ui.foreground_running = 0
+    ui.last_render = time.monotonic()
+    events = []
+    input_calls = {"count": 0}
+
+    def fake_handle_ready_input(timeout=0.0):
+        input_calls["count"] += 1
+        if input_calls["count"] == 1:
+            ui.dirty = True
+            events.append("input")
+            return True
+        return False
+
+    def fake_drain_events():
+        events.append("drain")
+        ui.running = False
+
+    ui.render = lambda force=False: events.append("initial-render" if force else "render")
+    ui.start_startup_discovery = lambda: None
+    ui.start_study_loop = lambda: None
+    ui.pending_prompts = m.collections.deque()
+    ui.resume_maintenance_on_start = False
+    ui.handle_ready_input = fake_handle_ready_input
+    ui.render_input_echo = lambda: events.append("echo")
+    ui.drain_events = fake_drain_events
+    ui.drain_terminal_flags = lambda: None
+    ui.kv_notice_active = lambda _now=None: False
+    ui.run_terminal_owner_loop()
+    assert events[:4] == ["initial-render", "input", "echo", "drain"]
 
 
 def test_background_study_uses_subprocess_for_evidence_refresh(m):
@@ -17585,6 +17651,8 @@ def main() -> int:
         test_tui_event_drain_is_bounded_and_coalesces_progress,
         test_tui_input_batching_and_display_cache_skip_hot_work,
         test_tui_latency_probe_command_contract,
+        test_tui_input_echo_does_not_drop_transcript_work,
+        test_tui_owner_loop_paints_input_before_background_events,
         test_background_study_uses_subprocess_for_evidence_refresh,
         test_tui_prompt_is_saved_before_context_preparation,
         test_tui_queued_prompt_is_durable_and_history_seeded,
