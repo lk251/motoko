@@ -6018,39 +6018,36 @@ def test_motokoignore_marks_existing_index_stale(m):
         assert any("source selection policy changed" in warning for warning in warnings)
 
 
-def test_context_catalog_staleness_defers_hash_on_metadata_change(m):
-    with isolated_state() as tmp:
-        docs = tmp / "docs"
-        docs.mkdir()
-        note = docs / "note.org"
-        note.write_text("* Same content\n", encoding="utf-8")
-        m.add_allowed_dir(str(docs))
-        index = {
-            "id": "catalog-staleness-index",
-            "name": "docs",
-            "root": str(docs.resolve()),
-            "glob": m.AUTO_INDEX_GLOB,
-            "selection_policy": m.document_selection_policy(docs, m.AUTO_INDEX_GLOB),
-            "created": m.now(),
-            "corpus_summary": "test corpus",
-            "files": [
-                {
-                    "path": str(note.resolve()),
-                    "source_fingerprint": m.source_fingerprint(note),
-                    "chunks": [],
-                }
-            ],
-        }
-        original_mtime = note.stat().st_mtime_ns
-        os.utime(note, ns=(original_mtime + 1_000_000_000, original_mtime + 1_000_000_000))
+def test_context_catalog_uses_full_index_staleness(m):
+    old_latest = m.latest_indexes_by_family
+    old_staleness = m.index_staleness
+    try:
+        with isolated_state():
+            index = {
+                "id": "catalog-staleness-index",
+                "name": "docs",
+                "root": "/tmp/docs",
+                "created": m.now(),
+                "corpus_summary": "test corpus",
+                "files": [],
+            }
+            calls = []
 
-        status, warnings = m.index_catalog_staleness(index)
-        assert status == "metadata-changed"
-        assert any("mtime changed" in warning for warning in warnings)
+            def fake_staleness(candidate):
+                calls.append(candidate)
+                return "metadata-changed", ["full freshness check"]
 
-        status, warnings = m.index_staleness(index)
-        assert status == "metadata-changed"
-        assert any("content hash still matches" in warning for warning in warnings)
+            m.latest_indexes_by_family = lambda: [index]
+            m.index_staleness = fake_staleness
+
+            catalog = m.build_context_catalog()
+
+            assert calls == [index]
+            assert catalog["indexes"][0]["status"] == "metadata-changed"
+            assert catalog["indexes"][0]["warnings"] == ["full freshness check"]
+    finally:
+        m.latest_indexes_by_family = old_latest
+        m.index_staleness = old_staleness
 
 
 def test_motokoignore_rejects_unsupported_negation(m):
@@ -11823,7 +11820,7 @@ def test_background_study_refreshes_metadata_catalog_in_subprocess_by_default(m)
                 os.environ[key] = value
 
 
-def test_background_repair_scan_does_not_run_under_catalog_phase(m):
+def test_background_repair_audit_uses_helper_process(m):
     old_env = {key: os.environ.get(key) for key in [
         "MOTOKO_BACKGROUND_DEEP_CATALOG",
         "MOTOKO_BACKGROUND_INDEX_ENRICH",
@@ -11835,12 +11832,9 @@ def test_background_repair_scan_does_not_run_under_catalog_phase(m):
         "MOTOKO_BACKGROUND_PROFILE",
     ]}
     old_helper = m.write_context_catalog_subprocess
-    old_latest = m.latest_indexes_by_family
-    old_catalog_staleness = m.index_catalog_staleness
-    old_full_staleness = m.index_staleness
-    old_quality = m.index_quality_gate
     old_repair = m.repair_indexes_needing_quality
-    quality_phases = []
+    old_repair_subprocess = m.repair_indexes_needing_quality_subprocess
+    repair_calls = []
     try:
         for key in old_env:
             os.environ[key] = "0"
@@ -11849,7 +11843,6 @@ def test_background_repair_scan_does_not_run_under_catalog_phase(m):
         with isolated_state():
             conv = m.new_conversation("Repair scan phase")
             phases = []
-            index = {"id": "idx-repair", "name": "docs", "root": "/tmp/docs", "files": []}
 
             def fake_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
                 catalog = {
@@ -11863,19 +11856,16 @@ def test_background_repair_scan_does_not_run_under_catalog_phase(m):
                 m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
                 return catalog
 
-            def forbidden_full_staleness(_index):
-                raise AssertionError("repair candidate scan should use catalog staleness, not full staleness")
+            def forbidden_inprocess_repair(**_kwargs):
+                raise AssertionError("background repair must run through the helper process")
 
-            def fake_quality(_index):
-                quality_phases.append(phases[-1] if phases else "")
-                return {"status": "pass"}
+            def fake_repair_subprocess(**kwargs):
+                repair_calls.append(kwargs)
+                return ["index quality repaired: idx-repair"]
 
             m.write_context_catalog_subprocess = fake_helper
-            m.latest_indexes_by_family = lambda: [index]
-            m.index_catalog_staleness = lambda _index: ("fresh", [])
-            m.index_staleness = forbidden_full_staleness
-            m.index_quality_gate = fake_quality
-            m.repair_indexes_needing_quality = lambda **_kwargs: []
+            m.repair_indexes_needing_quality = forbidden_inprocess_repair
+            m.repair_indexes_needing_quality_subprocess = fake_repair_subprocess
 
             notes = m.background_study_step(
                 conv,
@@ -11883,17 +11873,17 @@ def test_background_repair_scan_does_not_run_under_catalog_phase(m):
                 cancel_event=threading.Event(),
             )
 
-            assert notes == []
+            assert notes == ["index quality repaired: idx-repair"]
             assert "bg-light: catalog-meta(cpu)" in phases
-            assert "bg-heavy: repair scan(cpu)" in phases
-            assert quality_phases == ["bg-heavy: repair scan(cpu)"]
+            assert "bg-heavy: repair/audit(cpu/model)" in phases
+            assert len(repair_calls) == 1
+            assert repair_calls[0]["limit"] == 1
+            assert repair_calls[0]["quiet"] is True
+            assert repair_calls[0]["cancel_event"] is not None
     finally:
         m.write_context_catalog_subprocess = old_helper
-        m.latest_indexes_by_family = old_latest
-        m.index_catalog_staleness = old_catalog_staleness
-        m.index_staleness = old_full_staleness
-        m.index_quality_gate = old_quality
         m.repair_indexes_needing_quality = old_repair
+        m.repair_indexes_needing_quality_subprocess = old_repair_subprocess
         for key, value in old_env.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -15103,6 +15093,7 @@ def test_background_study_repairs_quality_failure(m):
 
         old_quiet_model = m.quiet_model
         old_summarize_text = m.summarize_text
+        old_repair_subprocess = m.repair_indexes_needing_quality_subprocess
         try:
             m.quiet_model = lambda *args, **kwargs: "initial summary"
             index = m.build_document_index(str(docs))
@@ -15126,6 +15117,11 @@ def test_background_study_repairs_quality_failure(m):
                 return "Corpus summary for the background repair task."
 
             m.summarize_text = repair_summary
+            m.repair_indexes_needing_quality_subprocess = lambda **kwargs: m.repair_indexes_needing_quality(
+                limit=kwargs.get("limit"),
+                quiet=kwargs.get("quiet", True),
+                cancel_event=kwargs.get("cancel_event"),
+            )
             conv = m.new_conversation("Repair background")
             notes = m.background_study_step(conv)
             repaired = m.load_index_exact(index["id"])
@@ -15134,6 +15130,7 @@ def test_background_study_repairs_quality_failure(m):
         finally:
             m.quiet_model = old_quiet_model
             m.summarize_text = old_summarize_text
+            m.repair_indexes_needing_quality_subprocess = old_repair_subprocess
 
 
 def test_index_signal_enrichment_skips_active_index(m):

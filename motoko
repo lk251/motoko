@@ -10271,7 +10271,7 @@ def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
     vector_stores = list_vector_stores() if deep_artifacts else list_vector_store_catalog_records()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
-        status, warnings = index_staleness(index) if deep_artifacts else index_catalog_staleness(index)
+        status, warnings = index_staleness(index)
         item = {
             "id": index.get("id", ""),
             "name": index.get("name", ""),
@@ -10414,6 +10414,30 @@ def command_internal_context_catalog() -> int:
         return 1
     if payload.get("return_catalog", True):
         print(json.dumps(catalog, ensure_ascii=False))
+    return 0
+
+
+def command_internal_repair_indexes_needing_quality() -> int:
+    payload: dict = {}
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        try:
+            helper_nice = min(19, max(0, int(payload.get("helper_nice", 0) or 0)))
+        except (TypeError, ValueError):
+            helper_nice = 0
+        if helper_nice > 0 and hasattr(os, "nice"):
+            with contextlib.suppress(OSError):
+                os.nice(helper_nice)
+        raw_limit = payload.get("limit")
+        limit = None if raw_limit is None else max(0, int(raw_limit))
+        notes = repair_indexes_needing_quality(
+            limit=limit,
+            quiet=bool(payload.get("quiet", True)),
+        )
+    except BaseException as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"notes": notes}, ensure_ascii=False))
     return 0
 
 
@@ -11909,11 +11933,73 @@ def index_staleness(index: dict) -> tuple[str, list[str]]:
     return corpus_index_staleness(index, artifact_warning_provider=index_artifact_warnings)
 
 
-def index_catalog_staleness(index: dict) -> tuple[str, list[str]]:
-    return corpus_index_staleness(
-        index,
-        hash_on_metadata_change=False,
+def repair_indexes_needing_quality_subprocess(
+    *,
+    limit: int | None = None,
+    quiet: bool = True,
+    timeout: float = 3600.0,
+    cancel_event=None,
+) -> list[str]:
+    payload = json.dumps(
+        {
+            "limit": limit,
+            "quiet": bool(quiet),
+            "helper_nice": min(19, env_int("MOTOKO_INDEX_REPAIR_HELPER_NICE", 5, minimum=0)),
+        },
+        ensure_ascii=False,
     )
+    env = dict(os.environ)
+    env["MOTOKO_INTERNAL"] = "1"
+    raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
+    process = subprocess.Popen(
+        [sys.executable, motoko_program_path(), "__internal-repair-indexes-needing-quality"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    deadline = time.monotonic() + max(1.0, float(timeout or 3600.0))
+    sent_input = False
+    try:
+        while True:
+            raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_helper_process(process)
+                raise TimeoutError("index repair helper timed out")
+            if not sent_input and process.stdin is not None:
+                try:
+                    process.stdin.write(payload)
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+                sent_input = True
+            try:
+                process.wait(timeout=min(0.5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    except WorkPaused:
+        _stop_helper_process(process)
+        raise
+    stdout = ""
+    stderr = ""
+    if process.stdout is not None:
+        with contextlib.suppress(OSError):
+            stdout = process.stdout.read()
+    if process.stderr is not None:
+        with contextlib.suppress(OSError):
+            stderr = process.stderr.read()
+    if process.returncode != 0:
+        detail = (stderr or stdout or "").strip()
+        raise RuntimeError(f"index repair helper failed: {detail or 'no diagnostic'}")
+    try:
+        report = json.loads(stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"index repair helper returned invalid JSON: {exc}") from exc
+    notes = report.get("notes", [])
+    return [str(note) for note in notes] if isinstance(notes, list) else []
 
 
 def quiet_model(
@@ -17977,27 +18063,19 @@ def background_study_step(
                     notes.append(f"evidence refresh {item.get('status')}: {label} {detail}".strip())
     repair_limit = env_int("MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT", BACKGROUND_INDEX_REPAIR_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_INDEX_REPAIR", True) and repair_limit:
-        repairable_indexes = [
-            index
-            for index in latest_indexes_by_family()
-            if index_catalog_staleness(index)[0] != "stale"
-        ]
-        repair_candidates = []
-        if repairable_indexes:
-            set_phase("bg-heavy: repair scan(cpu)", notes=notes)
-            repair_candidates = [
-                index
-                for index in repairable_indexes
-                if index_quality_gate(index).get("status") != "pass"
-            ]
-        if repair_candidates:
-            set_phase("bg-heavy: repairing index(model)", notes=notes)
-            repair_notes = repair_indexes_needing_quality(
+        set_phase("bg-heavy: repair/audit(cpu/model)", notes=notes)
+        try:
+            repair_notes = repair_indexes_needing_quality_subprocess(
                 limit=repair_limit,
                 quiet=True,
-                phase_callback=lambda phase: set_phase(phase, notes=notes),
+                timeout=env_seconds("MOTOKO_INDEX_REPAIR_HELPER_TIMEOUT", 3600.0),
                 cancel_event=cancel_event,
             )
+        except WorkPaused:
+            raise
+        except Exception as exc:
+            notes.append(f"index quality repair failed: {type(exc).__name__}: {compact_text(str(exc), 120)}")
+        else:
             if repair_notes:
                 notes.extend(repair_notes)
                 catalog = refresh_catalog(after_change=True)
@@ -26108,6 +26186,8 @@ def main(argv: list[str]) -> int:
         return command_internal_propose_memories()
     if argv and argv[0] == "__internal-context-catalog":
         return command_internal_context_catalog()
+    if argv and argv[0] == "__internal-repair-indexes-needing-quality":
+        return command_internal_repair_indexes_needing_quality()
     if argv and argv[0] == "__internal-startup-discovery":
         return command_internal_startup_discovery()
     parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
