@@ -19,6 +19,7 @@ import http.client
 import io
 import inspect
 import json
+import math
 import os
 import pathlib
 import pty
@@ -10270,7 +10271,7 @@ def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
     vector_stores = list_vector_stores() if deep_artifacts else list_vector_store_catalog_records()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
-        status, warnings = index_staleness(index)
+        status, warnings = index_staleness(index) if deep_artifacts else index_catalog_staleness(index)
         item = {
             "id": index.get("id", ""),
             "name": index.get("name", ""),
@@ -11906,6 +11907,13 @@ def sha256_hex(data: bytes) -> str:
 
 def index_staleness(index: dict) -> tuple[str, list[str]]:
     return corpus_index_staleness(index, artifact_warning_provider=index_artifact_warnings)
+
+
+def index_catalog_staleness(index: dict) -> tuple[str, list[str]]:
+    return corpus_index_staleness(
+        index,
+        hash_on_metadata_change=False,
+    )
 
 
 def quiet_model(
@@ -17969,11 +17977,19 @@ def background_study_step(
                     notes.append(f"evidence refresh {item.get('status')}: {label} {detail}".strip())
     repair_limit = env_int("MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT", BACKGROUND_INDEX_REPAIR_LIMIT)
     if env_flag("MOTOKO_BACKGROUND_INDEX_REPAIR", True) and repair_limit:
-        repair_candidates = [
+        repairable_indexes = [
             index
             for index in latest_indexes_by_family()
-            if index_staleness(index)[0] != "stale" and index_quality_gate(index).get("status") != "pass"
+            if index_catalog_staleness(index)[0] != "stale"
         ]
+        repair_candidates = []
+        if repairable_indexes:
+            set_phase("bg-heavy: repair scan(cpu)", notes=notes)
+            repair_candidates = [
+                index
+                for index in repairable_indexes
+                if index_quality_gate(index).get("status") != "pass"
+            ]
         if repair_candidates:
             set_phase("bg-heavy: repairing index(model)", notes=notes)
             repair_notes = repair_indexes_needing_quality(
@@ -23836,10 +23852,25 @@ def read_pty_available(fd: int, *, seconds: float = 0.05) -> str:
     return b"".join(chunks).decode("utf-8", errors="replace")
 
 
-def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_worker=None) -> dict:
+def _probe_stream_text(count: int) -> str:
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return "".join(alphabet[idx % len(alphabet)] for idx in range(max(1, count)))
+
+
+def build_tui_catalog_latency_probe(
+    master_fd: int,
+    slave_fd: int,
+    *,
+    catalog_worker=None,
+    workload_label: str = "",
+    stream_seconds: float = 0.0,
+    stream_interval: float = 0.05,
+) -> dict:
     phase = "bg-light: catalog-meta(cpu)"
-    workload = "live-catalog" if catalog_worker is not None else "synthetic-events"
-    probe_text = "ZQJX"
+    workload = workload_label or ("live-catalog" if catalog_worker is not None else "synthetic-events")
+    stream_seconds = max(0.0, float(stream_seconds or 0.0))
+    stream_interval = max(0.005, float(stream_interval or 0.05))
+    probe_text = _probe_stream_text(max(1, int(stream_seconds / stream_interval))) if stream_seconds else "ZQJX"
     probe_bytes = probe_text.encode("utf-8")
     conv = new_conversation("TUI catalog latency probe")
     ui = MotokoTui(conv)
@@ -23867,6 +23898,7 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
     reader_stop = threading.Event()
     writer_start = threading.Event()
     reader_error = ""
+    writer_done = threading.Event()
     worker_result = {
         "status": "not-run" if catalog_worker is None else "pending",
         "elapsed_ms": None,
@@ -23909,9 +23941,11 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
                 if not input_written_at:
                     input_written_at = now_value
                 os.write(master_fd, bytes([byte_value]))
-                time.sleep(0.015)
+                time.sleep(stream_interval if stream_seconds else 0.015)
         except Exception as exc:  # pragma: no cover - diagnostic detail in probe output.
             reader_error = f"{type(exc).__name__}: {compact_text(str(exc), 160)}"
+        finally:
+            writer_done.set()
 
     reader_thread = threading.Thread(
         target=read_terminal_output,
@@ -23941,7 +23975,7 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
             def run_catalog_worker() -> None:
                 started = time.monotonic()
                 try:
-                    catalog_worker()
+                    catalog_worker(ui)
                 except Exception as exc:  # The probe reports only type/message, never catalog content.
                     worker_result["status"] = "failed"
                     worker_result["error"] = f"{type(exc).__name__}: {compact_text(str(exc), 160)}"
@@ -23972,7 +24006,11 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
             probe_requested = True
             writer_start.set()
         all_visible = bool(probe_visible_times) and all(probe_visible_times)
-        if (input_seen_at and all_visible) or (input_written_at and time.monotonic() - input_written_at > 1.0):
+        timeout_seconds = max(1.0, stream_seconds + 2.0)
+        if (
+            (writer_done.is_set() and input_seen_at and all_visible)
+            or (input_written_at and time.monotonic() - input_written_at > timeout_seconds)
+        ):
             ui.running = False
 
     ui.start_study_loop = start_catalog_pressure
@@ -23996,6 +24034,11 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
     ]
     visible_latency = max(visible_latencies) if visible_latencies else None
     all_input_visible = len(visible_latencies) == len(probe_bytes)
+    sorted_visible = sorted(visible_latencies)
+    p95_visible_latency = None
+    if sorted_visible:
+        p95_idx = min(len(sorted_visible) - 1, int(math.ceil(len(sorted_visible) * 0.95)) - 1)
+        p95_visible_latency = sorted_visible[p95_idx]
     passed = (
         bool(phase_seen_at)
         and input_seen_status == phase
@@ -24016,6 +24059,8 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         "event_pressure": 33,
         "probe_text": probe_text,
         "input_char_count": len(probe_bytes),
+        "stream_seconds": stream_seconds,
+        "stream_interval_ms": round(stream_interval * 1000, 3),
         "phase_visible_before_input": bool(phase_seen_at),
         "input_seen_while_catalog_active": input_seen_status == phase,
         "input_before_events": bool(
@@ -24026,6 +24071,7 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
         "remaining_events_before_input_drain": remaining_events_before_input_drain,
         "latency_ms": round(input_latency * 1000, 3) if input_latency is not None else None,
         "visible_latency_ms": round(visible_latency * 1000, 3) if visible_latency is not None else None,
+        "visible_latency_p95_ms": round(p95_visible_latency * 1000, 3) if p95_visible_latency is not None else None,
         "visible_latencies_ms": [round(value * 1000, 3) for value in visible_latencies],
         "all_input_visible": all_input_visible,
         "latency_threshold_ms": 200,
@@ -24037,12 +24083,51 @@ def build_tui_catalog_latency_probe(master_fd: int, slave_fd: int, *, catalog_wo
     }
 
 
-def run_tui_catalog_latency_probe(*, live_catalog: bool = False) -> dict:
-    def live_catalog_worker() -> None:
+def run_tui_catalog_latency_probe(
+    *,
+    live_catalog: bool = False,
+    background_step: bool = False,
+    stream_seconds: float = 0.0,
+    stream_interval_ms: float = 50.0,
+) -> dict:
+    def live_catalog_worker(_ui=None) -> None:
         write_context_catalog_subprocess(
             deep_artifacts=False,
             timeout=env_seconds("MOTOKO_CONTEXT_CATALOG_HELPER_TIMEOUT", 120.0),
         )
+
+    def background_step_worker(ui) -> None:
+        old_env = {
+            key: os.environ.get(key)
+            for key in (
+                "MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL",
+                "MOTOKO_BACKGROUND_INDEX_ENRICH",
+                "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+                "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+                "MOTOKO_BACKGROUND_INDEX_REPAIR",
+                "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+                "MOTOKO_BACKGROUND_PROFILE",
+            )
+        }
+        try:
+            os.environ["MOTOKO_BACKGROUND_CATALOG_MIN_INTERVAL"] = "0"
+            os.environ["MOTOKO_BACKGROUND_INDEX_ENRICH"] = "0"
+            os.environ["MOTOKO_BACKGROUND_INDEX_CLEANUP"] = "0"
+            os.environ["MOTOKO_BACKGROUND_EVIDENCE_REFRESH"] = "0"
+            os.environ["MOTOKO_BACKGROUND_INDEX_REPAIR"] = "0"
+            os.environ["MOTOKO_BACKGROUND_VECTOR_REFRESH"] = "0"
+            os.environ["MOTOKO_BACKGROUND_PROFILE"] = "0"
+            background_study_step(
+                ui.conv,
+                phase_callback=lambda phase: ui.put_event(("study_phase", phase)),
+                cancel_event=None,
+            )
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
     old_state = os.environ.get("MOTOKO_STATE_HOME")
     old_config = os.environ.get("MOTOKO_CONFIG_HOME")
@@ -24054,11 +24139,18 @@ def run_tui_catalog_latency_probe(*, live_catalog: bool = False) -> dict:
                 os.environ["MOTOKO_CONFIG_HOME"] = str(pathlib.Path(tmp) / "config")
             master_fd, slave_fd = pty.openpty()
             try:
-                set_pty_window_size(slave_fd)
+                if stream_seconds:
+                    stream_chars = max(1, int(float(stream_seconds or 0.0) / max(0.001, float(stream_interval_ms or 50.0) / 1000.0)))
+                    set_pty_window_size(slave_fd, rows=24, cols=min(240, max(80, stream_chars + 12)))
+                else:
+                    set_pty_window_size(slave_fd)
                 return build_tui_catalog_latency_probe(
                     master_fd,
                     slave_fd,
-                    catalog_worker=live_catalog_worker if live_catalog else None,
+                    catalog_worker=background_step_worker if background_step else (live_catalog_worker if live_catalog else None),
+                    workload_label="background-step" if background_step else ("live-catalog" if live_catalog else ""),
+                    stream_seconds=stream_seconds,
+                    stream_interval=max(1.0, float(stream_interval_ms or 50.0)) / 1000.0,
                 )
             finally:
                 os.close(master_fd)
@@ -24087,8 +24179,10 @@ def format_tui_catalog_latency_probe(report: dict) -> str:
             f"remaining events before input drain: {report.get('remaining_events_before_input_drain')}",
             f"probe text: {report.get('probe_text', '')}",
             f"visible chars: {report.get('input_char_count')} all_visible={report.get('all_input_visible')}",
+            f"stream: {report.get('stream_seconds')}s every {report.get('stream_interval_ms')} ms",
             f"input latency: {report.get('latency_ms')} ms (threshold {report.get('latency_threshold_ms')} ms)",
             f"visible latency: {report.get('visible_latency_ms')} ms (threshold {report.get('latency_threshold_ms')} ms)",
+            f"visible latency p95: {report.get('visible_latency_p95_ms')} ms",
             f"visible latencies: {report.get('visible_latencies_ms')}",
             f"event pressure: {report.get('event_pressure')}",
             f"catalog worker: {report.get('catalog_worker_status')} ({report.get('catalog_worker_elapsed_ms')} ms)",
@@ -24100,7 +24194,12 @@ def format_tui_catalog_latency_probe(report: dict) -> str:
 
 
 def command_tui_latency_probe(args) -> None:
-    report = run_tui_catalog_latency_probe(live_catalog=args.live_catalog)
+    report = run_tui_catalog_latency_probe(
+        live_catalog=args.live_catalog,
+        background_step=getattr(args, "background_step", False),
+        stream_seconds=getattr(args, "stream_seconds", 0.0),
+        stream_interval_ms=getattr(args, "stream_interval_ms", 50.0),
+    )
     if args.json:
         print(json.dumps(report, sort_keys=True))
     else:
@@ -26082,6 +26181,23 @@ def main(argv: list[str]) -> int:
         "--live-catalog",
         action="store_true",
         help="exercise the current realm catalog helper instead of a temporary synthetic catalog",
+    )
+    tui_latency_probe.add_argument(
+        "--background-step",
+        action="store_true",
+        help="exercise the real background study catalog/planning step with unrelated heavy phases disabled",
+    )
+    tui_latency_probe.add_argument(
+        "--stream-seconds",
+        type=float,
+        default=0.0,
+        help="type continuously for this many seconds instead of using the short burst fixture",
+    )
+    tui_latency_probe.add_argument(
+        "--stream-interval-ms",
+        type=float,
+        default=50.0,
+        help="milliseconds between typed probe characters in streaming mode",
     )
     tui_latency_probe.set_defaults(func=command_tui_latency_probe)
 

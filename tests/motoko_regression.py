@@ -6018,6 +6018,41 @@ def test_motokoignore_marks_existing_index_stale(m):
         assert any("source selection policy changed" in warning for warning in warnings)
 
 
+def test_context_catalog_staleness_defers_hash_on_metadata_change(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        note = docs / "note.org"
+        note.write_text("* Same content\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "catalog-staleness-index",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "selection_policy": m.document_selection_policy(docs, m.AUTO_INDEX_GLOB),
+            "created": m.now(),
+            "corpus_summary": "test corpus",
+            "files": [
+                {
+                    "path": str(note.resolve()),
+                    "source_fingerprint": m.source_fingerprint(note),
+                    "chunks": [],
+                }
+            ],
+        }
+        original_mtime = note.stat().st_mtime_ns
+        os.utime(note, ns=(original_mtime + 1_000_000_000, original_mtime + 1_000_000_000))
+
+        status, warnings = m.index_catalog_staleness(index)
+        assert status == "metadata-changed"
+        assert any("mtime changed" in warning for warning in warnings)
+
+        status, warnings = m.index_staleness(index)
+        assert status == "metadata-changed"
+        assert any("content hash still matches" in warning for warning in warnings)
+
+
 def test_motokoignore_rejects_unsupported_negation(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -7772,12 +7807,15 @@ def test_tui_latency_probe_command_contract(m):
                 "event_pressure": 33,
                 "probe_text": "ZQJX",
                 "input_char_count": 4,
+                "stream_seconds": 0.0,
+                "stream_interval_ms": 50.0,
                 "phase_visible_before_input": True,
                 "input_seen_while_catalog_active": True,
                 "input_before_events": True,
                 "remaining_events_before_input_drain": 12,
                 "latency_ms": 0.12,
                 "visible_latency_ms": 0.15,
+                "visible_latency_p95_ms": 0.13,
                 "visible_latencies_ms": [0.1, 0.11, 0.13, 0.15],
                 "all_input_visible": True,
                 "latency_threshold_ms": 200,
@@ -7792,7 +7830,12 @@ def test_tui_latency_probe_command_contract(m):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             assert m.main(["tui-latency-probe", "--json"]) == 0
-        assert calls[-1] == {"live_catalog": False}
+        assert calls[-1] == {
+            "live_catalog": False,
+            "background_step": False,
+            "stream_seconds": 0.0,
+            "stream_interval_ms": 50.0,
+        }
         report = json.loads(buf.getvalue())
         assert report["schema"] == "motoko-tui-catalog-latency-probe-v2"
         assert report["status"] == "pass"
@@ -7810,8 +7853,22 @@ def test_tui_latency_probe_command_contract(m):
         assert "catalog worker: not-run" in buf.getvalue()
 
         with contextlib.redirect_stdout(io.StringIO()):
-            assert m.main(["tui-latency-probe", "--live-catalog"]) == 0
-        assert calls[-1] == {"live_catalog": True}
+            assert m.main(["tui-latency-probe", "--live-catalog", "--stream-seconds", "3", "--stream-interval-ms", "25"]) == 0
+        assert calls[-1] == {
+            "live_catalog": True,
+            "background_step": False,
+            "stream_seconds": 3.0,
+            "stream_interval_ms": 25.0,
+        }
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert m.main(["tui-latency-probe", "--background-step"]) == 0
+        assert calls[-1] == {
+            "live_catalog": False,
+            "background_step": True,
+            "stream_seconds": 0.0,
+            "stream_interval_ms": 50.0,
+        }
 
         m.run_tui_catalog_latency_probe = lambda **_kwargs: {
             "schema": "motoko-tui-catalog-latency-probe-v2",
@@ -7821,12 +7878,15 @@ def test_tui_latency_probe_command_contract(m):
             "event_pressure": 33,
             "probe_text": "ZQJX",
             "input_char_count": 4,
+            "stream_seconds": 0.0,
+            "stream_interval_ms": 50.0,
             "phase_visible_before_input": False,
             "input_seen_while_catalog_active": False,
             "input_before_events": False,
             "remaining_events_before_input_drain": None,
             "latency_ms": None,
             "visible_latency_ms": None,
+            "visible_latency_p95_ms": None,
             "visible_latencies_ms": [],
             "all_input_visible": False,
             "latency_threshold_ms": 200,
@@ -11756,6 +11816,84 @@ def test_background_study_refreshes_metadata_catalog_in_subprocess_by_default(m)
             assert notes == []
     finally:
         m.write_context_catalog_subprocess = old_helper
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_background_repair_scan_does_not_run_under_catalog_phase(m):
+    old_env = {key: os.environ.get(key) for key in [
+        "MOTOKO_BACKGROUND_DEEP_CATALOG",
+        "MOTOKO_BACKGROUND_INDEX_ENRICH",
+        "MOTOKO_BACKGROUND_INDEX_CLEANUP",
+        "MOTOKO_BACKGROUND_EVIDENCE_REFRESH",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR",
+        "MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT",
+        "MOTOKO_BACKGROUND_VECTOR_REFRESH",
+        "MOTOKO_BACKGROUND_PROFILE",
+    ]}
+    old_helper = m.write_context_catalog_subprocess
+    old_latest = m.latest_indexes_by_family
+    old_catalog_staleness = m.index_catalog_staleness
+    old_full_staleness = m.index_staleness
+    old_quality = m.index_quality_gate
+    old_repair = m.repair_indexes_needing_quality
+    quality_phases = []
+    try:
+        for key in old_env:
+            os.environ[key] = "0"
+        os.environ["MOTOKO_BACKGROUND_INDEX_REPAIR"] = "1"
+        os.environ["MOTOKO_BACKGROUND_INDEX_REPAIR_LIMIT"] = "1"
+        with isolated_state():
+            conv = m.new_conversation("Repair scan phase")
+            phases = []
+            index = {"id": "idx-repair", "name": "docs", "root": "/tmp/docs", "files": []}
+
+            def fake_helper(*, deep_artifacts=True, timeout=120.0, cancel_event=None):
+                catalog = {
+                    "updated": m.now(),
+                    "artifact_freshness": "metadata",
+                    "memory_count": 0,
+                    "indexes": [],
+                    "topics": [],
+                    "dossiers": [],
+                }
+                m.atomic_write(m.context_catalog_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+                return catalog
+
+            def forbidden_full_staleness(_index):
+                raise AssertionError("repair candidate scan should use catalog staleness, not full staleness")
+
+            def fake_quality(_index):
+                quality_phases.append(phases[-1] if phases else "")
+                return {"status": "pass"}
+
+            m.write_context_catalog_subprocess = fake_helper
+            m.latest_indexes_by_family = lambda: [index]
+            m.index_catalog_staleness = lambda _index: ("fresh", [])
+            m.index_staleness = forbidden_full_staleness
+            m.index_quality_gate = fake_quality
+            m.repair_indexes_needing_quality = lambda **_kwargs: []
+
+            notes = m.background_study_step(
+                conv,
+                phase_callback=phases.append,
+                cancel_event=threading.Event(),
+            )
+
+            assert notes == []
+            assert "bg-light: catalog-meta(cpu)" in phases
+            assert "bg-heavy: repair scan(cpu)" in phases
+            assert quality_phases == ["bg-heavy: repair scan(cpu)"]
+    finally:
+        m.write_context_catalog_subprocess = old_helper
+        m.latest_indexes_by_family = old_latest
+        m.index_catalog_staleness = old_catalog_staleness
+        m.index_staleness = old_full_staleness
+        m.index_quality_gate = old_quality
+        m.repair_indexes_needing_quality = old_repair
         for key, value in old_env.items():
             if value is None:
                 os.environ.pop(key, None)
