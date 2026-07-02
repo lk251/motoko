@@ -2319,6 +2319,118 @@ def format_diagnose_safe(conv: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+def catalog_diagnose_report(*, audit_artifacts: bool = False) -> dict:
+    started = time.monotonic()
+    report: dict = {
+        "schema": "catalog-diagnose-v1",
+        "privacy": "content-free",
+        "audit_artifacts": bool(audit_artifacts),
+    }
+
+    def timed(label: str, func):
+        before = time.monotonic()
+        value = func()
+        report[f"{label}_ms"] = round((time.monotonic() - before) * 1000, 3)
+        return value
+
+    evidence_stores = timed("evidence_catalog_records", list_evidence_store_catalog_records)
+    vector_stores = timed("vector_catalog_records", list_vector_store_catalog_records)
+    indexes = timed("latest_indexes", latest_indexes_by_family)
+    rows = []
+    for ordinal, index in enumerate(indexes[:CONTEXT_CATALOG_INDEX_LIMIT], 1):
+        files = list(index.get("files", []) or [])
+        chunks = [
+            chunk
+            for file_item in files
+            for chunk in list(file_item.get("chunks", []) or [])
+            if isinstance(chunk, dict)
+        ]
+        row = {
+            "ordinal": ordinal,
+            "files": len(files),
+            "chunks": len(chunks),
+            "duplicate_chunks": sum(1 for chunk in chunks if chunk.get("duplicate_of_existing_index")),
+        }
+        before = time.monotonic()
+        status, warnings = index_metadata_staleness(index)
+        row["metadata_staleness_ms"] = round((time.monotonic() - before) * 1000, 3)
+        row["metadata_status"] = status
+        row["metadata_warnings"] = len(warnings)
+        before = time.monotonic()
+        _profile = corpus_profile_text(index)
+        row["corpus_profile_ms"] = round((time.monotonic() - before) * 1000, 3)
+        before = time.monotonic()
+        _artifacts = context_catalog_retrieval_artifacts(
+            index,
+            evidence_stores=evidence_stores,
+            vector_stores=vector_stores,
+            deep_artifacts=False,
+        )
+        row["retrieval_artifacts_ms"] = round((time.monotonic() - before) * 1000, 3)
+        if audit_artifacts:
+            before = time.monotonic()
+            artifact_warnings = index_artifact_warnings(index)
+            row["artifact_audit_ms"] = round((time.monotonic() - before) * 1000, 3)
+            row["artifact_warnings"] = len(artifact_warnings)
+        rows.append(row)
+    report["indexes"] = rows
+    before = time.monotonic()
+    _memories = load_memories(limit=1000)
+    report["memories_ms"] = round((time.monotonic() - before) * 1000, 3)
+    before = time.monotonic()
+    _profile = load_profile_dossier()
+    report["profile_ms"] = round((time.monotonic() - before) * 1000, 3)
+    before = time.monotonic()
+    _conversations = list_conversations()
+    report["conversations_ms"] = round((time.monotonic() - before) * 1000, 3)
+    report["evidence_records"] = len(evidence_stores)
+    report["vector_records"] = len(vector_stores)
+    report["index_count"] = len(indexes)
+    report["total_ms"] = round((time.monotonic() - started) * 1000, 3)
+    return report
+
+
+def format_catalog_diagnose_report(report: dict) -> str:
+    lines = [
+        f"catalog diagnose: {report.get('schema', '')}",
+        "privacy: content-free; no paths, filenames, prompts, responses, summaries, or corpus text",
+        f"audit artifacts: {str(bool(report.get('audit_artifacts'))).lower()}",
+        (
+            f"totals: {report.get('total_ms', 0)} ms; "
+            f"indexes={report.get('index_count', 0)} "
+            f"evidence_records={report.get('evidence_records', 0)} "
+            f"vector_records={report.get('vector_records', 0)}"
+        ),
+        (
+            "catalog records: "
+            f"evidence={report.get('evidence_catalog_records_ms', 0)} ms "
+            f"vector={report.get('vector_catalog_records_ms', 0)} ms "
+            f"latest_indexes={report.get('latest_indexes_ms', 0)} ms"
+        ),
+        (
+            "other: "
+            f"memories={report.get('memories_ms', 0)} ms "
+            f"profile={report.get('profile_ms', 0)} ms "
+            f"conversations={report.get('conversations_ms', 0)} ms"
+        ),
+        "indexes:",
+    ]
+    for row in report.get("indexes", []) or []:
+        line = (
+            f"- #{row.get('ordinal')} "
+            f"files={row.get('files', 0)} "
+            f"chunks={row.get('chunks', 0)} "
+            f"duplicates={row.get('duplicate_chunks', 0)} "
+            f"metadata={row.get('metadata_staleness_ms', 0)} ms/{row.get('metadata_status', '')} "
+            f"profile={row.get('corpus_profile_ms', 0)} ms "
+            f"artifacts={row.get('retrieval_artifacts_ms', 0)} ms"
+        )
+        if "artifact_audit_ms" in row:
+            line += f" audit={row.get('artifact_audit_ms', 0)} ms warnings={row.get('artifact_warnings', 0)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def default_config() -> dict:
     return {
         "identity": {
@@ -2813,10 +2925,9 @@ def conversation_label(conv: dict) -> str:
 
 
 def index_label(index: dict) -> str:
-    status, _warnings = index_staleness(index)
     return (
         f"{style(index.get('id', ''), 'yellow')}  "
-        f"{len(index.get('files', []))} file(s)  {status}  "
+        f"{len(index.get('files', []))} file(s)  "
         f"{index.get('name', '')}  {index.get('root', '')}"
     )
 
@@ -10271,7 +10382,7 @@ def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
     vector_stores = list_vector_stores() if deep_artifacts else list_vector_store_catalog_records()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
-        status, warnings = index_staleness(index)
+        status, warnings = index_staleness(index) if deep_artifacts else index_metadata_staleness(index)
         item = {
             "id": index.get("id", ""),
             "name": index.get("name", ""),
@@ -11933,6 +12044,10 @@ def index_staleness(index: dict) -> tuple[str, list[str]]:
     return corpus_index_staleness(index, artifact_warning_provider=index_artifact_warnings)
 
 
+def index_metadata_staleness(index: dict) -> tuple[str, list[str]]:
+    return corpus_index_staleness(index)
+
+
 def repair_indexes_needing_quality_subprocess(
     *,
     limit: int | None = None,
@@ -12334,6 +12449,28 @@ def find_existing_chunk_content(digest: str, *, skip_index_id: str = "") -> str:
     return ""
 
 
+def materialized_chunk_digests(*, skip_index_id: str = "") -> set[str]:
+    digests: set[str] = set()
+    for index in list_indexes():
+        if skip_index_id and index.get("id") == skip_index_id:
+            continue
+        for file_item in index.get("files", []):
+            for chunk in file_item.get("chunks", []):
+                digest = str(chunk.get("content_sha256") or "")
+                if not digest or chunk.get("duplicate_of_existing_index"):
+                    continue
+                if "content" in chunk:
+                    digests.add(digest)
+                    continue
+                try:
+                    path = chunk_content_path(index, chunk)
+                except ValueError:
+                    continue
+                if path is not None and path.exists():
+                    digests.add(digest)
+    return digests
+
+
 def existing_index_chunk_cache(root: pathlib.Path | None = None) -> dict[str, str]:
     cache = {}
     for index in list_indexes():
@@ -12363,6 +12500,7 @@ def chunk_index_cache(index: dict) -> dict[str, str]:
 
 def index_artifact_warnings(index: dict) -> list[str]:
     warnings = []
+    duplicate_targets: set[str] | None = None
     for file_item in index.get("files", []):
         for chunk in file_item.get("chunks", []):
             if "content" in chunk:
@@ -12373,11 +12511,11 @@ def index_artifact_warnings(index: dict) -> list[str]:
                 warnings.append(str(exc))
                 continue
             if path is None:
-                if chunk.get("duplicate_of_existing_index") and find_existing_chunk_content(
-                    chunk.get("content_sha256", ""),
-                    skip_index_id=index.get("id", ""),
-                ):
-                    continue
+                if chunk.get("duplicate_of_existing_index"):
+                    if duplicate_targets is None:
+                        duplicate_targets = materialized_chunk_digests(skip_index_id=index.get("id", ""))
+                    if str(chunk.get("content_sha256") or "") in duplicate_targets:
+                        continue
                 warnings.append(
                     f"{file_item.get('path', '')}: chunk {chunk.get('chunk')} has no stored content"
                 )
@@ -25977,6 +26115,14 @@ def command_diagnose(args) -> None:
     print_report(format_diagnose_safe())
 
 
+def command_catalog_diagnose(args) -> None:
+    report = catalog_diagnose_report(audit_artifacts=args.audit_artifacts)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(format_catalog_diagnose_report(report))
+
+
 def command_last_call(_args) -> None:
     print_report(format_last_model_call())
 
@@ -26242,6 +26388,18 @@ def main(argv: list[str]) -> int:
     diagnose = sub.add_parser("diagnose", help="show content-free job and background progress diagnostics")
     diagnose.add_argument("--safe", action="store_true", help="required privacy-safe mode")
     diagnose.set_defaults(func=command_diagnose)
+
+    catalog_diagnose = sub.add_parser(
+        "catalog-diagnose",
+        help="show content-free catalog-meta timing diagnostics",
+    )
+    catalog_diagnose.add_argument("--json", action="store_true", help="print JSON report")
+    catalog_diagnose.add_argument(
+        "--audit-artifacts",
+        action="store_true",
+        help="also time deep artifact integrity checks without printing content",
+    )
+    catalog_diagnose.set_defaults(func=command_catalog_diagnose)
 
     last_call = sub.add_parser("last-call", help="show content-free model-call route and timing telemetry")
     last_call.set_defaults(func=command_last_call)

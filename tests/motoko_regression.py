@@ -6018,9 +6018,10 @@ def test_motokoignore_marks_existing_index_stale(m):
         assert any("source selection policy changed" in warning for warning in warnings)
 
 
-def test_context_catalog_uses_full_index_staleness(m):
+def test_context_catalog_metadata_omits_artifact_audit(m):
     old_latest = m.latest_indexes_by_family
     old_staleness = m.index_staleness
+    old_metadata_staleness = m.index_metadata_staleness
     try:
         with isolated_state():
             index = {
@@ -6031,23 +6032,35 @@ def test_context_catalog_uses_full_index_staleness(m):
                 "corpus_summary": "test corpus",
                 "files": [],
             }
-            calls = []
+            full_calls = []
+            metadata_calls = []
 
             def fake_staleness(candidate):
-                calls.append(candidate)
-                return "metadata-changed", ["full freshness check"]
+                full_calls.append(candidate)
+                return "metadata-changed", ["artifact freshness check"]
+
+            def fake_metadata_staleness(candidate):
+                metadata_calls.append(candidate)
+                return "metadata-changed", ["metadata freshness check"]
 
             m.latest_indexes_by_family = lambda: [index]
             m.index_staleness = fake_staleness
+            m.index_metadata_staleness = fake_metadata_staleness
 
             catalog = m.build_context_catalog()
 
-            assert calls == [index]
+            assert full_calls == []
+            assert metadata_calls == [index]
             assert catalog["indexes"][0]["status"] == "metadata-changed"
-            assert catalog["indexes"][0]["warnings"] == ["full freshness check"]
+            assert catalog["indexes"][0]["warnings"] == ["metadata freshness check"]
+
+            deep_catalog = m.build_context_catalog(deep_artifacts=True)
+            assert full_calls == [index]
+            assert deep_catalog["indexes"][0]["warnings"] == ["artifact freshness check"]
     finally:
         m.latest_indexes_by_family = old_latest
         m.index_staleness = old_staleness
+        m.index_metadata_staleness = old_metadata_staleness
 
 
 def test_motokoignore_rejects_unsupported_negation(m):
@@ -10741,6 +10754,108 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
             "private filename",
         ]:
             assert private_text not in report
+
+
+def test_catalog_diagnose_is_content_free(m):
+    with isolated_state() as tmp:
+        docs = tmp / "secret-docs"
+        docs.mkdir()
+        note = docs / "secret-logbook.org"
+        note.write_text("* Private Alvarez task\n", encoding="utf-8")
+        index = {
+            "id": "secret-index-logbook",
+            "name": "secret-docs",
+            "root": str(docs.resolve()),
+            "created": m.now(),
+            "corpus_summary": "private summary",
+            "files": [
+                {
+                    "path": str(note.resolve()),
+                    "source_fingerprint": m.source_fingerprint(note),
+                    "chunks": [
+                        {
+                            "id": "000001.000001",
+                            "chunk": 1,
+                            "content": "Private Alvarez task",
+                            "content_sha256": m.sha256_hex(b"Private Alvarez task"),
+                        }
+                    ],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False) + "\n")
+
+        report = m.catalog_diagnose_report(audit_artifacts=True)
+        rendered = m.format_catalog_diagnose_report(report)
+
+        assert report["schema"] == "catalog-diagnose-v1"
+        assert "total_ms" in report
+        assert report["indexes"][0]["files"] == 1
+        assert "metadata_staleness_ms" in report["indexes"][0]
+        assert "artifact_audit_ms" in report["indexes"][0]
+        for private_text in [
+            "secret",
+            "logbook",
+            "Alvarez",
+            "Private",
+            str(docs),
+            str(note),
+        ]:
+            assert private_text not in json.dumps(report, ensure_ascii=False)
+            assert private_text not in rendered
+
+
+def test_index_artifact_warnings_resolve_duplicates_without_per_chunk_scan(m):
+    with isolated_state():
+        digest = m.sha256_hex(b"shared chunk")
+        source_index = {
+            "id": "source-index",
+            "name": "docs",
+            "root": "/tmp/docs",
+            "created": m.now(),
+            "files": [
+                {
+                    "path": "/tmp/docs/source.org",
+                    "chunks": [
+                        {
+                            "id": "000001.000001",
+                            "chunk": 1,
+                            "content": "shared chunk",
+                            "content_sha256": digest,
+                        }
+                    ],
+                }
+            ],
+        }
+        duplicate_index = {
+            "id": "duplicate-index",
+            "name": "docs",
+            "root": "/tmp/docs",
+            "created": m.now(),
+            "files": [
+                {
+                    "path": "/tmp/docs/duplicate.org",
+                    "chunks": [
+                        {
+                            "id": "000001.000001",
+                            "chunk": 1,
+                            "duplicate_of_existing_index": True,
+                            "content_sha256": digest,
+                        }
+                    ],
+                }
+            ],
+        }
+        m.atomic_write(m.index_path(source_index["id"]), json.dumps(source_index, ensure_ascii=False) + "\n")
+        m.atomic_write(m.index_path(duplicate_index["id"]), json.dumps(duplicate_index, ensure_ascii=False) + "\n")
+        old_find = m.find_existing_chunk_content
+        try:
+            m.find_existing_chunk_content = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("artifact audit should not scan per duplicate chunk")
+            )
+            assert m.index_artifact_warnings(duplicate_index) == []
+        finally:
+            m.find_existing_chunk_content = old_find
 
 
 def test_embedding_vector_store_falls_back_from_excess_parallelism(m):
@@ -17851,6 +17966,8 @@ def main() -> int:
         test_background_study_pauses_when_vector_refresh_pauses,
         test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh,
         test_diagnose_safe_redacts_private_progress_metadata,
+        test_catalog_diagnose_is_content_free,
+        test_index_artifact_warnings_resolve_duplicates_without_per_chunk_scan,
         test_embedding_vector_store_falls_back_from_excess_parallelism,
         test_vector_query_can_use_catalog_reranker_route,
         test_normal_retrieval_uses_embedding_rerank_by_default,
