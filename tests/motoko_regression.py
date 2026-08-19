@@ -3621,6 +3621,154 @@ def test_conversation_reasoning_command_controls_qwen38_presets(m):
         assert "reasoning_preset" not in conv
 
 
+def test_conversation_context_command_selects_explicit_tui_profiles(m):
+    old_context_mode = os.environ.get(m.CHAT_CONTEXT_MODE_ENV)
+    try:
+        os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    f"qwen38-chat-{profile}": {
+                        "endpoint": f"unix:///tmp/qwen38-chat-{profile}.sock",
+                        "modelId": "qwen3.8-27b-ud-q5-k-xl" if profile in {"default", "quality"} else "qwen3.8-27b-ud-q5-k-s",
+                        "tasks": ["chat", f"{profile}_context_chat"],
+                        "route_profile": profile,
+                        "context_tokens": context_tokens,
+                        "selection": {"default": profile == "default", "priority": priority},
+                    }
+                    for profile, context_tokens, priority in (
+                        ("default", 32768, 120),
+                        ("quality", 32768, 100),
+                        ("deep", 65536, 80),
+                        ("max", 131072, 40),
+                    )
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            conv = m.new_conversation("Context controls")
+
+            deep = m.shared_command_request("/context deep", conv)
+            assert deep is not None
+            assert deep.kind == m.COMMAND_KIND_MUTATION
+            _label, run_deep = deep
+            report = run_deep()
+            assert conv["context_mode"] == "deep"
+            assert "qwen38-chat-deep" in report
+            assert "quant=UD-Q5-K-S" in report
+            assert "proactive prompt budget: 49152 tokens" in report
+
+            selected, governor = m.model_route_for_request(
+                m.MODEL_ROUTE_CHAT,
+                [{"role": "user", "content": "hello"}],
+                context_mode=m.conversation_context_mode(conv),
+            )
+            assert selected["catalog_route"] == "qwen38-chat-deep"
+            assert governor["selected_tier"] == "chat_deep"
+
+            ui = object.__new__(m.MotokoTui)
+            ui.input_buffer = "/context "
+            ui.cursor = len(ui.input_buffer)
+            options = ui.compute_dropdown_options()
+            assert [row["value"] for row in options] == ["auto", "quality", "deep", "max"]
+
+            ui.input_buffer = "/context d"
+            ui.cursor = len(ui.input_buffer)
+            options = ui.compute_dropdown_options()
+            assert [(row["kind"], row["value"]) for row in options] == [("context-mode", "deep")]
+
+            auto = m.shared_command_request("/context auto", conv)
+            assert auto is not None
+            _label, run_auto = auto
+            assert "catalog default" in run_auto()
+            assert "context_mode" not in conv
+    finally:
+        if old_context_mode is None:
+            os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
+        else:
+            os.environ[m.CHAT_CONTEXT_MODE_ENV] = old_context_mode
+
+
+def test_prepare_chat_messages_compacts_at_catalog_quality_budget(m):
+    old_build_messages = m.build_messages
+    old_compact_conversation = m.compact_conversation
+    old_context_mode = os.environ.get(m.CHAT_CONTEXT_MODE_ENV)
+    phases = []
+    calls = []
+    try:
+        os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
+        with isolated_state():
+            catalog = {
+                "realm": "mares",
+                "manager": {"kind": "systemd-socket-worker"},
+                "routes": {
+                    "qwen38-chat-default": {
+                        "endpoint": "unix:///tmp/qwen38-chat-default.sock",
+                        "modelId": "qwen3.8-27b-ud-q5-k-xl",
+                        "tasks": ["chat", "default_chat"],
+                        "route_profile": "default",
+                        "context_tokens": 32768,
+                        "selection": {"default": True, "priority": 120},
+                    }
+                },
+            }
+            m.ensure_private_dir(m.config_root())
+            m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            conv = {"messages": [{"role": "user", "content": str(index)} for index in range(10)]}
+
+            def fake_build_messages(_conv, _query="", *, project_scope=None, cancel_event=None):
+                calls.append("build")
+                chars = 1000 if _conv.get("compacted_for_test") else 110000
+                return [{"role": "user", "content": "x" * chars}], [{"kind": "chunk"}]
+
+            def fake_compact_conversation(_conv, **_kwargs):
+                calls.append("compact")
+                _conv["compacted_for_test"] = True
+                _conv["messages"] = _conv["messages"][-m.COMPACT_KEEP_MESSAGES :]
+                return True
+
+            m.build_messages = fake_build_messages
+            m.compact_conversation = fake_compact_conversation
+            messages, sources, preparation = m.prepare_chat_messages(
+                conv,
+                "question",
+                phase_callback=phases.append,
+            )
+            assert calls == ["build", "compact", "build"]
+            assert phases == ["retrieving", "compacting", "retrieving"]
+            assert preparation["compacted"] is True
+            assert preparation["prompt_budget_tokens"] == 24576
+            assert preparation["compaction_recommended"] is False
+            assert len(messages[0]["content"]) == 1000
+            assert sources == [{"kind": "chunk"}]
+
+            calls.clear()
+            phases.clear()
+            conv.pop("compacted_for_test", None)
+            conv["messages"] = conv["messages"][-m.COMPACT_KEEP_MESSAGES :]
+            try:
+                m.prepare_chat_messages(
+                    conv,
+                    "question",
+                    phase_callback=phases.append,
+                )
+            except SystemExit as exc:
+                assert "use /context deep or /context max" in str(exc)
+            else:
+                raise AssertionError("quality policy should refuse an over-budget prompt that cannot compact")
+            assert calls == ["build"]
+            assert phases == ["retrieving"]
+    finally:
+        m.build_messages = old_build_messages
+        m.compact_conversation = old_compact_conversation
+        if old_context_mode is None:
+            os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
+        else:
+            os.environ[m.CHAT_CONTEXT_MODE_ENV] = old_context_mode
+
+
 def test_chat_context_governor_selects_declared_route_profiles(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -3634,10 +3782,10 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                 "routes": {
                     "qwen36-chat-default": {
                         "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-default.sock",
-                        "modelId": "qwen3.6-27b-ud-q4-k-xl",
+                        "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "default_chat", "deep_synthesis"],
                         "route_profile": "default",
-                        "context_tokens": 131072,
+                        "context_tokens": 32768,
                         "kv_offload": True,
                         "kv_cache": {"location": "gpu"},
                         "selection": {"default": True, "priority": 100},
@@ -3647,7 +3795,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "quality_chat", "short_context_chat", "deep_synthesis"],
                         "route_profile": "quality",
-                        "context_tokens": 65536,
+                        "context_tokens": 32768,
                         "kv_offload": True,
                         "kv_cache": {"location": "gpu"},
                         "selection": {"priority": 80},
@@ -3657,7 +3805,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "modelId": "qwen3.6-27b-ud-q4-k-xl",
                         "tasks": ["chat", "long_context_chat", "deep_synthesis"],
                         "route_profile": "deep",
-                        "context_tokens": 131072,
+                        "context_tokens": 65536,
                         "kv_offload": True,
                         "kv_cache": {"location": "gpu"},
                         "selection": {"priority": 70},
@@ -3667,19 +3815,31 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "modelId": "qwen3.6-27b-ud-q4-k-xl",
                         "tasks": ["chat", "max_context_chat", "deep_synthesis"],
                         "route_profile": "max",
-                        "context_tokens": 262144,
+                        "context_tokens": 131072,
                         "kv_offload": False,
                         "kv_cache": {"location": "host-ram"},
                         "selection": {"priority": 30},
+                    },
+                    "legacy-max-task-route": {
+                        "endpoint": "unix:///run/motoko-llm/mares/legacy-max-task-route.sock",
+                        "modelId": "legacy-q4",
+                        "tasks": ["chat", "max_context_chat"],
+                        "context_tokens": 196608,
+                        "selection": {"priority": 999},
                     },
                 },
             }
             m.ensure_private_dir(m.config_root())
             m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+            assert m.route_profile_value({"route_profile": "long"}) == "deep"
 
             small, small_governor = m.select_chat_route([{"role": "user", "content": "hello"}])
             assert small["catalog_route"] == "qwen36-chat-default"
+            assert small["quant"] == "UD-Q5-K-XL"
             assert small_governor["selected_tier"] == "chat_default"
+            assert small_governor["reason"] == "auto:catalog-default"
+            assert small_governor["prompt_budget_tokens"] == 24576
+            assert small_governor["threshold_source"] == "catalog-context-tokens"
             assert not m.route_kv_offload_disabled(small)
 
             quality, quality_governor = m.select_chat_route(
@@ -3689,19 +3849,26 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
             assert quality["catalog_route"] == "qwen36-chat-quality"
             assert quality_governor["selected_tier"] == "chat_quality"
 
-            medium = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEFAULT_SOFT_TOKENS + 1000) * 4)}]
-            deep, deep_governor = m.select_chat_route(medium)
+            grown_history = [{"role": "user", "content": "x" * ((small_governor["prompt_budget_tokens"] + 1000) * 4)}]
+            preserved, preserved_governor = m.select_chat_route(grown_history)
+            assert preserved["catalog_route"] == "qwen36-chat-default"
+            assert preserved["quant"] == small["quant"]
+            assert preserved_governor["selected_tier"] == "chat_default"
+            assert preserved_governor["compaction_recommended"] is True
+            assert "compact and retrieve" in preserved_governor["reason"]
+
+            deep, deep_governor = m.select_chat_route(grown_history, mode="deep")
             assert deep["catalog_route"] == "qwen36-chat-deep"
             assert deep_governor["selected_tier"] == "chat_deep"
 
-            large = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEEP_SOFT_TOKENS + 1000) * 4)}]
-            selected, governor = m.select_chat_route(large)
+            selected, governor = m.select_chat_route(grown_history, mode="max")
             assert selected["catalog_route"] == "qwen36-chat-max"
             assert governor["selected_tier"] == "chat_max"
             assert governor["max_route_available"] is True
             assert m.route_kv_offload_disabled(selected)
             assert "Chat context governor:" in m.format_model_routes(include_defaults=True)
             assert "profile=default" in m.format_model_routes(include_defaults=True)
+            assert "prompt-budget=24576" in m.format_model_routes(include_defaults=True)
     finally:
         if old_endpoint is None:
             os.environ.pop("MOTOKO_ENDPOINT", None)
@@ -3734,8 +3901,8 @@ def test_chat_context_governor_falls_back_without_max_profile(m):
             }
             m.ensure_private_dir(m.config_root())
             m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
-            large = [{"role": "user", "content": "x" * ((m.CHAT_CONTEXT_DEEP_SOFT_TOKENS + 1000) * 4)}]
-            selected, governor = m.select_chat_route(large)
+            large = [{"role": "user", "content": "x" * 600000}]
+            selected, governor = m.select_chat_route(large, mode="max")
             assert selected["catalog_route"] == "qwen36-chat"
             assert governor["preferred_tier"] == "chat_max"
             assert "max route unavailable" in governor["reason"]
@@ -18033,6 +18200,8 @@ def main() -> int:
         test_slot_cache_failures_are_nonfatal_cache_misses,
         test_catalog_request_policy_shapes_chat_payload_and_telemetry,
         test_conversation_reasoning_command_controls_qwen38_presets,
+        test_conversation_context_command_selects_explicit_tui_profiles,
+        test_prepare_chat_messages_compacts_at_catalog_quality_budget,
         test_chat_context_governor_selects_declared_route_profiles,
         test_chat_context_governor_falls_back_without_max_profile,
         test_route_kv_offload_notice_detects_catalog_flag,

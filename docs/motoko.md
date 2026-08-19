@@ -425,7 +425,7 @@ marker uses per-user `ui.assistant_color` from `~/.config/motoko/config.json`
 with `purple` as the default. If `MOTOKO_ALIAS_COLOR` is set to a valid Motoko
 color, it takes precedence; if it is invalid, Motoko falls back to `purple`.
 Report-like output such as `/sources`, `/status`, `/model-routes`,
-`/identity`, `/permissions`, and `/retrieval-debug` highlights labels and
+`/context`, `/identity`, `/permissions`, and `/retrieval-debug` highlights labels and
 warnings only at render time. Saved conversation and artifact text stays plain.
 Prose in the chat body and prompt wraps on word boundaries when possible;
 code/preformatted blocks keep character wrapping so copied snippets remain
@@ -505,10 +505,10 @@ built or selected closure, and live runtime state.
 
 The intended supervisory pattern is:
 
-1. Use the highest-fidelity approved chat route for compact, difficult planning
-   and final critical review.
-2. Use the approved long-context route when the necessary assembled evidence
-   no longer fits the high-fidelity route.
+1. Keep ordinary work on the catalog's highest-fidelity default chat route,
+   using compaction and fresh retrieval rather than accumulating raw history.
+2. Select an approved deep or maximum-context route explicitly when the task
+   genuinely requires a larger assembled evidence window.
 3. Delegate bounded chunk, file, label, memory, embedding, reranking, and corpus
    work to the specialist routes declared in the local catalog.
 4. Bring the resulting artifacts back to the strongest suitable chat route for
@@ -537,9 +537,19 @@ source-of-truth files from summaries and distinguish declared, built, and live
 system state.
 ```
 
-Keep `MOTOKO_CHAT_CONTEXT_MODE=auto` for normal work. Use an explicit context
-mode only for an intentional comparison or when the task's required context is
-already known:
+Keep `MOTOKO_CHAT_CONTEXT_MODE=auto` for normal work. In `auto`, Motoko keeps
+the NixOS catalog route marked `selection.default == true`; prompt growth does
+not silently select another quant. Before a normal request crosses 75 percent
+of that route's declared `context_tokens`, Motoko compacts older turns and
+rebuilds the query-focused retrieval context. The threshold therefore follows
+the active NixOS catalog instead of fixed source-code tiers. If compaction and
+retrieval still cannot fit that prompt budget, Motoko asks for an explicit
+`deep` or `max` selection instead of silently changing route or quant.
+
+Use `/context quality`, `/context deep`, or `/context max` in the TUI for an
+intentional conversation-scoped selection; `/context auto` returns to the
+catalog default. The environment variable remains useful for process-wide
+comparisons:
 
 ```bash
 MOTOKO_CHAT_CONTEXT_MODE=max MOTOKO_REASONING=high motoko
@@ -552,9 +562,9 @@ motoko context-bench --target-tokens 96000
 Large raw context is not the same as durable project continuity. Approximate a
 larger agent working context through fresh source retrieval, inspectable
 dossiers, compact conversation state, and authoritative repository artifacts.
-Do not fill a route to its declared limit: leave roughly one quarter of the
-window for reasoning and output, and compact or retrieve more selectively when
-`/last-call` reports high context pressure.
+Do not fill a route to its declared limit: Motoko's catalog-derived prompt
+budget leaves one quarter of the window for reasoning and output. Compact or
+retrieve more selectively when `/last-call` reports high context pressure.
 
 Current compaction summarizes older turns, keeps recent messages verbatim, and
 saves both in the conversation. A summary can lose exact implementation detail,
@@ -1131,6 +1141,7 @@ Useful in-chat commands:
 /diagnose
 /status
 /model-routes
+/context [quality|deep|max|auto]
 /models [ROUTE]
 /model-status [ROUTE]
 /model-stop ROUTE

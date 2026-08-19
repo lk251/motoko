@@ -5,6 +5,12 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Changed interactive chat routing to be quality-first. `auto` now preserves
+  the NixOS catalog's default Q5 XL route instead of changing quant when a
+  conversation grows, proactively compacts older turns at a prompt budget
+  derived from that route's declared context, and rebuilds retrieval context
+  before answering. Added conversation-scoped `/context quality|deep|max|auto`
+  selection for intentional profile changes.
 - Fixed recurring TUI input stalls during `bg-light: catalog-meta(cpu)` and
   repair/source audits. Metadata checks no longer hash same-size files, derived
   dependency scans use bounded catalog sidecars instead of rereading multi-GB

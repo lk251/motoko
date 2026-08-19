@@ -2048,13 +2048,16 @@ model-output caching, and a chat context governor. NixOS owns approved model
 files, worker users, sockets, VRAM residency, service hardening, and llama.cpp
 flags. Motoko owns route selection, provenance, quality gates, private
 output-cache hits, and graceful user-visible handling of queued/loading/missing
-model states. The chat context governor estimates prompt size and selects among
-NixOS-declared chat route profiles: `selection.default == true` for ordinary
-turns, `route_profile == "quality"` only when explicitly requested,
-`route_profile == "deep"` for long-context work, and `route_profile == "max"`
-only for maximum-context prompts or explicit overrides. Use
-`MOTOKO_CHAT_CONTEXT_MODE=quality|deep|max` for explicit selection. Do not infer
-KV placement from route names; use catalog `kv_offload` and
+model states. The chat context governor estimates prompt size but keeps
+`selection.default == true` for ordinary turns; it must not silently change
+quant because conversation history grew. Before the normal route exceeds its
+prompt budget, Motoko compacts older turns and rebuilds query-focused retrieval
+context. That budget is 75 percent of the selected route's NixOS-declared
+`context_tokens`, not a fixed source-code tier. `route_profile == "quality"`,
+`route_profile == "deep"`, and `route_profile == "max"` are explicit choices
+through `/context`, with `/context auto` returning to the catalog default. Use
+`MOTOKO_CHAT_CONTEXT_MODE=quality|deep|max` for a process-wide explicit
+selection. Do not infer KV placement from route names; use catalog `kv_offload` and
 `kv_cache.location`. Do not fake server-side KV caching inside Motoko;
 prompt-prefix/KV reuse belongs in the deployed local model service if
 measurement shows it is worthwhile.

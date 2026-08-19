@@ -628,9 +628,9 @@ MODEL_LOADING_RETRY_SECONDS = 2.0
 MODEL_RESIDENCY_DEFAULT_CHAT_GRACE_SECONDS = 90
 MODEL_RESIDENCY_LOCK_DIR = "model-residency-locks"
 CHAT_CONTEXT_MODE_ENV = "MOTOKO_CHAT_CONTEXT_MODE"
-CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
-CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
-CHAT_CONTEXT_MAX_SOFT_TOKENS = 262_144
+CHAT_CONTEXT_MODES = ("auto", "quality", "deep", "max", "default")
+CHAT_CONTEXT_SELECTION_MODES = ("auto", "quality", "deep", "max")
+CHAT_CONTEXT_PROMPT_BUDGET_PERCENT = 75
 TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4
 SUMMARY_CONTEXT_ESTIMATE_CHARS_PER_TOKEN = 3
 SUMMARY_CONTEXT_MIN_RESERVE_TOKENS = 512
@@ -673,9 +673,9 @@ TITLE_SCHEMA_VERSION = "title-v1"
 MODEL_OUTPUT_CACHE_SCHEMA_VERSION = "model-output-cache-v1"
 MODEL_WORKER_EVAL_SCHEMA_VERSION = "model-worker-eval-v1"
 MODEL_WORKER_EVAL_PROMPT_VERSION = "model-worker-eval-v1"
-MODEL_CALL_TELEMETRY_SCHEMA_VERSION = "model-call-telemetry-v1"
+MODEL_CALL_TELEMETRY_SCHEMA_VERSION = "model-call-telemetry-v2"
 CHAT_SLOT_CACHE_NAMESPACE_VERSION = "chat-slot-cache-input-v1"
-CONTEXT_GOVERNOR_SCHEMA_VERSION = "context-governor-v1"
+CONTEXT_GOVERNOR_SCHEMA_VERSION = "context-governor-v2"
 RETRIEVAL_EVAL_SCHEMA_VERSION = "retrieval-eval-v1"
 RETRIEVAL_DEBUG_SCHEMA_VERSION = "retrieval-debug-v1"
 INDEX_STORAGE_AUDIT_SCHEMA_VERSION = "index-storage-audit-v1"
@@ -988,6 +988,7 @@ SLASH_COMMANDS = [
     ("/diagnose", "show content-free job and background progress diagnostics"),
     ("/status", "show model, memory, and context state"),
     ("/model-routes", "show model worker routes"),
+    ("/context [MODE]", "show or set chat context: quality, deep, max, auto"),
     ("/reasoning [PRESET]", "show or set chat reasoning: off, low, default, high, max, auto"),
     ("/models [ROUTE]", "show local model service status"),
     ("/model-status [ROUTE]", "alias for /models"),
@@ -1170,6 +1171,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/status",
     "/last-call",
     "/model-routes",
+    "/context",
     "/reasoning",
     "/models",
     "/model-status",
@@ -3080,8 +3082,24 @@ def route_quant_label(raw: dict) -> str:
         str(raw.get(key, ""))
         for key in ("model", "modelId", "model_id", "displayName", "file", "model_path", "modelPath")
     ).lower()
-    for pattern in ("ud-q5", "ud-q4", "q8_0", "q6_k", "q5_k", "q4_k"):
-        if pattern in haystack:
+    normalized_haystack = haystack.replace("-", "_")
+    for pattern in (
+        "ud_q5_k_xl",
+        "ud_q5_k_s",
+        "ud_q4_k_xl",
+        "ud_q4_k_s",
+        "q8_0",
+        "q6_k",
+        "q5_k_xl",
+        "q5_k_s",
+        "q5_k",
+        "q4_k_xl",
+        "q4_k_s",
+        "q4_k",
+        "ud_q5",
+        "ud_q4",
+    ):
+        if pattern in normalized_haystack:
             return pattern.upper().replace("_", "-")
     return ""
 
@@ -3304,7 +3322,7 @@ def estimate_messages_tokens_for_context_fit(messages: list[dict]) -> int:
 
 def chat_context_mode() -> str:
     mode = os.environ.get(CHAT_CONTEXT_MODE_ENV, "auto").strip().lower()
-    return mode if mode in {"auto", "default", "quality", "deep", "max"} else "auto"
+    return mode if mode in CHAT_CONTEXT_MODES else "auto"
 
 
 CHAT_CONTEXT_ROUTE_TASKS = {
@@ -3340,6 +3358,19 @@ def route_selection_priority_value(info: dict) -> int:
 def route_selection_default_value(info: dict) -> bool:
     selection = info.get("selection") if isinstance(info.get("selection"), dict) else {}
     return selection.get("default") is True
+
+
+def catalog_default_chat_route(candidates: list[dict]) -> dict | None:
+    defaults = [info for info in candidates if route_selection_default_value(info)]
+    if not defaults:
+        return None
+    return sorted(
+        defaults,
+        key=lambda info: (
+            -route_selection_priority_value(info),
+            str(info.get("catalog_route") or info.get("route") or ""),
+        ),
+    )[0]
 
 
 def route_chat_capable(route_id: str, raw: dict) -> bool:
@@ -3397,7 +3428,14 @@ def route_context_limit(info: dict) -> int:
         value = int(info.get("ctx_size") or 0)
     except (TypeError, ValueError):
         value = 0
-    return value if value > 0 else CHAT_CONTEXT_MAX_SOFT_TOKENS
+    return value if value > 0 else 0
+
+
+def route_prompt_budget_tokens(info: dict) -> int:
+    context_limit = route_context_limit(info)
+    if context_limit <= 0:
+        return 0
+    return max(1, context_limit * CHAT_CONTEXT_PROMPT_BUDGET_PERCENT // 100)
 
 
 def route_governor_tier(info: dict) -> str:
@@ -3411,17 +3449,13 @@ def route_governor_tier(info: dict) -> str:
         return "chat_quality"
     if tasks & {"long_context_chat"}:
         return "chat_deep"
-    limit = route_context_limit(info)
-    if limit >= CHAT_CONTEXT_MAX_SOFT_TOKENS:
-        return "chat_max"
-    if limit >= CHAT_CONTEXT_DEEP_SOFT_TOKENS:
-        return "chat_deep"
     return "chat_default"
 
 
 def route_governor_rank(info: dict, preferred_tier: str) -> tuple:
     tier = route_governor_tier(info)
     route_id = str(info.get("catalog_route") or info.get("route", ""))
+    preferred_profile = preferred_tier.removeprefix("chat_")
     fallback_order = {
         "chat_default": ["chat_default", "chat_quality", "chat_deep", "chat_max"],
         "chat_quality": ["chat_quality", "chat_default", "chat_deep", "chat_max"],
@@ -3433,6 +3467,7 @@ def route_governor_rank(info: dict, preferred_tier: str) -> tuple:
     context_rank = -context_limit if preferred_tier == "chat_max" else context_limit
     return (
         preferred_rank,
+        0 if route_profile(info) == preferred_profile else 1,
         0 if preferred_tier == "chat_default" and route_selection_default_value(info) else 1,
         -route_selection_priority_value(info),
         context_rank,
@@ -3440,7 +3475,7 @@ def route_governor_rank(info: dict, preferred_tier: str) -> tuple:
     )
 
 
-def preferred_chat_tier(prompt_tokens: int, mode: str) -> str:
+def preferred_chat_tier(_prompt_tokens: int, mode: str) -> str:
     if mode == "max":
         return "chat_max"
     if mode == "deep":
@@ -3449,10 +3484,6 @@ def preferred_chat_tier(prompt_tokens: int, mode: str) -> str:
         return "chat_quality"
     if mode == "default":
         return "chat_default"
-    if prompt_tokens > CHAT_CONTEXT_DEEP_SOFT_TOKENS:
-        return "chat_max"
-    if prompt_tokens > CHAT_CONTEXT_DEFAULT_SOFT_TOKENS:
-        return "chat_deep"
     return "chat_default"
 
 
@@ -3461,19 +3492,36 @@ def select_chat_route(messages: list[dict], *, mode: str | None = None) -> tuple
     mode = mode or chat_context_mode()
     preferred_tier = preferred_chat_tier(prompt_tokens, mode)
     candidates = chat_route_candidates() or [model_route(MODEL_ROUTE_CHAT)]
-    viable = [row for row in candidates if route_context_limit(row) >= prompt_tokens]
-    pool = viable or candidates
-    if preferred_tier == "chat_max" and not any(route_governor_tier(row) == "chat_max" for row in pool):
-        pool = sorted(pool, key=lambda row: (-route_context_limit(row), str(row.get("catalog_route") or "")))
+    catalog_default = catalog_default_chat_route(candidates) if mode == "auto" else None
+    if catalog_default is not None:
+        pool = [catalog_default]
+        preferred_tier = route_governor_tier(catalog_default)
+        preferred_available = True
     else:
-        pool = sorted(pool, key=lambda row: route_governor_rank(row, preferred_tier))
+        preferred_available = any(route_governor_tier(row) == preferred_tier for row in candidates)
+        pool = []
+    if not pool and preferred_tier == "chat_max" and not preferred_available:
+        pool = sorted(candidates, key=lambda row: (-route_context_limit(row), str(row.get("catalog_route") or "")))
+    elif not pool:
+        pool = sorted(candidates, key=lambda row: route_governor_rank(row, preferred_tier))
     selected = dict(pool[0])
     selected_tier = route_governor_tier(selected)
-    reason = f"{mode}:{preferred_tier}"
+    context_limit = route_context_limit(selected)
+    prompt_budget = route_prompt_budget_tokens(selected)
+    compaction_recommended = bool(
+        mode in {"auto", "default", "quality"}
+        and prompt_budget
+        and prompt_tokens > prompt_budget
+    )
+    reason = "auto:catalog-default" if catalog_default is not None else f"{mode}:{preferred_tier}"
     if preferred_tier == "chat_max" and selected_tier != "chat_max":
         reason += "; max route unavailable, using largest declared chat route"
-    if not viable:
-        reason += "; prompt estimate exceeds declared context"
+    elif not preferred_available:
+        reason += f"; {preferred_tier.removeprefix('chat_')} route unavailable, using {selected_tier.removeprefix('chat_')}"
+    if compaction_recommended:
+        reason += "; prompt exceeds catalog-derived quality budget, compact and retrieve before request"
+    if context_limit and prompt_tokens > context_limit:
+        reason += "; prompt estimate exceeds selected route context"
     return selected, {
         "schema": CONTEXT_GOVERNOR_SCHEMA_VERSION,
         "mode": mode,
@@ -3481,25 +3529,39 @@ def select_chat_route(messages: list[dict], *, mode: str | None = None) -> tuple
         "selected_tier": selected_tier,
         "reason": reason,
         "prompt_tokens_estimate": prompt_tokens,
+        "prompt_budget_tokens": prompt_budget,
+        "context_limit_tokens": context_limit,
+        "compaction_recommended": compaction_recommended,
+        "threshold_source": "catalog-context-tokens" if context_limit else "catalog-context-unknown",
         "candidate_count": len(candidates),
         "max_route_available": any(route_governor_tier(row) == "chat_max" for row in candidates),
     }
 
 
-def model_route_for_request(route: str, messages: list[dict]) -> tuple[dict, dict]:
+def model_route_for_request(
+    route: str,
+    messages: list[dict],
+    *,
+    context_mode: str | None = None,
+) -> tuple[dict, dict]:
     route = normalize_model_route(route)
     if route != MODEL_ROUTE_CHAT:
-        return model_route(route), {
+        fixed_route = model_route(route)
+        return fixed_route, {
             "schema": CONTEXT_GOVERNOR_SCHEMA_VERSION,
             "mode": "fixed",
             "preferred_tier": route,
             "selected_tier": route,
             "reason": "non-chat route uses configured logical route",
             "prompt_tokens_estimate": estimate_messages_tokens(messages),
+            "prompt_budget_tokens": route_prompt_budget_tokens(fixed_route),
+            "context_limit_tokens": route_context_limit(fixed_route),
+            "compaction_recommended": False,
+            "threshold_source": "catalog-context-tokens",
             "candidate_count": 1,
             "max_route_available": False,
         }
-    return select_chat_route(messages)
+    return select_chat_route(messages, mode=context_mode)
 
 
 def route_policy_section(route_info: dict, *keys: str) -> dict:
@@ -3582,6 +3644,67 @@ def selected_reasoning_preset(route_info: dict, route: str, *, explicit: str | N
 def conversation_reasoning_preset(conv: dict) -> str | None:
     preset = str(conv.get("reasoning_preset") or "").strip().lower()
     return preset or None
+
+
+def conversation_context_mode(conv: dict) -> str:
+    mode = str(conv.get("context_mode") or "").strip().lower()
+    return mode if mode in CHAT_CONTEXT_MODES and mode != "auto" else chat_context_mode()
+
+
+def chat_context_mode_available(mode: str) -> bool:
+    preferred_tier = preferred_chat_tier(0, mode)
+    return any(route_governor_tier(info) == preferred_tier for info in chat_route_candidates())
+
+
+def format_conversation_context_mode(conv: dict) -> str:
+    stored = str(conv.get("context_mode") or "").strip().lower()
+    effective = conversation_context_mode(conv)
+    selected, governor = select_chat_route([], mode=effective)
+    route_id = str(selected.get("catalog_route") or selected.get("route") or "")
+    source = "conversation" if stored else (CHAT_CONTEXT_MODE_ENV if chat_context_mode() != "auto" else "catalog default")
+    lines = [
+        f"context: {effective} [{source}]",
+        (
+            f"route: {route_id} profile={route_profile(selected) or 'default'} "
+            f"quant={selected.get('quant') or 'unknown'}"
+        ),
+        (
+            f"catalog context: {governor.get('context_limit_tokens') or 'unknown'} tokens; "
+            f"proactive prompt budget: {governor.get('prompt_budget_tokens') or 'unknown'} tokens"
+        ),
+        "available profiles:",
+    ]
+    candidates = chat_route_candidates()
+    for mode in ("quality", "deep", "max", "default"):
+        rows = [info for info in candidates if route_governor_tier(info) == f"chat_{mode}"]
+        if not rows:
+            lines.append(f"- {mode}: unavailable")
+            continue
+        info = sorted(rows, key=lambda row: route_governor_rank(row, f"chat_{mode}"))[0]
+        candidate_id = str(info.get("catalog_route") or info.get("route") or "")
+        lines.append(
+            f"- {mode}: {candidate_id} ctx={route_context_limit(info) or 'unknown'} "
+            f"prompt-budget={route_prompt_budget_tokens(info) or 'unknown'} quant={info.get('quant') or 'unknown'}"
+        )
+    lines.append("use /context quality|deep|max, or /context auto to follow the catalog default")
+    return "\n".join(lines)
+
+
+def configure_conversation_context_mode(conv: dict, value: str) -> str:
+    value = str(value or "").strip().lower()
+    if value in {"", "show"}:
+        return format_conversation_context_mode(conv)
+    if value in {"auto", "reset"}:
+        conv.pop("context_mode", None)
+        save_conversation(conv)
+        return format_conversation_context_mode(conv)
+    if value not in CHAT_CONTEXT_MODES or value == "auto":
+        raise SystemExit("context mode must be one of: quality, deep, max, default, auto")
+    if not chat_context_mode_available(value):
+        raise SystemExit(f"context profile is not declared in the local model catalog: {value}")
+    conv["context_mode"] = value
+    save_conversation(conv)
+    return format_conversation_context_mode(conv)
 
 
 def reasoning_preset_description(route_info: dict, preset: str) -> str:
@@ -3668,7 +3791,9 @@ def model_call_started_record(
 ) -> dict:
     prompt_tokens = int(governor.get("prompt_tokens_estimate", 0) or 0)
     ctx_size = route_context_limit(route_info)
+    prompt_budget = int(governor.get("prompt_budget_tokens", 0) or 0)
     context_percent = round((prompt_tokens / ctx_size) * 100, 3) if ctx_size else 0.0
+    prompt_budget_percent = round((prompt_tokens / prompt_budget) * 100, 3) if prompt_budget else 0.0
     record = {
         "schema": MODEL_CALL_TELEMETRY_SCHEMA_VERSION,
         "created": now(),
@@ -3686,6 +3811,10 @@ def model_call_started_record(
         "quant": str(route_info.get("quant", "")),
         "ctx_size": ctx_size,
         "prompt_tokens_estimate": prompt_tokens,
+        "prompt_budget_tokens": prompt_budget,
+        "prompt_budget_percent": prompt_budget_percent,
+        "context_threshold_source": str(governor.get("threshold_source", "")),
+        "compaction_recommended": bool(governor.get("compaction_recommended")),
         "completion_tokens_estimate": 0,
         "context_percent": context_percent,
         "source_count": int(source_count) if source_count is not None else None,
@@ -3740,6 +3869,12 @@ def write_last_model_call(record: dict) -> None:
             "quant",
             "ctx_size",
             "prompt_tokens_estimate",
+            "prompt_budget_tokens",
+            "prompt_budget_percent",
+            "context_threshold_source",
+            "compaction_recommended",
+            "context_compacted",
+            "initial_prompt_tokens_estimate",
             "completion_tokens_estimate",
             "context_percent",
             "source_count",
@@ -3920,9 +4055,22 @@ def format_last_model_call(record: dict | None = None) -> str:
                 f"{record.get('ctx_size', 0)} ctx "
                 f"({record.get('context_percent', 0)}%)"
             ),
+            (
+                "prompt budget: "
+                f"{record.get('prompt_tokens_estimate', 0)} / "
+                f"{record.get('prompt_budget_tokens', 0)} tok "
+                f"({record.get('prompt_budget_percent', 0)}%; "
+                f"{record.get('context_threshold_source', 'unknown')})"
+            ),
             f"completion: {record.get('completion_tokens_estimate', 0)} estimated tok",
         ]
     )
+    if record.get("context_compacted"):
+        lines.append(
+            "preparation: proactively compacted and retrieved again "
+            f"({record.get('initial_prompt_tokens_estimate', 0)} -> "
+            f"{record.get('prompt_tokens_estimate', 0)} estimated prompt tok)"
+        )
     if record.get("source_count") is not None:
         lines.append(f"sources: {record.get('source_count')}")
     policy_lines = []
@@ -3995,6 +4143,15 @@ def add_reasoning_to_model_call_record(record: dict, reasoning: dict) -> None:
     record["thinking_budget_tokens"] = reasoning.get("thinking_budget_tokens", 0)
 
 
+def add_context_preparation_to_model_call_record(record: dict, preparation: dict | None) -> None:
+    if not isinstance(preparation, dict):
+        return
+    record["context_compacted"] = bool(preparation.get("compacted"))
+    record["initial_prompt_tokens_estimate"] = int(
+        preparation.get("initial_prompt_tokens_estimate", 0) or 0
+    )
+
+
 def synthetic_messages_for_token_estimate(target_tokens: int) -> list[dict]:
     target_tokens = max(32, int(target_tokens or 0))
     unit = "benchmark-token "
@@ -4027,6 +4184,7 @@ def run_context_bench(*, dry_run: bool = True, targets: list[int] | None = None)
             "tier": governor.get("selected_tier", ""),
             "model": route_info.get("model", ""),
             "ctx_size": route_context_limit(route_info),
+            "prompt_budget_tokens": route_prompt_budget_tokens(route_info),
             "governor_reason": governor.get("reason", ""),
             "dry_run": dry_run,
         }
@@ -4063,7 +4221,8 @@ def format_context_bench(report: dict) -> str:
         lines.append(
             f"- target={row.get('target_tokens', 0)}tok "
             f"estimated={row.get('estimated_prompt_tokens', 0)}tok "
-            f"tier={row.get('tier', '')} route={route} ctx={row.get('ctx_size', 0)}"
+            f"tier={row.get('tier', '')} route={route} ctx={row.get('ctx_size', 0)} "
+            f"prompt-budget={row.get('prompt_budget_tokens', 0)}"
         )
         lines.append(f"  model: {row.get('model', '')}")
         lines.append(f"  governor: {row.get('governor_reason', '')}")
@@ -4186,12 +4345,8 @@ def format_chat_route_governor() -> str:
         "Chat context governor:",
         f"  schema: {CONTEXT_GOVERNOR_SCHEMA_VERSION}",
         f"  mode: {chat_context_mode()} ({CHAT_CONTEXT_MODE_ENV}=auto|default|quality|deep|max)",
-        (
-            "  soft tiers: "
-            f"default<={CHAT_CONTEXT_DEFAULT_SOFT_TOKENS}tok, "
-            f"deep<={CHAT_CONTEXT_DEEP_SOFT_TOKENS}tok, "
-            f"max<={CHAT_CONTEXT_MAX_SOFT_TOKENS}tok"
-        ),
+        "  policy: auto preserves the catalog default; profile changes require explicit selection",
+        f"  prompt budget: {CHAT_CONTEXT_PROMPT_BUDGET_PERCENT}% of each route's catalog context_tokens",
     ]
     if not candidates:
         lines.append("  candidates: none; using configured chat route")
@@ -4201,6 +4356,7 @@ def format_chat_route_governor() -> str:
         route_id = info.get("catalog_route") or info.get("route", "")
         tier = route_governor_tier(info)
         ctx = route_context_limit(info)
+        prompt_budget = route_prompt_budget_tokens(info)
         quant = f" quant={info.get('quant')}" if info.get("quant") else ""
         profile = f" profile={info.get('route_profile')}" if info.get("route_profile") else ""
         default = " default" if route_selection_default_value(info) else ""
@@ -4208,7 +4364,8 @@ def format_chat_route_governor() -> str:
         kv_location = str(kv_cache.get("location") or "").strip()
         kv = f" KV={kv_location}" if kv_location else ""
         lines.append(
-            f"    - {route_id}: {tier}{profile}{default} ctx={ctx}{quant}{kv} model={info.get('model', '')}"
+            f"    - {route_id}: {tier}{profile}{default} ctx={ctx or 'unknown'} "
+            f"prompt-budget={prompt_budget or 'unknown'}{quant}{kv} model={info.get('model', '')}"
         )
     return "\n".join(lines)
 
@@ -19137,6 +19294,67 @@ def build_messages(
     return messages, sources
 
 
+def prepare_chat_messages(
+    conv: dict,
+    query: str = "",
+    *,
+    project_scope: dict | None = None,
+    context_mode: str | None = None,
+    phase_callback=None,
+    cancel_event=None,
+) -> tuple[list[dict], list[dict], dict]:
+    mode = context_mode or conversation_context_mode(conv)
+    if phase_callback is not None:
+        phase_callback("retrieving")
+    messages, sources = build_messages(
+        conv,
+        query,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
+    _route_info, governor = select_chat_route(messages, mode=mode)
+    preparation = {
+        "mode": mode,
+        "compacted": False,
+        "initial_prompt_tokens_estimate": governor.get("prompt_tokens_estimate", 0),
+        "prompt_budget_tokens": governor.get("prompt_budget_tokens", 0),
+    }
+    if governor.get("compaction_recommended") and len(conv.get("messages", [])) > COMPACT_KEEP_MESSAGES:
+        if phase_callback is not None:
+            phase_callback("compacting")
+        if compact_conversation(
+            conv,
+            quiet=True,
+            timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+            cancel_event=cancel_event,
+        ):
+            preparation["compacted"] = True
+            if phase_callback is not None:
+                phase_callback("retrieving")
+            messages, sources = build_messages(
+                conv,
+                query,
+                project_scope=project_scope,
+                cancel_event=cancel_event,
+            )
+            _route_info, governor = select_chat_route(messages, mode=mode)
+    preparation.update(
+        {
+            "final_prompt_tokens_estimate": governor.get("prompt_tokens_estimate", 0),
+            "prompt_budget_tokens": governor.get("prompt_budget_tokens", 0),
+            "compaction_recommended": bool(governor.get("compaction_recommended")),
+        }
+    )
+    if governor.get("compaction_recommended"):
+        raise SystemExit(
+            "prepared context still exceeds the catalog-derived prompt budget for "
+            f"the {mode} route ({governor.get('prompt_tokens_estimate', 0)} > "
+            f"{governor.get('prompt_budget_tokens', 0)} estimated tokens); "
+            "use /context deep or /context max for this turn, or reduce the attached context"
+        )
+    return messages, sources, preparation
+
+
 def model_request_timeout(route_info: dict, timeout: float) -> float:
     return model_io_request_timeout(
         str(route_info.get("endpoint", "")),
@@ -19523,9 +19741,11 @@ def call_model(
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
     slot_cache_context: dict | None = None,
+    context_mode: str | None = None,
+    context_preparation: dict | None = None,
     cancel_event=None,
 ) -> str:
-    route_info, governor = model_route_for_request(route, messages)
+    route_info, governor = model_route_for_request(route, messages, context_mode=context_mode)
     effective_sampling_preset = selected_sampling_preset(
         route_info,
         route_info.get("route", route),
@@ -19586,6 +19806,7 @@ def call_model(
             request_metadata=request_metadata,
         )
         add_reasoning_to_model_call_record(record, reasoning)
+        add_context_preparation_to_model_call_record(record, context_preparation)
         add_slot_cache_to_model_call_record(record, slot_context)
         write_last_model_call(record)
         spinner = ThinkingSpinner(enabled=echo)
@@ -20024,8 +20245,10 @@ def call_model_with_callback(
     enable_thinking: bool | None = None,
     max_tokens: int | None = None,
     slot_cache_context: dict | None = None,
+    context_mode: str | None = None,
+    context_preparation: dict | None = None,
 ) -> str:
-    route_info, governor = model_route_for_request(route, messages)
+    route_info, governor = model_route_for_request(route, messages, context_mode=context_mode)
     effective_sampling_preset = selected_sampling_preset(
         route_info,
         route_info.get("route", route),
@@ -20087,6 +20310,7 @@ def call_model_with_callback(
             request_metadata=request_metadata,
         )
         add_reasoning_to_model_call_record(record, reasoning)
+        add_context_preparation_to_model_call_record(record, context_preparation)
         add_slot_cache_to_model_call_record(record, slot_context)
         write_last_model_call(record)
     except BaseException:
@@ -20213,6 +20437,7 @@ HELP_SECTIONS = [
             ("/status", "show model, memory, and context state"),
             ("/last-call", "show content-free model-call route and timing telemetry"),
             ("/model-routes", "show chat and background worker model routes"),
+            ("/context [MODE]", "show or set this conversation's chat context profile"),
             ("/reasoning [PRESET]", "show or set this conversation's chat reasoning preset"),
             ("/models [ROUTE]", "show local model service status from motoko-model"),
             ("/model-stop ROUTE", "stop a local model service through motoko-model"),
@@ -20784,6 +21009,8 @@ def format_status(conv: dict | None = None) -> str:
     index_config = config.get("index", {})
     recall_config = conversation_recall_config()
     chat_route_info = model_route(MODEL_ROUTE_CHAT)
+    active_context_mode = conversation_context_mode(conv) if conv else chat_context_mode()
+    selected_chat_route, selected_chat_governor = select_chat_route([], mode=active_context_mode)
     if endpoint_is_unix(chat_route_info.get("endpoint", "")):
         readiness = model_route_manager().readiness(MODEL_ROUTE_CHAT)
         chat_route_state = compact_local_model_status(readiness.status_text) or "unknown"
@@ -20806,6 +21033,13 @@ def format_status(conv: dict | None = None) -> str:
         f"model: {model_name()}",
         f"model badge: {model_badge()}",
         f"endpoint: {endpoint()}",
+        (
+            f"chat context: {active_context_mode} -> "
+            f"{selected_chat_route.get('catalog_route') or selected_chat_route.get('route', '')} "
+            f"profile={route_profile(selected_chat_route) or 'default'} "
+            f"quant={selected_chat_route.get('quant') or 'unknown'} "
+            f"budget={selected_chat_governor.get('prompt_budget_tokens') or 'unknown'}tok"
+        ),
         "model routes: " + ", ".join(f"{route}={model_route_badge(route)}" for route in configured_model_routes()),
         f"chat route state: {chat_route_state}",
         f"model status source: {chat_status_source}",
@@ -21026,6 +21260,8 @@ def model_command_request(text: str, conv: dict):
     text = text.strip()
     primary = command_primary(text)
     body = command_body(text)
+    if primary == "/context":
+        return "/context", lambda: configure_conversation_context_mode(conv, body)
     if primary == "/reasoning":
         return "/reasoning", lambda: configure_conversation_reasoning(conv, body)
     if primary == "/model-stop":
@@ -23285,14 +23521,21 @@ class MotokoTui:
                             f"auto-attached memory dossier: {dossier.get('id')} ({dossier.get('name', '')})",
                         )
                     )
-                messages, sources = build_messages(
+                context_mode = conversation_context_mode(self.conv)
+                messages, sources, preparation = prepare_chat_messages(
                     self.conv,
                     user_text,
                     project_scope=project_scope,
+                    context_mode=context_mode,
+                    phase_callback=lambda phase: self.put_event(("answer_phase", phase)),
                     cancel_event=cancel_event,
                 )
                 raise_if_cancelled(cancel_event)
-                selected_route, _governor = model_route_for_request(MODEL_ROUTE_CHAT, messages)
+                selected_route, _governor = model_route_for_request(
+                    MODEL_ROUTE_CHAT,
+                    messages,
+                    context_mode=context_mode,
+                )
                 if route_kv_offload_disabled(selected_route):
                     self.put_event(("kv_notice",))
                 self.put_event(("answer_phase", "answering"))
@@ -23317,6 +23560,8 @@ class MotokoTui:
                     on_connection=self.set_active_model_connection,
                     on_response=self.set_active_model_response,
                     source_count=len(sources),
+                    context_mode=context_mode,
+                    context_preparation=preparation,
                     slot_cache_context={
                         "conversation_id": self.conv.get("id", ""),
                         "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,
@@ -23871,6 +24116,21 @@ class MotokoTui:
                 for preset in (*REASONING_PRESET_ORDER, "auto")
                 if not current or preset.startswith(current)
             ]
+        if first == "/context" and len(words) <= 2:
+            return [
+                {
+                    "kind": "context-mode",
+                    "value": mode,
+                    "label": mode,
+                    "description": (
+                        "follow the catalog default"
+                        if mode == "auto"
+                        else "explicit chat context profile"
+                    ),
+                }
+                for mode in CHAT_CONTEXT_SELECTION_MODES
+                if not current or mode.startswith(current)
+            ]
         if first in {"/models", "/model-status", "/model-stop", "/model-metrics", "/slot-cache"} and len(words) <= 2:
             return [
                 {
@@ -23965,6 +24225,12 @@ class MotokoTui:
             self.dirty = True
         if kind == "reasoning-preset":
             self.input_buffer = f"/reasoning {value}"
+            self.cursor = len(self.input_buffer)
+            self.submit_text(self.input_buffer)
+            self.input_buffer = ""
+            self.cursor = 0
+        if kind == "context-mode":
+            self.input_buffer = f"/context {value}"
             self.cursor = len(self.input_buffer)
             self.submit_text(self.input_buffer)
             self.input_buffer = ""
@@ -24773,16 +25039,20 @@ def chat_loop(conv: dict) -> None:
         print("\n" + assistant_label("Motoko "), end="", flush=True)
         try:
             with foreground_cancel_scope("keyboard interrupt during chat answer") as cancel_event:
-                messages, sources = build_messages(
+                context_mode = conversation_context_mode(conv)
+                messages, sources, preparation = prepare_chat_messages(
                     conv,
                     user_text,
                     project_scope=project_scope,
+                    context_mode=context_mode,
                     cancel_event=cancel_event,
                 )
                 reply = call_model(
                     messages,
                     source_count=len(sources),
                     reasoning_preset=conversation_reasoning_preset(conv),
+                    context_mode=context_mode,
+                    context_preparation=preparation,
                     slot_cache_context={
                         "conversation_id": conv.get("id", ""),
                         "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,

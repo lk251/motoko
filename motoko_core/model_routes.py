@@ -287,6 +287,8 @@ def route_string_value(raw: dict, *keys: str) -> str:
 def route_profile_value(raw: dict) -> str:
     value = route_string_value(raw, "route_profile", "routeProfile", "profile")
     value = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+    if value == "long":
+        value = "deep"
     return value if value in CHAT_ROUTE_PROFILES else ""
 
 
