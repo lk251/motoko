@@ -394,7 +394,7 @@ def selection_policy_staleness(index: dict) -> tuple[str, list[str]]:
     return "fresh", []
 
 
-def file_staleness(file_item: dict) -> tuple[str, list[str]]:
+def file_staleness(file_item: dict, *, hash_on_metadata_change: bool = True) -> tuple[str, list[str]]:
     path = pathlib.Path(file_item.get("path", "")).expanduser()
     expected = file_item.get("source_fingerprint") or {}
     if not expected:
@@ -414,6 +414,11 @@ def file_staleness(file_item: dict) -> tuple[str, list[str]]:
     if current_stat.st_mtime_ns != expected.get("mtime_ns"):
         warnings.append(f"{path}: mtime changed")
     if warnings:
+        if not hash_on_metadata_change:
+            if current_stat.st_size != expected.get("size"):
+                warnings.append(f"{path}: content may have changed; exact hash check deferred")
+                return "stale", warnings
+            return "metadata-changed", warnings
         try:
             current_hash = sha256_file(path)
             if current_hash == expected.get("sha256"):
@@ -429,6 +434,7 @@ def index_staleness(
     index: dict,
     *,
     artifact_warning_provider=None,
+    hash_on_metadata_change: bool = True,
 ) -> tuple[str, list[str]]:
     selection_status, selection_warnings = selection_policy_staleness(index)
     if selection_status == "stale":
@@ -436,7 +442,10 @@ def index_staleness(
     statuses = []
     warnings = list(selection_warnings)
     for file_item in index.get("files", []):
-        status, file_warnings = file_staleness(file_item)
+        status, file_warnings = file_staleness(
+            file_item,
+            hash_on_metadata_change=hash_on_metadata_change,
+        )
         statuses.append(status)
         warnings.extend(file_warnings)
     if not statuses:
@@ -445,7 +454,7 @@ def index_staleness(
         return "stale", warnings
     if "unknown" in statuses:
         return "unknown", warnings
-    if "mtime-only" in statuses:
+    if "mtime-only" in statuses or "metadata-changed" in statuses:
         return "metadata-changed", warnings
     artifact_warnings = artifact_warning_provider(index) if artifact_warning_provider else []
     if artifact_warnings:

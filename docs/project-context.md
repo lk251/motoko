@@ -295,6 +295,12 @@ Current UI direction:
   opt-in, such as `MOTOKO_BACKGROUND_PROFILE=1` for idle profile refreshes, so
   the background loop does not compete with active chat. It must not silently
   crawl broad new directories or build large document indexes.
+- Automatic background study must yield its current step on the first TUI
+  keystroke, not merely check idleness before starting. Catalog and source-audit
+  paths must use metadata and current sidecars for bounded decisions; they must
+  not synchronously hash unchanged-size source files or parse large derived
+  stores that lack sidecars. Legacy large stores converge through explicit
+  refresh/rebuild rather than blocking the composer.
 - Manual `/bg-now` / `motoko bg-now` should be an explicit trigger for that same
   background machinery, not a second maintenance pipeline. It may bypass normal
   idle timers and heavy-index cooldowns because the user asked for work now, but
@@ -2109,6 +2115,13 @@ rerank work, and future worker lanes. Status may mention route names and unit
 state, but must not log prompts, responses, retrieved context, filenames,
 memories, summaries, corpora, or conversation text.
 
+Residency selection and the corresponding model request are covered by a
+realm-local file lease. Large-chat calls take the lease exclusively while
+ordinary worker calls share it, so parallel worker fanout remains available
+but a background thread or second Motoko process cannot reactivate worker VRAM
+between route eviction and a foreground chat response. Explicit non-chat
+exclusive lanes also take their own exclusive lease.
+
 The recent-chat grace window is a protection window for foreground chat, not an
 eviction timer. Motoko must not proactively stop a large chat route merely
 because grace expired. A large chat route should be released only when a
@@ -2133,8 +2146,10 @@ vector progress remains available for the next refresh pass.
 The main chat route may use llama.cpp per-request reasoning controls. Motoko
 sets `reasoning_format="deepseek"`,
 `chat_template_kwargs.enable_thinking`, and `thinking_budget_tokens` only for
-logical chat requests. The current presets are `MOTOKO_REASONING=off|low|default|high|max`;
-the default is enabled with a 4096-token thinking budget. Worker routes for
+logical chat requests. The current presets are `off`, `low`, `default`, `high`,
+and `max`; the default is enabled with a 4096-token thinking budget. `/reasoning PRESET`
+stores a conversation-scoped override, `/reasoning auto` removes it, and
+`MOTOKO_REASONING_PRESET` supplies a process-wide default. Worker routes for
 indexing, titles, memory maintenance, profiles, and audits must not inherit
 chat thinking settings just because they share the transport helper. Streaming
 `reasoning_content` may be shown live under a distinct `Thinking` phase in the

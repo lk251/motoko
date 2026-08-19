@@ -5,6 +5,17 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Fixed recurring TUI input stalls during `bg-light: catalog-meta(cpu)` and
+  repair/source audits. Metadata checks no longer hash same-size files, derived
+  dependency scans use bounded catalog sidecars instead of rereading multi-GB
+  vector stores, and the first keystroke preempts an automatic study step.
+- Fixed a model-residency race that could leave Qwen 3.8 unable to allocate
+  VRAM after orgfiles/background workers reactivated between route eviction and
+  foreground socket startup. Realm-local shared/exclusive leases now cover the
+  full request while preserving parallel worker fanout.
+- Added `/reasoning off|low|default|high|max|auto`. The setting is scoped to the
+  current conversation, and `MOTOKO_REASONING_PRESET` remains available for a
+  process-wide default.
 - Added `motoko source-lifecycle [INDEX]` and `/source-lifecycle [ID]` to
   inspect changed, deleted, or newly ignored indexed source files across their
   dependent artifacts. The report covers indexes, vector/evidence stores,

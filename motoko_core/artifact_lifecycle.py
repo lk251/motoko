@@ -652,6 +652,7 @@ def json_paths_referencing_index(
     index_id: str,
     *,
     load_json: Callable[[pathlib.Path], object | None],
+    check_cancelled: Callable[[], None] | None = None,
 ) -> list[pathlib.Path]:
     """Return JSON artifact paths that reference an index id."""
 
@@ -660,6 +661,8 @@ def json_paths_referencing_index(
     if not root.exists():
         return rows
     for path in sorted(root.glob("*.json")):
+        if check_cancelled is not None:
+            check_cancelled()
         data = load_json(path)
         if data is not None and json_references_index(data, index_id):
             rows.append(path)
@@ -693,6 +696,7 @@ def index_artifact_dependency_counts(
     artifact_targets: list[dict],
     *,
     load_json: Callable[[pathlib.Path], object | None],
+    check_cancelled: Callable[[], None] | None = None,
 ) -> dict[str, int]:
     """Count JSON artifact families that reference an index id."""
 
@@ -700,11 +704,20 @@ def index_artifact_dependency_counts(
         return {}
     counts: dict[str, int] = {}
     for target in artifact_targets:
+        if check_cancelled is not None:
+            check_cancelled()
         kind = str(target.get("artifact_kind", "")).strip()
         path = target.get("path", "")
         if not kind or not path:
             continue
-        counts[kind] = len(json_paths_referencing_index(path, index_id, load_json=load_json))
+        counts[kind] = len(
+            json_paths_referencing_index(
+                path,
+                index_id,
+                load_json=load_json,
+                check_cancelled=check_cancelled,
+            )
+        )
     return counts
 
 

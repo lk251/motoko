@@ -3552,6 +3552,75 @@ def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
             os.environ["MOTOKO_MODEL"] = old_model
 
 
+def test_conversation_reasoning_command_controls_qwen38_presets(m):
+    with isolated_state():
+        catalog = {
+            "realm": "mares",
+            "manager": {"kind": "systemd-socket-worker"},
+            "routes": {
+                "qwen38-chat-default": {
+                    "endpoint": "unix:///tmp/qwen38-chat-default.sock",
+                    "modelId": "qwen3.8-27b-ad-q5-k-m",
+                    "tasks": ["chat", "default_chat"],
+                    "route_profile": "default",
+                    "selection": {"default": True, "exclusiveLane": "large-chat"},
+                    "request_policy": {
+                        "reasoning": {
+                            "supported": True,
+                            "format": "deepseek",
+                            "per_request_budget_field": "thinking_budget_tokens",
+                            "per_request_enable_field": "chat_template_kwargs.enable_thinking",
+                            "presets": {
+                                "off": {"enable_thinking": False},
+                                "low": {"enable_thinking": True, "thinking_budget_tokens": 1024},
+                                "default": {"enable_thinking": True, "thinking_budget_tokens": 4096},
+                                "high": {"enable_thinking": True, "thinking_budget_tokens": 16384},
+                                "max": {"enable_thinking": True, "thinking_budget_tokens": -1},
+                            },
+                        }
+                    },
+                }
+            },
+        }
+        m.ensure_private_dir(m.config_root())
+        m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
+        conv = m.new_conversation("Reasoning controls")
+
+        high = m.shared_command_request("/reasoning high", conv)
+        assert high is not None
+        assert high.kind == m.COMMAND_KIND_MUTATION
+        _label, run_high = high
+        assert "high (thinking on, 16384-token budget)" in run_high()
+        assert conv["reasoning_preset"] == "high"
+
+        off = m.shared_command_request("/reasoning off", conv)
+        assert off is not None
+        _label, run_off = off
+        assert "off (thinking off)" in run_off()
+        route_info = m.model_route(m.MODEL_ROUTE_CHAT)
+        selected = m.selected_reasoning_preset(
+            route_info,
+            m.MODEL_ROUTE_CHAT,
+            explicit=m.conversation_reasoning_preset(conv),
+        )
+        assert selected == "off"
+        payload = m.chat_completion_payload(
+            route_info,
+            [{"role": "user", "content": "hello"}],
+            temperature=0.7,
+            stream=True,
+            reasoning_preset=selected,
+        )
+        assert payload["chat_template_kwargs"]["enable_thinking"] is False
+        assert "thinking_budget_tokens" not in payload
+
+        auto = m.shared_command_request("/reasoning auto", conv)
+        assert auto is not None
+        _label, run_auto = auto
+        assert "route/environment default" in run_auto()
+        assert "reasoning_preset" not in conv
+
+
 def test_chat_context_governor_selects_declared_route_profiles(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -4286,43 +4355,86 @@ def test_chat_route_defers_when_large_chat_peer_is_busy(m):
             m.run_local_model_helper = old_run_helper
 
 
-def test_open_model_response_direct_calls_prepare_residency(m):
-    class FakeResponse:
-        def read(self):
-            return b"{}"
-
-    @contextlib.contextmanager
-    def fake_core(*_args, **_kwargs):
-        yield FakeResponse()
-
-    old_core = m.open_model_response_core
-    old_prepare = m.prepare_route_residency_for_request
-    calls = []
-    try:
-        m.open_model_response_core = fake_core
-
-        def fake_prepare(route_info, *, phase_callback=None):
-            calls.append((m.local_model_helper_route(route_info), phase_callback is not None))
-            return []
-
-        m.prepare_route_residency_for_request = fake_prepare
-        route_info = {
-            "route": "embedding",
-            "catalog_route": "qwen3-embedding-0b6",
-            "endpoint": "unix:///run/motoko-llm/mares/qwen3-embedding-0b6.sock",
-            "model": "qwen3-embedding-0.6b-q8-0",
+def test_model_residency_lease_blocks_chat_worker_race(m):
+    with isolated_state() as tmp:
+        socket_dir = tmp / "sockets"
+        socket_dir.mkdir()
+        chat = {
+            "route": m.MODEL_ROUTE_CHAT,
+            "catalog_route": "qwen38-chat-default",
+            "endpoint": f"unix://{socket_dir / 'qwen38-chat-default.sock'}",
+            "route_profile": "default",
+            "scheduling": {"exclusiveLane": "large-chat"},
         }
-        with m.open_model_response(route_info, {"model": "x"}, timeout=1) as resp:
-            assert resp.read() == b"{}"
-        assert calls == [("qwen3-embedding-0b6", False)]
+        worker = {
+            "route": m.MODEL_ROUTE_MEMORY,
+            "catalog_route": "qwen35-2b-worker",
+            "endpoint": f"unix://{socket_dir / 'qwen35-2b-worker.sock'}",
+            "scheduling": {"parallelSlots": 8},
+        }
+        old_prepare = m.prepare_route_residency_for_request
+        try:
+            m.prepare_route_residency_for_request = lambda *_args, **_kwargs: []
+            with m.model_route_residency_lease(worker):
+                try:
+                    with m.model_route_residency_lease(chat):
+                        raise AssertionError("chat lease should not overlap a worker lease")
+                except m.RouteResidencyBusy as exc:
+                    assert "active worker model request" in str(exc)
+                else:
+                    raise AssertionError("chat lease should defer behind a worker request")
+            with m.model_route_residency_lease(chat):
+                try:
+                    with m.model_route_residency_lease(worker):
+                        raise AssertionError("worker lease should not overlap a chat lease")
+                except m.RouteResidencyBusy as exc:
+                    assert "active chat model request" in str(exc)
+                else:
+                    raise AssertionError("worker lease should defer behind a chat request")
+            with m.model_route_residency_lease(worker):
+                pass
+        finally:
+            m.prepare_route_residency_for_request = old_prepare
 
-        calls.clear()
-        with m.open_model_response(route_info, {"model": "x"}, timeout=1, prepare_residency=False) as resp:
-            assert resp.read() == b"{}"
-        assert calls == []
-    finally:
-        m.open_model_response_core = old_core
-        m.prepare_route_residency_for_request = old_prepare
+
+def test_open_model_response_direct_calls_prepare_residency(m):
+    with isolated_state():
+        class FakeResponse:
+            def read(self):
+                return b"{}"
+
+        @contextlib.contextmanager
+        def fake_core(*_args, **_kwargs):
+            yield FakeResponse()
+
+        old_core = m.open_model_response_core
+        old_prepare = m.prepare_route_residency_for_request
+        calls = []
+        try:
+            m.open_model_response_core = fake_core
+
+            def fake_prepare(route_info, *, phase_callback=None):
+                calls.append((m.local_model_helper_route(route_info), phase_callback is not None))
+                return []
+
+            m.prepare_route_residency_for_request = fake_prepare
+            route_info = {
+                "route": "embedding",
+                "catalog_route": "qwen3-embedding-0b6",
+                "endpoint": "unix:///run/motoko-llm/mares/qwen3-embedding-0b6.sock",
+                "model": "qwen3-embedding-0.6b-q8-0",
+            }
+            with m.open_model_response(route_info, {"model": "x"}, timeout=1) as resp:
+                assert resp.read() == b"{}"
+            assert calls == [("qwen3-embedding-0b6", False)]
+
+            calls.clear()
+            with m.open_model_response(route_info, {"model": "x"}, timeout=1, prepare_residency=False) as resp:
+                assert resp.read() == b"{}"
+            assert calls == []
+        finally:
+            m.open_model_response_core = old_core
+            m.prepare_route_residency_for_request = old_prepare
 
 
 def test_model_service_status_and_stop_use_motoko_model_helper(m):
@@ -6061,6 +6173,107 @@ def test_context_catalog_metadata_omits_artifact_audit(m):
         m.latest_indexes_by_family = old_latest
         m.index_staleness = old_staleness
         m.index_metadata_staleness = old_metadata_staleness
+
+
+def test_context_catalog_staleness_defers_content_hashes(m):
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        note = docs / "note.org"
+        note.write_text("* Same content\n", encoding="utf-8")
+        m.add_allowed_dir(str(docs))
+        index = {
+            "id": "catalog-metadata-index",
+            "name": "docs",
+            "root": str(docs.resolve()),
+            "glob": m.AUTO_INDEX_GLOB,
+            "selection_policy": m.document_selection_policy(docs, m.AUTO_INDEX_GLOB),
+            "created": m.now(),
+            "files": [
+                {
+                    "path": str(note.resolve()),
+                    "source_fingerprint": m.source_fingerprint(note),
+                    "chunks": [],
+                }
+            ],
+        }
+        original_mtime = note.stat().st_mtime_ns
+        os.utime(note, ns=(original_mtime + 1_000_000_000, original_mtime + 1_000_000_000))
+
+        status, warnings = m.index_metadata_staleness(index)
+        assert status == "metadata-changed"
+        assert any("mtime changed" in warning for warning in warnings)
+        assert not any("content hash" in warning for warning in warnings)
+
+        status, warnings = m.index_staleness(index)
+        assert status == "metadata-changed"
+        assert any("content hash still matches" in warning for warning in warnings)
+
+
+def test_artifact_dependency_counts_use_catalog_sidecars(m):
+    with isolated_state():
+        index_id = "source-index"
+        store_path = m.vector_store_path("vector-sidecar")
+        m.atomic_write(
+            store_path,
+            json.dumps({"id": "vector-sidecar", "source_index": {"id": "wrong-index"}}) + "\n",
+        )
+        m.atomic_write(
+            store_path.with_suffix(".catalog"),
+            json.dumps(
+                {
+                    "catalog_schema": m.ARTIFACT_CATALOG_RECORD_SCHEMA_VERSION,
+                    "artifact_kind": "vector_store",
+                    "id": "vector-sidecar",
+                    "source_index": {"id": index_id},
+                }
+            )
+            + "\n",
+        )
+        legacy_store_path = m.vector_store_path("legacy-without-sidecar")
+        m.atomic_write(
+            legacy_store_path,
+            json.dumps(
+                {
+                    "id": "legacy-without-sidecar",
+                    "source_index": {"id": index_id},
+                    "padding": "x" * (m.ARTIFACT_CATALOG_FULL_STORE_FALLBACK_BYTES + 1),
+                }
+            )
+            + "\n",
+        )
+
+        old_safe_load_json = m.safe_load_json
+        try:
+            def guarded_load(path):
+                if pathlib.Path(path) in {store_path, legacy_store_path}:
+                    raise AssertionError("large vector stores should not be loaded during dependency scans")
+                return old_safe_load_json(path)
+
+            m.safe_load_json = guarded_load
+            counts = m.artifact_dependency_counts_for_index(index_id)
+        finally:
+            m.safe_load_json = old_safe_load_json
+
+        assert counts["vector_store"] == 1
+
+
+def test_tui_input_preempts_automatic_study(m):
+    with isolated_state():
+        ui = m.MotokoTui(m.new_conversation("Input preemption"))
+        read_fd, write_fd = os.pipe()
+        try:
+            ui.stdin_fd = read_fd
+            step_cancel_event = threading.Event()
+            ui.study_step_cancel_event = step_cancel_event
+            os.write(write_fd, b"x")
+
+            assert ui.handle_ready_input() is True
+            assert step_cancel_event.is_set()
+            assert ui.input_buffer == "x"
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
 
 
 def test_motokoignore_rejects_unsupported_negation(m):
@@ -17819,6 +18032,7 @@ def main() -> int:
         test_cross_home_action_policy_is_config_driven,
         test_slot_cache_failures_are_nonfatal_cache_misses,
         test_catalog_request_policy_shapes_chat_payload_and_telemetry,
+        test_conversation_reasoning_command_controls_qwen38_presets,
         test_chat_context_governor_selects_declared_route_profiles,
         test_chat_context_governor_falls_back_without_max_profile,
         test_route_kv_offload_notice_detects_catalog_flag,
@@ -17835,6 +18049,7 @@ def main() -> int:
         test_chat_route_releases_idle_worker_routes,
         test_chat_route_releases_idle_large_chat_peer,
         test_chat_route_defers_when_large_chat_peer_is_busy,
+        test_model_residency_lease_blocks_chat_worker_race,
         test_open_model_response_direct_calls_prepare_residency,
         test_model_service_status_and_stop_use_motoko_model_helper,
         test_summary_reductions_fan_out_across_worker_routes,
@@ -17911,6 +18126,7 @@ def main() -> int:
         test_tui_input_batching_and_display_cache_skip_hot_work,
         test_tui_latency_probe_command_contract,
         test_tui_input_echo_does_not_drop_transcript_work,
+        test_tui_input_preempts_automatic_study,
         test_tui_owner_loop_paints_input_before_background_events,
         test_background_study_uses_subprocess_for_evidence_refresh,
         test_tui_prompt_is_saved_before_context_preparation,
@@ -17986,6 +18202,9 @@ def main() -> int:
         test_context_catalog_uses_artifact_sidecars_without_deep_freshness,
         test_deep_context_catalog_reports_fresh_artifacts,
         test_attached_artifact_fields_use_persisted_deep_catalog,
+        test_context_catalog_metadata_omits_artifact_audit,
+        test_context_catalog_staleness_defers_content_hashes,
+        test_artifact_dependency_counts_use_catalog_sidecars,
         test_background_study_refreshes_metadata_catalog_in_subprocess_by_default,
         test_background_catalog_helper_failure_does_not_build_inprocess,
         test_manual_background_study_keeps_deep_catalog_refresh,

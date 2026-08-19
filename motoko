@@ -626,6 +626,7 @@ LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
 SLOT_CACHE_HELPER_TIMEOUT_SECONDS = 60
 MODEL_LOADING_RETRY_SECONDS = 2.0
 MODEL_RESIDENCY_DEFAULT_CHAT_GRACE_SECONDS = 90
+MODEL_RESIDENCY_LOCK_DIR = "model-residency-locks"
 CHAT_CONTEXT_MODE_ENV = "MOTOKO_CHAT_CONTEXT_MODE"
 CHAT_CONTEXT_DEFAULT_SOFT_TOKENS = 64_000
 CHAT_CONTEXT_DEEP_SOFT_TOKENS = 128_000
@@ -645,6 +646,7 @@ REASONING_PRESETS = {
     "high": (True, 16384),
     "max": (True, -1),
 }
+REASONING_PRESET_ORDER = ("off", "low", "default", "high", "max")
 REASONING_LIVE_MAX_CHARS = 1600
 KV_OFFLOAD_NOTICE_TEXT = "KV not in GPU"
 KV_OFFLOAD_NOTICE_SECONDS = 3.0
@@ -986,6 +988,7 @@ SLASH_COMMANDS = [
     ("/diagnose", "show content-free job and background progress diagnostics"),
     ("/status", "show model, memory, and context state"),
     ("/model-routes", "show model worker routes"),
+    ("/reasoning [PRESET]", "show or set chat reasoning: off, low, default, high, max, auto"),
     ("/models [ROUTE]", "show local model service status"),
     ("/model-status [ROUTE]", "alias for /models"),
     ("/model-stop ROUTE", "stop a local model service through motoko-model"),
@@ -1118,6 +1121,7 @@ SHELL_COMMANDS = [
     "context-bench",
     "feedback",
     "model-routes",
+    "reasoning",
     "models",
     "model-status",
     "model-stop",
@@ -1166,6 +1170,7 @@ SIMPLE_SLASH_COMMANDS = {
     "/status",
     "/last-call",
     "/model-routes",
+    "/reasoning",
     "/models",
     "/model-status",
     "/retrieval-eval",
@@ -1708,6 +1713,14 @@ def work_pause_requested() -> bool:
 
 def work_cancel_requested(cancel_event) -> bool:
     return bool(cancel_event is not None and cancel_event.is_set())
+
+
+class CombinedCancelEvent:
+    def __init__(self, *events) -> None:
+        self.events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self.events)
 
 
 def raise_if_work_cancelled(
@@ -3558,9 +3571,67 @@ def selected_reasoning_preset(route_info: dict, route: str, *, explicit: str | N
             explicit = str(policy.get("default_preset") or policy.get("defaultPreset") or "default")
         else:
             explicit = ""
-    if explicit.lower() in {"", "off", "none", "0", "false", "no"}:
+    explicit = explicit.strip().lower()
+    if explicit in {"none", "0", "false", "no"}:
+        explicit = "off"
+    if not explicit:
         return ""
     return explicit if reasoning_preset_declared(route_info, explicit) else ""
+
+
+def conversation_reasoning_preset(conv: dict) -> str | None:
+    preset = str(conv.get("reasoning_preset") or "").strip().lower()
+    return preset or None
+
+
+def reasoning_preset_description(route_info: dict, preset: str) -> str:
+    presets = route_reasoning_policy(route_info).get("presets")
+    row = presets.get(preset) if isinstance(presets, dict) else None
+    if not isinstance(row, dict):
+        return preset
+    if row.get("enable_thinking") is False:
+        return f"{preset} (thinking off)"
+    budget = row.get("thinking_budget_tokens")
+    if budget == -1:
+        return f"{preset} (thinking on, unrestricted budget)"
+    if isinstance(budget, int):
+        return f"{preset} (thinking on, {budget}-token budget)"
+    return f"{preset} (thinking on)"
+
+
+def format_conversation_reasoning(conv: dict, route_info: dict | None = None) -> str:
+    route_info = route_info or model_route(MODEL_ROUTE_CHAT)
+    declared = [preset for preset in REASONING_PRESET_ORDER if reasoning_preset_declared(route_info, preset)]
+    if not declared:
+        return "The selected chat route does not declare per-request reasoning presets."
+    stored = conversation_reasoning_preset(conv)
+    current = stored or selected_reasoning_preset(route_info, MODEL_ROUTE_CHAT)
+    source = "conversation" if stored else "route/environment default"
+    available = ", ".join(reasoning_preset_description(route_info, preset) for preset in declared)
+    return (
+        f"reasoning: {reasoning_preset_description(route_info, current)} [{source}]\n"
+        f"available: {available}\n"
+        "use /reasoning PRESET, or /reasoning auto to follow the route/environment default"
+    )
+
+
+def configure_conversation_reasoning(conv: dict, value: str) -> str:
+    route_info = model_route(MODEL_ROUTE_CHAT)
+    value = str(value or "").strip().lower()
+    if value in {"", "show"}:
+        return format_conversation_reasoning(conv, route_info)
+    if value in {"auto", "reset"}:
+        conv.pop("reasoning_preset", None)
+        save_conversation(conv)
+        return format_conversation_reasoning(conv, route_info)
+    if value in {"none", "0", "false", "no"}:
+        value = "off"
+    if not reasoning_preset_declared(route_info, value):
+        declared = [preset for preset in REASONING_PRESET_ORDER if reasoning_preset_declared(route_info, preset)]
+        raise SystemExit("reasoning preset must be one of: " + ", ".join(declared + ["auto"]))
+    conv["reasoning_preset"] = value
+    save_conversation(conv)
+    return format_conversation_reasoning(conv, route_info)
 
 
 def model_request_metadata(
@@ -10486,12 +10557,16 @@ def write_context_catalog_subprocess(
                 pass
         while True:
             raise_if_work_cancelled(cancel_event, "context catalog refresh interrupted by request", work_kind="catalog")
+            if work_pause_requested():
+                _stop_helper_process(process)
+                clear_work_pause_request()
+                raise WorkPaused("context catalog refresh paused by request", work_kind="catalog")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _stop_helper_process(process)
                 raise TimeoutError("context catalog helper timed out")
             try:
-                process.wait(timeout=min(0.5, remaining))
+                process.wait(timeout=min(0.05, remaining))
                 break
             except subprocess.TimeoutExpired:
                 continue
@@ -12045,7 +12120,7 @@ def index_staleness(index: dict) -> tuple[str, list[str]]:
 
 
 def index_metadata_staleness(index: dict) -> tuple[str, list[str]]:
-    return corpus_index_staleness(index)
+    return corpus_index_staleness(index, hash_on_metadata_change=False)
 
 
 def repair_indexes_needing_quality_subprocess(
@@ -12079,6 +12154,10 @@ def repair_indexes_needing_quality_subprocess(
     try:
         while True:
             raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
+            if work_pause_requested():
+                _stop_helper_process(process)
+                clear_work_pause_request()
+                raise WorkPaused("index quality repair paused by request", work_kind="index-repair")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 _stop_helper_process(process)
@@ -12091,7 +12170,7 @@ def repair_indexes_needing_quality_subprocess(
                     pass
                 sent_input = True
             try:
-                process.wait(timeout=min(0.5, remaining))
+                process.wait(timeout=min(0.05, remaining))
                 break
             except subprocess.TimeoutExpired:
                 continue
@@ -12660,11 +12739,44 @@ def resolve_artifact_lifecycle_specs(specs: list[dict]) -> list[dict]:
     return resolve_artifact_lifecycle_specs_core(specs, resolve_path=artifact_lifecycle_path_for_key)
 
 
-def artifact_dependency_counts_for_index(index_id: str) -> dict[str, int]:
+def artifact_dependency_reference(path: pathlib.Path) -> dict | None:
+    expected_kind = ""
+    if path.parent == vector_stores_dir():
+        expected_kind = "vector_store"
+    elif path.parent == evidence_stores_dir():
+        expected_kind = "evidence_store"
+    if expected_kind:
+        sidecar_path = path.with_suffix(".catalog")
+        record = load_artifact_catalog_record(sidecar_path, path)
+        if record is not None and record.get("artifact_kind") == expected_kind:
+            source = record.get("source_index") if isinstance(record.get("source_index"), dict) else {}
+            try:
+                current = sidecar_path.stat().st_mtime_ns >= path.stat().st_mtime_ns
+            except OSError:
+                current = False
+            if current and source.get("id"):
+                return record
+        try:
+            if path.stat().st_size > ARTIFACT_CATALOG_FULL_STORE_FALLBACK_BYTES:
+                return None
+        except OSError:
+            return None
+    return safe_load_json(path)
+
+
+def artifact_dependency_counts_for_index(index_id: str, *, cancel_event=None) -> dict[str, int]:
+    def check_cancelled() -> None:
+        raise_if_work_cancelled(
+            cancel_event,
+            "index dependency scan interrupted by request",
+            work_kind="index-dependency-scan",
+        )
+
     return index_artifact_dependency_counts(
         index_id,
         resolve_artifact_lifecycle_specs(dependency_json_artifact_specs()),
-        load_json=safe_load_json,
+        load_json=artifact_dependency_reference,
+        check_cancelled=check_cancelled,
     )
 
 
@@ -14001,21 +14113,18 @@ def rerank_documents(
     }
     try:
         raise_if_cancelled(cancel_event)
-        prepare_route_residency_for_request(route_info)
-    except RouteResidencyBusy as exc:
-        raise SystemExit(f"rerank request deferred: {exc}") from exc
-    try:
         with open_model_response(
             route_info,
             payload,
             timeout=timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
             cancel_event=cancel_event,
-            prepare_residency=False,
         ) as resp:
             raise_if_cancelled(cancel_event)
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
             raise_if_cancelled(cancel_event)
+    except RouteResidencyBusy as exc:
+        raise SystemExit(f"rerank request deferred: {exc}") from exc
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("__motoko_stopped__") from exc
@@ -14046,21 +14155,18 @@ def embed_texts(
     }
     try:
         raise_if_cancelled(cancel_event)
-        prepare_route_residency_for_request(route_info)
-    except RouteResidencyBusy as exc:
-        raise SystemExit(f"embedding request deferred: {exc}") from exc
-    try:
         with open_model_response(
             route_info,
             payload,
             timeout=timeout,
             socket_activation_min_timeout=socket_activation_min_timeout,
             cancel_event=cancel_event,
-            prepare_residency=False,
         ) as resp:
             raise_if_cancelled(cancel_event)
             data = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
             raise_if_cancelled(cancel_event)
+    except RouteResidencyBusy as exc:
+        raise SystemExit(f"embedding request deferred: {exc}") from exc
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, json.JSONDecodeError) as exc:
         if cancel_event is not None and cancel_event.is_set():
             raise RuntimeError("__motoko_stopped__") from exc
@@ -17232,8 +17338,10 @@ def mark_heavy_index_attempt(index: dict, state: dict, *, result: str, new_index
     write_heavy_study_state(state)
 
 
-def index_change_summary(index: dict) -> dict:
+def index_change_summary(index: dict, *, cancel_event=None) -> dict:
+    raise_if_work_cancelled(cancel_event, "index change scan interrupted by request", work_kind="index-change-scan")
     status, warnings = index_staleness(index)
+    raise_if_work_cancelled(cancel_event, "index change scan interrupted by request", work_kind="index-change-scan")
     root = pathlib.Path(index.get("root", "")).expanduser().resolve()
     pattern = index.get("glob") or AUTO_INDEX_GLOB
     known_paths = set(index_source_lifecycle_scan(index, current_paths=set(), root=root).get("known_paths", []))
@@ -17264,12 +17372,18 @@ def index_change_summary(index: dict) -> dict:
             "coverage_score": 0,
         }
     current_paths = {str(candidate.resolve()): candidate for candidate in candidates}
+    raise_if_work_cancelled(cancel_event, "index change scan interrupted by request", work_kind="index-change-scan")
+
+    def file_status(file_item: dict) -> str:
+        raise_if_work_cancelled(cancel_event, "index change scan interrupted by request", work_kind="index-change-scan")
+        return file_staleness(file_item)[0]
+
     lifecycle_scan = index_source_lifecycle_scan(
         index,
         current_paths=set(current_paths),
         root=root,
         ignore_rules=candidate_report.get("selection_policy", {}).get("motokoignore", {}).get("rules", []),
-        file_status=lambda file_item: file_staleness(file_item)[0],
+        file_status=file_status,
     )
     known_paths = set(lifecycle_scan.get("known_paths", []))
     new_files = sorted(
@@ -17281,7 +17395,10 @@ def index_change_summary(index: dict) -> dict:
     artifact_plan = source_lifecycle_artifact_plan(
         index_id=str(index.get("id", "")),
         source_lifecycle=source_lifecycle,
-        dependent_counts=artifact_dependency_counts_for_index(str(index.get("id", ""))),
+        dependent_counts=artifact_dependency_counts_for_index(
+            str(index.get("id", "")),
+            cancel_event=cancel_event,
+        ),
     )
     covered_files = int(lifecycle_scan.get("covered_files", 0) or 0)
     new_bytes = 0
@@ -17408,7 +17525,9 @@ def refresh_heavy_attached_indexes(
             replace_attached_index(conv, index.get("id", ""), latest)
             notes.append(f"attached newer index {index.get('id')} -> {latest.get('id')}")
             index = latest
-        summary = index_change_summary(index)
+        if phase_callback is not None:
+            phase_callback("bg-heavy: source-audit(cpu)")
+        summary = index_change_summary(index, cancel_event=cancel_event)
         reason = heavy_index_refresh_reason(summary)
         if reason is None:
             new_files = len(summary.get("new_files", []))
@@ -19307,6 +19426,50 @@ def prepare_route_residency_for_request(route_info: dict, *, phase_callback=None
     return notes
 
 
+def model_residency_lock_specs(route_info: dict) -> list[tuple[pathlib.Path, int]]:
+    if not endpoint_is_unix(str(route_info.get("endpoint") or "")):
+        return []
+    lock_dir = state_root() / MODEL_RESIDENCY_LOCK_DIR
+    specs = [(lock_dir / "large-chat.lock", fcntl.LOCK_EX if route_is_large_chat(route_info) else fcntl.LOCK_SH)]
+    lane = route_declared_exclusive_lane(route_info)
+    if lane and not route_is_large_chat(route_info):
+        lane_name = re.sub(r"[^a-z0-9._-]+", "-", lane).strip("-._") or "declared"
+        specs.append((lock_dir / f"lane-{lane_name}.lock", fcntl.LOCK_EX))
+    return specs
+
+
+def model_residency_lock_busy_message(route_info: dict, mode: int, path: pathlib.Path) -> str:
+    route_name = local_model_helper_route(route_info)
+    if path.name.startswith("lane-"):
+        return f"route {route_name} queued behind an active request in exclusive lane {route_declared_exclusive_lane(route_info)}"
+    if mode == fcntl.LOCK_EX:
+        return f"chat route {route_name} queued behind an active worker model request"
+    return f"worker route {route_name} queued behind an active chat model request"
+
+
+@contextlib.contextmanager
+def model_route_residency_lease(route_info: dict, *, phase_callback=None, cancel_event=None):
+    locks: list[tuple[int, pathlib.Path]] = []
+    try:
+        for path, mode in model_residency_lock_specs(route_info):
+            raise_if_cancelled(cancel_event)
+            ensure_private_dir(path.parent)
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                os.close(fd)
+                raise RouteResidencyBusy(model_residency_lock_busy_message(route_info, mode, path)) from exc
+            locks.append((fd, path))
+        prepare_route_residency_for_request(route_info, phase_callback=phase_callback)
+        yield
+    finally:
+        for fd, _path in reversed(locks):
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
 @contextlib.contextmanager
 def open_model_response(
     route_info: dict,
@@ -19319,24 +19482,28 @@ def open_model_response(
     socket_activation_min_timeout: float | None = None,
     prepare_residency: bool = True,
 ):
-    if prepare_residency:
-        prepare_route_residency_for_request(route_info)
-    with open_model_response_core(
-        route_info,
-        payload,
-        timeout=timeout,
-        unix_request_path=LOCAL_MODEL_UNIX_REQUEST_PATH,
-        socket_activation_min_timeout=(
-            SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS
-            if socket_activation_min_timeout is None
-            else socket_activation_min_timeout
-        ),
-        model_loading_retry_seconds=MODEL_LOADING_RETRY_SECONDS,
-        cancel_event=cancel_event,
-        on_connection=on_connection,
-        on_response=on_response,
-    ) as resp:
-        yield resp
+    lease = (
+        model_route_residency_lease(route_info, cancel_event=cancel_event)
+        if prepare_residency
+        else contextlib.nullcontext()
+    )
+    with lease:
+        with open_model_response_core(
+            route_info,
+            payload,
+            timeout=timeout,
+            unix_request_path=LOCAL_MODEL_UNIX_REQUEST_PATH,
+            socket_activation_min_timeout=(
+                SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS
+                if socket_activation_min_timeout is None
+                else socket_activation_min_timeout
+            ),
+            model_loading_retry_seconds=MODEL_LOADING_RETRY_SECONDS,
+            cancel_event=cancel_event,
+            on_connection=on_connection,
+            on_response=on_response,
+        ) as resp:
+            yield resp
 
 
 def call_model(
@@ -19386,40 +19553,45 @@ def call_model(
     reasoning = {}
     if not effective_reasoning_preset:
         reasoning = apply_chat_reasoning_payload(payload, route_info)
+    residency_lease = model_route_residency_lease(route_info, cancel_event=cancel_event)
     try:
         raise_if_cancelled(cancel_event)
-        prepare_route_residency_for_request(route_info)
+        residency_lease.__enter__()
     except RouteResidencyBusy as exc:
         raise SystemExit(f"model request deferred: {exc}") from exc
-    slot_context = None
-    if slot_cache_context:
-        slot_context = prepare_slot_cache_for_request(
+    try:
+        slot_context = None
+        if slot_cache_context:
+            slot_context = prepare_slot_cache_for_request(
+                route_info,
+                payload,
+                conversation_id=str(slot_cache_context.get("conversation_id") or ""),
+                client_namespace=str(slot_cache_context.get("client_namespace") or CHAT_SLOT_CACHE_NAMESPACE_VERSION),
+            )
+        request_metadata = model_request_metadata(
             route_info,
             payload,
-            conversation_id=str(slot_cache_context.get("conversation_id") or ""),
-            client_namespace=str(slot_cache_context.get("client_namespace") or CHAT_SLOT_CACHE_NAMESPACE_VERSION),
+            sampling_preset=effective_sampling_preset,
+            reasoning_preset=effective_reasoning_preset,
+            json_schema=json_schema,
+            grammar=grammar,
         )
-    request_metadata = model_request_metadata(
-        route_info,
-        payload,
-        sampling_preset=effective_sampling_preset,
-        reasoning_preset=effective_reasoning_preset,
-        json_schema=json_schema,
-        grammar=grammar,
-    )
-    started = time.monotonic()
-    record = model_call_started_record(
-        route_info,
-        governor,
-        source_count=source_count,
-        stream=stream,
-        temperature=temperature,
-        request_metadata=request_metadata,
-    )
-    add_reasoning_to_model_call_record(record, reasoning)
-    add_slot_cache_to_model_call_record(record, slot_context)
-    write_last_model_call(record)
-    spinner = ThinkingSpinner(enabled=echo)
+        started = time.monotonic()
+        record = model_call_started_record(
+            route_info,
+            governor,
+            source_count=source_count,
+            stream=stream,
+            temperature=temperature,
+            request_metadata=request_metadata,
+        )
+        add_reasoning_to_model_call_record(record, reasoning)
+        add_slot_cache_to_model_call_record(record, slot_context)
+        write_last_model_call(record)
+        spinner = ThinkingSpinner(enabled=echo)
+    except BaseException:
+        residency_lease.__exit__(None, None, None)
+        raise
     try:
         spinner.start()
         with open_model_response(
@@ -19456,6 +19628,7 @@ def call_model(
         raise
     finally:
         spinner.stop()
+        residency_lease.__exit__(None, None, None)
 
 
 def run_with_wall_timeout(label: str, wall_timeout: float, func, *args, **kwargs):
@@ -19880,40 +20053,45 @@ def call_model_with_callback(
     reasoning = {}
     if not effective_reasoning_preset:
         reasoning = apply_chat_reasoning_payload(payload, route_info)
+    residency_lease = model_route_residency_lease(route_info, cancel_event=cancel_event)
     try:
-        prepare_route_residency_for_request(route_info)
+        residency_lease.__enter__()
     except RouteResidencyBusy as exc:
         raise SystemExit(f"model request deferred: {exc}") from exc
-    slot_context = None
-    if slot_cache_context:
-        slot_context = prepare_slot_cache_for_request(
+    try:
+        slot_context = None
+        if slot_cache_context:
+            slot_context = prepare_slot_cache_for_request(
+                route_info,
+                payload,
+                conversation_id=str(slot_cache_context.get("conversation_id") or ""),
+                client_namespace=str(slot_cache_context.get("client_namespace") or CHAT_SLOT_CACHE_NAMESPACE_VERSION),
+            )
+        request_metadata = model_request_metadata(
             route_info,
             payload,
-            conversation_id=str(slot_cache_context.get("conversation_id") or ""),
-            client_namespace=str(slot_cache_context.get("client_namespace") or CHAT_SLOT_CACHE_NAMESPACE_VERSION),
+            sampling_preset=effective_sampling_preset,
+            reasoning_preset=effective_reasoning_preset,
+            json_schema=json_schema,
+            grammar=grammar,
         )
-    request_metadata = model_request_metadata(
-        route_info,
-        payload,
-        sampling_preset=effective_sampling_preset,
-        reasoning_preset=effective_reasoning_preset,
-        json_schema=json_schema,
-        grammar=grammar,
-    )
-    collected = []
-    first_token_at = 0.0
-    started = time.monotonic()
-    record = model_call_started_record(
-        route_info,
-        governor,
-        source_count=source_count,
-        stream=True,
-        temperature=temperature,
-        request_metadata=request_metadata,
-    )
-    add_reasoning_to_model_call_record(record, reasoning)
-    add_slot_cache_to_model_call_record(record, slot_context)
-    write_last_model_call(record)
+        collected = []
+        first_token_at = 0.0
+        started = time.monotonic()
+        record = model_call_started_record(
+            route_info,
+            governor,
+            source_count=source_count,
+            stream=True,
+            temperature=temperature,
+            request_metadata=request_metadata,
+        )
+        add_reasoning_to_model_call_record(record, reasoning)
+        add_slot_cache_to_model_call_record(record, slot_context)
+        write_last_model_call(record)
+    except BaseException:
+        residency_lease.__exit__(None, None, None)
+        raise
     try:
         raise_if_cancelled(cancel_event)
         with open_model_response(
@@ -19939,6 +20117,7 @@ def call_model_with_callback(
                     collected.append(content)
                     on_token(content)
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+        residency_lease.__exit__(None, None, None)
         finish_model_call_record(
             record,
             started=started,
@@ -19951,6 +20130,7 @@ def call_model_with_callback(
         hint = local_model_verify_hint(route_info)
         raise SystemExit(model_request_failure_detail("model request failed", exc, hint)) from exc
     except BaseException as exc:
+        residency_lease.__exit__(None, None, None)
         finish_model_call_record(
             record,
             started=started,
@@ -19962,6 +20142,7 @@ def call_model_with_callback(
     try:
         raise_if_cancelled(cancel_event)
     except BaseException as exc:
+        residency_lease.__exit__(None, None, None)
         finish_model_call_record(
             record,
             started=started,
@@ -19970,17 +20151,20 @@ def call_model_with_callback(
             error=exc,
         )
         raise
-    reply = "".join(collected)
-    if slot_context is not None:
-        slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
-        add_slot_cache_to_model_call_record(record, slot_context)
-    finish_model_call_record(
-        record,
-        started=started,
-        first_token_at=first_token_at,
-        completion_text=reply,
-    )
-    return reply
+    try:
+        reply = "".join(collected)
+        if slot_context is not None:
+            slot_context = save_slot_cache_after_request_with_service_gc(route_info, slot_context)
+            add_slot_cache_to_model_call_record(record, slot_context)
+        finish_model_call_record(
+            record,
+            started=started,
+            first_token_at=first_token_at,
+            completion_text=reply,
+        )
+        return reply
+    finally:
+        residency_lease.__exit__(None, None, None)
 
 
 def read_streaming_response(
@@ -20029,6 +20213,7 @@ HELP_SECTIONS = [
             ("/status", "show model, memory, and context state"),
             ("/last-call", "show content-free model-call route and timing telemetry"),
             ("/model-routes", "show chat and background worker model routes"),
+            ("/reasoning [PRESET]", "show or set this conversation's chat reasoning preset"),
             ("/models [ROUTE]", "show local model service status from motoko-model"),
             ("/model-stop ROUTE", "stop a local model service through motoko-model"),
             ("/model-metrics ROUTE", "show content-free llama.cpp route metrics from motoko-model"),
@@ -20837,10 +21022,12 @@ def vector_command_request(text: str, conv: dict):
     return None
 
 
-def model_command_request(text: str):
+def model_command_request(text: str, conv: dict):
     text = text.strip()
     primary = command_primary(text)
     body = command_body(text)
+    if primary == "/reasoning":
+        return "/reasoning", lambda: configure_conversation_reasoning(conv, body)
     if primary == "/model-stop":
         selector = body
         if not selector:
@@ -21514,7 +21701,7 @@ def shared_command_request(text: str, conv: dict):
     builders = [
         (lambda: report_command_request(text, conv), COMMAND_KIND_REPORT, False),
         (lambda: evidence_command_request(text, conv), COMMAND_KIND_REPORT, True),
-        (lambda: model_command_request(text), COMMAND_KIND_MUTATION, True),
+        (lambda: model_command_request(text, conv), COMMAND_KIND_MUTATION, True),
         (lambda: settings_command_request(text), COMMAND_KIND_MUTATION, True),
         (lambda: index_report_command_request(text, conv), COMMAND_KIND_REPORT, True),
         (lambda: vector_command_request(text, conv), COMMAND_KIND_REPORT, True),
@@ -22005,6 +22192,7 @@ class MotokoTui:
         self.study_running = False
         self.study_status = "study: starting"
         self.study_last_note = ""
+        self.study_step_cancel_event: threading.Event | None = None
         self.study_phase_started = time.monotonic()
         self.study_phase_updated = self.study_phase_started
         self.last_input_at = time.monotonic()
@@ -22284,11 +22472,17 @@ class MotokoTui:
                 break
             self.handle_key(key)
 
+    def preempt_automatic_study_for_input(self) -> None:
+        cancel_event = getattr(self, "study_step_cancel_event", None)
+        if cancel_event is not None and not cancel_event.is_set():
+            cancel_event.set()
+
     def handle_ready_input(self, timeout: float = 0.0) -> bool:
         readable, _writeable, _errors = select.select([self.stdin_fd], [], [], max(0.0, float(timeout or 0.0)))
         if not readable:
             return False
         self.last_input_at = time.monotonic()
+        self.preempt_automatic_study_for_input()
         key = self.read_key()
         if key:
             self.handle_key(key)
@@ -23118,6 +23312,7 @@ class MotokoTui:
                     on_token=on_token,
                     on_reasoning=on_reasoning,
                     route=MODEL_ROUTE_CHAT,
+                    reasoning_preset=conversation_reasoning_preset(self.conv),
                     cancel_event=cancel_event,
                     on_connection=self.set_active_model_connection,
                     on_response=self.set_active_model_response,
@@ -23466,15 +23661,19 @@ class MotokoTui:
                     next_run = now_ts + 1
                     continue
                 next_run = now_ts + interval
+                step_cancel_event = threading.Event()
+                self.study_step_cancel_event = step_cancel_event
+                combined_cancel_event = CombinedCancelEvent(cancel_event, step_cancel_event)
                 self.put_event(("study_phase", "study: scanning"))
                 try:
                     notes = background_study_step(
                         self.conv,
                         phase_callback=lambda phase: self.put_event(("study_phase", phase)),
-                        cancel_event=cancel_event,
+                        cancel_event=combined_cancel_event,
                     )
                 except WorkPaused as exc:
-                    self.put_event(("study_done", [str(exc)]))
+                    note = "background study yielded to input" if step_cancel_event.is_set() else str(exc)
+                    self.put_event(("study_done", [note]))
                     if work_cancel_requested(cancel_event):
                         break
                 except Exception as exc:  # Background study must not break chat.
@@ -23483,6 +23682,9 @@ class MotokoTui:
                     self.put_event(("study_done", notes))
                     if work_cancel_requested(cancel_event):
                         break
+                finally:
+                    if self.study_step_cancel_event is step_cancel_event:
+                        self.study_step_cancel_event = None
 
         getattr(self, "jobs", LIVE_JOB_SUPERVISOR).start_thread(
             kind="study-loop",
@@ -23658,6 +23860,17 @@ class MotokoTui:
                 for row in list_dossiers()
                 if not current or item_matches_selector(row, current)
             ][:20]
+        if first == "/reasoning" and len(words) <= 2:
+            return [
+                {
+                    "kind": "reasoning-preset",
+                    "value": preset,
+                    "label": preset,
+                    "description": "follow route/environment default" if preset == "auto" else "chat reasoning preset",
+                }
+                for preset in (*REASONING_PRESET_ORDER, "auto")
+                if not current or preset.startswith(current)
+            ]
         if first in {"/models", "/model-status", "/model-stop", "/model-metrics", "/slot-cache"} and len(words) <= 2:
             return [
                 {
@@ -23750,6 +23963,12 @@ class MotokoTui:
             self.cursor = len(self.input_buffer)
             self.dropdown_index = 0
             self.dirty = True
+        if kind == "reasoning-preset":
+            self.input_buffer = f"/reasoning {value}"
+            self.cursor = len(self.input_buffer)
+            self.submit_text(self.input_buffer)
+            self.input_buffer = ""
+            self.cursor = 0
 
     def render(self, *, force: bool = False) -> None:
         size = self.terminal_size()
@@ -24563,6 +24782,7 @@ def chat_loop(conv: dict) -> None:
                 reply = call_model(
                     messages,
                     source_count=len(sources),
+                    reasoning_preset=conversation_reasoning_preset(conv),
                     slot_cache_context={
                         "conversation_id": conv.get("id", ""),
                         "client_namespace": CHAT_SLOT_CACHE_NAMESPACE_VERSION,

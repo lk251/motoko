@@ -1330,8 +1330,13 @@ names.
 While the TUI is open, Motoko also runs a low-intensity background study loop
 only when she is idle. The loop refreshes a private context catalog, checks
 index freshness, upgrades a bounded number of old CPU-only index artifacts, and
-records study suggestions. By default it avoids heavy model calls so it does not
-compete with chat; set `MOTOKO_BACKGROUND_PROFILE=1` to allow idle
+records study suggestions. The first keystroke cancels the current automatic
+step so the composer remains responsive even if maintenance was already in
+progress. Catalog metadata checks avoid content hashing, and source audits read
+small artifact sidecars instead of loading large vector/evidence stores; legacy
+large stores without sidecars are left for explicit refresh or rebuild. By
+default the loop avoids heavy model calls so it does not compete with chat; set
+`MOTOKO_BACKGROUND_PROFILE=1` to allow idle
 profile-dossier refreshes. It does not silently crawl new directories or create
 large document indexes; document access still starts from explicit allowlists
 and `/index`. Use `/study QUERY` for a deliberate bounded study pass that either
@@ -1390,13 +1395,16 @@ chat_template_kwargs.enable_thinking = true|false
 thinking_budget_tokens = N
 ```
 
-Use `MOTOKO_REASONING=off|low|default|high|max` for one process. The default is
-`default`, which enables thinking with a 4096-token budget. `low` uses 1024,
-`high` uses 16384, and `max` is unrestricted. Streaming reasoning switches the
-active TUI answer row to `Thinking`, shows the latest reasoning text dimmed and
-truncated for fit, and returns to `Answering` when normal answer tokens stream.
-It is not inserted into the conversation transcript, prompt history,
-`/last-call`, logs, or shared state.
+Use `/reasoning off|low|default|high|max` inside Motoko to set the current
+conversation. `/reasoning` shows the current setting and `/reasoning auto`
+returns to the route/environment default. `off` disables thinking, `low` uses
+1024 tokens, `default` uses 4096, `high` uses 16384, and `max` is unrestricted.
+For a process-wide default, launch Motoko with
+`MOTOKO_REASONING_PRESET=off|low|default|high|max`. Streaming reasoning switches
+the active TUI answer row to `Thinking`, shows the latest reasoning text dimmed
+and truncated for fit, and returns to `Answering` when normal answer tokens
+stream. Reasoning text is not inserted into the conversation transcript,
+prompt history, `/last-call`, logs, or shared state.
 
 All routes still fall back to the normal chat endpoint until config,
 environment variables, or the NixOS local-model catalog override them, so the

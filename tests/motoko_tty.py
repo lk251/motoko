@@ -491,6 +491,27 @@ def main() -> int:
             catalog_probe = catalog_latency_probe_on_pty(m, master_fd, slave_fd)
             assert catalog_probe["status"] == "pass", catalog_probe
 
+            background_preempted = m.threading.Event()
+
+            def preemptible_background(probe_ui):
+                step_cancel_event = m.threading.Event()
+                probe_ui.study_step_cancel_event = step_cancel_event
+                if not step_cancel_event.wait(2.0):
+                    raise RuntimeError("typed input did not preempt background work")
+                background_preempted.set()
+
+            preemption_probe = m.build_tui_catalog_latency_probe(
+                master_fd,
+                slave_fd,
+                catalog_worker=preemptible_background,
+                workload_label="input-preemption",
+                stream_seconds=0.4,
+                stream_interval=0.02,
+            )
+            assert preemption_probe["status"] == "pass", preemption_probe
+            assert preemption_probe["catalog_worker_status"] == "completed"
+            assert background_preempted.is_set()
+
             set_winsz(slave_fd, 18, 72)
             assert ui.terminal_size().columns == 72
             ui.render(force=True)
@@ -510,7 +531,7 @@ def main() -> int:
                 os.environ.pop("MOTOKO_CONFIG_HOME", None)
             else:
                 os.environ["MOTOKO_CONFIG_HOME"] = old_config
-    print("5 motoko tty render/input checks passed")
+    print("6 motoko tty render/input checks passed")
     return 0
 
 
