@@ -484,6 +484,97 @@ durable skills and later tightly constrained support files/tools, while
 preserving Motoko's realm-local, dependency-light, approval-first security
 shape.
 
+## Supervisory Workflow And Context Management
+
+Motoko can act as a supervisory planner for a repository without becoming the
+host's administrative control plane. Start her in the repository whose current
+files should define the task. For example, in Javier's admin realm:
+
+```bash
+cd /home/javier/repos/nixos-configs
+motoko index --plan --name nixos-configs .
+motoko index --name nixos-configs .
+MOTOKO_REASONING=high motoko
+```
+
+Inspect the index plan before writing derived state. Do not index `/`, `/etc`,
+or `/nix/store`: a focused source repository is more current, more relevant,
+and less likely to expose unrelated secrets or generated files. When discussing
+a system problem, distinguish among declared repository configuration, the
+built or selected closure, and live runtime state.
+
+The intended supervisory pattern is:
+
+1. Use the highest-fidelity approved chat route for compact, difficult planning
+   and final critical review.
+2. Use the approved long-context route when the necessary assembled evidence
+   no longer fits the high-fidelity route.
+3. Delegate bounded chunk, file, label, memory, embedding, reranking, and corpus
+   work to the specialist routes declared in the local catalog.
+4. Bring the resulting artifacts back to the strongest suitable chat route for
+   synthesis and review.
+
+The concrete model files, quants, context sizes, and service policy belong to
+NixOS. Treat `~/.config/motoko/local-models.json` and `/model-routes` as the
+source of truth instead of embedding a particular quant filename in Motoko's
+personality, memories, or source code.
+
+Motoko currently combines deterministic context-size routing with fixed
+specialist task routes. She does not yet ask a large model to semantically
+assign every subtask to another model. A future semantic supervisor should
+return a structured plan containing only approved catalog route IDs. Motoko's
+code must retain final authority over route validity, scheduling, privacy, and
+service access.
+
+A useful standing instruction is:
+
+```text
+Act as the supervisory planner for this project. Classify each part of the task,
+recommend the least expensive approved route competent to handle it, reserve the
+highest-fidelity route for difficult reasoning and final review, and use the
+long-context route only when the assembled evidence requires it. Distinguish
+source-of-truth files from summaries and distinguish declared, built, and live
+system state.
+```
+
+Keep `MOTOKO_CHAT_CONTEXT_MODE=auto` for normal work. Use an explicit context
+mode only for an intentional comparison or when the task's required context is
+already known:
+
+```bash
+MOTOKO_CHAT_CONTEXT_MODE=max MOTOKO_REASONING=high motoko
+motoko model-routes
+motoko context-bench --target-tokens 32000
+motoko context-bench --target-tokens 64000
+motoko context-bench --target-tokens 96000
+```
+
+Large raw context is not the same as durable project continuity. Approximate a
+larger agent working context through fresh source retrieval, inspectable
+dossiers, compact conversation state, and authoritative repository artifacts.
+Do not fill a route to its declared limit: leave roughly one quarter of the
+window for reasoning and output, and compact or retrieve more selectively when
+`/last-call` reports high context pressure.
+
+Current compaction summarizes older turns, keeps recent messages verbatim, and
+saves both in the conversation. A summary can lose exact implementation detail,
+so use these practices:
+
+1. Keep one conversation per coherent project or objective and resume it.
+2. Keep current files, Git commits, tests, and tracked decisions authoritative.
+3. Refresh an index after material repository changes.
+4. Use `/study` for broad analysis instead of manually pasting many files.
+5. Use `/sources` after consequential answers to inspect grounding.
+6. Use `/retrieval-debug QUERY` when Motoko misses relevant evidence.
+7. Use `/compact` at a clean phase boundary after important state is recorded.
+8. Use `/remember` for durable preferences and commitments, not transient code
+   details that should be retrieved from the repository.
+
+For NixOS work, `/repo review .` provides bounded read-only Git and review-gate
+context. Motoko's `repo-review` permission does not grant shell, sudo, rebuild,
+switch, commit, or push authority. Those operations remain separate reviewed
+human or coding-agent actions.
+
 Emacs-style editing keys in the TUI:
 
 ```text
