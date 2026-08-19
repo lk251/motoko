@@ -1,5 +1,11 @@
 Motoko org file
 * do
+** [#A] DSA sparse attention support for Qwen3.6 27B Q4-K_XL
+ycombinator item id 48636377 GLM-5.2 -How to run locally explains, on
+ecomment does, that llama.cpp implementation for this model is half
+baked due to missing the support for DSA sparse attention. so model
+runs with diff mechanism that it has not ben trained for which reduces
+quality and performance.
 ** hermes compile
 and other such hermes features. consider including
 

@@ -459,6 +459,12 @@ Current high-value future work:
   user-visible reports;
 - improve document-derived dossier quality after real documents are added by
   `personal`, without Codex reading those documents directly;
+- evaluate upgrading retrieval for allowlisted coding repositories, including
+  whether to extend the current Org/text-focused evidence pipeline with
+  code-aware artifacts and ranking, keep a specialized code-retrieval pipeline,
+  or combine shared candidate fusion with language-aware parsing and indexes;
+  decide from inspectable code-query evals while preserving provenance, realm
+  boundaries, artifact migrations, and source visibility;
 - add better memory review/edit/delete workflows when daily use shows the exact
   friction;
 - keep background study inspectable and bounded;
