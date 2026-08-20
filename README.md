@@ -36,9 +36,8 @@ Design constraints:
   state.
 - A Codex-style TUI transcript: chat output is append-only so normal terminal
   scrollback works, while the composer and status line redraw at the bottom.
-- TUI model badge showing the active local model/endpoint, such as
-  `qwen3.6-27b-mtp:chat` for a per-realm Unix socket or
-  `qwen3.6-27b-mtp:8083` for an older loopback endpoint.
+- TUI model badge showing the conversation's named chat model and reasoning
+  effort, such as `qwen38-default:xhigh` or `muse-glimmer:high`.
 - Automatic ranked memory selection and quiet after-answer memory maintenance,
   with visible phases, resumable state, and `/sources` provenance.
 - Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers

@@ -180,6 +180,14 @@ def apply_reasoning_policy(
     selected = presets.get(selected_name) if selected_name else {}
     if not isinstance(selected, dict):
         selected = {}
+    effort_presets = reasoning.get("effort_presets")
+    if not isinstance(effort_presets, dict):
+        effort_presets = reasoning.get("effortPresets")
+    if not isinstance(effort_presets, dict):
+        effort_presets = {}
+    reasoning_effort = selected.get("reasoning_effort")
+    if reasoning_effort is None and selected_name:
+        reasoning_effort = effort_presets.get(selected_name)
     if enable_thinking is None and isinstance(selected.get("enable_thinking"), bool):
         enable_thinking = selected.get("enable_thinking")
     if thinking_budget_tokens is None and selected.get("thinking_budget_tokens") is not None:
@@ -197,16 +205,25 @@ def apply_reasoning_policy(
         or reasoning.get("perRequestBudgetField")
         or "thinking_budget_tokens"
     )
+    effort_field = str(
+        reasoning.get("per_request_effort_field")
+        or reasoning.get("perRequestEffortField")
+        or "reasoning_effort"
+    )
     if enable_thinking is not None:
         payload_path_set(payload, enable_field, bool(enable_thinking))
     if thinking_budget_tokens is not None and thinking_budget_tokens >= -1:
         payload_path_set(payload, budget_field, int(thinking_budget_tokens))
+    if reasoning_effort is not None and enable_thinking is not False:
+        payload_path_set(payload, effort_field, str(reasoning_effort))
     return {
         "reasoning_preset": selected_name,
         "enable_field": enable_field,
         "budget_field": budget_field,
+        "effort_field": effort_field,
         "thinking_budget_tokens": payload_path_get(payload, budget_field),
         "enable_thinking": payload_path_get(payload, enable_field),
+        "reasoning_effort": payload_path_get(payload, effort_field),
         "format": str(reasoning.get("format") or ""),
     }
 
@@ -270,6 +287,11 @@ def request_policy_metadata(
         or reasoning.get("perRequestEnableField")
         or "chat_template_kwargs.enable_thinking"
     )
+    effort_field = str(
+        reasoning.get("per_request_effort_field")
+        or reasoning.get("perRequestEffortField")
+        or "reasoning_effort"
+    )
     return {
         "sampling_preset": str(sampling_preset or ""),
         "structured_json_schema": json_schema_field in payload,
@@ -278,6 +300,7 @@ def request_policy_metadata(
         "reasoning_format": str(reasoning.get("format") or "") if isinstance(reasoning, dict) else "",
         "thinking_budget_tokens": payload_path_get(payload, budget_field),
         "enable_thinking": payload_path_get(payload, enable_field),
+        "reasoning_effort": payload_path_get(payload, effort_field),
         "cache_measurement_supported": bool(
             policy_section(policy, "cache_measurement", "cacheMeasurement").get("supported")
         ),

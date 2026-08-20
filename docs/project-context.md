@@ -288,8 +288,8 @@ Current UI direction:
   expose those extra passes in `/sources`. Skills can encode deterministic
   retrieval procedures, but a code-owned planner should decide when those
   procedures run.
-- The TUI should show the active model badge, including MTP/port information
-  such as `qwen3.6-27b-mtp:8083`.
+- The TUI should show the conversation's named chat model and reasoning effort,
+  such as `qwen38-default:xhigh` or `muse-glimmer:high`.
 - Background study may refresh the private context catalog, note stale indexes,
   and suggest relevant existing dossiers. Heavy background model work should be
   opt-in, such as `MOTOKO_BACKGROUND_PROFILE=1` for idle profile refreshes, so
@@ -2043,21 +2043,21 @@ For future model-route bugs, the default diagnosis should include:
   when possible, so future direct request paths cannot bypass scheduling,
   privacy, timeout, or cancellation policy.
 
-Motoko has repo-local support for named model routes, deterministic
-model-output caching, and a chat context governor. NixOS owns approved model
+Motoko has repo-local support for named chat models backed by physical model
+routes, deterministic model-output caching, and per-model context governance. NixOS owns approved model
 files, worker users, sockets, VRAM residency, service hardening, and llama.cpp
 flags. Motoko owns route selection, provenance, quality gates, private
 output-cache hits, and graceful user-visible handling of queued/loading/missing
-model states. The chat context governor estimates prompt size but keeps
-`selection.default == true` for ordinary turns; it must not silently change
-quant because conversation history grew. Before the normal route exceeds its
+model states. `/model auto` keeps the route with `selection.default == true`;
+`/model NAME` stores a conversation-scoped canonical model name. Context size
+is a property of that selected model, and Motoko must not silently change
+model or quant because conversation history grew. Before the selected model exceeds its
 prompt budget, Motoko compacts older turns and rebuilds query-focused retrieval
 context. That budget is 75 percent of the selected route's NixOS-declared
-`context_tokens`, not a fixed source-code tier. `route_profile == "quality"`,
-`route_profile == "deep"`, and `route_profile == "max"` are explicit choices
-through `/context`, with `/context auto` returning to the catalog default. Use
-`MOTOKO_CHAT_CONTEXT_MODE=quality|deep|max` for a process-wide explicit
-selection. Do not infer KV placement from route names; use catalog `kv_offload` and
+`context_tokens`, not a fixed source-code tier. The catalog's `selection.chat`
+record owns the public model name, aliases, and whether a physical route is
+user-selectable. `/context` remains a deprecated compatibility alias only.
+Do not infer KV placement from route names; use catalog `kv_offload` and
 `kv_cache.location`. Do not fake server-side KV caching inside Motoko;
 prompt-prefix/KV reuse belongs in the deployed local model service if
 measurement shows it is worthwhile.
@@ -2111,7 +2111,7 @@ if a large route is actively serving or was just used, the worker should remain
 queued or fail with a clear content-free defer reason instead of racing systemd
 or llama.cpp restart loops. Conversely, before a large chat route starts,
 Motoko should release idle non-chat worker routes and idle peer large-chat
-profiles such as default/quality/deep/max so foreground chat does not race
+routes backing other named chat models so foreground chat does not race
 stale worker or stale chat-profile residency. This policy applies to memory
 maintenance, titles, skill review, profile/dossier work, indexing, embeddings,
 rerank work, and future worker lanes. Status may mention route names and unit
@@ -2146,13 +2146,15 @@ job should be marked deferred/retryable rather than treated as a broken
 artifact: memory proposals stay queued, partial indexes stay resumable, and
 vector progress remains available for the next refresh pass.
 
-The main chat route may use llama.cpp per-request reasoning controls. Motoko
-sets `reasoning_format="deepseek"`,
-`chat_template_kwargs.enable_thinking`, and `thinking_budget_tokens` only for
-logical chat requests. The current presets are `off`, `low`, `default`, `high`,
-and `max`; the default is enabled with a 4096-token thinking budget. `/reasoning PRESET`
-stores a conversation-scoped override, `/reasoning auto` removes it, and
-`MOTOKO_REASONING_PRESET` supplies a process-wide default. Worker routes for
+The main chat route may use llama.cpp per-request reasoning controls. Qwen
+requests use `reasoning_format="deepseek"`,
+`chat_template_kwargs.enable_thinking`, and top-level `reasoning_effort` with
+the public presets `off`, `low`, `medium`, and `xhigh`; Qwen defaults to
+`xhigh`. Muse Glimmer keeps reasoning required, maps the common non-off presets
+to `chat_template_kwargs.reasoning_strength`, and preserves its native `high`
+default under `/reasoning auto`. `/reasoning PRESET` stores a
+conversation-scoped override, `/reasoning auto` removes it, and
+`MOTOKO_REASONING_PRESET` supplies a process-wide override. Worker routes for
 indexing, titles, memory maintenance, profiles, and audits must not inherit
 chat thinking settings just because they share the transport helper. Streaming
 `reasoning_content` may be shown live under a distinct `Thinking` phase in the
@@ -2162,7 +2164,7 @@ logs, shared state, or prompt history.
 Model-call telemetry must remain content-free. `last-model-call.json`,
 `/last-call`, and `motoko context-bench` may record route names, route profiles,
 model ids, configured context size, declared KV placement, reasoning preset and
-budget, estimated prompt/completion token counts, source counts, timing, and
+actual effort, estimated prompt/completion token counts, source counts, timing, and
 estimated token rates. They must not record prompt text, response text,
 reasoning text, filenames, excerpts, summaries, private memory text, or
 corpus-derived content.

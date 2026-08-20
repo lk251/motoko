@@ -51,6 +51,21 @@ The near-term goal is a dependable, inspectable, dependency-light terminal
 assistant. New capability should first improve trust, provenance, memory
 quality, document retrieval quality, and TTY ergonomics.
 
+## Chat Model Controls
+
+The current primary TUI controls are `/model` and `/reasoning`; context is a
+property of the selected model. The public model names are `qwen38-default`,
+`qwen38-long`, `qwen38-longest`, and `muse-glimmer`, with `/model auto`
+following the NixOS catalog default. `/context` is a deprecated compatibility
+alias, not the primary model selector.
+
+Qwen accepts `/reasoning off|low|medium|xhigh|auto` and sends the non-off level
+as llama.cpp's top-level `reasoning_effort`. Muse Glimmer accepts
+`low|medium|xhigh|auto`, cannot disable reasoning, and maps the common levels to
+`chat_template_kwargs.reasoning_strength`; its native automatic default is
+`high`. These names and mappings come from the NixOS-generated route catalog,
+not account-specific source branches.
+
 ## Repository Locations
 
 Expected working checkouts:
@@ -178,21 +193,23 @@ history, Codex auth, raw Codex sessions, provider keys, or personal data into
 
 ## Local Model Endpoint
 
-Motoko's default endpoint is:
+Motoko's source fallback endpoint is:
 
 ```text
 http://127.0.0.1:8083/v1/chat/completions
 ```
 
-The default model string in the Motoko source is:
+The fallback model string in the Motoko source is:
 
 ```text
 qwen3.6-27b-mtp-ud-q5-k-xl
 ```
 
-On HB3 headless, NixOS starts the Qwen3.6 27B MTP UD-Q5 llama.cpp service at
-boot. The service is intended to be a dumb local inference endpoint, not a tool
-owner, memory owner, credential holder, or host-mutation authority.
+On HB3, the NixOS-generated `~/.config/motoko/local-models.json` overrides that
+fallback with private per-realm Unix sockets and the current Qwen3.8/Muse
+catalog. Services are socket-activated rather than permanently started at boot.
+They are intended to be dumb local inference endpoints, not tool owners, memory
+owners, credential holders, or host-mutation authorities.
 
 `mares` and `personal` should be able to use the endpoint. They should not be
 able to start, stop, restart, or reconfigure model services. That remains

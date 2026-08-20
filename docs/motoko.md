@@ -424,8 +424,8 @@ dim `Worked for ...` separator line across the chat width. Motoko's assistant
 marker uses per-user `ui.assistant_color` from `~/.config/motoko/config.json`
 with `purple` as the default. If `MOTOKO_ALIAS_COLOR` is set to a valid Motoko
 color, it takes precedence; if it is invalid, Motoko falls back to `purple`.
-Report-like output such as `/sources`, `/status`, `/model-routes`,
-`/context`, `/identity`, `/permissions`, and `/retrieval-debug` highlights labels and
+Report-like output such as `/sources`, `/status`, `/model`, `/model-routes`,
+`/identity`, `/permissions`, and `/retrieval-debug` highlights labels and
 warnings only at render time. Saved conversation and artifact text stays plain.
 Prose in the chat body and prompt wraps on word boundaries when possible;
 code/preformatted blocks keep character wrapping so copied snippets remain
@@ -436,8 +436,8 @@ selection so entries past the first visible page remain visible.
 The TUI does not render a spinner or duplicate chat activity in the bottom
 status line; the live answer row carries `Preparing` and `Answering` state.
 The bottom status line starts with the conversation title rather than the
-assistant name. It includes the model badge, for example
-`qwen3.6-27b-mtp:8083`, and reports active memory and background-study phases
+assistant name. It includes the selected chat model and effort, for example
+`qwen38-default:xhigh`, and reports active memory and background-study phases
 such as
 `mem: proposing(qwen35-2b-worker)`, `bg-light: catalog(cpu)`, or
 `bg-heavy: summarizing chunk file 6/54 chunk 10/100 9% eta 3h12m`.
@@ -537,22 +537,26 @@ source-of-truth files from summaries and distinguish declared, built, and live
 system state.
 ```
 
-Keep `MOTOKO_CHAT_CONTEXT_MODE=auto` for normal work. In `auto`, Motoko keeps
-the NixOS catalog route marked `selection.default == true`; prompt growth does
-not silently select another quant. Before a normal request crosses 75 percent
-of that route's declared `context_tokens`, Motoko compacts older turns and
-rebuilds the query-focused retrieval context. The threshold therefore follows
-the active NixOS catalog instead of fixed source-code tiers. If compaction and
-retrieval still cannot fit that prompt budget, Motoko asks for an explicit
-`deep` or `max` selection instead of silently changing route or quant.
+Use `/model` to inspect the named chat models and `/model NAME` to select one
+for the current conversation. `/model auto` follows the NixOS catalog route
+marked `selection.default == true`. On HB3 the names are:
 
-Use `/context quality`, `/context deep`, or `/context max` in the TUI for an
-intentional conversation-scoped selection; `/context auto` returns to the
-catalog default. The environment variable remains useful for process-wide
-comparisons:
+- `qwen38-default`: Qwen3.8 UD-Q5_K_XL, 32K context;
+- `qwen38-long`: Qwen3.8 UD-Q5_K_M, 64K context;
+- `qwen38-longest`: Qwen3.8 UD-Q5_K_M, 131K context with host KV;
+- `muse-glimmer`: Muse Glimmer KQuant 17GB, 131K context with GPU KV.
+
+Aliases `default`, `long`, `longest`, and `muse` are accepted. Before a request
+crosses 75 percent of the selected model's declared `context_tokens`, Motoko
+compacts older turns and rebuilds query-focused retrieval context. If the
+prepared prompt still does not fit, Motoko asks you to choose a larger-context
+model rather than silently changing model, quant, or reasoning effort.
+`/context` is accepted only as a deprecated compatibility alias for old saved
+commands and conversations.
+
+For content-free route comparisons:
 
 ```bash
-MOTOKO_CHAT_CONTEXT_MODE=max MOTOKO_REASONING=high motoko
 motoko model-routes
 motoko context-bench --target-tokens 32000
 motoko context-bench --target-tokens 64000
@@ -640,7 +644,7 @@ picker. This avoids typing long conversation IDs for normal use.
 
 `motoko last-call` and `/last-call` show the most recent content-free model
 call record: route, catalog route, route profile, declared KV location,
-reasoning preset and budget, selected context tier, estimated prompt and
+reasoning preset and actual effort, selected context tier, estimated prompt and
 completion tokens, context pressure, source count, elapsed time, and estimated
 generation speed. The record deliberately omits prompt text, response text,
 reasoning text, filenames, excerpts, summaries, and other corpus-derived
@@ -658,7 +662,7 @@ declare sampling presets, structured-output fields, reasoning/thinking
 presets, and prompt-cache measurement support. Motoko applies these policy
 fields to approved local model requests and records only content-free metadata
 in `/last-call`, such as route, model id, estimated tokens, selected sampling
-preset, selected reasoning preset, thinking budget, whether structured output
+preset, selected reasoning preset and effort, whether structured output
 was requested, and timing counters.
 For background and maintenance worker calls, Motoko also uses scheduling
 metadata to avoid GPU residency fights: idle same-realm large chat routes may
@@ -1140,8 +1144,9 @@ Useful in-chat commands:
 /down [TEXT]
 /diagnose
 /status
+/model [qwen38-default|qwen38-long|qwen38-longest|muse-glimmer|auto]
+/reasoning [off|low|medium|xhigh|auto]
 /model-routes
-/context [quality|deep|max|auto]
 /models [ROUTE]
 /model-status [ROUTE]
 /model-stop ROUTE
@@ -1396,22 +1401,23 @@ those OpenAI-compatible Unix sockets, but does not call `systemctl` or run
 llama.cpp as the current user. Use `motoko-model list/info/verify/start/stop/status`
 for model-service operations.
 
-Main chat reasoning is controlled per request, not by separate NixOS route
-profiles. Motoko sends llama.cpp DeepSeek-style reasoning fields only on the
-logical chat route:
+Main chat reasoning is controlled per request independently of the selected
+named model. For Qwen, Motoko sends:
 
 ```text
 reasoning_format = deepseek
 chat_template_kwargs.enable_thinking = true|false
-thinking_budget_tokens = N
+reasoning_effort = low|medium|xhigh
 ```
 
-Use `/reasoning off|low|default|high|max` inside Motoko to set the current
-conversation. `/reasoning` shows the current setting and `/reasoning auto`
-returns to the route/environment default. `off` disables thinking, `low` uses
-1024 tokens, `default` uses 4096, `high` uses 16384, and `max` is unrestricted.
-For a process-wide default, launch Motoko with
-`MOTOKO_REASONING_PRESET=off|low|default|high|max`. Streaming reasoning switches
+Use `/reasoning off|low|medium|xhigh` inside Motoko to set the current
+conversation. `/reasoning auto` returns to the selected model's default;
+Qwen defaults to `xhigh`. Muse Glimmer cannot disable reasoning. Its common
+`low`, `medium`, and `xhigh` controls map to
+`chat_template_kwargs.reasoning_strength`, while `auto` preserves Muse's
+native `high` default. Old saved `default`, `high`, and `max` overrides are
+accepted as compatibility aliases for Qwen `xhigh`. For a process-wide
+default, use `MOTOKO_REASONING_PRESET=off|low|medium|xhigh`. Streaming reasoning switches
 the active TUI answer row to `Thinking`, shows the latest reasoning text dimmed
 and truncated for fit, and returns to `Answering` when normal answer tokens
 stream. Reasoning text is not inserted into the conversation transcript,

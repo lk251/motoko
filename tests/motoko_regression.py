@@ -2515,10 +2515,11 @@ def test_chat_reasoning_payload_and_stream(m):
             payload = ReasoningHandler.payloads[-1]
             assert payload["reasoning_format"] == "deepseek"
             assert payload["chat_template_kwargs"]["enable_thinking"] is True
-            assert payload["thinking_budget_tokens"] == 16384
+            assert payload["reasoning_effort"] == "xhigh"
+            assert "thinking_budget_tokens" not in payload
             record = m.read_last_model_call()
-            assert record["reasoning_mode"] == "high"
-            assert record["thinking_budget_tokens"] == 16384
+            assert record["reasoning_mode"] == "xhigh"
+            assert record["reasoning_effort"] == "xhigh"
             assert "checking" not in json.dumps(record)
             ReasoningHandler.payloads = []
             worker_tokens = []
@@ -3467,7 +3468,7 @@ def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
                             "enable_thinking": True,
                             "thinking_budget_tokens": 4096,
                         },
-                        "high": {
+                        "xhigh": {
                             "enable_thinking": True,
                             "thinking_budget_tokens": 16384,
                         },
@@ -3525,7 +3526,7 @@ def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
                 route=m.MODEL_ROUTE_MEMORY,
                 sampling_preset="deterministic",
                 json_schema=schema,
-                reasoning_preset="high",
+                reasoning_preset="xhigh",
             )
             memory_payload = FakeHandler.payloads[-1]
             assert memory_payload["model"] == "qwen3.5-2b-q4-k-m"
@@ -3536,7 +3537,7 @@ def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
             routes = m.format_model_routes(include_defaults=True)
             assert "request sampling=balanced/deterministic" in routes
             assert "structured=on(json_schema,grammar)" in routes
-            assert "reasoning=on:deepseek/default/high" in routes
+            assert "reasoning=on:deepseek/default/xhigh" in routes
             assert "scheduling idle=300s" in routes
             assert "safety disabled=tools/props/slots" in routes
     finally:
@@ -3563,41 +3564,90 @@ def test_conversation_reasoning_command_controls_qwen38_presets(m):
                     "modelId": "qwen3.8-27b-ad-q5-k-m",
                     "tasks": ["chat", "default_chat"],
                     "route_profile": "default",
-                    "selection": {"default": True, "exclusiveLane": "large-chat"},
+                    "selection": {
+                        "default": True,
+                        "exclusiveLane": "large-chat",
+                        "chat": {"name": "qwen38-default", "aliases": ["default"], "selectable": True},
+                    },
                     "request_policy": {
                         "reasoning": {
                             "supported": True,
                             "format": "deepseek",
+                            "default_preset": "xhigh",
                             "per_request_budget_field": "thinking_budget_tokens",
                             "per_request_enable_field": "chat_template_kwargs.enable_thinking",
+                            "per_request_effort_field": "reasoning_effort",
+                            "effort_presets": {"low": "low", "medium": "medium", "xhigh": "xhigh"},
                             "presets": {
                                 "off": {"enable_thinking": False},
-                                "low": {"enable_thinking": True, "thinking_budget_tokens": 1024},
-                                "default": {"enable_thinking": True, "thinking_budget_tokens": 4096},
-                                "high": {"enable_thinking": True, "thinking_budget_tokens": 16384},
-                                "max": {"enable_thinking": True, "thinking_budget_tokens": -1},
+                                "low": {"enable_thinking": True},
+                                "medium": {"enable_thinking": True},
+                                "xhigh": {"enable_thinking": True},
                             },
                         }
                     },
-                }
+                },
+                "muse-glimmer-long": {
+                    "endpoint": "unix:///tmp/muse-glimmer-long.sock",
+                    "modelId": "muse-glimmer-30b-kquant-17gb",
+                    "tasks": ["chat", "long_context_chat", "max_context_chat"],
+                    "route_profile": "max",
+                    "selection": {
+                        "default": False,
+                        "priority": 90,
+                        "chat": {"name": "muse-glimmer", "aliases": ["muse"], "selectable": True},
+                    },
+                    "request_policy": {
+                        "reasoning": {
+                            "supported": True,
+                            "required": True,
+                            "can_disable": False,
+                            "default_preset": "high",
+                            "per_request_effort_field": "chat_template_kwargs.reasoning_strength",
+                            "effort_presets": {
+                                "low": "low",
+                                "medium": "medium",
+                                "high": "high",
+                                "xhigh": "xhigh",
+                            },
+                            "presets": {"low": {}, "medium": {}, "high": {}, "xhigh": {}},
+                        }
+                    },
+                },
             },
         }
         m.ensure_private_dir(m.config_root())
         m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
         conv = m.new_conversation("Reasoning controls")
 
-        high = m.shared_command_request("/reasoning high", conv)
-        assert high is not None
-        assert high.kind == m.COMMAND_KIND_MUTATION
-        _label, run_high = high
-        assert "high (thinking on, 16384-token budget)" in run_high()
-        assert conv["reasoning_preset"] == "high"
+        medium = m.shared_command_request("/reasoning medium", conv)
+        assert medium is not None
+        assert medium.kind == m.COMMAND_KIND_MUTATION
+        _label, run_medium = medium
+        assert "medium (reasoning level medium)" in run_medium()
+        assert conv["reasoning_preset"] == "medium"
+
+        route_info = m.conversation_chat_route(conv)
+        selected = m.selected_reasoning_preset(
+            route_info,
+            m.MODEL_ROUTE_CHAT,
+            explicit=m.conversation_reasoning_preset(conv),
+        )
+        payload = m.chat_completion_payload(
+            route_info,
+            [{"role": "user", "content": "hello"}],
+            temperature=0.7,
+            stream=True,
+            reasoning_preset=selected,
+        )
+        assert payload["reasoning_effort"] == "medium"
+        assert payload["chat_template_kwargs"]["enable_thinking"] is True
 
         off = m.shared_command_request("/reasoning off", conv)
         assert off is not None
         _label, run_off = off
         assert "off (thinking off)" in run_off()
-        route_info = m.model_route(m.MODEL_ROUTE_CHAT)
+        route_info = m.conversation_chat_route(conv)
         selected = m.selected_reasoning_preset(
             route_info,
             m.MODEL_ROUTE_CHAT,
@@ -3613,77 +3663,132 @@ def test_conversation_reasoning_command_controls_qwen38_presets(m):
         )
         assert payload["chat_template_kwargs"]["enable_thinking"] is False
         assert "thinking_budget_tokens" not in payload
+        assert "reasoning_effort" not in payload
 
         auto = m.shared_command_request("/reasoning auto", conv)
         assert auto is not None
         _label, run_auto = auto
         assert "route/environment default" in run_auto()
         assert "reasoning_preset" not in conv
+        assert m.selected_reasoning_preset(route_info, m.MODEL_ROUTE_CHAT) == "xhigh"
+
+        m.configure_conversation_model(conv, "muse-glimmer")
+        muse_route = m.conversation_chat_route(conv)
+        assert m.selected_reasoning_preset(muse_route, m.MODEL_ROUTE_CHAT) == "high"
+        try:
+            m.configure_conversation_reasoning(conv, "off")
+        except SystemExit as exc:
+            assert "low, medium, xhigh, auto" in str(exc)
+        else:
+            raise AssertionError("Muse Glimmer must reject reasoning=off")
+        m.configure_conversation_reasoning(conv, "xhigh")
+        muse_payload = m.chat_completion_payload(
+            muse_route,
+            [{"role": "user", "content": "hello"}],
+            temperature=0.7,
+            stream=True,
+            reasoning_preset=m.conversation_reasoning_preset(conv),
+        )
+        assert muse_payload["chat_template_kwargs"]["reasoning_strength"] == "xhigh"
+        assert "reasoning_effort" not in muse_payload
 
 
-def test_conversation_context_command_selects_explicit_tui_profiles(m):
+def test_conversation_model_command_selects_named_models(m):
     old_context_mode = os.environ.get(m.CHAT_CONTEXT_MODE_ENV)
     try:
         os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
         with isolated_state():
+            routes = {}
+            for route_id, model_name, context_tokens, priority, profile, selectable in (
+                ("qwen38-chat-default", "qwen38-default", 32768, 120, "default", True),
+                ("qwen38-chat-xhigh", "qwen38-default", 32768, 100, "quality", False),
+                ("qwen38-chat-long", "qwen38-long", 65536, 80, "deep", True),
+                ("qwen38-chat-longest", "qwen38-longest", 131072, 40, "max", True),
+                ("muse-glimmer-long", "muse-glimmer", 131072, 90, "long", True),
+            ):
+                routes[route_id] = {
+                    "endpoint": f"unix:///tmp/{route_id}.sock",
+                    "modelId": "muse-glimmer-30b" if model_name == "muse-glimmer" else (
+                        "qwen3.8-27b-ud-q5-k-xl" if context_tokens == 32768 else "qwen3.8-27b-ud-q5-k-m"
+                    ),
+                    "quant": "KQuant-17GB" if model_name == "muse-glimmer" else (
+                        "UD-Q5_K_XL" if context_tokens == 32768 else "UD-Q5_K_M"
+                    ),
+                    "tasks": ["chat", f"{profile}_context_chat"],
+                    "route_profile": profile,
+                    "context_tokens": context_tokens,
+                    "selection": {
+                        "default": profile == "default",
+                        "priority": priority,
+                        "chat": {
+                            "name": model_name,
+                            "aliases": [profile] if selectable else [],
+                            "selectable": selectable,
+                        },
+                    },
+                }
             catalog = {
                 "realm": "mares",
                 "manager": {"kind": "systemd-socket-worker"},
-                "routes": {
-                    f"qwen38-chat-{profile}": {
-                        "endpoint": f"unix:///tmp/qwen38-chat-{profile}.sock",
-                        "modelId": "qwen3.8-27b-ud-q5-k-xl" if profile in {"default", "quality"} else "qwen3.8-27b-ud-q5-k-s",
-                        "tasks": ["chat", f"{profile}_context_chat"],
-                        "route_profile": profile,
-                        "context_tokens": context_tokens,
-                        "selection": {"default": profile == "default", "priority": priority},
-                    }
-                    for profile, context_tokens, priority in (
-                        ("default", 32768, 120),
-                        ("quality", 32768, 100),
-                        ("deep", 65536, 80),
-                        ("max", 131072, 40),
-                    )
-                },
+                "routes": routes,
             }
             m.ensure_private_dir(m.config_root())
             m.atomic_write(m.local_models_path(), json.dumps(catalog, ensure_ascii=False) + "\n")
-            conv = m.new_conversation("Context controls")
+            conv = m.new_conversation("Model controls")
 
-            deep = m.shared_command_request("/context deep", conv)
-            assert deep is not None
-            assert deep.kind == m.COMMAND_KIND_MUTATION
-            _label, run_deep = deep
-            report = run_deep()
-            assert conv["context_mode"] == "deep"
-            assert "qwen38-chat-deep" in report
-            assert "quant=UD-Q5-K-S" in report
+            long_model = m.shared_command_request("/model qwen38-long", conv)
+            assert long_model is not None
+            assert long_model.kind == m.COMMAND_KIND_MUTATION
+            _label, run_long = long_model
+            report = run_long()
+            assert conv["chat_model"] == "qwen38-long"
+            assert "qwen38-chat-long" in report
+            assert "quant=UD-Q5_K_M" in report
             assert "proactive prompt budget: 49152 tokens" in report
 
             selected, governor = m.model_route_for_request(
                 m.MODEL_ROUTE_CHAT,
                 [{"role": "user", "content": "hello"}],
-                context_mode=m.conversation_context_mode(conv),
+                chat_model=m.conversation_chat_model(conv),
             )
-            assert selected["catalog_route"] == "qwen38-chat-deep"
+            assert selected["catalog_route"] == "qwen38-chat-long"
             assert governor["selected_tier"] == "chat_deep"
+            status = m.format_status(conv)
+            assert "chat model: qwen38-long -> qwen38-chat-long" in status
+            assert "endpoint: unix:///tmp/qwen38-chat-long.sock" in status
 
             ui = object.__new__(m.MotokoTui)
-            ui.input_buffer = "/context "
+            ui.conv = conv
+            ui.input_buffer = "/model "
             ui.cursor = len(ui.input_buffer)
             options = ui.compute_dropdown_options()
-            assert [row["value"] for row in options] == ["auto", "quality", "deep", "max"]
+            assert [row["value"] for row in options] == [
+                "qwen38-default",
+                "qwen38-long",
+                "qwen38-longest",
+                "muse-glimmer",
+                "auto",
+            ]
 
-            ui.input_buffer = "/context d"
+            ui.input_buffer = "/model qwen38-l"
             ui.cursor = len(ui.input_buffer)
             options = ui.compute_dropdown_options()
-            assert [(row["kind"], row["value"]) for row in options] == [("context-mode", "deep")]
+            assert [(row["kind"], row["value"]) for row in options] == [
+                ("chat-model", "qwen38-long"),
+                ("chat-model", "qwen38-longest"),
+            ]
 
-            auto = m.shared_command_request("/context auto", conv)
+            auto = m.shared_command_request("/model auto", conv)
             assert auto is not None
             _label, run_auto = auto
             assert "catalog default" in run_auto()
-            assert "context_mode" not in conv
+            assert "chat_model" not in conv
+
+            legacy = m.shared_command_request("/context deep", conv)
+            assert legacy is not None
+            _label, run_legacy = legacy
+            assert "deprecated" in run_legacy()
+            assert conv["chat_model"] == "muse-glimmer"
     finally:
         if old_context_mode is None:
             os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
@@ -3755,7 +3860,7 @@ def test_prepare_chat_messages_compacts_at_catalog_quality_budget(m):
                     phase_callback=phases.append,
                 )
             except SystemExit as exc:
-                assert "use /context deep or /context max" in str(exc)
+                assert "choose a larger-context /model" in str(exc)
             else:
                 raise AssertionError("quality policy should refuse an over-budget prompt that cannot compact")
             assert calls == ["build"]
@@ -3866,7 +3971,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
             assert governor["selected_tier"] == "chat_max"
             assert governor["max_route_available"] is True
             assert m.route_kv_offload_disabled(selected)
-            assert "Chat context governor:" in m.format_model_routes(include_defaults=True)
+            assert "Chat models:" in m.format_model_routes(include_defaults=True)
             assert "profile=default" in m.format_model_routes(include_defaults=True)
             assert "prompt-budget=24576" in m.format_model_routes(include_defaults=True)
     finally:
@@ -18200,7 +18305,7 @@ def main() -> int:
         test_slot_cache_failures_are_nonfatal_cache_misses,
         test_catalog_request_policy_shapes_chat_payload_and_telemetry,
         test_conversation_reasoning_command_controls_qwen38_presets,
-        test_conversation_context_command_selects_explicit_tui_profiles,
+        test_conversation_model_command_selects_named_models,
         test_prepare_chat_messages_compacts_at_catalog_quality_budget,
         test_chat_context_governor_selects_declared_route_profiles,
         test_chat_context_governor_falls_back_without_max_profile,

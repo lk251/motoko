@@ -5,12 +5,12 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
-- Changed interactive chat routing to be quality-first. `auto` now preserves
-  the NixOS catalog's default Q5 XL route instead of changing quant when a
-  conversation grows, proactively compacts older turns at a prompt budget
-  derived from that route's declared context, and rebuilds retrieval context
-  before answering. Added conversation-scoped `/context quality|deep|max|auto`
-  selection for intentional profile changes.
+- Replaced context-profile selection with conversation-scoped named chat
+  models: `/model qwen38-default|qwen38-long|qwen38-longest|muse-glimmer`, with
+  `/model auto` following the NixOS catalog default. Context size now follows
+  the selected model and Motoko never changes quant merely because a prompt
+  grows. `/context` remains only as a deprecated saved-command compatibility
+  alias.
 - Fixed recurring TUI input stalls during `bg-light: catalog-meta(cpu)` and
   repair/source audits. Metadata checks no longer hash same-size files, derived
   dependency scans use bounded catalog sidecars instead of rereading multi-GB
@@ -19,9 +19,11 @@ not the easiest place to review what changed after a long work session.
   VRAM after orgfiles/background workers reactivated between route eviction and
   foreground socket startup. Realm-local shared/exclusive leases now cover the
   full request while preserving parallel worker fanout.
-- Added `/reasoning off|low|default|high|max|auto`. The setting is scoped to the
-  current conversation, and `MOTOKO_REASONING_PRESET` remains available for a
-  process-wide default.
+- Changed `/reasoning` to model-native effort controls. Qwen exposes
+  `off|low|medium|xhigh|auto` through llama.cpp's top-level
+  `reasoning_effort`; Muse Glimmer exposes `low|medium|xhigh|auto` through
+  `reasoning_strength`, keeps reasoning required, and uses its native `high`
+  default under `auto`. Old `default|high|max` overrides migrate to `xhigh`.
 - Added `motoko source-lifecycle [INDEX]` and `/source-lifecycle [ID]` to
   inspect changed, deleted, or newly ignored indexed source files across their
   dependent artifacts. The report covers indexes, vector/evidence stores,
