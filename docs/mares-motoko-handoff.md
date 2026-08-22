@@ -1,6 +1,6 @@
 # Mares Motoko Handoff
 
-Date: 2026-05-18
+Date: 2026-08-22
 
 This is the repo-local handoff for future Codex sessions running as the
 non-admin `mares` account in:
@@ -34,8 +34,8 @@ the intended handoff mechanism.
 ## Purpose
 
 Motoko is Javier's small terminal personal assistant. She is a local chat,
-memory, and document-context tool over an existing llama.cpp
-OpenAI-compatible endpoint.
+memory, retrieval, and bounded project-assistance tool over NixOS-declared
+llama.cpp OpenAI-compatible endpoints.
 
 Motoko is intentionally not:
 
@@ -43,6 +43,7 @@ Motoko is intentionally not:
 - Hermes;
 - a provider gateway;
 - an autonomous host-admin agent;
+- a general-purpose terminal or network agent;
 - a LangChain or LangGraph app;
 - a browser or web UI;
 - a service manager or NixOS apply tool.
@@ -50,6 +51,12 @@ Motoko is intentionally not:
 The near-term goal is a dependable, inspectable, dependency-light terminal
 assistant. New capability should first improve trust, provenance, memory
 quality, document retrieval quality, and TTY ergonomics.
+
+Motoko now includes review-first skills, typed actions, approved stdlib tool
+contracts, confirmed project-file writes, explicit durable goal loops, and
+managed worktrees. These are narrow, validator-owned capabilities rather than
+ambient host authority: arbitrary shell, network, service-control, privileged,
+and hidden autonomous execution remain disabled.
 
 ## Chat Model Controls
 
@@ -65,6 +72,26 @@ as llama.cpp's top-level `reasoning_effort`. Muse Glimmer accepts
 `chat_template_kwargs.reasoning_strength`; its native automatic default is
 `high`. These names and mappings come from the NixOS-generated route catalog,
 not account-specific source branches.
+
+## Current Project Status
+
+As of 2026-08-22:
+
+- the raw TUI has a dedicated input/render owner, input-first scheduling,
+  append-only scrollback, durable queued prompts, and PTY latency probes;
+- chat uses named Qwen3.8/Muse models, model-native reasoning effort, proactive
+  compaction, and realm-local residency coordination;
+- retrieval combines lexical/path, Org structure, hierarchical evidence,
+  embeddings, reranking, and span selection with visible source provenance;
+- indexes, vectors, evidence, dossiers, memories, feedback, skills, and jobs
+  have inspectable schemas and durable refresh/rebuild/checkpoint paths;
+- skills remain review-first, while typed actions and goal loops can make only
+  explicitly approved, validator-owned project changes;
+- the root `motoko` executable remains the composition facade, with focused
+  services progressively extracted into `motoko_core/`;
+- current priorities are stabilization and craftsmanship: service ownership,
+  cancellation, artifact lifecycle, retrieval/code-intelligence precision,
+  eval quality, and hardening the reviewed mutation paths through real use.
 
 ## Repository Locations
 
@@ -99,7 +126,10 @@ make a push work.
 
 Motoko is deliberately simple:
 
-- `motoko`: one Python standard-library script and CLI/TUI implementation.
+- `motoko`: the Python standard-library CLI/TUI and composition facade.
+- `motoko_core/`: focused standard-library services for runtime state,
+  conversations, retrieval, memory, dossiers, artifacts, models, jobs, skills,
+  typed actions, goal loops, code intelligence, and terminal behavior.
 - `flake.nix`: packages the script with `python312` using
   `writeShellScriptBin`.
 - `README.md`: high-level user and design summary.
@@ -109,12 +139,12 @@ Motoko is deliberately simple:
   direction.
 - `docs/model-worker-research-brief.md`: NixOS-side research target for local
   worker models, route competence, VRAM residency, and prompt/KV-cache review.
-- `tests/motoko_regression.py`: stdlib regression tests for memory, TUI helpers,
-  model-call shims, explicit memories, and indexing plans.
-- `tests/motoko_eval.py`: small evaluation harness for study, context planning,
-  and background-study behavior.
-- `tests/motoko_tty.py`: pseudo-terminal render checks for TTY/tmux-like
-  behavior.
+- `tests/motoko_regression.py`: broad stdlib regression coverage for model
+  routing, retrieval, artifacts, memories, skills, actions, goals, and helpers.
+- `tests/motoko_eval.py`: synthetic evaluation harness for retrieval, study,
+  context planning, and background behavior.
+- `tests/motoko_tty.py`: pseudo-terminal responsiveness and rendering checks
+  for raw TTY/tmux-like behavior.
 - `CHANGELOG.md`: concise user-facing change summaries.
 
 Motoko uses only Python's standard library. Do not add runtime dependencies
@@ -137,7 +167,9 @@ MOTOKO_BACKGROUND_PROFILE
 MOTOKO_MAX_DERIVED_INDEX_BYTES
 ```
 
-The defaults target HB3's local Qwen endpoint and normal per-user XDG paths.
+The production deployment uses the NixOS route catalog when present; source
+fallbacks still support older loopback environments. State and config use
+normal per-user XDG paths.
 Tests should override state/config paths so they never touch real user memory.
 
 ## NixOS Integration
@@ -272,7 +304,13 @@ Inspect the runtime:
 ```bash
 motoko about
 motoko status
+motoko model-routes
 ```
+
+Inside the TUI, use `/model` and `/reasoning` for the conversation's chat model
+and effort, `/sources` for grounding, `/retrieval-preview` or
+`/retrieval-debug` for retrieval diagnosis, and `/bg-now` for explicit bounded
+maintenance catch-up.
 
 List and resume conversations:
 
@@ -487,7 +525,9 @@ Current high-value future work:
 - keep background study inspectable and bounded;
 - consider a NixOS container or KVM VM for personal assistant state only if the
   current account split is not enough;
-- revisit the local model endpoint if the Qwen3.6 MTP service changes.
+- revisit or remove the source-level Qwen3.6 loopback fallback only through a
+  deliberate compatibility change; HB3 production routing comes from the
+  current NixOS Qwen3.8/Muse catalog.
 
 Do not reintroduce:
 

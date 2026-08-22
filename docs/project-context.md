@@ -1,6 +1,6 @@
 # Motoko Project Context
 
-Date: 2026-05-17
+Date: 2026-08-22
 
 Motoko was split out of `nixos-configs` into this repository so her code,
 tests, and main documentation can evolve independently while NixOS keeps only
@@ -11,7 +11,8 @@ host integration policy.
 Motoko is Javier's local terminal personal assistant for the HB3 `personal`
 realm, and a small local repo-review helper for the `mares` and `javier`
 realms. She is meant to feel conversational and useful for private daily notes,
-documents, memory, local Qwen chat, and bounded source-repo inspection.
+documents, memory, approved local-model chat, and bounded source-repo
+inspection and improvement.
 
 She is intentionally not:
 
@@ -19,8 +20,48 @@ She is intentionally not:
 - Hermes;
 - a provider gateway;
 - an autonomous host-admin agent;
+- a general-purpose terminal or network agent;
 - a LangChain/LangGraph application;
 - a web UI.
+
+Motoko now has narrowly agentic capabilities, but they do not change that role.
+Skills are review-first, model plans become typed action records, code-owned
+validators retain authority, mutating project actions require confirmation,
+and arbitrary shell, network, service-control, and privileged execution remain
+disabled.
+
+## Current Project Status
+
+As of 2026-08-22, Motoko is a working local assistant with the following major
+systems in place:
+
+- conversation-scoped named Qwen3.8 and Muse chat models, model-native
+  reasoning controls, catalog-derived context budgets, proactive compaction,
+  and realm-local model-residency coordination;
+- a responsive raw-terminal UI with append-only scrollback, a dedicated
+  input/render owner, input-first scheduling, durable queued prompts, and PTY
+  latency probes under background-event pressure;
+- hybrid lexical, path, Org-structural, hierarchical evidence, embedding,
+  reranking, and source-span retrieval behind increasingly shared typed service
+  results and visible provenance;
+- durable indexes, vectors, evidence stores, dossiers, memories, feedback,
+  skills, and job checkpoints with explicit artifact schemas, invalidation,
+  quality, migration, refresh, or source-rebuild paths;
+- review-first learned skills and code-owned retrieval handlers;
+- fingerprinted standard-library skill tools, typed action records, confirmed
+  project-file writes, content-safe ledgers, deterministic action evals,
+  durable goal loops, and managed Git worktrees;
+- deterministic code-map/code-query and self-eval surfaces that help Motoko
+  inspect her own implementation before proposing changes.
+
+The architecture is intentionally mid-refactor rather than framework-shaped.
+The root `motoko` executable remains the composition facade, while focused
+services under `motoko_core/` own growing portions of runtime state, retrieval,
+memory, model I/O, jobs, artifact lifecycle, skills, actions, goal loops, and
+terminal behavior. The highest-value work is continued hardening: complete
+service ownership, cooperative cancellation, artifact lifecycle fanout,
+retrieval/code-intelligence precision, private eval quality, and real-use
+exercise of the reviewed mutation paths.
 
 ## Host Integration
 
@@ -114,6 +155,7 @@ Accepted directions:
   upgrades, lexical retrieval, and other reliable non-LLM work;
 - named local-model routes for repetitive small-model work, large-model
   synthesis/audits, and interactive chat;
+- conversation-scoped named chat-model and model-native reasoning controls;
 - artifact provenance and quality gates for model-derived summaries before
   routing background work to smaller worker models;
 - synthetic worker-model evaluation fixtures that compare route outputs without
@@ -125,6 +167,12 @@ Accepted directions:
   splitting the codebase or renaming the repository;
 - fixed repo status/diff/log/review commands that attach bounded summaries as
   context without arbitrary shell execution;
+- review-first skills with code-owned handler/effect declarations;
+- typed action records, fingerprinted narrow tool contracts, explicit
+  confirmation, private results, and content-safe ledgers;
+- durable read-only and user-confirmed goal loops with budgets, checkpoints,
+  proposal review, and managed worktree isolation;
+- deterministic code intelligence and self-evals for Motoko's own repository;
 - TTY-friendly terminal ergonomics;
 - no new runtime dependencies unless the benefit is reviewed and concrete.
 
@@ -1774,7 +1822,8 @@ Motoko self-code checkpoint, 2026-05-31:
   engineering review, tests, commits, or user approval; it gives Motoko better
   local evidence and safer procedural scaffolding.
 
-Bird's-eye status on 2026-05-31:
+Historical bird's-eye checkpoint from 2026-05-31 (superseded by the current
+status near the top of this document, retained for design history):
 
 - Motoko is usable and meaningfully smarter than the original text-only
   assistant: hybrid lexical/structured/evidence/vector/rerank retrieval,
@@ -1902,8 +1951,9 @@ The accepted review checklist for script execution and a general tool runner:
   service control, model files, or network policy, NixOS declares that surface;
   Motoko consumes approved interfaces and does not call `sudo` or `systemctl`.
 
-Goal loops should be added after the planner/handler/tool boundary is solid.
-The intended shape is a durable, user-approved loop record with objective,
+Goal loops were added only after the planner/handler/tool boundary had a typed,
+validator-owned substrate. Their shape is a durable, user-approved loop record
+with objective,
 scope, allowed skills/tools, context sources, budgets, stop conditions,
 checkpoint ledger, and final audit. A loop should run explicit phases: plan,
 retrieve, act through approved handlers/tools, observe, reflect/audit, persist
@@ -1912,7 +1962,7 @@ resumable, visible in job status, and conservative by default: read-only loops
 first, then user-confirmed local mutations, and only later any broader
 automation after separate review.
 
-Agentic roadmap gates not completed by design:
+Agentic roadmap status and remaining gates:
 
 - Script-assisted project mutation: implemented as structured proposals.
   Approved scripts may produce `project_file_write` proposals, but Motoko
@@ -1956,38 +2006,27 @@ Relative priority for increasing Motoko's intelligence and competence:
 4. Treat network tools and stronger sandboxing as enabling infrastructure for
    specific future tools, not as primary intelligence work by themselves.
 
-Immediate next agentic implementation sequence, when development resumes:
+Current agentic hardening priorities:
 
-1. Script-assisted project mutation as structured proposal generation is now
-   implemented for `project_file_write` proposals. Approved scripts may declare
-   `propose_project_changes` and emit `proposed_actions`; Motoko validates
-   those actions, stores a content-safe proposal summary, and applies one only
-   through `motoko action apply-proposal RUN_ID INDEX --yes`. Raw script writes
-   remain blocked. Future work can add patch-style proposals on the same
-   boundary if real usage shows that full-file writes are too coarse.
-2. Read-only autonomous goal loops are now implemented as opt-in
-   `model_readonly` records. The runner plans, retrieves, inspects, audits, and
-   proposes typed actions inside a budget, then stops for user review without
-   mutating project files.
-3. User-confirmed mutating goal loops are now implemented through
-   `model_confirmed` proposals plus `goal apply`. Continue hardening them
-   before enabling any broader autonomous act/observe loop.
-4. Keep Hermes-style skill improvement running as a parallel craft track:
+1. Exercise script-assisted project proposals, model-readonly loops,
+   model-confirmed apply, and managed worktrees through real tasks, regression
+   fixtures, action-eval coverage, interruption, and stale-input cases. Keep raw
+   script writes blocked and add patch-style proposals only if full-file writes
+   prove too coarse.
+2. Keep Hermes-style skill improvement running as a parallel craft track:
    prompted self-review, loaded-skill patching, support-file use, and
    feedback-derived evals should steadily improve Motoko's procedural memory.
    This should keep Motoko's typed-action and approval boundary, not import a
    broad terminal/tool runtime.
-5. Make the next long stretch the skill
-   lifecycle layer: usage metadata, pin/archive/restore, review-first curator
-   reports, loaded-skill patch preference, umbrella-skill consolidation, and
-   support-file organization. This is the next craftsmanship pass for keeping
-   skills useful as Motoko learns from real use.
-6. Continue toward Hermes-style agent-harness capability without losing
-   Motoko's constraints: durable skills, support files, approved scripts,
-   explicit goal loops, feedback-derived evals, and review-first self-improving
-   procedure. This belongs farther down the roadmap than today's stabilization
-   pass, and must preserve realm-local state, typed effects, approval gates,
-   ledgers, and stdlib-first implementation.
+3. Continue the skill-lifecycle craftsmanship pass: improve usage metadata,
+   pin/archive/restore behavior, curator reports, loaded-skill patch preference,
+   umbrella-skill consolidation, and support-file organization from real-use
+   evidence.
+4. Continue toward useful agent-harness capability without losing Motoko's
+   constraints: durable skills, approved scripts, explicit goal loops,
+   feedback-derived evals, and review-first self-improving procedure. Network,
+   broad terminal, service-control, privileged, and hidden autonomous authority
+   remain separate design gates rather than presumed next steps.
 
 ## NixOS-Facing Model Boundary
 

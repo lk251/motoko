@@ -1,20 +1,54 @@
 # Motoko Personal Assistant
 
-Date: 2026-05-17
+Date: 2026-08-22
 
-Motoko is the first terminal chat interface for the HB3 `personal` realm, and
-is also available as a small local helper for the `mares` and `javier` realms.
-It is intentionally small: a Python standard-library script that talks to the
-existing local llama.cpp OpenAI-compatible endpoint for Qwen3.6.
+Motoko is the terminal personal assistant for the HB3 `personal` realm, and is
+also available as a local project/repository helper for the `mares` and
+`javier` realms. It remains Python-standard-library-only and talks to approved
+local llama.cpp routes declared by NixOS. The root `motoko` executable owns CLI
+and composition while focused runtime, retrieval, memory, artifact, skill,
+action, goal-loop, model, and terminal services live under `motoko_core/`.
 
-Motoko is not Texere, not Hermes, and not an agent runtime. It is primarily a
-personal chat and memory tool; when used from `javier` or `mares`, its repo
-commands are fixed read-only review helpers.
+Motoko is not Texere, Hermes, a provider gateway, or a general-purpose
+autonomous agent runtime. She is primarily a personal chat, memory, and
+retrieval assistant. Repository use starts from fixed read-only inspection and
+may cross into project mutation only through typed, validator-owned,
+user-confirmed action records and explicit goal-loop/worktree workflows.
 
-For documents, Motoko uses a small dependency-free form of hierarchical
-retrieval-augmented generation: it builds chunk summaries, file summaries, and a
-corpus summary, then retrieves the most relevant chunks for the current question
-and includes those excerpts in the prompt.
+For documents and allowlisted repositories, Motoko uses dependency-free hybrid
+retrieval: lexical/path matching, deterministic Org structure, hierarchical
+evidence, optional local embeddings and reranking, source-span selection, and
+deliberate context packing. `/sources`, `/retrieval-preview`, and
+`/retrieval-debug` expose what was selected and why.
+
+## Current Implementation Status
+
+As of 2026-08-22:
+
+- `/model` selects a conversation-scoped named chat model from the NixOS
+  catalog; `/reasoning` selects model-native effort. Context size belongs to
+  the selected model, and Motoko compacts/retrieves before overflow rather than
+  silently changing model or quant.
+- The TUI uses a dedicated input/render owner and input-first event scheduling.
+  Background catalog, audit, repair, indexing, and vector work is lane-aware,
+  bounded, visible, checkpointed where needed, and expected to yield to active
+  conversation work.
+- Retrieval, evidence, vector queries, preview, debug, and chat context are
+  converging on shared typed service results with source provenance and
+  content-free diagnostics.
+- Realm-local skills are review-first. Code-owned handlers may affect retrieval;
+  approved stdlib tools run only through fingerprinted contracts and typed
+  actions. Arbitrary executables, shell, network, service control, and
+  privileged effects are not enabled.
+- Explicit and model-planned goal loops are durable and budgeted. Read-only
+  loops stop with proposals; mutating loops stop for confirmation and apply
+  only through the normal validators and ledgers. Managed Git worktrees keep
+  larger project changes isolated.
+- The main remaining work is hardening and craftsmanship: shrink the root
+  facade behind tested service boundaries, finish artifact lifecycle and
+  cooperative cancellation coverage, improve code retrieval and dossier
+  quality, and exercise reviewed action/goal-loop paths through real use and
+  evals.
 
 ## Security Boundary
 
@@ -494,7 +528,7 @@ files should define the task. For example, in Javier's admin realm:
 cd /home/javier/repos/nixos-configs
 motoko index --plan --name nixos-configs .
 motoko index --name nixos-configs .
-MOTOKO_REASONING=high motoko
+MOTOKO_REASONING_PRESET=xhigh motoko
 ```
 
 Inspect the index plan before writing derived state. Do not index `/`, `/etc`,
@@ -507,7 +541,7 @@ The intended supervisory pattern is:
 
 1. Keep ordinary work on the catalog's highest-fidelity default chat route,
    using compaction and fresh retrieval rather than accumulating raw history.
-2. Select an approved deep or maximum-context route explicitly when the task
+2. Select an approved named long-context model explicitly when the task
    genuinely requires a larger assembled evidence window.
 3. Delegate bounded chunk, file, label, memory, embedding, reranking, and corpus
    work to the specialist routes declared in the local catalog.
@@ -519,7 +553,7 @@ NixOS. Treat `~/.config/motoko/local-models.json` and `/model-routes` as the
 source of truth instead of embedding a particular quant filename in Motoko's
 personality, memories, or source code.
 
-Motoko currently combines deterministic context-size routing with fixed
+Motoko currently combines explicit named chat-model selection with fixed
 specialist task routes. She does not yet ask a large model to semantically
 assign every subtask to another model. A future semantic supervisor should
 return a structured plan containing only approved catalog route IDs. Motoko's
@@ -619,11 +653,9 @@ motoko last-call
 motoko context-bench
 motoko model-routes
 motoko models
-motoko models qwen36-chat-default
-motoko model-stop qwen36-chat-default
-motoko models qwen36-chat
-motoko model-stop qwen36-chat
-motoko model-metrics qwen36-chat
+motoko models qwen38-chat-default
+motoko model-stop qwen38-chat-default
+motoko model-metrics qwen38-chat-default
 motoko model-eval
 motoko index-enrich INDEX_ID
 motoko index-enrich --all
@@ -1436,7 +1468,7 @@ Inspect live local model service state with `/models` or:
 
 ```bash
 motoko models
-motoko models qwen36-chat-default
+motoko models qwen38-chat-default
 ```
 
 This uses the approved `motoko-model status ROUTE` helper and is intentionally
@@ -1449,7 +1481,7 @@ VRAM.
 Release a worker explicitly with `/model-stop ROUTE` or:
 
 ```bash
-motoko model-stop qwen36-chat-default
+motoko model-stop qwen38-chat-default
 ```
 
 This calls `motoko-model stop ROUTE`; Motoko still does not call `systemctl`

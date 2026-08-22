@@ -1,8 +1,9 @@
 # Motoko Agentic Capability Design
 
-Date: 2026-05-24
+Date: 2026-08-22
 
-Status: approved boundary; implementation in progress.
+Status: approved boundary; narrow implementation shipped; hardening in
+progress.
 
 This document tracks the reviewed path for adding skill-script execution,
 general tool running, and goal loops to Motoko. The target is not to turn
@@ -15,10 +16,26 @@ The guiding constraint is that Motoko may become more capable only by making
 authority explicit. A model may propose plans, select skills, and explain
 intent, but code-owned validators decide what can run.
 
+## Current Status
+
+The reviewed substrate is now implemented: skill-tool metadata and fingerprint
+approvals, a constrained Python-standard-library runner, typed action records,
+content-safe ledgers, confirmed project-file writes, structured project-change
+proposals, deterministic action evals, durable explicit goal runs, opt-in
+read-only and model-confirmed planners, and managed Git worktrees.
+
+The boundary has not widened into a general agent runtime. Raw script-owned
+project writes, arbitrary shell or executable control, network tools, service
+control, privileged effects, and hidden autonomous mutation remain disabled.
+Current work should harden the shipped review/apply paths through real use,
+interruption tests, stale-input handling, proposal quality, and clearer audit
+UX before considering any broader authority.
+
 ## Review Checklist
 
-Before enabling script execution or a general tool runner, settle these design
-points:
+The narrow runner was enabled only after settling these design points. Recheck
+them before broadening script, tool, goal-loop, filesystem, network, or service
+authority:
 
 - Authority model: accepted. Defines which effects exist, which are prompt-only, which are
   built-in handlers, which are script-backed, and which require explicit user
@@ -673,25 +690,24 @@ Tool machinery checkpoint, 2026-05-24:
   fingerprint approvals, realm-local ledgers, and NixOS-owned stronger
   containment if a future tool truly needs it.
 
-Gated capabilities not completed by design:
+Current boundary and unimplemented gates:
 
-- Script-assisted project mutation: script tools still cannot directly write
-  project files. This is intentional. The current safe path is code-owned
-  `project_file_write`, and the likely next step is to let approved scripts
-  emit structured patch/write proposals that Motoko validates and applies
-  through the same allowlist, `.motokoignore`, hash, confirmation, atomic-write,
-  ledger, pause, and checkpoint machinery. Raw script filesystem write
-  authority should remain a later, separately reviewed option if it is ever
-  needed.
+- Script-assisted project mutation: structured proposal generation is
+  implemented. Approved scripts may emit typed `project_file_write` proposals,
+  but Motoko validates and applies them through the normal allowlist,
+  `.motokoignore`, hash, confirmation, atomic-write, ledger, pause, and
+  checkpoint machinery. Raw script filesystem write authority remains
+  disabled and separately gated.
 - `network`: not enabled. To enable it, require a NixOS-reviewed wrapper or
   policy, explicit destination/purpose metadata, no ambient secrets, and
   content-safe telemetry.
-- Read-only model-planned goal loops: enabled only through explicit
-  `planner: model_readonly` records. They may plan, retrieve, inspect, audit,
-  and propose typed actions under budget, but they refuse project-write,
-  network, service-control, and privileged effects and do not apply mutations.
-  Mutating model-planned loops remain disabled until the read-only form has
-  enough usage and eval coverage.
+- Model-planned goal loops: explicit `planner: model_readonly` and
+  `planner: model_confirmed` records are enabled. Read-only loops plan,
+  retrieve, inspect, audit, and propose under budget without mutation.
+  Model-confirmed loops also stop at proposals and require
+  `motoko goal apply RUN_ID --yes`; validators, confirmations, budgets,
+  checkpoints, and ledgers remain authoritative. Fully autonomous mutating
+  act/observe loops remain disabled.
 - Broader terminal-like tools and arbitrary executable control: not enabled.
   Shell commands, arbitrary executables, service control, and privileged
   actions remain outside Motoko's authority.
@@ -702,13 +718,12 @@ Gated capabilities not completed by design:
 
 Priority assessment for future intelligence and competence:
 
-1. Script-assisted project mutation and read-only model-planned loops now form
-   the first useful agentic layer: Motoko can turn understanding into
-   reviewable proposals and can run a bounded plan/retrieve/audit loop without
-   granting mutation authority.
-2. Mutating model-planned loops are potentially valuable, but only after the
-   read-only form works well. Mutation should remain user-confirmed until
-   evals and real usage prove reliability.
+1. The proposal lane and explicit goal-loop forms now provide the first useful
+   agentic layer. Harden their review quality, cancellation, resume, stale-input
+   refusal, and action-eval coverage before broadening them.
+2. Mutation should remain user-confirmed until evals and real usage prove the
+   review/apply path reliable. Fully autonomous mutating loops are not the
+   current priority.
 3. Hermes-style skill improvement should continue incrementally: prompted
    self-review, loaded-skill patching, support files, and tool contracts are
    useful; broad terminal/code-execution toolsets should not be copied.
@@ -793,12 +808,13 @@ Adversarial audit checkpoint, 2026-05-24:
   directory and allowlist; skill-tool read paths now respect `.motokoignore`;
   and same-session confirmations now include an argument hash so approval for
   one invocation cannot silently authorize a broader one.
-- Open risks remain explicit rather than hidden: current script tools are
-  policy-confined but not OS-confined, active foreground script cancellation
-  still needs an interrupted ledger path, a full skill lifecycle/curator layer
-  is not implemented, autonomous model-planned loops remain disabled by
-  design, and artifact lifecycle application still needs to cover every
-  derived artifact family.
+- At that checkpoint, open risks remained explicit rather than hidden: script
+  tools were policy-confined but not OS-confined, active foreground script
+  cancellation still needed an interrupted ledger path, a full skill
+  lifecycle/curator layer was not implemented, autonomous model-planned loops
+  remained disabled by design, and artifact lifecycle application still needed
+  to cover every derived artifact family. Later checkpoints in this document
+  supersede the completed items without erasing this audit history.
 
 Durable goal-run checkpoint, 2026-05-24:
 

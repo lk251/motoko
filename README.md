@@ -1,11 +1,55 @@
 # Motoko
 
 Motoko is Javier's small terminal personal assistant for the HB3 `personal`
-realm. She is intentionally not Texere, not Hermes, and not an agent runtime.
-She is a local chat, memory, and document-context tool over an existing
-llama.cpp OpenAI-compatible endpoint.
+realm. She is a local-first chat, memory, retrieval, and project-assistance
+tool over NixOS-declared llama.cpp endpoints. Motoko is intentionally not
+Texere, Hermes, a provider gateway, or a general-purpose autonomous agent
+runtime.
 
-Design constraints:
+Motoko does include a deliberately narrow agentic substrate: review-first
+skills, code-owned retrieval handlers, typed action records, approved
+standard-library tools, confirmed project-file writes, and explicit durable
+goal loops. Those capabilities remain bounded by realm-local state, allowlists,
+validators, visible ledgers, budgets, and user confirmation. Arbitrary shell,
+network, service-control, privileged, and hidden autonomous execution remain
+outside the product boundary.
+
+## Current Status
+
+As of 2026-08-22, Motoko is a substantial working local assistant rather than
+the original single-purpose chat script:
+
+- Interactive chat uses conversation-scoped named models such as
+  `qwen38-default`, `qwen38-long`, `qwen38-longest`, and `muse-glimmer` from the
+  NixOS route catalog. `/reasoning` exposes model-native effort controls, and
+  context pressure causes compaction and fresh retrieval rather than a silent
+  model or quant change.
+- The raw TUI has a dedicated input/render owner, append-only terminal
+  scrollback, durable queued prompts, first-keystroke background preemption,
+  and PTY regression probes for latency under background-event pressure.
+- Retrieval is hybrid and inspectable: lexical/path matching, deterministic Org
+  structure, hierarchical evidence, embeddings, reranking, span selection,
+  `/sources`, `/retrieval-preview`, and `/retrieval-debug` share the same
+  provenance-preserving service boundary.
+- Index, evidence, vector, dossier, memory, feedback, and skill artifacts have
+  explicit schemas, provenance, quality checks, refresh/rebuild paths, and
+  durable background progress. Incremental vector refresh reuses compatible
+  rows and rebuilds incompatible stores from source indexes.
+- Skills remain review-first. Typed actions and goal loops can inspect,
+  propose, and apply narrowly validated project changes, including managed Git
+  worktrees, but they cannot turn model text into unrestricted host authority.
+- The implementation remains Python-standard-library-only. The root `motoko`
+  executable is still the main composition facade while focused services are
+  being extracted into `motoko_core/`; continuing that separation is
+  craftsmanship work, not a framework rewrite.
+
+The project is usable, but not architecturally finished. Current priorities are
+reliability and competence: keep the TUI responsive, complete artifact
+lifecycle ownership and cooperative cancellation, improve retrieval and code
+intelligence with inspectable evals, harden reviewed action/goal-loop paths,
+and improve memory and dossier quality through real use.
+
+## Guiding Constraints
 
 - Python standard library only.
 - No provider API keys.
@@ -159,6 +203,11 @@ Design constraints:
   before writing beyond it.
 - User-owned personality/style guidance in
   `~/.config/motoko/personality.md`.
+
+These constraints are the design, not temporary omissions. Motoko should gain
+intelligence through better evidence, memory, procedures, evaluation, and
+carefully bounded action—not by accumulating opaque infrastructure or ambient
+authority.
 
 See [docs/motoko.md](docs/motoko.md) for usage and operating notes.
 See [docs/project-context.md](docs/project-context.md) for the HB3/NixOS,
