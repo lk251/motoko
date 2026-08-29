@@ -5,6 +5,11 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Improved deterministic self-code inspection by replacing anonymous CLI
+  dispatch lambdas with named command handlers. `motoko code-map` and
+  `motoko code-query` now link those commands to concrete source locations,
+  and `motoko self-eval` fails if any CLI handler becomes unresolved.
+- Added Motoko's missing Nix app description so flake inspection is warning-free.
 - Replaced context-profile selection with conversation-scoped named chat
   models: `/model qwen38-default|qwen38-long|qwen38-longest|muse-glimmer`, with
   `/model auto` following the NixOS catalog default. Context size now follows

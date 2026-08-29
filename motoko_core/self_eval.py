@@ -98,6 +98,25 @@ def run_self_improvement_eval(root: str | pathlib.Path | None = None, *, skills:
             evidence={"commands": summary.get("commands", 0), "handlers": summary.get("command_handlers", 0)},
         )
     )
+    unlinked_commands = summary.get("unlinked_commands", []) if isinstance(summary.get("unlinked_commands"), list) else []
+    checks.append(
+        _check(
+            "code_map_command_handlers_resolved",
+            not unlinked_commands,
+            f"unlinked_commands={len(unlinked_commands)}",
+            evidence={
+                "commands": [
+                    {
+                        "command": row.get("command", ""),
+                        "handler": row.get("handler", ""),
+                        "path": row.get("path", ""),
+                        "line": row.get("line", 0),
+                    }
+                    for row in unlinked_commands[:8]
+                ]
+            },
+        )
+    )
     traces = code_map.get("command_traces", []) if isinstance(code_map.get("command_traces"), list) else []
     source_lifecycle_trace = next((row for row in traces if row.get("command") == "source-lifecycle"), {})
     checks.append(

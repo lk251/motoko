@@ -1138,6 +1138,8 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert summary["model_route_paths"] > 0
         assert summary["artifact_lifecycle_paths"] > 0
         assert summary["root_hotspots"]
+        assert summary["unlinked_commands"] == []
+        assert all(row["handler_found"] for row in code_map["command_traces"])
         assert any(row["name"] == "nix-flake" for row in code_map["validation_gates"])
         assert any(row["name"] == "SOURCE_LIFECYCLE_REPORT_SCHEMA" for row in code_map["constants"])
         assert any(
@@ -1157,6 +1159,20 @@ def test_motoko_codebase_context_and_commands_are_deterministic(m):
         assert source_trace["handler"] == "command_source_lifecycle"
         assert source_trace["handler_found"] is True
         assert any("source_lifecycle" in row["name"] for row in source_trace["tests"])
+        expected_named_handlers = {
+            "help": "command_help",
+            "compact": "command_compact",
+            "memories": "command_memories",
+            "skills": "command_skills",
+            "forget": "command_forget",
+            "allow-dir": "command_allow_dir",
+        }
+        traces_by_command = {row["command"]: row for row in code_map["command_traces"]}
+        for command, handler in expected_named_handlers.items():
+            trace = traces_by_command[command]
+            assert trace["handler"] == handler
+            assert trace["handler_path"] == "motoko"
+            assert trace["handler_line"] > 0
         assert any(row["path"] == "motoko_core/artifact_lifecycle.py" for row in code_map["service_boundaries"])
         query = m.motoko_code_query("Motoko skill plan command implementation tests")
         assert query["schema"] == "motoko-code-query-v1"
@@ -1266,6 +1282,7 @@ def test_self_improvement_eval_checks_codebase_skill_and_scanner(m):
         assert "self_improvement_umbrella_skills_select" in names
         assert "motoko_codebase_skill_activates" in names
         assert "code_map_command_traces_link_tests" in names
+        assert "code_map_command_handlers_resolved" in names
         assert "code_map_relationships_present" in names
         assert "code_map_schema_constants_present" in names
         assert "code_query_finds_schema_constants" in names

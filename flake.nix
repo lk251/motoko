@@ -37,6 +37,7 @@
         default = {
           type = "app";
           program = "${self.packages.${system}.default}/bin/motoko";
+          meta.description = "Run the Motoko local terminal assistant";
         };
       });
 
@@ -52,18 +53,22 @@
             python3 -m py_compile ${src}/motoko
             touch "$out"
           '';
-          regression = pkgs.runCommand "motoko-regression-tests" { nativeBuildInputs = [ pkgs.python312 ]; } ''
-            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-            mkdir -p "$PYTHONPYCACHEPREFIX"
-            MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_regression.py
-            touch "$out"
-          '';
-          evaluation = pkgs.runCommand "motoko-evaluation-harness" { nativeBuildInputs = [ pkgs.python312 ]; } ''
-            export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-            mkdir -p "$PYTHONPYCACHEPREFIX"
-            MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_eval.py
-            touch "$out"
-          '';
+          regression =
+            pkgs.runCommand "motoko-regression-tests" { nativeBuildInputs = [ pkgs.python312 ]; }
+              ''
+                export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+                mkdir -p "$PYTHONPYCACHEPREFIX"
+                MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_regression.py
+                touch "$out"
+              '';
+          evaluation =
+            pkgs.runCommand "motoko-evaluation-harness" { nativeBuildInputs = [ pkgs.python312 ]; }
+              ''
+                export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+                mkdir -p "$PYTHONPYCACHEPREFIX"
+                MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_eval.py
+                touch "$out"
+              '';
           tty = pkgs.runCommand "motoko-tty-tests" { nativeBuildInputs = [ pkgs.python312 ]; } ''
             export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
             mkdir -p "$PYTHONPYCACHEPREFIX"

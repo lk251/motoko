@@ -635,7 +635,7 @@ def _build_command_traces(commands: list[dict], symbols: list[dict], tests: list
                 "handler": handler,
                 "handler_path": handler_symbol.get("path", ""),
                 "handler_line": handler_symbol.get("line", 0),
-                "handler_found": bool(handler_symbol) or handler == "<lambda>",
+                "handler_found": bool(handler_symbol),
                 "tests": _matching_tests_for_command(command, test_search_rows),
             }
         )
@@ -976,13 +976,16 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     validation_gates = _build_validation_gates()
     _maybe_cancel(cancel_check)
     command_handlers = {row.get("handler", "") for row in commands if row.get("handler")}
-    symbol_names = {row.get("name", "") for row in symbols}
+    unlinked_command_keys = {
+        (row.get("command_path", ""), int(row.get("command_line", 0) or 0))
+        for row in command_traces
+        if not row.get("handler_found")
+    }
     unlinked_commands = [
         row
         for row in commands
         if not row.get("parent")
-        and row.get("handler") != "<lambda>"
-        and (not row.get("handler") or row.get("handler") not in symbol_names and "." not in row.get("handler", ""))
+        and (row.get("path", ""), int(row.get("line", 0) or 0)) in unlinked_command_keys
     ]
     return {
         "schema": CODE_INTEL_SCHEMA,

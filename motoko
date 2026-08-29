@@ -26775,6 +26775,30 @@ def command_tips(_args) -> None:
     print_report(format_tips())
 
 
+def command_help(_args) -> None:
+    print(format_help())
+
+
+def command_compact(args) -> None:
+    compact_conversation(load_conversation(args.id))
+
+
+def command_memories(_args) -> None:
+    print_memories()
+
+
+def command_skills(_args) -> None:
+    print_report(format_skills())
+
+
+def command_forget(args) -> None:
+    forget_memory(args.id)
+
+
+def command_allow_dir(args) -> None:
+    add_allowed_dir(args.path)
+
+
 def command_code_map(args) -> None:
     report = motoko_code_map(args.repo)
     if args.json:
@@ -27030,11 +27054,14 @@ def main(argv: list[str]) -> int:
         return command_internal_repair_indexes_needing_quality()
     if argv and argv[0] == "__internal-startup-discovery":
         return command_internal_startup_discovery()
-    parser = argparse.ArgumentParser(prog="motoko", description="Personal local Qwen chat client.")
+    parser = argparse.ArgumentParser(
+        prog="motoko",
+        description="Local-first personal assistant for chat, memory, retrieval, and reviewed project work.",
+    )
     sub = parser.add_subparsers(dest="command")
 
     help_cmd = sub.add_parser("help", help="show the full Motoko command reference")
-    help_cmd.set_defaults(func=lambda _args: print(format_help()))
+    help_cmd.set_defaults(func=command_help)
 
     tips_cmd = sub.add_parser("tips", help="show daily usage and feedback tips")
     tips_cmd.set_defaults(func=command_tips)
@@ -27074,7 +27101,7 @@ def main(argv: list[str]) -> int:
 
     compact = sub.add_parser("compact", help="compact a conversation")
     compact.add_argument("id", nargs="?")
-    compact.set_defaults(func=lambda args: compact_conversation(load_conversation(args.id)))
+    compact.set_defaults(func=command_compact)
 
     status = sub.add_parser("status", help="show model, memory, and state paths")
     status.set_defaults(func=command_status)
@@ -27459,10 +27486,10 @@ def main(argv: list[str]) -> int:
     dossier_show.set_defaults(func=command_dossier_show)
 
     memories = sub.add_parser("memories", help="list memories")
-    memories.set_defaults(func=lambda _args: print_memories())
+    memories.set_defaults(func=command_memories)
 
     skills = sub.add_parser("skills", help="list learned procedural skills")
-    skills.set_defaults(func=lambda _args: print_report(format_skills()))
+    skills.set_defaults(func=command_skills)
 
     skill = sub.add_parser("skill", help="list, show, learn, suggest, or delete procedural skills")
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)
@@ -27688,7 +27715,7 @@ def main(argv: list[str]) -> int:
 
     forget = sub.add_parser("forget", help="delete a memory")
     forget.add_argument("id")
-    forget.set_defaults(func=lambda args: forget_memory(args.id))
+    forget.set_defaults(func=command_forget)
 
     personality = sub.add_parser("personality", help="show or initialize personality guidance")
     personality_sub = personality.add_subparsers(dest="personality_command")
@@ -27717,7 +27744,7 @@ def main(argv: list[str]) -> int:
 
     allow_dir = sub.add_parser("allow-dir", help="allow document reads under a directory")
     allow_dir.add_argument("path")
-    allow_dir.set_defaults(func=lambda args: add_allowed_dir(args.path))
+    allow_dir.set_defaults(func=command_allow_dir)
 
     args = parser.parse_args(argv)
     if args.command is None:
