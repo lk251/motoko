@@ -1,9 +1,8 @@
 # Motoko
 
-Motoko is Javier's small terminal personal assistant for the HB3 `personal`
-realm. She is a local-first chat, memory, retrieval, and project-assistance
-tool over NixOS-declared llama.cpp endpoints. Motoko is intentionally not
-Texere, Hermes, a provider gateway, or a general-purpose autonomous agent
+Motoko is a small local terminal assistant for chat, memory, retrieval, and
+bounded project assistance over operator-approved llama.cpp endpoints. Motoko
+is intentionally not a provider gateway or a general-purpose autonomous agent
 runtime.
 
 Motoko does include a deliberately narrow agentic substrate: review-first
@@ -19,11 +18,10 @@ outside the product boundary.
 As of 2026-08-22, Motoko is a substantial working local assistant rather than
 the original single-purpose chat script:
 
-- Interactive chat uses conversation-scoped named models such as
-  `qwen38-default`, `qwen38-long`, `qwen38-longest`, and `muse-glimmer` from the
-  NixOS route catalog. `/reasoning` exposes model-native effort controls, and
-  context pressure causes compaction and fresh retrieval rather than a silent
-  model or quant change.
+- Interactive chat uses conversation-scoped named models from the managed
+  route catalog. `/reasoning` exposes model-native effort controls, and context
+  pressure causes compaction and fresh retrieval rather than a silent model or
+  quant change.
 - The raw TUI has a dedicated input/render owner, append-only terminal
   scrollback, durable queued prompts, first-keystroke background preemption,
   and PTY regression probes for latency under background-event pressure.
@@ -80,8 +78,8 @@ and improve memory and dossier quality through real use.
   state.
 - A Codex-style TUI transcript: chat output is append-only so normal terminal
   scrollback works, while the composer and status line redraw at the bottom.
-- TUI model badge showing the conversation's named chat model and reasoning
-  effort, such as `qwen38-default:xhigh` or `muse-glimmer:high`.
+- TUI model badge showing the conversation's catalog-defined chat model and
+  reasoning effort, such as `chat-default:xhigh`.
 - Automatic ranked memory selection and quiet after-answer memory maintenance,
   with visible phases, resumable state, and `/sources` provenance.
 - Adaptive document retrieval, topic dossiers, and deeper `/deepen` dossiers
@@ -170,7 +168,7 @@ and improve memory and dossier quality through real use.
 - For chronological Org files, exact-date queries and phrases such as "last
   two days" or "latest entries" select the matching dated sections as
   mandatory evidence inside a large chunk before preview/chat/rerank use the
-  source text. This keeps `logbook.org`-style `** do` and `** log`
+  source text. This keeps `sample-journal.org`-style `** do` and `** log`
   subsections visible even when the file was indexed as one broad chunk.
 - More generally, Motoko now performs evidence-span selection inside retrieved
   chunks. She scores dated Org sections, Org/Markdown headings, query-term
@@ -210,8 +208,8 @@ carefully bounded action—not by accumulating opaque infrastructure or ambient
 authority.
 
 See [docs/motoko.md](docs/motoko.md) for usage and operating notes.
-See [docs/project-context.md](docs/project-context.md) for the HB3/NixOS,
-security, and interface context that should guide future changes.
+See [docs/project-context.md](docs/project-context.md) for the deployment,
+security, and interface contracts that should guide future changes.
 See [CHANGELOG.md](CHANGELOG.md) for concise user-facing change summaries.
 
 ## Nix
@@ -245,3 +243,7 @@ Run only the pseudo-terminal render checks:
 ```bash
 nix build .#checks.x86_64-linux.tty
 ```
+
+## License
+
+Motoko is available under the [MIT License](LICENSE).

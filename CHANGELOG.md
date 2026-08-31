@@ -11,24 +11,21 @@ not the easiest place to review what changed after a long work session.
   and `motoko self-eval` fails if any CLI handler becomes unresolved.
 - Added Motoko's missing Nix app description so flake inspection is warning-free.
 - Replaced context-profile selection with conversation-scoped named chat
-  models: `/model qwen38-default|qwen38-long|qwen38-longest|muse-glimmer`, with
-  `/model auto` following the NixOS catalog default. Context size now follows
-  the selected model and Motoko never changes quant merely because a prompt
-  grows. `/context` remains only as a deprecated saved-command compatibility
-  alias.
+  models from the managed route catalog, with `/model auto` following the
+  catalog default. Context size now follows the selected model and Motoko never
+  changes quant merely because a prompt grows. `/context` remains only as a
+  deprecated saved-command compatibility alias.
 - Fixed recurring TUI input stalls during `bg-light: catalog-meta(cpu)` and
   repair/source audits. Metadata checks no longer hash same-size files, derived
   dependency scans use bounded catalog sidecars instead of rereading multi-GB
   vector stores, and the first keystroke preempts an automatic study step.
-- Fixed a model-residency race that could leave Qwen 3.8 unable to allocate
-  VRAM after orgfiles/background workers reactivated between route eviction and
-  foreground socket startup. Realm-local shared/exclusive leases now cover the
-  full request while preserving parallel worker fanout.
-- Changed `/reasoning` to model-native effort controls. Qwen exposes
-  `off|low|medium|xhigh|auto` through llama.cpp's top-level
-  `reasoning_effort`; Muse Glimmer exposes `low|medium|xhigh|auto` through
-  `reasoning_strength`, keeps reasoning required, and uses its native `high`
-  default under `auto`. Old `default|high|max` overrides migrate to `xhigh`.
+- Fixed a model-residency race that could leave a large chat model unable to
+  allocate accelerator memory after document-index/background workers
+  reactivated between route eviction and foreground socket startup. Realm-local
+  shared/exclusive leases now cover the full request while preserving parallel
+  worker fanout.
+- Changed `/reasoning` to catalog-declared, model-native effort controls while
+  preserving compatibility aliases for older saved overrides.
 - Added `motoko source-lifecycle [INDEX]` and `/source-lifecycle [ID]` to
   inspect changed, deleted, or newly ignored indexed source files across their
   dependent artifacts. The report covers indexes, vector/evidence stores,
@@ -297,14 +294,14 @@ not the easiest place to review what changed after a long work session.
   artifact lifecycle decisions, and content-free observability now have
   dedicated stdlib modules while the root `motoko` executable remains the
   compatibility facade.
-- Added a chat context governor that estimates prompt size, uses the
-  NixOS-declared default Qwen3.6 route for normal chat, and switches to
-  approved quality/deep/max profiles only for explicit mode requests or prompts
-  that need longer context.
+- Added a chat context governor that estimates prompt size, uses the managed
+  catalog's default route for normal chat, and switches to approved
+  quality/deep/max profiles only for explicit mode requests or prompts that
+  need longer context.
 - Updated chat route selection for explicit NixOS route profiles, so Motoko now
   honors `selection.default`, `selection.priority`, `route_profile`,
   `context_tokens`, `kv_offload`, and `kv_cache.location` instead of treating
-  `qwen36-chat` or Q4 naming as canonical.
+  a particular route or quant name as canonical.
 - Added content-free model-call telemetry plus `/last-call`,
   `motoko last-call`, and `motoko context-bench` so route choice, context
   pressure, timing, and estimated token rates can be inspected without storing
@@ -349,8 +346,8 @@ not the easiest place to review what changed after a long work session.
 - Kept TUI rendering away from the final terminal column to avoid tty/tmux wrap
   ambiguity in long composer lines.
 - Documented that future HRAG quality work should happen through Motoko-owned
-  runtime behavior and synthetic fixtures, without Codex reading Javier's
-  personal documents.
+  runtime behavior and synthetic fixtures, without development agents reading
+  private personal documents.
 - Added bounded heavy background refresh for attached stale document indexes or
   meaningful batches of new files, with visible `bg-heavy: indexing(model)`
   status and prompt queuing while the local model focuses on indexing.
@@ -456,7 +453,7 @@ not the easiest place to review what changed after a long work session.
   reranked.
 - Changed retrieval excerpts to honor exact dates and "last/latest/recent"
   Org-date queries as mandatory evidence inside a selected chunk, so
-  chronological files such as `logbook.org` show the newest dated `** do`/`** log`
+  chronological files such as `sample-journal.org` show the newest dated `** do`/`** log`
   sections instead of only the beginning of a large chunk.
 - Added bounded evidence-span selection inside retrieved chunks. Motoko now
   scores Org headings, Markdown headings, dated sections, term windows, and
@@ -549,8 +546,7 @@ not the easiest place to review what changed after a long work session.
   remains available only by explicit opt-in.
 - Made the TUI input renderer terminal-cell aware to reduce cursor drift on
   wrapped prompts and wide Unicode text.
-- Added local-model visibility through a compact model badge such as
-  `qwen3.6-27b-mtp:8083`.
+- Added local-model visibility through a compact `model:endpoint` badge.
 - Added generated conversation titles after the first few messages while
   preserving manually set titles.
 - Added a low-cost idle background study loop that refreshes the private
@@ -566,5 +562,5 @@ not the easiest place to review what changed after a long work session.
 - Split Motoko into this standalone repository and flake.
 - Kept NixOS host integration in `nixos-configs`; Motoko's source, tests, and
   main documentation now live here.
-- Documented Motoko as a small, dependency-free terminal personal assistant for
-  the HB3 `personal` realm.
+- Documented Motoko as a small, dependency-free local terminal personal
+  assistant.

@@ -20,7 +20,7 @@ def worker_model_eval_fixtures() -> list[dict]:
             "id": "org-priority-chunk",
             "route": MODEL_ROUTE_INDEX_CHUNK,
             "role": "chunk summary",
-            "label": "orgfiles/tasks.org chunk 1",
+            "label": "synthetic-corpus/sample-planning.org chunk 1",
             "required_keys": [
                 "summary",
                 "title",
@@ -37,24 +37,24 @@ def worker_model_eval_fixtures() -> list[dict]:
                 {"name": "priority", "any": ["#A", "priority A", "A priority"]},
                 {"name": "deadline", "any": ["2026-05-22", "May 22"]},
                 {"name": "scheduled date", "any": ["2026-05-21", "May 21"]},
-                {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
-                {"name": "obligation", "any": ["countersigned packet", "signed packet"]},
-                {"name": "path", "any": ["/workspace/orgfiles/legal.org", "legal.org"]},
-                {"name": "project", "any": ["violet harbor"]},
+                {"name": "person", "any": ["Example Recipient", "Recipient"]},
+                {"name": "obligation", "any": ["review packet", "sample packet"]},
+                {"name": "path", "any": ["/workspace/synthetic-corpus/reference.org", "reference.org"]},
+                {"name": "project", "any": ["fixture lantern"]},
             ],
             "forbidden_facts": [
                 {"name": "wrong date", "any": ["2026-05-23"]},
                 {"name": "invented person", "any": ["Marina"]},
-                {"name": "invented payment", "any": ["invoice 2026-019", "payment due"]},
+                {"name": "invented record", "any": ["record TEST-019", "unrelated due date"]},
             ],
             "text": "\n".join(
                 [
-                    "* TODO [#A] Send signed Alvarez packet :client:legal:",
+                    "* TODO [#A] Send review packet :sample:review:",
                     "SCHEDULED: <2026-05-21 Thu 09:00>",
                     "DEADLINE: <2026-05-22 Fri>",
-                    "Project: violet harbor",
-                    "File reference: /workspace/orgfiles/legal.org",
-                    "Obligation: Javier must email the countersigned packet to Ana Alvarez before noon.",
+                    "Project: fixture lantern",
+                    "File reference: /workspace/synthetic-corpus/reference.org",
+                    "Obligation: the user must send the review packet to Example Recipient before noon.",
                 ]
             ),
             "max_output_chars": 2200,
@@ -64,7 +64,7 @@ def worker_model_eval_fixtures() -> list[dict]:
             "id": "file-purpose-map",
             "route": MODEL_ROUTE_INDEX_FILE,
             "role": "file summary",
-            "label": "orgfiles/tasks.org file summary",
+            "label": "synthetic-corpus/sample-planning.org file summary",
             "required_keys": [
                 "file_summary",
                 "file_title",
@@ -79,23 +79,23 @@ def worker_model_eval_fixtures() -> list[dict]:
             ],
             "required_facts": [
                 {"name": "file role", "any": ["planning", "task"]},
-                {"name": "priority task", "any": ["Send signed Alvarez packet", "Alvarez packet"]},
+                {"name": "priority task", "any": ["Send review packet", "review packet"]},
                 {"name": "deadline", "any": ["2026-05-22", "May 22"]},
-                {"name": "project", "any": ["violet harbor"]},
-                {"name": "support task", "any": ["Draft support note"]},
-                {"name": "path", "any": ["/workspace/orgfiles/tasks.org", "tasks.org"]},
+                {"name": "project", "any": ["fixture lantern"]},
+                {"name": "support task", "any": ["Draft sample note"]},
+                {"name": "path", "any": ["/workspace/synthetic-corpus/sample-planning.org", "sample-planning.org"]},
             ],
             "forbidden_facts": [
-                {"name": "wrong repo", "any": ["nixos-configs"]},
-                {"name": "wrong status", "any": ["DONE Send signed Alvarez packet"]},
+                {"name": "wrong repo", "any": ["production-config"]},
+                {"name": "wrong status", "any": ["DONE Send review packet"]},
             ],
             "text": "\n\n".join(
                 [
-                    "Path: /workspace/orgfiles/tasks.org",
-                    "Chunk 1 summary: TODO priority A Send signed Alvarez packet for project violet harbor. "
-                    "Deadline 2026-05-22. Obligation to email Ana Alvarez before noon.",
-                    "Chunk 2 summary: TODO priority B Draft support note, scheduled 2026-05-23, "
-                    "depends on the Alvarez packet being sent.",
+                    "Path: /workspace/synthetic-corpus/sample-planning.org",
+                    "Chunk 1 summary: TODO priority A Send review packet for project fixture lantern. "
+                    "Deadline 2026-05-22. Obligation to contact Example Recipient before noon.",
+                    "Chunk 2 summary: TODO priority B Draft sample note, scheduled 2026-05-23, "
+                    "depends on the review packet being sent.",
                 ]
             ),
             "max_output_chars": 2600,
@@ -105,7 +105,7 @@ def worker_model_eval_fixtures() -> list[dict]:
             "id": "document-label",
             "route": MODEL_ROUTE_INDEX_LABEL,
             "role": "classification label",
-            "label": "orgfiles/inbox.org label",
+            "label": "synthetic-corpus/sample-intake.org label",
             "required_keys": [
                 "label",
                 "kind",
@@ -119,8 +119,8 @@ def worker_model_eval_fixtures() -> list[dict]:
                 {"name": "org kind", "any": ["org", "notes", "task"]},
                 {"name": "task-bearing", "any": ["task_bearing", "task-bearing", "task bearing", "TODO"]},
                 {"name": "active", "any": ["active"]},
-                {"name": "legal tag", "any": ["legal"]},
-                {"name": "client tag", "any": ["client"]},
+                {"name": "review tag", "any": ["review"]},
+                {"name": "sample tag", "any": ["sample"]},
             ],
             "forbidden_facts": [
                 {"name": "archive", "any": ["archived"]},
@@ -128,8 +128,8 @@ def worker_model_eval_fixtures() -> list[dict]:
             ],
             "text": "\n".join(
                 [
-                    "Path: /workspace/orgfiles/inbox.org",
-                    "* TODO [#A] Client legal packet :client:legal:",
+                    "Path: /workspace/synthetic-corpus/sample-intake.org",
+                    "* TODO [#A] Review sample packet :sample:review:",
                     "DEADLINE: <2026-05-22 Fri>",
                     "Short note: active inbox item, current item.",
                 ]
@@ -141,7 +141,7 @@ def worker_model_eval_fixtures() -> list[dict]:
             "id": "corpus-priority-synthesis",
             "route": MODEL_ROUTE_INDEX_CORPUS,
             "role": "corpus summary",
-            "label": "orgfiles corpus synthesis",
+            "label": "synthetic corpus synthesis",
             "required_keys": [
                 "corpus_summary",
                 "active_projects",
@@ -153,25 +153,25 @@ def worker_model_eval_fixtures() -> list[dict]:
                 "audit_needed",
             ],
             "required_facts": [
-                {"name": "top priority", "any": ["Send signed Alvarez packet", "Alvarez packet"]},
+                {"name": "top priority", "any": ["Send review packet", "review packet"]},
                 {"name": "deadline", "any": ["2026-05-22", "May 22"]},
-                {"name": "person", "any": ["Ana Alvarez", "Alvarez"]},
-                {"name": "project", "any": ["violet harbor"]},
-                {"name": "repo planning file", "any": ["nixos-configs.org"]},
+                {"name": "person", "any": ["Example Recipient", "Recipient"]},
+                {"name": "project", "any": ["fixture lantern"]},
+                {"name": "repo planning file", "any": ["project-notes.org"]},
                 {"name": "morning schedule", "any": ["2026-05-21", "May 21"]},
             ],
             "forbidden_facts": [
                 {"name": "wrong person", "any": ["Marina"]},
-                {"name": "invented completion", "any": ["already completed", "DONE Send signed Alvarez packet"]},
+                {"name": "invented completion", "any": ["already completed", "DONE Send review packet"]},
             ],
             "text": "\n\n".join(
                 [
-                    "File /workspace/orgfiles/tasks.org: active planning file. "
-                    "Priority A TODO Send signed Alvarez packet. Deadline 2026-05-22. "
-                    "Scheduled 2026-05-21 morning. Obligation: email Ana Alvarez.",
-                    "File /workspace/orgfiles/nixos-configs.org: repo planning file. "
-                    "Priority B TODO prepare branch review notes after the legal packet.",
-                    "File /workspace/orgfiles/ideas.org: ideas backlog for project violet harbor.",
+                    "File /workspace/synthetic-corpus/sample-planning.org: active planning file. "
+                    "Priority A TODO Send review packet. Deadline 2026-05-22. "
+                    "Scheduled 2026-05-21 morning. Obligation: contact Example Recipient.",
+                    "File /workspace/synthetic-corpus/project-notes.org: repo planning file. "
+                    "Priority B TODO prepare branch review notes after the review packet.",
+                    "File /workspace/synthetic-corpus/sample-brainstorm.org: ideas backlog for project fixture lantern.",
                 ]
             ),
             "max_output_chars": 3000,

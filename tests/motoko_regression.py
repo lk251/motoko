@@ -257,7 +257,7 @@ def test_recent_conversation_lanes(m):
         current = m.new_conversation("Current")
         current["id"] = "current"
         current["updated"] = "2026-05-17T10:00:00+00:00"
-        current["messages"] = [{"role": "user", "content": "What did I say about violet harbor?"}]
+        current["messages"] = [{"role": "user", "content": "What did I say about fixture lantern?"}]
         write_conversation(m, current)
 
         recent = m.new_conversation("Recent unrelated")
@@ -269,17 +269,17 @@ def test_recent_conversation_lanes(m):
         relevant = m.new_conversation("Older relevant")
         relevant["id"] = "relevant"
         relevant["updated"] = "2026-05-17T08:00:00+00:00"
-        relevant["messages"] = [{"role": "user", "content": "The codename is violet harbor."}]
+        relevant["messages"] = [{"role": "user", "content": "The codename is fixture lantern."}]
         write_conversation(m, relevant)
 
         other_project = m.new_conversation("Other project relevant")
         other_project["id"] = "other-project"
         other_project["project"] = {"kind": "git", "root": "/tmp/not-this-project"}
         other_project["updated"] = "2026-05-17T09:58:00+00:00"
-        other_project["messages"] = [{"role": "user", "content": "The codename is violet harbor."}]
+        other_project["messages"] = [{"role": "user", "content": "The codename is fixture lantern."}]
         write_conversation(m, other_project)
 
-        selected = m.ranked_recent_conversations(current, "violet harbor")
+        selected = m.ranked_recent_conversations(current, "fixture lantern")
         by_id = {row["id"]: row for row in selected}
         assert "recent" in by_id
         assert "recent" in by_id["recent"]["_selection_reasons"]
@@ -287,8 +287,8 @@ def test_recent_conversation_lanes(m):
         assert "relevant" in by_id["relevant"]["_selection_reasons"]
         assert "other-project" not in by_id
 
-        text, sources = m.render_recent_conversations_with_sources(current, "violet harbor")
-        assert "violet harbor" in text
+        text, sources = m.render_recent_conversations_with_sources(current, "fixture lantern")
+        assert "fixture lantern" in text
         assert any("relevant" in source.get("selection", []) for source in sources)
 
 
@@ -308,7 +308,7 @@ def test_conversation_recall_config_expands_saved_lanes_and_snippets(m):
         current = m.new_conversation("Current")
         current["id"] = "current"
         current["updated"] = "2026-05-17T10:00:00+00:00"
-        current["messages"] = [{"role": "user", "content": "Find violet harbor and copper bridge notes."}]
+        current["messages"] = [{"role": "user", "content": "Find fixture lantern and copper bridge notes."}]
         write_conversation(m, current)
 
         for idx in range(4):
@@ -318,22 +318,22 @@ def test_conversation_recall_config_expands_saved_lanes_and_snippets(m):
             recent["messages"] = [{"role": "user", "content": f"Routine note {idx}."}]
             write_conversation(m, recent)
 
-        for idx, phrase in enumerate(["violet harbor", "copper bridge", "violet harbor copper bridge"], 1):
+        for idx, phrase in enumerate(["fixture lantern", "copper bridge", "fixture lantern copper bridge"], 1):
             relevant = m.new_conversation(f"Relevant {idx}")
             relevant["id"] = f"relevant-{idx}"
             relevant["updated"] = f"2026-05-17T08:0{idx}:00+00:00"
             relevant["messages"] = [{"role": "user", "content": f"The project phrase is {phrase}."}]
             write_conversation(m, relevant)
 
-        selected = m.ranked_recent_conversations(current, "violet harbor copper bridge")
+        selected = m.ranked_recent_conversations(current, "fixture lantern copper bridge")
         assert len(selected) == 6
         assert sum("recent" in row.get("_selection_reasons", []) for row in selected) == 3
         assert sum("relevant" in row.get("_selection_reasons", []) for row in selected) == 3
         assert any(row.get("_matched_snippets") for row in selected)
 
-        text, sources = m.render_recent_conversations_with_sources(current, "violet harbor copper bridge")
+        text, sources = m.render_recent_conversations_with_sources(current, "fixture lantern copper bridge")
         assert "matched snippets:" in text
-        assert "violet harbor copper bridge" in text
+        assert "fixture lantern copper bridge" in text
         assert len(sources) == 6
         assert "conversation recall: current 24 msg(s)" in m.format_status(current)
 
@@ -383,7 +383,7 @@ def test_maintenance_state_and_phases(m):
         old_propose = m.propose_memories_bounded
         try:
             m.propose_memories_bounded = lambda _conv, **_kwargs: [
-                "Javier prefers concise terminal output."
+                "The user prefers concise terminal output."
             ]
             state = m.begin_maintenance_state(conv)
             phases = []
@@ -416,14 +416,14 @@ def test_memory_proposal_sends_transcript_not_assistant_prefill(m):
         try:
             def fake_call_model(messages, **kwargs):
                 calls.append((messages, kwargs))
-                return "MEMORY: Javier prefers concise terminal output."
+                return "MEMORY: The user prefers concise terminal output."
 
             m.call_model = fake_call_model
             proposals = m.propose_memories(conv)
         finally:
             m.call_model = old_call_model
 
-        assert proposals == ["Javier prefers concise terminal output."]
+        assert proposals == ["The user prefers concise terminal output."]
         messages, kwargs = calls[0]
         assert [item["role"] for item in messages] == ["system", "user"]
         assert "Conversation transcript:" in messages[-1]["content"]
@@ -436,9 +436,9 @@ def test_memory_proposal_helper_timeout_respects_socket_activation(m):
     with isolated_state():
         old_model_route = m.model_route
         try:
-            m.model_route = lambda _route: {"endpoint": "unix:///run/motoko-llm/personal/qwen35-2b-worker.sock"}
+            m.model_route = lambda _route: {"endpoint": "unix:///run/example-models/sample-worker.sock"}
             assert m.memory_proposal_helper_timeout(90) == m.SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS + 15
-            m.model_route = lambda _route: {"endpoint": "http://127.0.0.1:8083/v1/chat/completions"}
+            m.model_route = lambda _route: {"endpoint": "http://127.0.0.1:18083/v1/chat/completions"}
             assert m.memory_proposal_helper_timeout(90) == 105
         finally:
             m.model_route = old_model_route
@@ -466,7 +466,7 @@ def test_memory_proposal_queue_retries_until_saved(m):
                 calls["count"] += 1
                 if calls["count"] == 1:
                     raise TimeoutError("cold worker")
-                return ["Javier wants Motoko memory proposals to retry durably."]
+                return ["The user wants Motoko memory proposals to retry durably."]
 
             m.propose_memories_bounded = fake_propose
             first_notes = m.auto_maintain_conversation(conv)
@@ -479,7 +479,7 @@ def test_memory_proposal_queue_retries_until_saved(m):
             assert m.queued_memory_proposal_count() == 0
             assert int(conv.get("last_auto_memory_message_count", 0) or 0) == len(conv["messages"])
             assert any(
-                row.get("text") == "Javier wants Motoko memory proposals to retry durably."
+                row.get("text") == "The user wants Motoko memory proposals to retry durably."
                 for row in m.read_memory_rows()
             )
         finally:
@@ -1080,7 +1080,7 @@ def test_skill_plan_shows_prompt_and_retrieval_selection(m):
             description="RaceFocus planning responses",
             body="Keep VR, 2D HUD, and OBS renderer contexts distinct.",
         )
-        temporal = m.format_skill_plan("summarize the last three days present in logbook.org")
+        temporal = m.format_skill_plan("summarize the last three days present in sample-journal.org")
         assert "activated retrieval skills:" in temporal
         assert "org-temporal-retrieval" in temporal
         assert "builtin:org_temporal_latest_entries" in temporal
@@ -1406,11 +1406,11 @@ def test_profile_dossier(m):
         conv["id"] = "profile-conv"
         conv["messages"] = [{"role": "user", "content": "I care about craftsmanship."}]
         write_conversation(m, conv)
-        m.add_memory("Javier values craftsmanship.", source="test", conversation_id=conv["id"])
+        m.add_memory("The user values craftsmanship.", source="test", conversation_id=conv["id"])
 
         old_quiet = m.quiet_model
         try:
-            m.quiet_model = lambda *args, **kwargs: "Stable preferences\n- Javier values craftsmanship."
+            m.quiet_model = lambda *args, **kwargs: "Stable preferences\n- The user values craftsmanship."
             profile = m.refresh_profile_dossier()
             assert "craftsmanship" in profile["text"]
             text, sources = m.render_profile_with_sources()
@@ -1458,13 +1458,13 @@ def test_core_profile_rendering_is_injectable(m):
         "updated": "2026-05-23T00:00:00+00:00",
         "memory_ids": ["mem-1", "mem-2"],
         "conversation_ids": ["conv-1"],
-        "text": "Javier values grounded retrieval.",
+        "text": "The user values grounded retrieval.",
     }
 
     text, sources = m.render_profile_with_sources_core(profile)
     report = m.format_profile_dossier(profile)
 
-    assert text == "Javier values grounded retrieval."
+    assert text == "The user values grounded retrieval."
     assert sources == [
         {
             "kind": "profile",
@@ -1529,7 +1529,7 @@ def test_core_profile_project_scope_matching_is_service_owned(m):
 
 def test_core_profile_source_material_is_service_owned(m):
     memories = [
-        {"id": "mem-1", "text": "Javier values careful craftsmanship.", "importance": 4},
+        {"id": "mem-1", "text": "The user values careful craftsmanship.", "importance": 4},
         {"id": "mem-2", "text": "Motoko should be inspectable."},
     ]
     conversations = [
@@ -1550,7 +1550,7 @@ def test_core_profile_source_material_is_service_owned(m):
     )
 
     assert "Durable memories:" in text
-    assert "[mem-1; i4] Javier values careful craftsmanship." in text
+    assert "[mem-1; i4] The user values careful craftsmanship." in text
     assert "[mem-2; i3] Motoko should be inspectable." in text
     assert "conversation:conv-1 title:Useful" in text
     assert "Grounded retrieval and source visibility matter." in text
@@ -1584,7 +1584,7 @@ def test_memory_dossier(m):
         conv["id"] = "dossier-conv"
         conv["messages"] = [{"role": "user", "content": "I want careful craftsmanship in Motoko."}]
         write_conversation(m, conv)
-        m.add_memory("Javier values careful craftsmanship.", source="test", conversation_id=conv["id"])
+        m.add_memory("The user values careful craftsmanship.", source="test", conversation_id=conv["id"])
 
         old_summarize = m.summarize_blocks
         try:
@@ -1804,7 +1804,7 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
         eta_seconds=120,
     )
     assert line == "bg-heavy: vectorizing(model) batch 2/5 parallel 32 rows 64/160 eta 2m00s"
-    assert "orgfiles" not in line
+    assert "sample_notes" not in line
     assert "logbook" not in line
 
     incremental = format_vector_progress_phase_core(
@@ -1857,16 +1857,16 @@ def test_vector_progress_phase_is_content_free_and_finalizing(m):
     )
     assert finalizing == "bg-heavy: vectorizing finalizing rows 160/160 elapsed 7m00s"
     sanitized = m.sanitize_background_phase(
-        "bg-heavy: vectorizing(model) orgfiles incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 elapsed 5m00s eta ?"
+        "bg-heavy: vectorizing(model) sample_notes incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 elapsed 5m00s eta ?"
     )
     assert sanitized == "bg-heavy: vectorizing(model) incremental reuse 150 new 10 batch 0/1 parallel 32 rows 150/160 elapsed 5m00s eta ?"
-    assert "orgfiles" not in sanitized
+    assert "sample_notes" not in sanitized
     sanitized_full = m.sanitize_background_phase(
-        "bg-heavy: vectorizing(model) orgfiles full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+        "bg-heavy: vectorizing(model) sample_notes full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
     )
     assert sanitized_full == "bg-heavy: vectorizing(model) full missing new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
     sanitized_initial = m.sanitize_background_phase(
-        "bg-heavy: vectorizing(model) orgfiles initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
+        "bg-heavy: vectorizing(model) sample_notes initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
     )
     assert sanitized_initial == "bg-heavy: vectorizing(model) initial new 160 batch 0/5 parallel 32 rows 0/160 eta ?"
 
@@ -1875,7 +1875,7 @@ def test_safe_vector_progress_row_core_is_content_free_and_stale_aware(m):
     assert m.format_safe_vector_progress_row({"id": "x"}).startswith("- job:")
     now = dt.datetime(2026, 6, 1, 4, 30, 0, tzinfo=dt.timezone.utc)
     progress = {
-        "id": "embedding-secret-logbook-orgfiles",
+        "id": "embedding-secret-logbook-sample_notes",
         "updated": "2026-06-01T04:20:00+00:00",
         "expected_rows": 100,
         "completed_rows": 25,
@@ -1904,7 +1904,7 @@ def test_safe_vector_progress_row_core_is_content_free_and_stale_aware(m):
     assert "route=qwen3-embedding-0b6" in text
     assert "secret" not in text
     assert "logbook" not in text
-    assert "orgfiles" not in text
+    assert "sample_notes" not in text
 
     initial_text = format_safe_vector_progress_row_core(
         {
@@ -2581,7 +2581,7 @@ def test_unix_socket_model_loading_retries(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "chat": {
@@ -2627,7 +2627,7 @@ def assert_unix_socket_connection_reset_retries(m, status_text):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "chat": {
@@ -2663,11 +2663,11 @@ def assert_unix_socket_connection_reset_retries(m, status_text):
 
 
 def test_unix_socket_connection_reset_retries_while_activating(m):
-    assert_unix_socket_connection_reset_retries(m, "realm=mares\nroute=chat\nbackend=activating\n")
+    assert_unix_socket_connection_reset_retries(m, "realm=work\nroute=chat\nbackend=activating\n")
 
 
 def test_unix_socket_connection_reset_retries_while_active(m):
-    assert_unix_socket_connection_reset_retries(m, "realm=mares\nroute=chat\nbackend=active\n")
+    assert_unix_socket_connection_reset_retries(m, "realm=work\nroute=chat\nbackend=active\n")
 
 
 def test_model_route_config_and_summary_cache(m):
@@ -2723,6 +2723,31 @@ def test_model_route_config_and_summary_cache(m):
             os.environ["MOTOKO_MODEL_CACHE"] = old_cache
 
 
+def test_model_request_requires_explicit_endpoint_configuration(m):
+    old_endpoint = os.environ.pop("MOTOKO_ENDPOINT", None)
+    old_model = os.environ.pop("MOTOKO_MODEL", None)
+    try:
+        with isolated_state():
+            route_info = m.model_route(m.MODEL_ROUTE_CHAT)
+            assert route_info["endpoint"] == ""
+            assert route_info["model"] == "local-model"
+            try:
+                with m.open_model_response(
+                    route_info,
+                    {"model": route_info["model"], "messages": []},
+                    timeout=1,
+                ):
+                    raise AssertionError("missing endpoint unexpectedly opened a model response")
+            except SystemExit as exc:
+                assert "no local model endpoint is configured for chat" in str(exc)
+                assert "local-models.json" in str(exc)
+    finally:
+        if old_endpoint is not None:
+            os.environ["MOTOKO_ENDPOINT"] = old_endpoint
+        if old_model is not None:
+            os.environ["MOTOKO_MODEL"] = old_model
+
+
 def test_summary_input_is_bounded_to_declared_worker_context(m):
     old_cache = os.environ.get("MOTOKO_MODEL_CACHE")
     old_model_route = m.model_route
@@ -2753,7 +2778,7 @@ def test_summary_input_is_bounded_to_declared_worker_context(m):
         metadata = {}
         source = ("alpha beta gamma " * 1200) + "tail-marker"
         summary = m.summarize_text(
-            "music_plan.org chunk 3",
+            "sample-large-note.org chunk 3",
             source,
             "Summarize this chunk.",
             route=m.MODEL_ROUTE_INDEX_CHUNK,
@@ -2810,7 +2835,7 @@ def test_summary_context_overflow_retries_with_smaller_prompt(m):
         m.quiet_model = flaky_quiet_model
         metadata = {}
         summary = m.summarize_text(
-            "music_plan.org chunk 3",
+            "sample-large-note.org chunk 3",
             "delta " * 1000,
             "Summarize this chunk.",
             route=m.MODEL_ROUTE_INDEX_CHUNK,
@@ -2846,7 +2871,7 @@ def test_local_model_catalog_unix_socket_route(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "chat": {
@@ -2897,11 +2922,11 @@ def test_local_model_catalog_task_routes(m):
         os.environ.pop("MOTOKO_MODEL", None)
         with isolated_state():
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen35-2b-worker": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen35-2b-worker.sock",
                         "modelId": "qwen3.5-2b-q4-k-m",
                         "tasks": ["index_chunk", "index_label", "memory_maintenance"],
                         "cache": {
@@ -2912,26 +2937,26 @@ def test_local_model_catalog_task_routes(m):
                             "metrics": True,
                             "persistentSlotCache": False,
                         },
-                        "metrics_endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
+                        "metrics_endpoint": "unix:///run/motoko-llm/work/qwen35-2b-worker.sock",
                         "metrics_path": "/metrics",
                     },
                     "ministral-3b-worker": {
-                        "endpoint": "unix:///run/motoko-llm/mares/ministral-3b-worker.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/ministral-3b-worker.sock",
                         "modelId": "ministral-3-3b-instruct-2512-q4-k-m",
                         "tasks": ["index_chunk", "index_label", "index_file"],
                     },
                     "qwen3-4b-instruct-worker": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen3-4b-instruct-worker.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen3-4b-instruct-worker.sock",
                         "modelId": "qwen3-4b-instruct-2507-q4-k-m",
                         "tasks": ["index_file", "index_corpus", "audit"],
                     },
                     "qwen35-9b-worker": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen35-9b-worker.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen35-9b-worker.sock",
                         "modelId": "qwen3.5-9b-q4-k-m",
                         "tasks": ["index_corpus", "synthesis", "audit"],
                     },
                     "qwen36-chat-default": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-default.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat-default.sock",
                         "modelId": "qwen3.6-27b-ud-q4-k-xl",
                         "tasks": ["chat", "default_chat", "deep_synthesis"],
                         "route_profile": "default",
@@ -2966,7 +2991,7 @@ def test_local_model_catalog_task_routes(m):
             assert "index_chunk: qwen3.5-2b-q4-k-m" in text
             assert "catalog=qwen35-2b-worker" in text
             assert "prompt-cache=on" in text
-            assert "metrics-endpoint=unix:///run/motoko-llm/mares/qwen35-2b-worker.sock path=/metrics" in text
+            assert "metrics-endpoint=unix:///run/motoko-llm/work/qwen35-2b-worker.sock path=/metrics" in text
     finally:
         if old_endpoint is None:
             os.environ.pop("MOTOKO_ENDPOINT", None)
@@ -2986,7 +3011,7 @@ def test_slot_cache_capability_respects_route_gates(m):
         os.environ.pop("MOTOKO_MODEL", None)
         with isolated_state() as tmp:
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat-default": {
@@ -3048,7 +3073,7 @@ def test_persistent_slot_cache_saves_and_restores_chat_slot(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat-default": {
@@ -3395,7 +3420,7 @@ def test_slot_cache_failures_are_nonfatal_cache_misses(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat-default": {
@@ -3494,7 +3519,7 @@ def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
                 "cache_measurement": {"supported": True},
             }
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat": {
@@ -3573,7 +3598,7 @@ def test_catalog_request_policy_shapes_chat_payload_and_telemetry(m):
 def test_conversation_reasoning_command_controls_qwen38_presets(m):
     with isolated_state():
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen38-chat-default": {
@@ -3745,7 +3770,7 @@ def test_conversation_model_command_selects_named_models(m):
                     },
                 }
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": routes,
             }
@@ -3823,7 +3848,7 @@ def test_prepare_chat_messages_compacts_at_catalog_quality_budget(m):
         os.environ.pop(m.CHAT_CONTEXT_MODE_ENV, None)
         with isolated_state():
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen38-chat-default": {
@@ -3899,11 +3924,11 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
         os.environ.pop("MOTOKO_MODEL", None)
         with isolated_state():
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat-default": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-default.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat-default.sock",
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "default_chat", "deep_synthesis"],
                         "route_profile": "default",
@@ -3913,7 +3938,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "selection": {"default": True, "priority": 100},
                     },
                     "qwen36-chat-quality": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-quality.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat-quality.sock",
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "quality_chat", "short_context_chat", "deep_synthesis"],
                         "route_profile": "quality",
@@ -3923,7 +3948,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "selection": {"priority": 80},
                     },
                     "qwen36-chat-deep": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-deep.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat-deep.sock",
                         "modelId": "qwen3.6-27b-ud-q4-k-xl",
                         "tasks": ["chat", "long_context_chat", "deep_synthesis"],
                         "route_profile": "deep",
@@ -3933,7 +3958,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "selection": {"priority": 70},
                     },
                     "qwen36-chat-max": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-max.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat-max.sock",
                         "modelId": "qwen3.6-27b-ud-q4-k-xl",
                         "tasks": ["chat", "max_context_chat", "deep_synthesis"],
                         "route_profile": "max",
@@ -3943,7 +3968,7 @@ def test_chat_context_governor_selects_declared_route_profiles(m):
                         "selection": {"priority": 30},
                     },
                     "legacy-max-task-route": {
-                        "endpoint": "unix:///run/motoko-llm/mares/legacy-max-task-route.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/legacy-max-task-route.sock",
                         "modelId": "legacy-q4",
                         "tasks": ["chat", "max_context_chat"],
                         "context_tokens": 196608,
@@ -4010,11 +4035,11 @@ def test_chat_context_governor_falls_back_without_max_profile(m):
         os.environ.pop("MOTOKO_MODEL", None)
         with isolated_state():
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat.sock",
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "deep_synthesis"],
                         "args": ["--ctx-size", "131072"],
@@ -4047,11 +4072,11 @@ def test_route_kv_offload_notice_detects_catalog_flag(m):
         os.environ.pop("MOTOKO_MODEL", None)
         with isolated_state():
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat-max": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat-max.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat-max.sock",
                         "modelId": "qwen3.6-27b-ud-q4-k-xl",
                         "tasks": ["chat", "max_context_chat", "deep_synthesis"],
                         "route_profile": "max",
@@ -4137,7 +4162,7 @@ def test_embedding_route_fails_fast_when_model_file_missing(m):
         with isolated_state() as tmp:
             missing = tmp / "missing-embedding.gguf"
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -4194,7 +4219,7 @@ def test_local_model_status_diagnostic_uses_catalog_route_without_hashing(m):
             if command == "status":
                 return "\n".join(
                     [
-                        "realm=mares",
+                        "realm=work",
                         "route=qwen35-9b-worker",
                         "socket=active",
                         "proxy=activating",
@@ -4224,7 +4249,7 @@ def test_worker_route_releases_idle_large_chat_route(m):
         socket_dir = tmp / "sockets"
         socket_dir.mkdir()
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen36-chat-default": {
@@ -4275,7 +4300,7 @@ def test_worker_route_defers_when_large_chat_route_is_busy(m):
         socket_dir = tmp / "sockets"
         socket_dir.mkdir()
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen36-chat-default": {
@@ -4326,7 +4351,7 @@ def test_worker_route_waits_for_recent_large_chat_grace(m):
     with isolated_state() as tmp:
         socket_dir = tmp / "sockets"
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen36-chat-default": {
@@ -4394,7 +4419,7 @@ def test_worker_route_releases_idle_declared_exclusive_lane_peer(m):
         socket_dir = tmp / "sockets"
         socket_dir.mkdir()
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "worker-a": {
@@ -4443,7 +4468,7 @@ def test_worker_route_defers_when_declared_exclusive_lane_peer_is_busy(m):
         socket_dir = tmp / "sockets"
         socket_dir.mkdir()
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "worker-a": {
@@ -4492,7 +4517,7 @@ def test_chat_route_releases_idle_worker_routes(m):
     with isolated_state() as tmp:
         socket_dir = tmp / "sockets"
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen36-chat-default": {
@@ -4542,7 +4567,7 @@ def test_chat_route_releases_idle_large_chat_peer(m):
     with isolated_state() as tmp:
         socket_dir = tmp / "sockets"
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen36-chat-default": {
@@ -4595,7 +4620,7 @@ def test_chat_route_defers_when_large_chat_peer_is_busy(m):
     with isolated_state() as tmp:
         socket_dir = tmp / "sockets"
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "qwen36-chat-default": {
@@ -4710,7 +4735,7 @@ def test_open_model_response_direct_calls_prepare_residency(m):
             route_info = {
                 "route": "embedding",
                 "catalog_route": "qwen3-embedding-0b6",
-                "endpoint": "unix:///run/motoko-llm/mares/qwen3-embedding-0b6.sock",
+                "endpoint": "unix:///run/motoko-llm/work/qwen3-embedding-0b6.sock",
                 "model": "qwen3-embedding-0.6b-q8-0",
             }
             with m.open_model_response(route_info, {"model": "x"}, timeout=1) as resp:
@@ -4734,11 +4759,11 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
         os.environ.pop("MOTOKO_MODEL", None)
         with isolated_state():
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen36-chat": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen36-chat.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen36-chat.sock",
                         "modelId": "qwen3.6-27b-mtp-ud-q5-k-xl",
                         "tasks": ["chat", "deep_synthesis"],
                         "maxParallel": 1,
@@ -4746,12 +4771,12 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                             "prompt": True,
                             "persistentSlotCache": True,
                             "slotsEndpoint": True,
-                            "slotSavePath": "/var/lib/motoko-llm-slots-mares-qwen36-chat",
+                            "slotSavePath": "/var/lib/motoko-llm-slots-work-qwen36-chat",
                             "slotCacheMaxMiB": 32768,
                         },
                     },
                     "qwen35-2b-worker": {
-                        "endpoint": "unix:///run/motoko-llm/mares/qwen35-2b-worker.sock",
+                        "endpoint": "unix:///run/motoko-llm/work/qwen35-2b-worker.sock",
                         "modelId": "qwen3.5-2b-q4-k-m",
                         "tasks": ["index_chunk", "memory_maintenance"],
                         "maxParallel": 8,
@@ -4770,7 +4795,7 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                     backend = "inactive" if calls and calls[-2:] == [("stop", route), ("status", route)] else "active"
                     return "\n".join(
                         [
-                            "realm=mares",
+                            "realm=work",
                             f"route={route}",
                             "socket=active",
                             "proxy=active",
@@ -4785,7 +4810,7 @@ def test_model_service_status_and_stop_use_motoko_model_helper(m):
                 if command == "slot-cache-status":
                     return "\n".join(
                         [
-                            "realm=mares",
+                            "realm=work",
                             f"route={route}",
                             "persistent_slot_cache=1",
                             "slot_cache_total_bytes=1400",
@@ -4927,7 +4952,7 @@ def test_summary_reductions_fan_out_across_worker_routes(m):
 
 def test_sources_fallback_lists_attached_topic_context(m):
     with isolated_state():
-        topic_path = pathlib.Path.cwd() / "logbook.org"
+        topic_path = pathlib.Path.cwd() / "sample-journal.org"
         topic = {
             "id": "topic-test",
             "name": "Yesterday Tasks",
@@ -4974,7 +4999,7 @@ def test_answer_grounding_audit_sources(m):
         {
             "kind": "chunk",
             "index": "idx",
-            "path": "/tmp/logbook.org",
+            "path": "/tmp/sample-journal.org",
             "chunk": 1,
             "lexical_score": 25,
         },
@@ -4987,7 +5012,7 @@ def test_answer_grounding_audit_sources(m):
         },
     ]
     audited = m.sources_with_answer_audit(
-        "summarize today according to logbook.org",
+        "summarize today according to sample-journal.org",
         "The logbook says the retrieval audit passed.",
         sources,
     )
@@ -4999,14 +5024,14 @@ def test_answer_grounding_audit_sources(m):
     assert audit["weak_nominal_strong_sources"] == 0
     text = m.format_sources(audited)
     assert "answer audit" in text
-    assert "paths: /tmp/logbook.org" in text
+    assert "paths: /tmp/sample-journal.org" in text
 
-    thin = m.answer_grounding_audit("summarize according to logbook.org", "No documents are attached.", [])
+    thin = m.answer_grounding_audit("summarize according to sample-journal.org", "No documents are attached.", [])
     assert thin["status"] == "fail"
     assert "attach or study" in thin["recommended_action"]
 
     weak = m.answer_grounding_audit(
-        "summarize according to logbook.org",
+        "summarize according to sample-journal.org",
         "Weak answer.",
         [{"kind": "chunk", "path": "/tmp/other.org", "chunk": 1, "lexical_score": 0}],
     )
@@ -5294,17 +5319,17 @@ def test_core_retrieval_reports_are_injectable(m):
                     "chunk_source_count": 0,
                     "answer_audit_status": "fail",
                     "selected_paths": [],
-                    "missing_paths": ["logbook.org"],
+                    "missing_paths": ["sample-journal.org"],
                 }
             ],
         }
     )
     debug_text = m.format_retrieval_debug_report_core(
         {
-            "query": "logbook.org",
+            "query": "sample-journal.org",
             "id": "debug-1",
             "query_terms": ["logbook"],
-            "path_mentions": ["logbook.org"],
+            "path_mentions": ["sample-journal.org"],
             "indexes": [
                 {
                     "id": "idx",
@@ -5313,18 +5338,18 @@ def test_core_retrieval_reports_are_injectable(m):
                     "chunks_considered": 1,
                     "production_retrieval": "hybrid",
                     "diagnosis": ["recall ok"],
-                    "files": [{"total": 10, "path": "/tmp/logbook.org", "matched_terms": ["logbook"]}],
-                    "chunks": [{"total": 9, "path": "/tmp/logbook.org", "chunk": 1, "summary": "Recent notes"}],
+                    "files": [{"total": 10, "path": "/tmp/sample-journal.org", "matched_terms": ["logbook"]}],
+                    "chunks": [{"total": 9, "path": "/tmp/sample-journal.org", "chunk": 1, "summary": "Recent notes"}],
                     "vector_store": {"id": "vec", "method": "embedding-v1", "rerank": True, "rerank_fallback": False},
-                    "vector_chunks": [{"score": 1.2, "vector_score": 0.9, "path": "/tmp/logbook.org", "chunk": 1}],
+                    "vector_chunks": [{"score": 1.2, "vector_score": 0.9, "path": "/tmp/sample-journal.org", "chunk": 1}],
                 }
             ],
         }
     )
 
     assert "retrieval eval: fail (0/1)" in eval_text
-    assert "missing paths logbook.org" in eval_text
-    assert "retrieval debug: logbook.org" in debug_text
+    assert "missing paths sample-journal.org" in eval_text
+    assert "retrieval debug: sample-journal.org" in debug_text
     assert "diagnosis: recall ok" in debug_text
     assert "vector store: vec method=embedding-v1 rerank=True fallback=False" in debug_text
 
@@ -5333,11 +5358,11 @@ def test_named_file_query_boosts_matching_path(m):
     with isolated_state():
         index = {
             "id": "idx",
-            "name": "orgfiles",
-            "root": "/tmp/orgfiles",
+            "name": "sample_notes",
+            "root": "/tmp/sample_notes",
             "files": [
                 {
-                    "path": "/tmp/orgfiles/organization/plan.org",
+                    "path": "/tmp/sample_notes/organization/plan.org",
                     "summary": "High priority TODO planning notes with many active tasks.",
                     "signals": {"active_task_count": 10, "priorities": {"A": 2}},
                     "chunks": [
@@ -5349,7 +5374,7 @@ def test_named_file_query_boosts_matching_path(m):
                     ],
                 },
                 {
-                    "path": "/tmp/orgfiles/logbook.org",
+                    "path": "/tmp/sample_notes/sample-journal.org",
                     "summary": "Daily logbook entries for yesterday and today.",
                     "signals": {},
                     "chunks": [
@@ -5362,24 +5387,24 @@ def test_named_file_query_boosts_matching_path(m):
                 },
             ],
         }
-        rows = m.ranked_index_chunks(index, "summarize yesterday and today according to logbook.org")
-        assert rows[0][1]["path"].endswith("/logbook.org")
-        text, sources = m.retrieve_from_index(index, "summarize yesterday and today according to logbook.org")
-        assert "/tmp/orgfiles/logbook.org" in text
-        assert any(source.get("path", "").endswith("/logbook.org") for source in sources)
+        rows = m.ranked_index_chunks(index, "summarize yesterday and today according to sample-journal.org")
+        assert rows[0][1]["path"].endswith("/sample-journal.org")
+        text, sources = m.retrieve_from_index(index, "summarize yesterday and today according to sample-journal.org")
+        assert "/tmp/sample_notes/sample-journal.org" in text
+        assert any(source.get("path", "").endswith("/sample-journal.org") for source in sources)
 
 
 def test_retrieval_debug_explains_scores(m):
     with isolated_state():
         index = {
             "id": "debug-index",
-            "name": "orgfiles",
-            "root": "/tmp/orgfiles",
+            "name": "sample_notes",
+            "root": "/tmp/sample_notes",
             "created": "2026-05-21T00:00:00+00:00",
             "corpus_summary": "Daily logbook and planning notes.",
             "files": [
                 {
-                    "path": "/tmp/orgfiles/notes.org",
+                    "path": "/tmp/sample_notes/notes.org",
                     "summary": "General planning notes with many unrelated TODOs.",
                     "signals": {"active_task_count": 8, "priorities": {"A": 1}},
                     "chunks": [
@@ -5392,7 +5417,7 @@ def test_retrieval_debug_explains_scores(m):
                     ],
                 },
                 {
-                    "path": "/tmp/orgfiles/logbook.org",
+                    "path": "/tmp/sample_notes/sample-journal.org",
                     "summary": "Daily logbook entries for yesterday and today.",
                     "signals": {},
                     "chunks": [
@@ -5408,15 +5433,15 @@ def test_retrieval_debug_explains_scores(m):
         }
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         report = m.run_retrieval_debug(
-            "summarize yesterday and today according to logbook.org",
+            "summarize yesterday and today according to sample-journal.org",
             index_ids=[index["id"]],
             limit=4,
         )
         rows = report["indexes"][0]["chunks"]
-        assert rows[0]["path"].endswith("/logbook.org")
+        assert rows[0]["path"].endswith("/sample-journal.org")
         assert rows[0]["path_boost"] >= 2000
         production_sources = report["indexes"][0]["production_sources"]
-        assert any(row["kind"] == "chunk" and row["path"].endswith("/logbook.org") for row in production_sources)
+        assert any(row["kind"] == "chunk" and row["path"].endswith("/sample-journal.org") for row in production_sources)
         assert report["indexes"][0]["production_diagnostics"]["schema"] == "retrieval-service-v1"
         assert report["indexes"][0]["production_diagnostics"]["source_count"] >= len(production_sources)
         text = m.format_retrieval_debug_report(report)
@@ -5506,7 +5531,7 @@ def test_retrieval_service_result_includes_debug_index_shape(m):
                 "created": "2026-05-30T00:00:00+00:00",
                 "files": [
                     {
-                        "path": "/tmp/docs/tasks.org",
+                        "path": "/tmp/docs/sample-planning.org",
                         "summary": "Alpha planning tasks.",
                         "chunks": [
                             {
@@ -5526,7 +5551,7 @@ def test_retrieval_service_result_includes_debug_index_shape(m):
             assert debug_index["files_considered"] == 1
             assert debug_index["chunks_considered"] == 1
             assert debug_index["production_sources"] == result.source_summary(limit=50)
-            assert debug_index["chunks"][0]["path"].endswith("tasks.org")
+            assert debug_index["chunks"][0]["path"].endswith("sample-planning.org")
             assert debug_index["production_diagnostics"]["schema"] == "retrieval-service-v1"
     finally:
         if old_evidence is None:
@@ -5541,7 +5566,7 @@ def test_retrieval_service_result_includes_debug_index_shape(m):
 
 def test_named_logbook_recent_query_uses_latest_org_sections(m):
     with isolated_state() as tmp:
-        docs = tmp / "orgfiles"
+        docs = tmp / "sample_notes"
         docs.mkdir()
         old_body = "Old setup note.\n" + ("older filler line\n" * 3600)
         recent_body = (
@@ -5557,11 +5582,11 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
             "Confirmed the last day should be selected from the tail.\n"
         )
         content = f"* [2026-04-09 Thu 12:39]\n** do\n{old_body}\n{recent_body}"
-        path = docs / "logbook.org"
+        path = docs / "sample-journal.org"
         path.write_text(content, encoding="utf-8")
         index = {
             "id": "recent-logbook-index",
-            "name": "orgfiles",
+            "name": "sample_notes",
             "root": str(docs),
             "created": "2026-05-21T10:00:00+00:00",
             "files": [
@@ -5581,7 +5606,7 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
                 }
             ],
         }
-        query = "summarize the last two days present in logbook.org"
+        query = "summarize the last two days present in sample-journal.org"
         selection = m.query_aware_content_selection(query, content, 1200, use_models=True)
         excerpt = selection["excerpt"]
         assert "2026-05-18" in excerpt
@@ -5606,7 +5631,7 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
         assert plan_source["handlers"] == ["builtin:org_temporal_latest_entries"]
         assert plan_source["temporal"]["requested_count"] == 2
         chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
-        assert chunk_sources and chunk_sources[0]["path"].endswith("logbook.org")
+        assert chunk_sources and chunk_sources[0]["path"].endswith("sample-journal.org")
         assert chunk_sources[0]["temporal_selected_dates"] == ["2026-05-19", "2026-05-18"]
         assert "selected newest dates present in source: 2026-05-19, 2026-05-18" in m.format_sources(sources)
         assert "retrieval plan" in m.format_sources(sources)
@@ -5620,7 +5645,7 @@ def test_org_structural_tag_query_uses_skill_and_inherited_tags(m):
         os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "1"
         os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
         with isolated_state() as tmp:
-            docs = tmp / "orgfiles"
+            docs = tmp / "sample_notes"
             docs.mkdir()
             path = docs / "todo.org"
             content = "\n".join(
@@ -5638,7 +5663,7 @@ def test_org_structural_tag_query_uses_skill_and_inherited_tags(m):
             path.write_text(content, encoding="utf-8")
             index = {
                 "id": "org-structural-index",
-                "name": "orgfiles",
+                "name": "sample_notes",
                 "root": str(docs),
                 "created": "2026-05-31T00:00:00+00:00",
                 "files": [
@@ -5781,9 +5806,9 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
         os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
         m.MAX_RETRIEVAL_CHARS = 1200
         with isolated_state() as tmp:
-            docs = tmp / "orgfiles"
+            docs = tmp / "sample_notes"
             docs.mkdir()
-            path = docs / "logbook.org"
+            path = docs / "sample-journal.org"
             older = (
                 "* [2026-05-18 Mon 11:14]\n"
                 "** log\n"
@@ -5807,7 +5832,7 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
             path.write_text(content, encoding="utf-8")
             index = {
                 "id": "nonconsecutive-logbook-index",
-                "name": "orgfiles",
+                "name": "sample_notes",
                 "root": str(docs),
                 "created": "2026-05-24T00:00:00+00:00",
                 "files": [
@@ -5828,7 +5853,7 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
                 ],
             }
 
-            text, sources = m.retrieve_from_index(index, "summarize the last two days present in logbook.org")
+            text, sources = m.retrieve_from_index(index, "summarize the last two days present in sample-journal.org")
             assert "May23 latest action" in text
             assert "May19 second-latest action" in text
             assert "May18 older action" not in text
@@ -5842,7 +5867,7 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
             assert chunks[0]["temporal_selected_dates"] == ["2026-05-23", "2026-05-19"]
             production_sources = m.summarize_retrieval_sources(sources, limit=3)
             assert production_sources[0]["kind"] == "index"
-            assert any(row["kind"] == "chunk" and row["path"].endswith("logbook.org") for row in production_sources)
+            assert any(row["kind"] == "chunk" and row["path"].endswith("sample-journal.org") for row in production_sources)
     finally:
         m.MAX_RETRIEVAL_CHARS = old_max_retrieval_chars
         if old_evidence is None:
@@ -5862,10 +5887,10 @@ def test_named_temporal_query_ignores_other_dated_org_files(m):
         os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
         os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
         with isolated_state() as tmp:
-            docs = tmp / "orgfiles"
+            docs = tmp / "sample_notes"
             docs.mkdir()
-            logbook = docs / "logbook.org"
-            pluslife = docs / "pluslife.org"
+            logbook = docs / "sample-journal.org"
+            other_dates = docs / "sample-other-dates.org"
             logbook_content = (
                 "* [2026-05-18 Mon 11:14]\n"
                 "** log\n"
@@ -5877,16 +5902,16 @@ def test_named_temporal_query_ignores_other_dated_org_files(m):
                 "** log\n"
                 "May23 logbook latest action.\n"
             )
-            pluslife_content = (
+            other_dates_content = (
                 "* [2026-05-24 Sun 09:00]\n"
                 "** log\n"
-                "May24 pluslife distractor should not satisfy a logbook.org query.\n"
+                "May24 unrelated distractor should not satisfy a sample-journal.org query.\n"
             )
             logbook.write_text(logbook_content, encoding="utf-8")
-            pluslife.write_text(pluslife_content, encoding="utf-8")
+            other_dates.write_text(other_dates_content, encoding="utf-8")
             index = {
                 "id": "named-temporal-index",
-                "name": "orgfiles",
+                "name": "sample_notes",
                 "root": str(docs),
                 "created": "2026-05-24T00:00:00+00:00",
                 "files": [
@@ -5905,31 +5930,31 @@ def test_named_temporal_query_ignores_other_dated_org_files(m):
                         ],
                     },
                     {
-                        "path": str(pluslife),
-                        "source_fingerprint": m.source_fingerprint(pluslife),
+                        "path": str(other_dates),
+                        "source_fingerprint": m.source_fingerprint(other_dates),
                         "summary": "Other Org notes with dates.",
                         "chunks": [
                             {
                                 "chunk": 1,
                                 "summary": "Pluslife material.",
-                                "content": pluslife_content,
-                                "content_sha256": m.sha256_hex(pluslife_content.encode("utf-8")),
-                                "content_bytes": len(pluslife_content.encode("utf-8")),
+                                "content": other_dates_content,
+                                "content_sha256": m.sha256_hex(other_dates_content.encode("utf-8")),
+                                "content_bytes": len(other_dates_content.encode("utf-8")),
                             }
                         ],
                     },
                 ],
             }
 
-            text, sources = m.retrieve_from_index(index, "summarize the last three days present in logbook.org")
+            text, sources = m.retrieve_from_index(index, "summarize the last three days present in sample-journal.org")
             assert "May23 logbook latest action" in text
             assert "May19 logbook second-latest action" in text
             assert "May18 logbook third-latest action" in text
-            assert "pluslife distractor" not in text
+            assert "unrelated distractor" not in text
             index_source = next(source for source in sources if source.get("kind") == "index")
             assert index_source["temporal_selected_dates"] == ["2026-05-23", "2026-05-19", "2026-05-18"]
             chunks = [source for source in sources if source.get("kind") == "chunk"]
-            assert chunks and all(source["path"].endswith("logbook.org") for source in chunks)
+            assert chunks and all(source["path"].endswith("sample-journal.org") for source in chunks)
     finally:
         if old_evidence is None:
             os.environ.pop("MOTOKO_EVIDENCE_RETRIEVAL", None)
@@ -5943,14 +5968,14 @@ def test_named_temporal_query_ignores_other_dated_org_files(m):
 
 def test_live_index_retrieval_uses_service_boundary(m):
     with isolated_state() as tmp:
-        docs = tmp / "orgfiles"
+        docs = tmp / "sample_notes"
         docs.mkdir()
-        path = docs / "logbook.org"
+        path = docs / "sample-journal.org"
         content = "* [2026-05-23 Sat 00:36]\n** log\nRetrieval boundary smoke test.\n"
         path.write_text(content, encoding="utf-8")
         index = {
             "id": "service-boundary-index",
-            "name": "orgfiles",
+            "name": "sample_notes",
             "root": str(docs),
             "created": "2026-05-24T00:00:00+00:00",
             "files": [
@@ -5970,7 +5995,7 @@ def test_live_index_retrieval_uses_service_boundary(m):
                 }
             ],
         }
-        text, sources = m.retrieve_from_index(index, "logbook.org retrieval boundary")
+        text, sources = m.retrieve_from_index(index, "sample-journal.org retrieval boundary")
         index_source = next(source for source in sources if source.get("kind") == "index")
         assert index_source["retrieval_service_schema"] == "retrieval-service-v1"
         assert "Retrieval boundary smoke test" in text
@@ -5983,7 +6008,7 @@ def test_render_context_with_sources_uses_live_retrieval_service(m):
         os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
         os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
         with isolated_state() as tmp:
-            docs = tmp / "orgfiles"
+            docs = tmp / "sample_notes"
             docs.mkdir()
             (docs / "notes.org").write_text("* Alpha\nRetrieval service attached context.\n", encoding="utf-8")
             m.add_allowed_dir(str(docs))
@@ -6020,13 +6045,13 @@ def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
         os.environ["MOTOKO_EVIDENCE_RETRIEVAL"] = "0"
         os.environ["MOTOKO_VECTOR_RETRIEVAL"] = "0"
         with isolated_state() as tmp:
-            docs = tmp / "orgfiles"
+            docs = tmp / "sample_notes"
             docs.mkdir()
-            path = docs / "logbook.org"
+            path = docs / "sample-journal.org"
             old_content = (
                 "* [2026-04-09 Thu 12:39]\n"
                 "** log\n"
-                "Older logbook material repeats logbook.org latest days many times.\n"
+                "Older logbook material repeats sample-journal.org latest days many times.\n"
             )
             recent_content = (
                 "* [2026-05-18 Mon 11:14]\n"
@@ -6043,7 +6068,7 @@ def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
             path.write_text(old_content + "\n" + recent_content, encoding="utf-8")
             index = {
                 "id": "temporal-index",
-                "name": "orgfiles",
+                "name": "sample_notes",
                 "root": str(docs),
                 "created": "2026-05-24T00:00:00+00:00",
                 "files": [
@@ -6071,7 +6096,7 @@ def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
                 ],
             }
 
-            text, sources = m.retrieve_from_index(index, "summarize the last two days present in logbook.org")
+            text, sources = m.retrieve_from_index(index, "summarize the last two days present in sample-journal.org")
             assert "2026-05-18" in text
             assert "2026-05-19" in text
             assert "2026-04-09" not in text
@@ -6092,9 +6117,9 @@ def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
 
 def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
     with isolated_state() as tmp:
-        docs = tmp / "orgfiles"
+        docs = tmp / "sample_notes"
         docs.mkdir()
-        path = docs / "logbook.org"
+        path = docs / "sample-journal.org"
         content = (
             "* [2026-05-18 Mon 11:14]\n"
             "** do\n"
@@ -6110,7 +6135,7 @@ def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
         path.write_text(content, encoding="utf-8")
         index = {
             "id": "evidence-index",
-            "name": "orgfiles",
+            "name": "sample_notes",
             "root": str(docs),
             "created": "2026-05-21T10:00:00+00:00",
             "files": [
@@ -6136,12 +6161,12 @@ def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
         kinds = {row.get("kind") for row in store["rows"]}
         assert "org_day" in kinds
         assert "org_task" in kinds
-        report = m.query_evidence_store(store, "repaste Personal LLM Architecture logbook.org")
+        report = m.query_evidence_store(store, "repaste Personal LLM Architecture sample-journal.org")
         assert report["rows"]
-        assert report["rows"][0]["path"].endswith("logbook.org")
+        assert report["rows"][0]["path"].endswith("sample-journal.org")
         assert "Personal LLM Architecture" in report["rows"][0]["text"]
 
-        text, sources = m.retrieve_from_index(index, "repaste Personal LLM Architecture logbook.org")
+        text, sources = m.retrieve_from_index(index, "repaste Personal LLM Architecture sample-journal.org")
         assert "Personal LLM Architecture" in text
         assert "repaste" in text.lower()
         chunk_sources = [source for source in sources if source.get("kind") == "chunk"]
@@ -6151,7 +6176,7 @@ def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
         assert chunk_sources[0].get("evidence_id")
         assert "evidence" in m.format_retrieval_debug_report(
             m.run_retrieval_debug(
-                "repaste Personal LLM Architecture logbook.org",
+                "repaste Personal LLM Architecture sample-journal.org",
                 index_ids=[index["id"]],
             )
         )
@@ -6187,7 +6212,7 @@ def test_span_selection_uses_embedding_and_rerank_routes(m):
             rerank_thread = threading.Thread(target=rerank_server.serve_forever, daemon=True)
             rerank_thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -6293,8 +6318,8 @@ def test_span_selection_uses_embedding_and_rerank_routes(m):
 
 
 def test_study_focus_recent_is_parsed_and_bounded(m):
-    query, focus = m.parse_study_directive("summarize yesterday and today according to logbook.org --focus recent")
-    assert query == "summarize yesterday and today according to logbook.org"
+    query, focus = m.parse_study_directive("summarize yesterday and today according to sample-journal.org --focus recent")
+    assert query == "summarize yesterday and today according to sample-journal.org"
     assert focus == "recent"
     assert "--focus" not in m.study_retrieval_query(query, focus)
     assert "yesterday" in m.study_retrieval_query(query, focus)
@@ -6657,16 +6682,16 @@ def test_cwd_learning_plan_and_existing_index(m):
 def test_unfinished_work_notice_can_scope_to_current_directory(m):
     with isolated_state() as tmp:
         motoko_repo = tmp / "motoko"
-        orgfiles_repo = tmp / "orgfiles"
+        sample_notes_repo = tmp / "sample_notes"
         motoko_repo.mkdir()
-        orgfiles_repo.mkdir()
+        sample_notes_repo.mkdir()
         partial = {
-            "id": "orgfiles-partial",
-            "name": "orgfiles",
-            "root": str(orgfiles_repo.resolve()),
+            "id": "sample_notes-partial",
+            "name": "sample_notes",
+            "root": str(sample_notes_repo.resolve()),
             "glob": m.AUTO_INDEX_GLOB,
             "created": "2026-06-30T00:00:00+00:00",
-            "files": [{"path": str(orgfiles_repo / "logbook.org")}],
+            "files": [{"path": str(sample_notes_repo / "sample-journal.org")}],
             "completed_files": 1,
             "total_files": 2,
         }
@@ -6674,12 +6699,12 @@ def test_unfinished_work_notice_can_scope_to_current_directory(m):
 
         global_notice = m.unfinished_work_notice()
         scoped_motoko_notice = m.unfinished_work_notice(root=motoko_repo)
-        scoped_orgfiles_notice = m.unfinished_work_notice(root=orgfiles_repo)
+        scoped_sample_notes_notice = m.unfinished_work_notice(root=sample_notes_repo)
 
-        assert "orgfiles-partial" in global_notice
+        assert "sample_notes-partial" in global_notice
         assert scoped_motoko_notice == ""
-        assert "orgfiles-partial" in scoped_orgfiles_notice
-        assert str(orgfiles_repo.resolve()) in scoped_orgfiles_notice
+        assert "sample_notes-partial" in scoped_sample_notes_notice
+        assert str(sample_notes_repo.resolve()) in scoped_sample_notes_notice
 
 
 def test_tui_startup_hides_unfinished_work_from_other_project_roots(m):
@@ -6689,17 +6714,17 @@ def test_tui_startup_hides_unfinished_work_from_other_project_roots(m):
         os.environ["MOTOKO_CWD_LEARN"] = "0"
         with isolated_state() as tmp:
             motoko_repo = tmp / "motoko"
-            orgfiles_repo = tmp / "orgfiles"
+            sample_notes_repo = tmp / "sample_notes"
             motoko_repo.mkdir()
-            orgfiles_repo.mkdir()
+            sample_notes_repo.mkdir()
             m.write_partial_index(
                 {
-                    "id": "orgfiles-partial",
-                    "name": "orgfiles",
-                    "root": str(orgfiles_repo.resolve()),
+                    "id": "sample_notes-partial",
+                    "name": "sample_notes",
+                    "root": str(sample_notes_repo.resolve()),
                     "glob": m.AUTO_INDEX_GLOB,
                     "created": "2026-06-30T00:00:00+00:00",
-                    "files": [{"path": str(orgfiles_repo / "logbook.org")}],
+                    "files": [{"path": str(sample_notes_repo / "sample-journal.org")}],
                     "completed_files": 1,
                     "total_files": 2,
                 },
@@ -6711,8 +6736,8 @@ def test_tui_startup_hides_unfinished_work_from_other_project_roots(m):
             startup_text = "\n".join(row.get("content", "") for row in ui.messages)
 
             assert "Unfinished Motoko work" not in startup_text
-            assert "orgfiles-partial" not in startup_text
-            assert str(orgfiles_repo.resolve()) not in startup_text
+            assert "sample_notes-partial" not in startup_text
+            assert str(sample_notes_repo.resolve()) not in startup_text
     finally:
         os.chdir(old_cwd)
         if old_cwd_learn is None:
@@ -6790,7 +6815,7 @@ def test_identity_config(m):
 
 def test_context_package_builds_sources_and_plan(m):
     lanes = m.build_prompt_context_lanes(
-        identity={"name": "Motoko", "realm": "mares", "description": "assistant"},
+        identity={"name": "Motoko", "realm": "work", "description": "assistant"},
         identity_text="Motoko realm",
         personality_text="Careful.",
         personality_file="/tmp/personality.md",
@@ -7758,7 +7783,7 @@ def test_core_memory_report_formatters_are_injectable(m):
     rows = [
         {
             "id": "mem-1",
-            "text": "Javier likes grounded retrieval.",
+            "text": "The user likes grounded retrieval.",
             "importance": 4,
             "pinned": True,
             "created": "2026-05-23T00:00:00+00:00",
@@ -7791,7 +7816,7 @@ def test_core_memory_context_renderer_is_injectable(m):
         [
             {
                 "id": "mem-1",
-                "text": "Javier likes grounded retrieval.",
+                "text": "The user likes grounded retrieval.",
                 "source": "test",
                 "conversation_id": "conv-1",
                 "created": "2026-05-23T00:00:00+00:00",
@@ -9071,7 +9096,7 @@ def test_response_feedback_is_private_and_does_not_pollute_conversation(m):
             {
                 "kind": "chunk",
                 "index": "idx",
-                "path": "/tmp/logbook.org",
+                "path": "/tmp/sample-journal.org",
                 "chunk": 1,
                 "retrieval": "hybrid",
                 "retrieval_methods": ["lexical", "vector"],
@@ -9103,14 +9128,14 @@ def test_feedback_eval_exports_private_retrieval_fixtures(m):
         conv = m.new_conversation("Feedback eval")
         conv["id"] = "feedback-eval-conv"
         conv["messages"] = [
-            {"role": "user", "content": "summarize logbook.org"},
+            {"role": "user", "content": "summarize sample-journal.org"},
             {"role": "assistant", "content": "A weak answer."},
         ]
         conv["last_sources"] = [
             {
                 "kind": "chunk",
                 "index": "idx",
-                "path": "/tmp/logbook.org",
+                "path": "/tmp/sample-journal.org",
                 "chunk": 1,
                 "evidence_id": "ev-abc",
                 "evidence_kind": "org_day",
@@ -9136,14 +9161,14 @@ def test_feedback_eval_exports_private_retrieval_fixtures(m):
 
 def test_retrieval_eval_replays_private_feedback_fixtures(m):
     with isolated_state() as tmp:
-        docs = tmp / "orgfiles"
+        docs = tmp / "sample_notes"
         docs.mkdir()
-        path = docs / "logbook.org"
+        path = docs / "sample-journal.org"
         content = "* [2026-05-23 Sat 00:36]\n** log\nFeedback replay source.\n"
         path.write_text(content, encoding="utf-8")
         index = {
             "id": "feedback-retrieval-index",
-            "name": "orgfiles",
+            "name": "sample_notes",
             "root": str(docs),
             "created": "2026-05-24T00:00:00+00:00",
             "files": [
@@ -9167,7 +9192,7 @@ def test_retrieval_eval_replays_private_feedback_fixtures(m):
         conv = m.new_conversation("Feedback replay")
         conv["id"] = "feedback-replay-conv"
         conv["messages"] = [
-            {"role": "user", "content": "summarize logbook.org feedback replay"},
+            {"role": "user", "content": "summarize sample-journal.org feedback replay"},
             {"role": "assistant", "content": "It mentions feedback replay."},
         ]
         conv["last_sources"] = [
@@ -9194,7 +9219,7 @@ def test_retrieval_eval_replays_private_feedback_fixtures(m):
 
 def test_retrieval_preview_shows_context_without_model_call(m):
     with isolated_state():
-        task_path = pathlib.Path.cwd() / "tasks.org"
+        task_path = pathlib.Path.cwd() / "sample-planning.org"
         conv = m.new_conversation("Preview")
         conv["context_items"] = [
             {
@@ -9495,7 +9520,7 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
         docs = tmp / "docs"
         docs.mkdir()
         content = "* TODO [#A] Finish vector readiness plan\nDEADLINE: <2026-05-22 Fri>\n"
-        (docs / "tasks.org").write_text(content, encoding="utf-8")
+        (docs / "sample-planning.org").write_text(content, encoding="utf-8")
         digest = m.sha256_hex(content.encode("utf-8"))
         index = {
             "id": "vector-index",
@@ -9506,8 +9531,8 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
             "corpus_summary": "Vector readiness test corpus.",
             "files": [
                 {
-                    "path": str(docs / "tasks.org"),
-                    "source_fingerprint": m.source_fingerprint(docs / "tasks.org"),
+                    "path": str(docs / "sample-planning.org"),
+                    "source_fingerprint": m.source_fingerprint(docs / "sample-planning.org"),
                     "summary": "Task file with current priorities.",
                     "chunks": [
                         {
@@ -9522,16 +9547,16 @@ def test_vector_plan_reports_storage_and_readiness_gates(m):
             ],
         }
         catalog = {
-            "realm": "mares",
+            "realm": "work",
             "manager": {"kind": "systemd-socket-worker"},
             "routes": {
                 "embed-worker": {
-                    "endpoint": "unix:///run/motoko-llm/mares/embed-worker.sock",
+                    "endpoint": "unix:///run/motoko-llm/work/embed-worker.sock",
                     "modelId": "embedding-test",
                     "tasks": ["embedding"],
                 },
                 "rerank-worker": {
-                    "endpoint": "unix:///run/motoko-llm/mares/rerank-worker.sock",
+                    "endpoint": "unix:///run/motoko-llm/work/rerank-worker.sock",
                     "modelId": "reranker-test",
                     "tasks": ["reranker"],
                 },
@@ -9596,14 +9621,14 @@ def test_vector_plan_core_builds_rows_and_readiness_gates(_m=None):
         storage_audit={"missing_duplicate_target_count": 0, "missing_stored_chunk_count": 0},
         embedding_routes=[{"route": "embed", "embedding_dimensions": 8, "endpoint_paths": ["/v1/embeddings"]}],
         reranker_routes=[{"route": "rerank", "endpoint_paths": ["/v1/rerank"]}],
-        realm="mares",
+        realm="work",
     )
     gate_status = {gate["name"]: gate["status"] for gate in gates}
 
     assert gate_status["retrieval_eval"] == "pass"
     assert gate_status["index_storage_audit"] == "pass"
     assert gate_status["embedding_route"] == "available"
-    assert "mares Motoko state" in gates[-1]["detail"]
+    assert "work Motoko state" in gates[-1]["detail"]
 
 
 def test_vector_query_core_scores_and_dedupes_rows(_m=None):
@@ -9612,7 +9637,7 @@ def test_vector_query_core_scores_and_dedupes_rows(_m=None):
     rows = [
         {
             "id": "weak-part",
-            "path": "/tmp/docs/tasks.org",
+            "path": "/tmp/docs/sample-planning.org",
             "chunk": "1",
             "summary": "Readiness notes.",
             "vector": lexical_sparse_vector_core("readiness notes", dims=16),
@@ -9621,7 +9646,7 @@ def test_vector_query_core_scores_and_dedupes_rows(_m=None):
         },
         {
             "id": "strong-part",
-            "path": "/tmp/docs/tasks.org",
+            "path": "/tmp/docs/sample-planning.org",
             "chunk": "1",
             "summary": "Finish the vector readiness deadline.",
             "vector": lexical_sparse_vector_core("finish vector readiness deadline", dims=16),
@@ -9640,7 +9665,7 @@ def test_vector_query_core_scores_and_dedupes_rows(_m=None):
     ranked = vector_query_rank_rows_core(rows, query, query_vector)
 
     assert ranked
-    assert ranked[0]["path"].endswith("tasks.org")
+    assert ranked[0]["path"].endswith("sample-planning.org")
     assert ranked[0]["row_id"] == "strong-part"
     assert ranked[0]["vector_hit_count"] == 2
     assert ranked[0]["lexical"] > 0
@@ -9649,7 +9674,7 @@ def test_vector_query_core_scores_and_dedupes_rows(_m=None):
 
 def test_embedding_vector_row_core_preserves_evidence_and_reuse_rules(_m=None):
     index = {"id": "idx"}
-    file_item = {"path": "/tmp/docs/tasks.org", "summary": "Task file summary."}
+    file_item = {"path": "/tmp/docs/sample-planning.org", "summary": "Task file summary."}
     chunk = {
         "chunk": 3,
         "content_sha256": "abc123",
@@ -9878,7 +9903,7 @@ def test_embedding_vector_progress_record_core_shapes_resume_checkpoint(_m=None)
         progress_schema="vector-progress-v1",
         method="embedding-v1",
         target_schema="vector-store-v2",
-        realm="mares",
+        realm="work",
         source_index={
             "id": "idx-1",
             "name": "docs",
@@ -9934,13 +9959,13 @@ def test_embedding_vector_store_record_core_shapes_provenance_and_reuse(_m=None)
         store_id="store-1",
         created="2026-06-01T00:00:00+00:00",
         schema="vector-store-v2",
-        realm="mares",
+        realm="work",
         method="embedding-v1",
         dims=2,
         vector_format="dense-json-normalized",
         production_embedding=True,
         route_info={
-            "endpoint": "unix:///run/motoko-llm/mares/embed.sock",
+            "endpoint": "unix:///run/motoko-llm/work/embed.sock",
             "request_path": "/v1/embeddings",
             "max_parallel": 32,
         },
@@ -9977,7 +10002,7 @@ def test_embedding_vector_store_record_core_shapes_provenance_and_reuse(_m=None)
         builder_version="0.1.0",
         quality_status="needs-eval",
         provenance_mode="model",
-        source_realm="mares",
+        source_realm="work",
         security_context="repo-review",
         rows=rows,
         note="test store",
@@ -9989,7 +10014,7 @@ def test_embedding_vector_store_record_core_shapes_provenance_and_reuse(_m=None)
     assert store["embedding_embedded_rows"] == 1
     assert store["embedding_reuse_store_id"] == "old-store"
     assert store["source_index"]["family_key"] == "family-2"
-    assert store["provenance"]["source_realm"] == "mares"
+    assert store["provenance"]["source_realm"] == "work"
     assert store["provenance"]["source_fingerprint"] == {"sha256": "fingerprint-2"}
     assert store["row_count"] == 2
     assert store["rows"] == rows
@@ -10068,7 +10093,7 @@ def test_vector_build_and_query_lexical_baseline(m):
         docs = tmp / "docs"
         docs.mkdir()
         content = "* TODO [#A] Finish vector readiness plan\nDEADLINE: <2026-05-22 Fri>\n"
-        (docs / "tasks.org").write_text(content, encoding="utf-8")
+        (docs / "sample-planning.org").write_text(content, encoding="utf-8")
         digest = m.sha256_hex(content.encode("utf-8"))
         index = {
             "id": "vector-index",
@@ -10079,8 +10104,8 @@ def test_vector_build_and_query_lexical_baseline(m):
             "corpus_summary": "Vector readiness test corpus.",
             "files": [
                 {
-                    "path": str(docs / "tasks.org"),
-                    "source_fingerprint": m.source_fingerprint(docs / "tasks.org"),
+                    "path": str(docs / "sample-planning.org"),
+                    "source_fingerprint": m.source_fingerprint(docs / "sample-planning.org"),
                     "summary": "Task file with current priorities.",
                     "chunks": [
                         {
@@ -10106,11 +10131,11 @@ def test_vector_build_and_query_lexical_baseline(m):
         assert m.vector_store_freshness(store)[0] == "fresh"
         report = m.query_vector_store(store, "finish vector readiness deadline", limit=3)
         assert report["rows"]
-        assert report["rows"][0]["path"].endswith("tasks.org")
+        assert report["rows"][0]["path"].endswith("sample-planning.org")
         assert report["freshness"] == "fresh"
         text = m.format_vector_query_report(report)
         assert "vector query:" in text
-        assert "tasks.org" in text
+        assert "sample-planning.org" in text
         vector_eval = m.run_vector_eval(dims=64)
         assert vector_eval["schema"] == m.VECTOR_EVAL_SCHEMA_VERSION
         assert vector_eval["status"] == "pass"
@@ -10130,7 +10155,7 @@ def test_embedding_vector_store_uses_catalog_route(m):
             docs = tmp / "docs"
             docs.mkdir()
             content = "* TODO [#A] Finish vector deadline task\nDEADLINE: <2026-05-22 Fri>\n"
-            (docs / "tasks.org").write_text(content, encoding="utf-8")
+            (docs / "sample-planning.org").write_text(content, encoding="utf-8")
             digest = m.sha256_hex(content.encode("utf-8"))
             index = {
                 "id": "embedding-index",
@@ -10141,8 +10166,8 @@ def test_embedding_vector_store_uses_catalog_route(m):
                 "corpus_summary": "Embedding route test corpus.",
                 "files": [
                     {
-                        "path": str(docs / "tasks.org"),
-                        "source_fingerprint": m.source_fingerprint(docs / "tasks.org"),
+                        "path": str(docs / "sample-planning.org"),
+                        "source_fingerprint": m.source_fingerprint(docs / "sample-planning.org"),
                         "summary": "Task file with current priorities.",
                         "chunks": [
                             {
@@ -10161,7 +10186,7 @@ def test_embedding_vector_store_uses_catalog_route(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -10378,7 +10403,7 @@ def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -10491,7 +10516,7 @@ def test_embedding_vector_store_parallelizes_batches(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -10599,7 +10624,7 @@ def test_retrieval_vector_query_uses_short_worker_timeouts(m):
             "rows": [
                 {
                     "id": "row1",
-                    "path": "/tmp/logbook.org",
+                    "path": "/tmp/sample-journal.org",
                     "chunk": 1,
                     "vector": [1.0, 0.0],
                     "summary": "latest logbook day",
@@ -10635,7 +10660,7 @@ def test_embedding_vector_store_stale_when_route_model_changes(m):
             docs = tmp / "docs"
             docs.mkdir()
             content = "* TODO Refresh vectors\n"
-            path = docs / "tasks.org"
+            path = docs / "sample-planning.org"
             path.write_text(content, encoding="utf-8")
             index = {
                 "id": "embedding-stale-index",
@@ -10665,7 +10690,7 @@ def test_embedding_vector_store_stale_when_route_model_changes(m):
 
             def write_catalog(model_id: str, dims: int = 4) -> None:
                 catalog = {
-                    "realm": "mares",
+                    "realm": "work",
                     "manager": {"kind": "systemd-socket-worker"},
                     "routes": {
                         "qwen3-embedding-0b6": {
@@ -10725,11 +10750,11 @@ def test_vector_doctor_reports_embedding_parallelism_without_private_rows(m):
         with isolated_state() as tmp:
             docs = tmp / "docs"
             docs.mkdir()
-            path = docs / "tasks.org"
+            path = docs / "sample-planning.org"
             content = "* TODO Vector doctor\n"
             path.write_text(content, encoding="utf-8")
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -10842,7 +10867,7 @@ def test_embedding_vector_store_resumes_saved_progress(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -11047,7 +11072,7 @@ def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -11165,8 +11190,8 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
             {
                 "updated": old_time,
                 "status": "running",
-                "phase": "bg-heavy: vectorizing(model) orgfiles batch 1/9 rows 2/20 eta 2m",
-                "notes": ["private logbook.org note"],
+                "phase": "bg-heavy: vectorizing(model) private-notes batch 1/9 rows 2/20 eta 2m",
+                "notes": ["private sample-journal.org note"],
             }
         )
         index_progress = {
@@ -11174,11 +11199,11 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
             "kind": "index",
             "status": "running",
             "phase": "summarizing chunk",
-            "root": "/home/mares/repos/orgfiles",
-            "name": "orgfiles",
-            "current_file": "/home/mares/repos/orgfiles/logbook.org",
-            "last_model_label": "/home/mares/repos/orgfiles/logbook.org chunk 1",
-            "error": "private filename logbook.org",
+            "root": "/home/example-user/Documents/private-notes",
+            "name": "private-notes",
+            "current_file": "/home/example-user/Documents/private-notes/sample-journal.org",
+            "last_model_label": "/home/example-user/Documents/private-notes/sample-journal.org chunk 1",
+            "error": "private filename sample-journal.org",
             "updated": old_time,
             "elapsed_seconds": 30,
             "eta_seconds": 120,
@@ -11198,12 +11223,12 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
         )
         vector_progress = {
             "schema": m.VECTOR_PROGRESS_SCHEMA_VERSION,
-            "id": "embedding-secret-logbook-orgfiles",
+            "id": "embedding-secret-logbook-private-notes",
             "updated": old_time,
             "source_index": {
                 "id": "secret-index-logbook",
-                "name": "orgfiles",
-                "root": "/home/mares/repos/orgfiles",
+                "name": "private-notes",
+                "root": "/home/example-user/Documents/private-notes",
             },
             "embedding_route": {
                 "catalog_route": "qwen3-embedding-0b6",
@@ -11220,7 +11245,7 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
             "rows": [
                 {
                     "id": "private-row",
-                    "path": "/home/mares/repos/orgfiles/logbook.org",
+                    "path": "/home/example-user/Documents/private-notes/sample-journal.org",
                     "summary": "private summary text",
                     "evidence_excerpt": "private excerpt",
                     "vector": [0.1, 0.2],
@@ -11248,9 +11273,9 @@ def test_diagnose_safe_redacts_private_progress_metadata(m):
         assert "route=qwen3-embedding-0b6" in report
         for private_text in [
             "secret",
-            "orgfiles",
+            "private-notes",
             "logbook",
-            "/home/mares",
+            "/home/example-user",
             "private summary",
             "private excerpt",
             "private filename",
@@ -11262,8 +11287,8 @@ def test_catalog_diagnose_is_content_free(m):
     with isolated_state() as tmp:
         docs = tmp / "secret-docs"
         docs.mkdir()
-        note = docs / "secret-logbook.org"
-        note.write_text("* Private Alvarez task\n", encoding="utf-8")
+        note = docs / "secret-sample-journal.org"
+        note.write_text("* Private sample marker\n", encoding="utf-8")
         index = {
             "id": "secret-index-logbook",
             "name": "secret-docs",
@@ -11278,8 +11303,8 @@ def test_catalog_diagnose_is_content_free(m):
                         {
                             "id": "000001.000001",
                             "chunk": 1,
-                            "content": "Private Alvarez task",
-                            "content_sha256": m.sha256_hex(b"Private Alvarez task"),
+                            "content": "Private sample marker",
+                            "content_sha256": m.sha256_hex(b"Private sample marker"),
                         }
                     ],
                 }
@@ -11298,7 +11323,7 @@ def test_catalog_diagnose_is_content_free(m):
         for private_text in [
             "secret",
             "logbook",
-            "Alvarez",
+            "sample marker",
             "Private",
             str(docs),
             str(note),
@@ -11411,7 +11436,7 @@ def test_embedding_vector_store_falls_back_from_excess_parallelism(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -11521,7 +11546,7 @@ def test_vector_query_can_use_catalog_reranker_route(m):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-reranker-0b6": {
@@ -11632,7 +11657,7 @@ def test_normal_retrieval_uses_embedding_rerank_by_default(m):
             rerank_thread = threading.Thread(target=rerank_server.serve_forever, daemon=True)
             rerank_thread.start()
             catalog = {
-                "realm": "mares",
+                "realm": "work",
                 "manager": {"kind": "systemd-socket-worker"},
                 "routes": {
                     "qwen3-embedding-0b6": {
@@ -11820,7 +11845,7 @@ def test_superseded_partials_do_not_look_unfinished(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "tasks.org"
+        source = docs / "sample-planning.org"
         source.write_text("* TODO Fresh task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         partial = {
@@ -11861,7 +11886,7 @@ def test_context_catalog_prefers_latest_index_per_family(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "logbook.org"
+        source = docs / "sample-journal.org"
         source.write_text("* TODO Fresh logbook task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         base = {
@@ -11931,7 +11956,7 @@ def test_prompt_context_uses_current_catalog_not_stale_catalog_file(m):
         with isolated_state() as tmp:
             docs = tmp / "docs"
             docs.mkdir()
-            source = docs / "logbook.org"
+            source = docs / "sample-journal.org"
             source.write_text("* TODO Fresh catalog task\n", encoding="utf-8")
             m.add_allowed_dir(str(docs))
             os.chdir(docs)
@@ -12032,12 +12057,12 @@ def test_status_reports_safe_vector_progress_jobs(m):
         ).astimezone().isoformat(timespec="seconds")
         progress = {
             "schema": m.VECTOR_PROGRESS_SCHEMA_VERSION,
-            "id": "embedding-secret-logbook-orgfiles",
+            "id": "embedding-secret-logbook-private-notes",
             "updated": old_time,
             "source_index": {
                 "id": "secret-index-logbook",
-                "name": "orgfiles",
-                "root": "/home/mares/repos/orgfiles",
+                "name": "private-notes",
+                "root": "/home/example-user/Documents/private-notes",
             },
             "embedding_route": {
                 "catalog_route": "qwen3-embedding-0b6",
@@ -12056,7 +12081,7 @@ def test_status_reports_safe_vector_progress_jobs(m):
             "rows": [
                 {
                     "id": "private-row",
-                    "path": "/home/mares/repos/orgfiles/logbook.org",
+                    "path": "/home/example-user/Documents/private-notes/sample-journal.org",
                     "summary": "private summary text",
                     "evidence_excerpt": "private excerpt",
                     "vector": [0.1, 0.2],
@@ -12086,9 +12111,9 @@ def test_status_reports_safe_vector_progress_jobs(m):
         assert "route=qwen3-embedding-0b6" in status
         for private_text in [
             "secret",
-            "orgfiles",
+            "private-notes",
             "logbook",
-            "/home/mares",
+            "/home/example-user",
             "private summary",
             "private excerpt",
         ]:
@@ -12099,7 +12124,7 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "logbook.org"
+        source = docs / "sample-journal.org"
         source.write_text("* TODO Fresh catalog artifact task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         index = {
@@ -12190,7 +12215,7 @@ def test_context_catalog_uses_artifact_sidecars_without_deep_freshness(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "logbook.org"
+        source = docs / "sample-journal.org"
         source.write_text("* TODO Sidecar catalog artifact task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         index = {
@@ -12274,7 +12299,7 @@ def test_deep_context_catalog_reports_fresh_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "logbook.org"
+        source = docs / "sample-journal.org"
         source.write_text("* TODO Deep catalog artifact task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         index = {
@@ -12828,7 +12853,7 @@ def test_status_refreshes_attached_index_artifact_metadata(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "logbook.org"
+        source = docs / "sample-journal.org"
         source.write_text("* TODO Fresh attached artifact task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         index = {
@@ -12955,7 +12980,7 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
         with isolated_state() as tmp:
             docs = tmp / "docs"
             docs.mkdir()
-            source = docs / "logbook.org"
+            source = docs / "sample-journal.org"
             current_content = "* [2026-05-24 Sun 09:00]\n** log\nFresh in-session note.\n"
             source.write_text(current_content, encoding="utf-8")
             m.add_allowed_dir(str(docs))
@@ -13016,7 +13041,7 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
 
             package, values = m.build_prompt_context_package(
                 conv,
-                "summarize the last day present in logbook.org",
+                "summarize the last day present in sample-journal.org",
             )
 
             assert conv["context_items"][0]["id"] == new_index["id"]
@@ -13045,7 +13070,7 @@ def test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up(m):
         with isolated_state() as tmp:
             docs = tmp / "docs"
             docs.mkdir()
-            source = docs / "logbook.org"
+            source = docs / "sample-journal.org"
             fresh_content = "* [2026-05-24 Sun 09:00]\n** log\nRecovered fresh note.\n"
             source.write_text(fresh_content, encoding="utf-8")
             m.add_allowed_dir(str(docs))
@@ -13126,7 +13151,7 @@ def test_sources_fallback_resyncs_attached_index_to_latest(m):
         with isolated_state() as tmp:
             docs = tmp / "docs"
             docs.mkdir()
-            source = docs / "logbook.org"
+            source = docs / "sample-journal.org"
             source.write_text("* [2026-05-24 Sun 09:00]\n** log\nFresh sources fallback note.\n", encoding="utf-8")
             m.add_allowed_dir(str(docs))
             os.chdir(docs)
@@ -13871,7 +13896,7 @@ def test_org_task_signals_drive_retrieval(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        tasks = docs / "tasks.org"
+        tasks = docs / "sample-planning.org"
         tasks.write_text(
             "\n".join(
                 [
@@ -13884,7 +13909,7 @@ def test_org_task_signals_drive_retrieval(m):
             + "\n",
             encoding="utf-8",
         )
-        (docs / "ideas.org").write_text("* Idea unrelated\n", encoding="utf-8")
+        (docs / "sample-brainstorm.org").write_text("* Idea unrelated\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         os.chdir(docs)
 
@@ -15556,7 +15581,7 @@ def test_index_signal_enrichment_upgrades_legacy_index(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        (docs / "tasks.org").write_text("* TODO [#A] Enrich legacy task\n", encoding="utf-8")
+        (docs / "sample-planning.org").write_text("* TODO [#A] Enrich legacy task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
 
         old_quiet_model = m.quiet_model
@@ -15645,13 +15670,13 @@ def test_index_repair_regenerates_failed_chunk_artifacts(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "tasks.org"
+        source = docs / "sample-planning.org"
         source.write_text(
             "\n".join(
                 [
-                    "* TODO [#A] Repair Alvarez packet",
+                    "* TODO [#A] Repair sample packet",
                     "DEADLINE: <2026-05-22 Fri>",
-                    "Ana Alvarez needs the countersigned packet.",
+                    "Example Recipient needs the review packet.",
                 ]
             )
             + "\n",
@@ -15681,10 +15706,10 @@ def test_index_repair_regenerates_failed_chunk_artifacts(m):
             def repair_summary(label, text, instruction, **kwargs):
                 route = kwargs.get("route")
                 if route == m.MODEL_ROUTE_INDEX_CHUNK:
-                    return "TODO [#A] Repair Alvarez packet due 2026-05-22 for Ana Alvarez."
+                    return "TODO [#A] Repair sample packet due 2026-05-22 for Example Recipient."
                 if route == m.MODEL_ROUTE_INDEX_FILE:
-                    return "tasks.org tracks the Alvarez packet repair task and deadline."
-                return "The corpus contains the Alvarez packet repair task."
+                    return "sample-planning.org tracks the sample packet repair task and deadline."
+                return "The corpus contains the sample packet repair task."
 
             m.summarize_text = repair_summary
             repaired, changed, note = m.repair_index_artifacts(damaged, limit=4)
@@ -15704,7 +15729,7 @@ def test_background_study_repairs_quality_failure(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        source = docs / "tasks.org"
+        source = docs / "sample-planning.org"
         source.write_text("* TODO [#A] Background repair task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
 
@@ -15730,7 +15755,7 @@ def test_background_study_repairs_quality_failure(m):
                 if kwargs.get("route") == m.MODEL_ROUTE_INDEX_CHUNK:
                     return "TODO [#A] Background repair task."
                 if kwargs.get("route") == m.MODEL_ROUTE_INDEX_FILE:
-                    return "tasks.org contains the background repair task."
+                    return "sample-planning.org contains the background repair task."
                 return "Corpus summary for the background repair task."
 
             m.summarize_text = repair_summary
@@ -15754,7 +15779,7 @@ def test_index_signal_enrichment_skips_active_index(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
         docs.mkdir()
-        (docs / "tasks.org").write_text("* TODO Active task\n", encoding="utf-8")
+        (docs / "sample-planning.org").write_text("* TODO Active task\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
 
         old_quiet_model = m.quiet_model
@@ -15968,7 +15993,7 @@ def test_core_recent_conversation_renderer_is_injectable(m):
 
     assert "conversation:conv-1" in text
     assert "updated=today" in text
-    assert "Javier: What next?" in text
+    assert "User: What next?" in text
     assert "Motoko: Use grounded retrieval." in text
     assert sources == [
         {
@@ -16443,7 +16468,7 @@ def test_builtin_source_scoped_temporal_skill_is_available(m):
         assert "collection loop into that service" in refactor
         assert "concurrency regressions for background progress" in refactor
 
-        rendered, sources = m.render_skills_with_sources("summarize last three days present in logbook.org")
+        rendered, sources = m.render_skills_with_sources("summarize last three days present in sample-journal.org")
         assert "Skill: org-temporal-retrieval" in rendered
         assert "newest distinct dates actually present" in rendered
         assert sources and sources[0]["kind"] == "skill"
@@ -16466,7 +16491,7 @@ def test_procedural_skills_are_included_in_prompt_and_sources(m):
     with isolated_state():
         conv = m.new_conversation("Skill prompt")
         conv["id"] = "skill-prompt"
-        prompt, sources = m.build_system_prompt_and_sources(conv, "latest days in logbook.org")
+        prompt, sources = m.build_system_prompt_and_sources(conv, "latest days in sample-journal.org")
         assert "Relevant procedural skills:" in prompt
         assert "source-scoped temporal retrieval task" in prompt
         assert any(source.get("kind") == "skill" for source in sources)
@@ -16720,7 +16745,7 @@ def test_skill_curator_uses_saved_feedback_eval_fixtures(m):
                 "schema": m.FEEDBACK_EVAL_SCHEMA_VERSION,
                 "id": "feedback-eval-curator",
                 "created": "2026-05-31T00:00:00+00:00",
-                "realm": "mares",
+                "realm": "work",
                 "source": "synthetic-test",
                 "fixture_count": 1,
                 "ratings": {"down": 1},
@@ -16729,7 +16754,7 @@ def test_skill_curator_uses_saved_feedback_eval_fixtures(m):
                     {
                         "id": "fixture-curator",
                         "created": "2026-05-31T00:00:00+00:00",
-                        "realm": "mares",
+                        "realm": "work",
                         "rating": "down",
                         "quality_status": "needs-review",
                         "focus": ["ranking", "staleness"],
@@ -17341,15 +17366,15 @@ def test_tool_catalog_and_action_plan_are_inspectable_without_running(m):
             assert "tool-backed-skill/demo" in catalog
             assert "external_process" in catalog
 
-            plan = m.format_action_plan("use demo for logbook.org")
+            plan = m.format_action_plan("use demo for sample-journal.org")
             assert "action plan:" in plan
             assert "model calls: none" in plan
             assert "tool-backed-skill/demo" in plan
             assert "status=needs_approval" in plan
-            assert '"path": "logbook.org"' in plan
+            assert '"path": "sample-journal.org"' in plan
 
             m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
-            plan = m.format_action_plan("use demo for logbook.org")
+            plan = m.format_action_plan("use demo for sample-journal.org")
             assert "status=valid" in plan
             assert "approval=persistent" in plan
         finally:
@@ -17653,11 +17678,11 @@ def test_project_file_write_overwrite_requires_expected_hash(m):
 
 def test_goal_loop_preview_save_and_list_without_execution(m):
     with isolated_state() as tmp:
-        docs = tmp / "orgfiles"
+        docs = tmp / "sample_notes"
         docs.mkdir()
         m.add_allowed_dir(str(docs))
         preview = m.format_goal_plan(
-            "Review orgfiles priorities",
+            "Review sample_notes priorities",
             scope=[str(docs)],
             allowed_tools=["tool-backed-skill/demo"],
             allowed_effects=["read_allowed_files", "write_motoko_state"],
@@ -17668,7 +17693,7 @@ def test_goal_loop_preview_save_and_list_without_execution(m):
         assert "execution enabled: no" in preview
         listing = m.format_goal_loops()
         assert "goal loops:" in listing
-        assert "Review orgfiles priorities" in listing
+        assert "Review sample_notes priorities" in listing
 
         path = next(m.goal_loops_dir().glob("*.json"))
         preview_file = m.format_goal_preview(str(path))
@@ -18305,6 +18330,7 @@ def main() -> int:
         test_tui_terminal_resize_flag_is_drained_by_owner_loop,
         test_fake_openai_stream,
         test_chat_reasoning_payload_and_stream,
+        test_model_request_requires_explicit_endpoint_configuration,
         test_unix_socket_model_loading_retries,
         test_unix_socket_connection_reset_retries_while_activating,
         test_unix_socket_connection_reset_retries_while_active,

@@ -2,7 +2,7 @@ You are working as a senior terminal-performance engineer on a real user-visible
 bug in Motoko.
 
 Repository:
-  /home/mares/repos/motoko
+  the Motoko repository root
 
 GitHub issue:
   lk251/motoko#1
@@ -19,7 +19,6 @@ FIRST, BEFORE EDITING:
    - AGENTS.md
    - README.md
    - docs/project-context.md
-   - docs/mares-motoko-handoff.md
    - CHANGELOG.md
    - tests/motoko_tty.py
    - motoko_core/tui_render.py

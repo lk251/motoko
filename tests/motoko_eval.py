@@ -74,7 +74,7 @@ def test_study_reuses_existing_dossier(m):
         "id": "craft-dossier",
         "name": "Craftsmanship",
         "query": "craftsmanship quality",
-        "summary": "Javier wants Motoko to feel like careful swiss watchmaker craftsmanship.",
+        "summary": "The user wants Motoko to feel like careful swiss watchmaker craftsmanship.",
         "source_memories": [],
         "source_conversations": [{"id": conv["id"]}],
     }
@@ -110,7 +110,7 @@ def test_context_plan_and_source_reasons(m):
     conv = m.new_conversation("Sources")
     conv["id"] = "sources"
     m.add_memory(
-        "Javier wants Motoko source reports to explain why context was included.",
+        "The user wants Motoko source reports to explain why context was included.",
         source="test",
         conversation_id=conv["id"],
         importance=4,
@@ -154,7 +154,7 @@ def test_background_study_state(m):
 def test_background_study_enriches_legacy_index(m):
     docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
     docs.mkdir()
-    (docs / "tasks.org").write_text("* TODO [#A] Background enrich task\n", encoding="utf-8")
+    (docs / "sample-planning.org").write_text("* TODO [#A] Background enrich task\n", encoding="utf-8")
     m.add_allowed_dir(str(docs))
     old_quiet_model = m.quiet_model
     try:
@@ -186,7 +186,7 @@ def test_background_study_enriches_legacy_index(m):
 def test_background_study_builds_evidence_store(m):
     docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
     docs.mkdir()
-    source = docs / "logbook.org"
+    source = docs / "sample-journal.org"
     content = (
         "* [2026-05-19 Tue 12:34]\n"
         "** do\n"
@@ -254,7 +254,7 @@ def test_heavy_index_refresh_replaces_attached_index(m):
 
     old_index = {
         "id": "old-index",
-        "name": "orgfiles",
+        "name": "sample_notes",
         "root": str(docs),
         "glob": "*.org",
         "created": m.now(),
@@ -318,13 +318,13 @@ def test_heavy_index_refresh_replaces_attached_index(m):
 def test_heavy_index_refresh_attaches_newer_completed_index(m):
     docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
     docs.mkdir()
-    source = docs / "logbook.org"
+    source = docs / "sample-journal.org"
     source.write_text("* TODO Current log entry\n", encoding="utf-8")
     m.add_allowed_dir(str(docs))
 
     old_index = {
         "id": "old-index",
-        "name": "orgfiles",
+        "name": "sample_notes",
         "root": str(docs),
         "glob": "*.org",
         "created": "2026-05-21T12:00:00+00:00",
@@ -366,7 +366,7 @@ def test_heavy_index_refresh_attaches_newer_completed_index(m):
 def test_manual_heavy_index_refresh_bypasses_cooldown(m):
     docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
     docs.mkdir()
-    source = docs / "tasks.org"
+    source = docs / "sample-planning.org"
     source.write_text("* TODO Old task\n", encoding="utf-8")
     m.add_allowed_dir(str(docs))
     old_index = {
@@ -418,7 +418,7 @@ def test_manual_heavy_index_refresh_bypasses_cooldown(m):
 def test_bg_now_attaches_current_directory_index_and_runs_manual_step(m):
     docs = pathlib.Path(os.environ["MOTOKO_STATE_HOME"]).parent / "docs"
     docs.mkdir()
-    source = docs / "tasks.org"
+    source = docs / "sample-planning.org"
     source.write_text("* TODO Current task\n", encoding="utf-8")
     m.add_allowed_dir(str(docs))
     index = {
@@ -472,12 +472,12 @@ def test_routed_index_quality_gate_preserves_org_evidence(m):
     docs = pathlib.Path(tempfile.mkdtemp()) / "docs"
     docs.mkdir()
     try:
-        (docs / "tasks.org").write_text(
+        (docs / "sample-planning.org").write_text(
             "\n".join(
                 [
-                    "* TODO [#A] Prepare client filing :legal:urgent:",
+                    "* TODO [#A] Prepare sample review :sample:urgent:",
                     "DEADLINE: <2026-05-20 Wed>",
-                    "Obligation: send the signed packet to Alvarez before noon.",
+                    "Obligation: send the review packet to Example Recipient before noon.",
                     "* TODO [#B] Draft support note",
                     "SCHEDULED: <2026-05-21 Thu>",
                 ]
@@ -485,7 +485,7 @@ def test_routed_index_quality_gate_preserves_org_evidence(m):
             + "\n",
             encoding="utf-8",
         )
-        (docs / "reference.org").write_text("* Reference\nProject code name: violet harbor\n", encoding="utf-8")
+        (docs / "reference.org").write_text("* Reference\nProject code name: fixture lantern\n", encoding="utf-8")
         m.add_allowed_dir(str(docs))
         old_quiet_model = m.quiet_model
         routes = []
@@ -493,10 +493,10 @@ def test_routed_index_quality_gate_preserves_org_evidence(m):
             def routed_summary(messages, **kwargs):
                 routes.append(kwargs.get("route"))
                 prompt = messages[-1]["content"]
-                if "Prepare client filing" in prompt:
-                    return "summary: Prepare client filing, deadline 2026-05-20, Alvarez packet, urgent legal task."
-                if "violet harbor" in prompt:
-                    return "summary: reference note for violet harbor."
+                if "Prepare sample review" in prompt:
+                    return "summary: Prepare sample review, deadline 2026-05-20, review packet, urgent task."
+                if "fixture lantern" in prompt:
+                    return "summary: reference note for fixture lantern."
                 return "summary: corpus map preserving task priorities, deadlines, project names, and file paths."
 
             m.quiet_model = routed_summary
@@ -509,13 +509,13 @@ def test_routed_index_quality_gate_preserves_org_evidence(m):
         assert m.MODEL_ROUTE_INDEX_CORPUS in routes
         assert index["signals"]["priorities"]["A"] == 1
         assert index["signals"]["task_items"][0]["deadline_date"] == "2026-05-20"
-        assert "Prepare client filing" in index["corpus_profile_text"]
+        assert "Prepare sample review" in index["corpus_profile_text"]
         assert index["files"][0]["summary_artifact"]["artifact_schema"] == m.FILE_SUMMARY_SCHEMA_VERSION
         assert index["files"][0]["chunks"][0]["summary_artifact"]["source_fingerprint"]["sha256"]
-        text, sources = m.retrieve_from_index(index, "highest priority legal tasks for 2026-05-20")
-        assert "Prepare client filing" in text
+        text, sources = m.retrieve_from_index(index, "highest priority review tasks for 2026-05-20")
+        assert "Prepare sample review" in text
         assert "2026-05-20" in text
-        assert "tasks.org" in text
+        assert "sample-planning.org" in text
         assert any(source.get("kind") == "chunk" for source in sources)
         quality = m.index_quality_gate(index)
         assert quality["status"] == "pass", m.format_index_quality_gate(quality)
@@ -542,13 +542,13 @@ def test_worker_model_eval_scores_routes_and_json_artifacts(m):
             if route == m.MODEL_ROUTE_INDEX_CHUNK:
                 return json.dumps(
                     {
-                        "summary": "TODO priority A send countersigned packet to Ana Alvarez for violet harbor.",
-                        "title": "Alvarez packet deadline",
+                        "summary": "TODO priority A send review packet to Example Recipient for fixture lantern.",
+                        "title": "Review packet deadline",
                         "kind": "org_task",
                         "dates": ["2026-05-21", "2026-05-22"],
-                        "todos": ["TODO [#A] Send signed Alvarez packet"],
-                        "obligations": ["email the countersigned packet before noon"],
-                        "files_or_paths_mentioned": ["/home/mares/repos/orgfiles/legal.org"],
+                        "todos": ["TODO [#A] Send review packet"],
+                        "obligations": ["send the review packet before noon"],
+                        "files_or_paths_mentioned": ["/workspace/synthetic-corpus/reference.org"],
                         "confidence": 0.93,
                         "escalation_needed": False,
                     }
@@ -556,27 +556,27 @@ def test_worker_model_eval_scores_routes_and_json_artifacts(m):
             if route == m.MODEL_ROUTE_INDEX_FILE:
                 return json.dumps(
                     {
-                        "file_summary": "Planning file for tasks.org with the Alvarez packet as priority work.",
+                        "file_summary": "Planning file for sample-planning.org with the review packet as priority work.",
                         "file_title": "Tasks planning",
                         "file_role": "active planning task file",
                         "file_kind": "org",
-                        "main_projects": ["violet harbor"],
+                        "main_projects": ["fixture lantern"],
                         "main_dates": ["2026-05-22"],
-                        "main_todos": ["Send signed Alvarez packet", "Draft support note"],
-                        "main_obligations": ["email Ana Alvarez before noon"],
+                        "main_todos": ["Send review packet", "Draft sample note"],
+                        "main_obligations": ["contact Example Recipient before noon"],
                         "confidence": 0.91,
                         "escalation_needed": False,
                     }
                 )
             if route == m.MODEL_ROUTE_INDEX_LABEL:
-                assert "inbox.org" in prompt
+                assert "sample-intake.org" in prompt
                 return json.dumps(
                     {
-                        "label": "active client legal org task",
+                        "label": "active sample review org task",
                         "kind": "org task notes",
                         "active": True,
                         "task_bearing": True,
-                        "sensitive": "client legal",
+                        "sensitive": "sample review",
                         "confidence": 0.88,
                         "escalation_needed": False,
                     }
@@ -584,13 +584,13 @@ def test_worker_model_eval_scores_routes_and_json_artifacts(m):
             if route == m.MODEL_ROUTE_INDEX_CORPUS:
                 return json.dumps(
                     {
-                        "corpus_summary": "Orgfiles corpus prioritizes the Alvarez packet before repo notes.",
-                        "active_projects": ["violet harbor"],
-                        "priority_items": ["Send signed Alvarez packet"],
+                        "corpus_summary": "Synthetic corpus prioritizes the review packet before repo notes.",
+                        "active_projects": ["fixture lantern"],
+                        "priority_items": ["Send review packet"],
                         "deadlines": ["2026-05-22"],
                         "scheduled_items": ["2026-05-21 morning"],
-                        "obligations": ["email Ana Alvarez"],
-                        "files_by_role": {"tasks": ["tasks.org"], "repo planning": ["nixos-configs.org"]},
+                        "obligations": ["contact Example Recipient"],
+                        "files_by_role": {"tasks": ["sample-planning.org"], "repo planning": ["project-notes.org"]},
                         "audit_needed": False,
                     }
                 )

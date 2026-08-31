@@ -367,7 +367,7 @@ def render_recent_conversations_with_sources_core(
             role = msg.get("role", "")
             if role not in {"user", "assistant"}:
                 continue
-            label = "Javier" if role == "user" else "Motoko"
+            label = "User" if role == "user" else "Motoko"
             recent_lines.append(f"{label}: {compact_text(msg.get('content', ''), snippet_chars)}")
         if recent_lines:
             body_parts.append("recent turns:\n  " + "\n  ".join(recent_lines))

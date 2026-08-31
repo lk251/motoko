@@ -47,8 +47,8 @@ authority:
   go through typed Motoko action records validated by code. No free-form shell
   command should be executed directly from model text.
 - Filesystem and realm boundaries: accepted. Scripts must stay inside the current user's
-  Motoko realm, respect document allowlists and `.motokoignore`, avoid
-  `/home/personal` from `mares`, avoid copied cross-account state, and never
+  Motoko realm, respect document allowlists and `.motokoignore`, avoid other
+  users' private home directories, avoid copied cross-account state, and never
   get sudo or system-service authority.
 - Environment and sandboxing: accepted. Strip secrets from environment variables, set a
   controlled working directory, bound runtime and output size, decide whether
@@ -143,7 +143,7 @@ Recommended approval record:
 ```json
 {
   "schema": "motoko-tool-approval-v1",
-  "realm": "mares",
+  "realm": "work",
   "skill": "example-skill",
   "tool": "scripts/example.py",
   "script_sha256": "...",
@@ -374,7 +374,7 @@ Accepted action record shape:
   "skill": "org-temporal-retrieval",
   "tool": "latest_entries",
   "arguments": {
-    "path": "logbook.org",
+    "path": "sample-journal.org",
     "count": 3
   },
   "reason": "Need latest dated entries from a specific Org source."
@@ -432,8 +432,8 @@ current user's realm, and only under explicitly allowed roots.
 
 Accepted rules:
 
-- `mares` must not read `/home/personal`, copy personal Motoko state, or rely
-  on Javier/admin account state.
+- One account must not read another user's private home, copy private Motoko
+  state, or rely on a more privileged account's state.
 - Skill tools may read allowlisted project/document roots only when the tool's
   effect contract includes `read_allowed_files`.
 - Skill tools must obey `.motokoignore` for corpus/document operations.
@@ -452,8 +452,7 @@ Implementation recipe:
 2. Reuse existing allowlist and `.motokoignore` logic for document/project
    reads instead of creating a separate runner-specific policy.
 3. Add tests for allowed relative paths, denied absolute paths outside scope,
-   denied `..`, denied symlink escape, ignored files, and `/home/personal`
-   denial from `mares`.
+   denied `..`, denied symlink escape, ignored files, and cross-home denial.
 
 ## Environment and Sandboxing
 

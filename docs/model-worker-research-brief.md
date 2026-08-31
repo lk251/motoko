@@ -1,8 +1,8 @@
 # Motoko Worker Model Research Brief
 
-This brief is for NixOS-side work in `/home/javier/repos/nixos-configs`.
-Motoko already has named model routes; NixOS should decide which local services
-and models back those routes.
+This brief defines the public interface for operating-system-side model work.
+Motoko already has named model routes; the managed deployment should decide
+which local services and models back those routes.
 
 ## Goal
 
@@ -11,9 +11,11 @@ background tasks without making the main chat model do every call. Keep the
 large model available for final synthesis, ambiguous reasoning, audits, and
 chat.
 
-HB3 currently has one RTX 4090 with about 24 GiB VRAM. Model residency and
-switching cost matter. Prefer service layouts that avoid loading and unloading
-models during active chat unless measurements show the cost is acceptable.
+Model residency, available accelerator memory, and switching cost matter.
+Prefer service layouts that avoid loading and unloading models during active
+chat unless measurements show the cost is acceptable. Actual hardware
+inventory and route deployment belong in the operating-system configuration
+repository.
 
 ## Motoko Routes
 

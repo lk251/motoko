@@ -57,7 +57,7 @@ BUILTIN_SKILLS = [
         "kind": "retrieval",
         "triggers": [
             "last/latest/recent N dated entries",
-            "explicit named Org source such as logbook.org",
+            "explicit named Org source such as sample-journal.org",
         ],
         "handler": ORG_TEMPORAL_HANDLER,
         "allowed_effects": [RETRIEVAL_PLAN_EFFECT, SOURCE_SCOPED_EVIDENCE_EFFECT],

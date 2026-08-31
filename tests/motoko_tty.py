@@ -373,7 +373,7 @@ def main() -> int:
     assert snapshot["progress"] == {"batch": 1}
     assert "job-1 answer large-model" in format_job_snapshots([snapshot])
     runtime = make_runtime_context(
-        realm="mares",
+        realm="work",
         identity="Motoko",
         app_version="0.1.0",
         revision="test",

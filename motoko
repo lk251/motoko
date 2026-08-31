@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Small personal Qwen chat client for the HB3 personal realm.
+"""Small local personal-assistant client for operator-approved model routes.
 
 Motoko intentionally uses only the Python standard library and the existing
 llama.cpp OpenAI-compatible endpoint.
@@ -618,8 +618,8 @@ APP = "motoko"
 APP_VERSION = "0.1.0"
 PROJECT_SCOPE_SCHEMA_VERSION = "project-scope-v1"
 LIVE_JOB_SUPERVISOR = JobSupervisor()
-DEFAULT_ENDPOINT = "http://127.0.0.1:8083/v1/chat/completions"
-DEFAULT_MODEL = "qwen3.6-27b-mtp-ud-q5-k-xl"
+DEFAULT_ENDPOINT = ""
+DEFAULT_MODEL = "local-model"
 LOCAL_MODEL_UNIX_REQUEST_PATH = "/v1/chat/completions"
 SOCKET_ACTIVATION_MIN_TIMEOUT_SECONDS = 900
 LOCAL_MODEL_HELPER_TIMEOUT_SECONDS = 5
@@ -1025,7 +1025,7 @@ SLASH_COMMANDS = [
     ("/repo log [PATH]", "show recent Git log for an allowlisted repo"),
     ("/repo review [PATH]", "show repo status, diff summary, and review-gate output when present"),
     ("/personality", "show the active personality/style file"),
-    ("/profile", "show Motoko's profile dossier about Javier"),
+    ("/profile", "show Motoko's profile dossier about the user"),
     ("/profile-refresh", "rebuild the profile dossier from memories and conversations"),
     ("/remember TEXT", "save a durable memory manually"),
     ("/memories", "list saved memories"),
@@ -1221,13 +1221,13 @@ SIMPLE_SLASH_COMMANDS = {
 DEFAULT_PERSONALITY = """
 Motoko should be warm, attentive, and calm. She should sound like a trusted
 personal conversation partner: direct, honest, emotionally present, and
-genuinely interested in Javier's life, projects, memories, and preferences.
+genuinely interested in the user's life, projects, memories, and preferences.
 She may show gentle enthusiasm, but should not exaggerate certainty, flatter,
 or pretend to know things that are not in context. She should preserve privacy,
 ask clarifying questions only when useful, and keep a thoughtful, grounded tone.
 """.strip()
 
-MARES_LOGO_ASCII = """
+MOTOKO_LOGO_ASCII = """
 $$$$$_     g$$$$      y$$$$_     $$$$$$$$$$gy   $$$$$$$$$$  yg$$@@@@@$y
 $@@@@@_   g@@@@@     y@@@@@@_    4@@@PPPPP@@@L  @@@FFFFFFF  @@@F~~~~@@@L
 $@@"@@@, g@@F4@@    _@@@ "@@$,   4@@$     g@@F  @@@ggggggs  $@@gggggggy
@@ -2455,7 +2455,7 @@ def default_config() -> dict:
         "identity": {
             "name": "Motoko",
             "realm": "personal",
-            "description": "Private local assistant for Javier's personal realm.",
+            "description": "Private local assistant for this account.",
         },
         "permissions": {
             "mode": DEFAULT_PERMISSION_MODE,
@@ -4873,16 +4873,16 @@ def retrieval_eval_fixtures() -> list[dict]:
     return [
         {
             "id": "named-logbook-recent",
-            "query": "summarize yesterday and today according to logbook.org",
+            "query": "summarize yesterday and today according to sample-journal.org",
             "corpus_summary": "Planning notes include a logbook, old habits, and project ideas.",
             "files": [
                 {
-                    "path": "/synthetic/orgfiles/logbook.org",
+                    "path": "/synthetic/sample-notes/sample-journal.org",
                     "summary": "Daily logbook with recent sysadmin and Motoko work.",
                     "content": "\n".join(
                         [
                             "* 2026-05-20",
-                            "** DONE Rebuilt hb3 after Motoko worker route update",
+                            "** DONE Rebuilt the managed host after a Motoko worker route update",
                             "** TODO Confirm sources show logbook evidence",
                             "* 2026-05-21",
                             "** TODO [#A] Push Motoko retrieval-grounding fixes",
@@ -4891,12 +4891,12 @@ def retrieval_eval_fixtures() -> list[dict]:
                     ),
                 },
                 {
-                    "path": "/synthetic/orgfiles/habits.org",
+                    "path": "/synthetic/sample-notes/habits.org",
                     "summary": "Old habit tracker kept for archival reference.",
                     "content": "* SOMEDAY Track stretching habit\n* DONE Archive stale routine\n",
                 },
             ],
-            "expected_paths": ["logbook.org"],
+            "expected_paths": ["sample-journal.org"],
             "expected_terms": ["2026-05-20", "2026-05-21", "retrieval-grounding"],
             "min_chunk_sources": 1,
         },
@@ -4906,7 +4906,7 @@ def retrieval_eval_fixtures() -> list[dict]:
             "corpus_summary": "Org files contain active projects, old ideas, and priority tasks.",
             "files": [
                 {
-                    "path": "/synthetic/orgfiles/tasks.org",
+                    "path": "/synthetic/sample-notes/sample-planning.org",
                     "summary": "Current task list with explicit priorities and deadlines.",
                     "content": "\n".join(
                         [
@@ -4918,33 +4918,33 @@ def retrieval_eval_fixtures() -> list[dict]:
                     ),
                 },
                 {
-                    "path": "/synthetic/orgfiles/archive.org",
+                    "path": "/synthetic/sample-notes/archive.org",
                     "summary": "Archived projects and stale ideas.",
                     "content": "* DONE Old website polish\n* SOMEDAY Ancient experiment\n",
                 },
             ],
-            "expected_paths": ["tasks.org"],
+            "expected_paths": ["sample-planning.org"],
             "expected_terms": ["Finish answer-grounding eval harness", "DEADLINE", "[#A]"],
             "min_chunk_sources": 1,
         },
         {
             "id": "exact-path-and-rare-term",
-            "query": "where did I mention invoice 2026-019 in finance.org",
+            "query": "where did I mention record TEST-019 in records.org",
             "corpus_summary": "Mixed finance notes and unrelated project notes.",
             "files": [
                 {
-                    "path": "/synthetic/orgfiles/finance.org",
-                    "summary": "Accounting notes and invoice follow-up items.",
-                    "content": "* TODO Send invoice 2026-019 to Alvarez\nAmount EUR 1200 due Friday.\n",
+                    "path": "/synthetic/sample-notes/records.org",
+                    "summary": "Sample records with follow-up items.",
+                    "content": "* TODO Review record TEST-019 for Example Recipient\nValue 1200 units due Friday.\n",
                 },
                 {
-                    "path": "/synthetic/orgfiles/projects.org",
-                    "summary": "Project notes without invoice identifiers.",
+                    "path": "/synthetic/sample-notes/projects.org",
+                    "summary": "Project notes without record identifiers.",
                     "content": "* TODO Research retrieval ideas\n",
                 },
             ],
-            "expected_paths": ["finance.org"],
-            "expected_terms": ["invoice 2026-019", "Alvarez"],
+            "expected_paths": ["records.org"],
+            "expected_terms": ["record TEST-019", "Example Recipient"],
             "min_chunk_sources": 1,
         },
     ]
@@ -4975,7 +4975,7 @@ def synthetic_retrieval_eval_index(fixture: dict) -> dict:
     return {
         "id": f"retrieval-eval-{fixture.get('id', 'fixture')}",
         "name": "retrieval eval fixture",
-        "root": "/synthetic/orgfiles",
+        "root": "/synthetic/sample-notes",
         "created": now(),
         "corpus_summary": str(fixture.get("corpus_summary", "")),
         "files": files,
@@ -6045,7 +6045,7 @@ def recent_conversation_matched_snippets(row: dict, query_counts, *, limit: int,
         score = score_text(query_counts, content)
         if score <= 0:
             continue
-        label = "Javier" if role == "user" else "Motoko"
+        label = "User" if role == "user" else "Motoko"
         candidates.append((score, order, f"{label}: {compact_text(content, snippet_chars)}"))
         order += 1
     candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
@@ -10053,7 +10053,7 @@ def refresh_profile_dossier(*, cancel_event=None) -> dict:
     raise_if_work_cancelled(cancel_event, "profile refresh interrupted by request", work_kind="profile")
     prompt = textwrap.dedent(
         f"""
-        Build a compact profile dossier for future private conversations with Javier.
+        Build a compact profile dossier for future private conversations with the user.
 
         Use only the source material below. Do not invent facts.
         Prefer stable, recurring, useful context over transient task details.
@@ -19309,7 +19309,7 @@ def build_system_prompt_and_sources(
     sufficiency = context_sufficiency_note(conv, query, sources, project_scope=project_scope)
     return textwrap.dedent(
         f"""
-        You are {identity.get('name', 'Motoko')}, Javier's local assistant
+        You are {identity.get('name', 'Motoko')}, a local assistant
         running in the {identity.get('realm', 'personal')} realm.
 
         Realm identity:
@@ -19874,6 +19874,14 @@ def open_model_response(
     socket_activation_min_timeout: float | None = None,
     prepare_residency: bool = True,
 ):
+    endpoint_text = str(route_info.get("endpoint") or "").strip()
+    if not endpoint_text:
+        route_name = str(route_info.get("catalog_route") or route_info.get("route") or MODEL_ROUTE_CHAT)
+        raise SystemExit(
+            f"no local model endpoint is configured for {route_name}; "
+            "install a managed ~/.config/motoko/local-models.json catalog, "
+            "set MOTOKO_ENDPOINT, or configure the route in ~/.config/motoko/config.json"
+        )
     lease = (
         model_route_residency_lease(route_info, cancel_event=cancel_event)
         if prepare_residency
@@ -20719,7 +20727,7 @@ HELP_SECTIONS = [
             ("/dossiers", "list memory dossiers"),
             ("/dossier-show [ID]", "show a memory dossier"),
             ("/personality", "show the active personality/style file"),
-            ("/profile", "show Motoko's profile dossier about Javier"),
+            ("/profile", "show Motoko's profile dossier about the user"),
             ("/profile-refresh", "rebuild the profile dossier"),
         ],
     ),
@@ -21028,7 +21036,7 @@ def format_about() -> str:
         f"realm: {identity_realm()}",
         f"model: {model_name()}",
         f"model badge: {model_badge()}",
-        f"endpoint: {endpoint()}",
+        f"endpoint: {endpoint() or 'not configured'}",
         background_lanes_text(),
         f"state: {state_root()}",
         f"config: {config_root()}",
@@ -21038,7 +21046,7 @@ def format_about() -> str:
 
 def format_about_header(width: int | None = None) -> list[str]:
     _ = width
-    logo = MARES_LOGO_ASCII.splitlines()
+    logo = MOTOKO_LOGO_ASCII.splitlines()
     rows = []
     for line in logo:
         rows.append(style(line, assistant_color(), "bold"))
@@ -25329,7 +25337,7 @@ def compact_conversation(
         {older_text}
 
         Create a dense but readable conversation summary for future turns.
-        Preserve Javier's durable preferences, commitments, open questions,
+        Preserve the user's durable preferences, commitments, open questions,
         named people/projects/files, and any conclusions already reached.
         Do not invent facts. Keep it under {MAX_CONVERSATION_SUMMARY_CHARS} characters.
         """

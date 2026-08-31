@@ -142,7 +142,7 @@ model immediately, because it gives the existing models better evidence.
 ## Procedural Skill Candidate: Source-Scoped Temporal Retrieval
 
 A useful recent failure pattern was the query "summarize the last N days
-present in logbook.org". The retrieval layer could find `logbook.org`, but the
+present in sample-journal.org". The retrieval layer could find `sample-journal.org`, but the
 answer sometimes inferred missing adjacent calendar days or allowed dated
 sections from other Org files to satisfy the request. The user intent was not
 "today and yesterday"; it was "the newest distinct dated sections that actually

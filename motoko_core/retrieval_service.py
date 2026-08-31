@@ -160,7 +160,7 @@ def build_prompt_context_lanes(
             ],
             "tone and behavior only",
         ),
-        ContextLane("profile", profile_text, profile_sources, "stable Javier context"),
+        ContextLane("profile", profile_text, profile_sources, "stable user context"),
         ContextLane("durable memories", memory_text, memory_sources, "ranked personal facts and preferences"),
         ContextLane("procedural skills", skill_text, skill_sources, "relevant learned procedures and debugging lessons"),
         ContextLane("Motoko codebase", codebase_text, codebase_sources, "deterministic Motoko self-code lookup"),

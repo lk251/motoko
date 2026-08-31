@@ -2,15 +2,14 @@
 
 Date: 2026-08-22
 
-Motoko is the terminal personal assistant for the HB3 `personal` realm, and is
-also available as a local project/repository helper for the `mares` and
-`javier` realms. It remains Python-standard-library-only and talks to approved
-local llama.cpp routes declared by NixOS. The root `motoko` executable owns CLI
+Motoko is a terminal personal assistant and bounded local project/repository
+helper. It remains Python-standard-library-only and talks to operator-approved
+local llama.cpp routes. The root `motoko` executable owns CLI
 and composition while focused runtime, retrieval, memory, artifact, skill,
 action, goal-loop, model, and terminal services live under `motoko_core/`.
 
-Motoko is not Texere, Hermes, a provider gateway, or a general-purpose
-autonomous agent runtime. She is primarily a personal chat, memory, and
+Motoko is not a provider gateway or a general-purpose autonomous agent runtime.
+She is primarily a personal chat, memory, and
 retrieval assistant. Repository use starts from fixed read-only inspection and
 may cross into project mutation only through typed, validator-owned,
 user-confirmed action records and explicit goal-loop/worktree workflows.
@@ -52,17 +51,15 @@ As of 2026-08-22:
 
 ## Security Boundary
 
-Motoko is installed for `personal`, `mares`, and `javier` on HB3. Each account
-uses its own home directory, so conversations, memories, indexes, and
-permissions are separate unless Javier deliberately imports or copies state.
-The `personal` and `mares` accounts are non-sudo. The `personal` account has
-local-model access, but does not have Hermes provider-key access.
+Each installation uses the current account's home directory, so conversations,
+memories, indexes, configuration, and permissions stay separate unless the
+operator deliberately imports or copies state. Motoko should run without sudo,
+provider credentials, or direct service-control authority.
 
 Motoko does not use:
 
 - provider API keys;
-- Hermes;
-- Texere;
+- a provider gateway;
 - LangChain or LangGraph;
 - pip packages;
 - npm packages;
@@ -75,10 +72,10 @@ Motoko uses:
 - the Python standard library only;
 - approved per-realm local model routes from
   `~/.config/motoko/local-models.json`;
-- files in the `personal` account's own home directory.
+- files deliberately allowlisted by the current user.
 
-On `.#hb3-headless`, NixOS owns the llama.cpp worker catalog, model paths,
-service flags, Unix sockets, and route policy. Motoko can request approved
+On managed deployments, the operating-system configuration owns the llama.cpp
+worker catalog, model paths, service flags, endpoints, and route policy. Motoko can request approved
 route endpoints, read content-free route status, stop a declared route through
 `motoko-model stop ROUTE`, and read content-free metrics through
 `motoko-model metrics ROUTE`; Motoko cannot call `systemctl`, load arbitrary
@@ -127,7 +124,7 @@ Example identity config:
   "identity": {
     "name": "Motoko",
     "realm": "admin",
-    "description": "NixOS and repository review assistant for Javier's admin account."
+    "description": "Local repository review assistant for this account."
   },
   "ui": {
     "assistant_color": "purple"
@@ -145,7 +142,7 @@ motoko status
 
 and includes it in the system prompt and `/sources` provenance for each answer.
 `motoko about` is the compact introduction screen: Motoko's name, brief
-privacy/security-conscious description, development values, version, the Mares
+privacy/security-conscious description, development values, version, the Motoko
 ASCII logo in the assistant color, identity/realm, active chat model and
 endpoint, background lanes, state
 paths, and permissions. The logo is rendered first and left-justified, with
@@ -200,7 +197,7 @@ Per-user index defaults can also live in `config.json`:
   "identity": {
     "name": "Motoko",
     "realm": "admin",
-    "description": "NixOS and repository review assistant for Javier's admin account."
+    "description": "Local repository review assistant for this account."
   },
   "permissions": {
     "mode": "repo-review"
@@ -236,7 +233,7 @@ MOTOKO_INDEX_MAX_FILES=50000 motoko index ~/Documents
 MOTOKO_INDEX_MAX_FILE_BYTES=20MiB motoko index ~/Documents
 ```
 
-To set defaults manually for `personal` or `mares`, log into that account and
+To set defaults manually, log into the target account and
 run `motoko permissions set MODE`, then edit `~/.config/motoko/config.json` if
 that account needs different index limits, conversation-recall budgets,
 identity text, or assistant label color. Valid `ui.assistant_color` values are
@@ -258,8 +255,8 @@ Suggested realm identities:
 {
   "identity": {
     "name": "Motoko",
-    "realm": "mares",
-    "description": "Mares Engineering work assistant for Texere, RaceFocus, Motoko, and source-repo analysis. Keep work context separate from Javier's personal memories and from admin-only host-apply authority."
+    "realm": "work",
+    "description": "Repository review assistant. Keep work context separate from private memories and host-apply authority."
   },
   "permissions": {
     "mode": "repo-review"
@@ -275,7 +272,7 @@ Suggested realm identities:
   "identity": {
     "name": "Motoko",
     "realm": "admin",
-    "description": "Admin-side NixOS and repository review assistant for Javier. Help inspect diffs, explain system policy, and prepare safe changes, but do not imply sudo, switching, pushing, or live mutation authority."
+    "description": "System-configuration and repository review assistant. Help inspect diffs and prepare safe changes without implying sudo, deployment, push, or live mutation authority."
   },
   "permissions": {
     "mode": "repo-review"
@@ -470,10 +467,9 @@ selection so entries past the first visible page remain visible.
 The TUI does not render a spinner or duplicate chat activity in the bottom
 status line; the live answer row carries `Preparing` and `Answering` state.
 The bottom status line starts with the conversation title rather than the
-assistant name. It includes the selected chat model and effort, for example
-`qwen38-default:xhigh`, and reports active memory and background-study phases
-such as
-`mem: proposing(qwen35-2b-worker)`, `bg-light: catalog(cpu)`, or
+assistant name. It includes the selected catalog model and effort, for example
+`chat-default:xhigh`, and reports active memory and background-study phases
+such as `mem: proposing(worker)`, `bg-light: catalog(cpu)`, or
 `bg-heavy: summarizing chunk file 6/54 chunk 10/100 9% eta 3h12m`.
 
 ## Daily Usage Tips
@@ -481,7 +477,7 @@ such as
 The normal daily loop is:
 
 1. Start Motoko from the directory whose corpus matters, such as
-   `/home/mares/repos/orgfiles`.
+   `~/Documents/notes`.
 2. Ask questions naturally. If an index exists for the current directory,
    Motoko auto-attaches the best current-directory index; if she offers to learn
    the directory tree, answer `yes` only when that corpus should become part of
@@ -522,12 +518,12 @@ shape.
 
 Motoko can act as a supervisory planner for a repository without becoming the
 host's administrative control plane. Start her in the repository whose current
-files should define the task. For example, in Javier's admin realm:
+files should define the task. For example:
 
 ```bash
-cd /home/javier/repos/nixos-configs
-motoko index --plan --name nixos-configs .
-motoko index --name nixos-configs .
+cd ~/repos/system-config
+motoko index --plan --name system-config .
+motoko index --name system-config .
 MOTOKO_REASONING_PRESET=xhigh motoko
 ```
 
@@ -572,19 +568,14 @@ system state.
 ```
 
 Use `/model` to inspect the named chat models and `/model NAME` to select one
-for the current conversation. `/model auto` follows the NixOS catalog route
-marked `selection.default == true`. On HB3 the names are:
-
-- `qwen38-default`: Qwen3.8 UD-Q5_K_XL, 32K context;
-- `qwen38-long`: Qwen3.8 UD-Q5_K_M, 64K context;
-- `qwen38-longest`: Qwen3.8 UD-Q5_K_M, 131K context with host KV;
-- `muse-glimmer`: Muse Glimmer KQuant 17GB, 131K context with GPU KV.
-
-Aliases `default`, `long`, `longest`, and `muse` are accepted. Before a request
-crosses 75 percent of the selected model's declared `context_tokens`, Motoko
-compacts older turns and rebuilds query-focused retrieval context. If the
-prepared prompt still does not fit, Motoko asks you to choose a larger-context
-model rather than silently changing model, quant, or reasoning effort.
+for the current conversation. `/model auto` follows the managed catalog route
+marked `selection.default == true`; names, aliases, model files, quants,
+context sizes, and cache placement are deployment-owned catalog data. Before a
+request crosses 75 percent of the selected model's declared `context_tokens`,
+Motoko compacts older turns and rebuilds query-focused retrieval context. If
+the prepared prompt still does not fit, Motoko asks you to choose a
+larger-context model rather than silently changing model, quant, or reasoning
+effort.
 `/context` is accepted only as a deprecated compatibility alias for old saved
 commands and conversations.
 
@@ -653,9 +644,9 @@ motoko last-call
 motoko context-bench
 motoko model-routes
 motoko models
-motoko models qwen38-chat-default
-motoko model-stop qwen38-chat-default
-motoko model-metrics qwen38-chat-default
+motoko models ROUTE
+motoko model-stop ROUTE
+motoko model-metrics ROUTE
 motoko model-eval
 motoko index-enrich INDEX_ID
 motoko index-enrich --all
@@ -1084,7 +1075,7 @@ model-planned, user-reviewed, and user-confirmed.
 are rejected.
 
 The built-in `org-temporal-retrieval` skill handles queries such as "last three
-days present in logbook.org". It declares the
+days present in sample-journal.org". It declares the
 `builtin:org_temporal_latest_entries` handler. For matching queries, Motoko
 builds a pre-retrieval `retrieval_plan_v1`, activates that skill, scopes
 retrieval to the named Org source, parses dated headings, and selects the
@@ -1176,7 +1167,7 @@ Useful in-chat commands:
 /down [TEXT]
 /diagnose
 /status
-/model [qwen38-default|qwen38-long|qwen38-longest|muse-glimmer|auto]
+/model [NAME|auto]
 /reasoning [off|low|medium|xhigh|auto]
 /model-routes
 /models [ROUTE]
@@ -1332,11 +1323,11 @@ reported as a maintenance failure instead of leaving `memory: proposing`
 visible forever. For per-realm Unix-socket model routes, the helper wall
 timeout is aligned with socket-activation timeouts so model loading is not
 mistaken for a failed memory proposal.
-When Javier explicitly asks Motoko to remember something with natural wording
+When the user explicitly asks Motoko to remember something with natural wording
 such as `remember that ...`, Motoko saves that memory deterministically before
 answering instead of waiting for the model proposal pass.
 After the first few messages, maintenance may also ask the local model for a
-short conversation title. First-message titles are provisional unless Javier
+short conversation title. First-message titles are provisional unless the user
 set a title manually with `/title` or `motoko new --title`.
 
 Memories default to importance `3`. `motoko memory importance ID 1-5` changes
@@ -1392,7 +1383,7 @@ reuses an existing dossier, builds a topic dossier from an attached or relevant
 index, or builds a memory/conversation dossier. `/study QUERY --focus recent`
 is a real parsed focus hint for recent/today/yesterday retrieval; it is not
 sent through as literal query text.
-When a query names a file such as `logbook.org`, retrieval gives that path a
+When a query names a file such as `sample-journal.org`, retrieval gives that path a
 strong deterministic boost before model synthesis so explicit file requests do
 not lose to broad task-signal matches elsewhere in the corpus.
 For document corpora already attached to the active conversation, Motoko may
@@ -1425,11 +1416,11 @@ Motoko separates background work into three lanes:
 - `large-model`: chat answers, corpus synthesis, dossiers, memory/profile
   reflection, audits, and hard ambiguous reasoning.
 
-The lanes are implemented through named model routes. On HB3, NixOS declares
-the approved local model catalog in `~/.config/motoko/local-models.json`; routes
-normally point at `unix:///run/motoko-llm/<realm>/<route>.sock` and are served
-by per-realm worker users such as `mares-llm` or `personal-llm`. Motoko talks to
-those OpenAI-compatible Unix sockets, but does not call `systemctl` or run
+The lanes are implemented through named model routes. A managed deployment
+declares the approved local model catalog in
+`~/.config/motoko/local-models.json`; routes may point at OpenAI-compatible
+Unix sockets owned by isolated worker users. Motoko talks to those endpoints,
+but does not call `systemctl` or run
 llama.cpp as the current user. Use `motoko-model list/info/verify/start/stop/status`
 for model-service operations.
 
@@ -1443,22 +1434,20 @@ reasoning_effort = low|medium|xhigh
 ```
 
 Use `/reasoning off|low|medium|xhigh` inside Motoko to set the current
-conversation. `/reasoning auto` returns to the selected model's default;
-Qwen defaults to `xhigh`. Muse Glimmer cannot disable reasoning. Its common
-`low`, `medium`, and `xhigh` controls map to
-`chat_template_kwargs.reasoning_strength`, while `auto` preserves Muse's
-native `high` default. Old saved `default`, `high`, and `max` overrides are
-accepted as compatibility aliases for Qwen `xhigh`. For a process-wide
-default, use `MOTOKO_REASONING_PRESET=off|low|medium|xhigh`. Streaming reasoning switches
-the active TUI answer row to `Thinking`, shows the latest reasoning text dimmed
-and truncated for fit, and returns to `Answering` when normal answer tokens
-stream. Reasoning text is not inserted into the conversation transcript,
-prompt history, `/last-call`, logs, or shared state.
+conversation. `/reasoning auto` returns to the selected model's
+catalog-declared default. The catalog's request policy determines which native
+request fields and effort values a model supports; old saved
+`default|high|max` values remain accepted as compatibility aliases. For a
+process-wide default, use
+`MOTOKO_REASONING_PRESET=off|low|medium|xhigh`. Streaming reasoning switches the
+active TUI answer row to `Thinking`, shows the latest reasoning text dimmed and
+truncated for fit, and returns to `Answering` when normal answer tokens stream.
+Reasoning text is not inserted into the conversation transcript, prompt
+history, `/last-call`, logs, or shared state.
 
-All routes still fall back to the normal chat endpoint until config,
-environment variables, or the NixOS local-model catalog override them, so the
-feature is safe before smaller worker models are deployed. Inspect routes with
-`/model-routes` or:
+Routes require an endpoint declared by the managed local-model catalog,
+environment variables, or user configuration; Motoko has no compiled-in host
+or port fallback. Inspect routes with `/model-routes` or:
 
 ```bash
 motoko model-routes
@@ -1468,7 +1457,7 @@ Inspect live local model service state with `/models` or:
 
 ```bash
 motoko models
-motoko models qwen38-chat-default
+motoko models ROUTE
 ```
 
 This uses the approved `motoko-model status ROUTE` helper and is intentionally
@@ -1481,7 +1470,7 @@ VRAM.
 Release a worker explicitly with `/model-stop ROUTE` or:
 
 ```bash
-motoko model-stop qwen38-chat-default
+motoko model-stop ROUTE
 ```
 
 This calls `motoko-model stop ROUTE`; Motoko still does not call `systemctl`
@@ -1493,20 +1482,20 @@ Route overrides can live in `~/.config/motoko/config.json`:
 {
   "model_routes": {
     "index_chunk": {
-      "endpoint": "http://127.0.0.1:8091/v1/chat/completions",
+      "endpoint": "unix:///run/local-models/summary.sock",
       "model": "small-summary-worker"
     },
     "index_file": {
-      "endpoint": "http://127.0.0.1:8091/v1/chat/completions",
+      "endpoint": "unix:///run/local-models/summary.sock",
       "model": "small-summary-worker"
     },
     "index_label": {
-      "endpoint": "http://127.0.0.1:8092/v1/chat/completions",
+      "endpoint": "unix:///run/local-models/label.sock",
       "model": "small-label-worker"
     },
     "index_corpus": {
-      "endpoint": "http://127.0.0.1:8083/v1/chat/completions",
-      "model": "qwen3.6-27b-mtp-ud-q5-k-xl"
+      "endpoint": "unix:///run/local-models/synthesis.sock",
+      "model": "synthesis-worker"
     }
   }
 }
@@ -1541,11 +1530,10 @@ template assumptions change enough that old slot files should not be reused.
 `restore=miss|restored|failed` and `save=saved|failed`; it must not contain
 prompt or response text.
 
-When the NixOS catalog is keyed by worker service name instead of Motoko route
-name, Motoko resolves routes through each catalog entry's `tasks` list. For
-example, `index_chunk` can map to `qwen35-2b-worker`, `index_file` to
-`qwen3-4b-instruct-worker`, `index_label` to `ministral-3b-worker`, and topic
-or corpus synthesis to `qwen35-9b-worker`.
+When the managed catalog is keyed by worker service name instead of Motoko
+route name, Motoko resolves logical roles such as `index_chunk`, `index_file`,
+`index_label`, and `index_corpus` through each catalog entry's `tasks` list.
+Physical service names and their model assignments remain deployment-owned.
 
 For hierarchical summaries, Motoko can fan out independent reduction batches
 across smaller worker routes before the final synthesis route runs. For
@@ -1626,7 +1614,7 @@ motoko bg-now
 
 `/profile-refresh` or `motoko profile refresh` builds a compact profile dossier
 from durable memories and recent conversation material. This is an explicit
-hierarchical retrieval-augmented memory layer for Javier's stable preferences,
+hierarchical retrieval-augmented memory layer for the user's stable preferences,
 goals, projects, working style, personal context, constraints, sensitivities,
 and open questions. `/profile` or `motoko profile` displays it. The dossier is
 included in future prompts with `/sources` provenance.
@@ -1965,10 +1953,10 @@ looks inside Org chunks for dated headings and extracts the matching sections
 as mandatory evidence before generic heading/window competition. Those sections
 are then used for `/retrieval-preview`, chat context, topic evidence, or rerank
 documents. This is specifically important for chronological files such as
-`logbook.org`, where the relevant `** do` and `** log` subsections may live
+`sample-journal.org`, where the relevant `** do` and `** log` subsections may live
 near the end of a large chunk rather than near the beginning.
 
-This is implemented as evidence-span selection, not as a `logbook.org`
+This is implemented as evidence-span selection, not as a `sample-journal.org`
 special case. Motoko builds candidate spans from dated Org sections, Org and
 Markdown headings, query-term windows, and overlapping text windows. She scores
 those spans deterministically first. For a bounded number of large top-ranked
@@ -2027,13 +2015,13 @@ dossier under:
 Create one from the shell:
 
 ```bash
-motoko topic INDEX_ID "family memories involving Buenos Aires" --name buenos-aires
-motoko deepen INDEX_ID "family memories involving Buenos Aires"
+motoko topic INDEX_ID "history of the sample project" --name sample-project
+motoko deepen INDEX_ID "history of the sample project"
 motoko topics
 motoko topic-show TOPIC_ID
 motoko topic-show TOPIC_ID --evidence
 motoko chat --topic TOPIC_ID
-motoko dossier "why does Javier care about craftsmanship?"
+motoko dossier "why does the user care about craftsmanship?"
 motoko dossiers
 motoko dossier-show DOSSIER_ID
 motoko dossier-show DOSSIER_ID --evidence
@@ -2043,10 +2031,10 @@ motoko chat --dossier DOSSIER_ID
 Create or attach one from inside a chat:
 
 ```text
-/topic family memories involving Buenos Aires
-/topic INDEX_ID family memories involving Buenos Aires
-/deepen family memories involving Buenos Aires
-/deepen INDEX_ID family memories involving Buenos Aires
+/topic history of the sample project
+/topic INDEX_ID history of the sample project
+/deepen history of the sample project
+/deepen INDEX_ID history of the sample project
 /attach-topic
 /attach-topic TOPIC_ID
 ```
@@ -2055,9 +2043,9 @@ If a chat already has a document index attached, `/topic QUERY` uses that
 attached index. Otherwise `/topic` opens an index picker and then asks for the
 topic query. Topic dossiers store summaries and selected excerpts as Motoko
 derived state, so they can duplicate sensitive personal text inside the
-`personal` user's Motoko state directory. They are useful for going deeper into
-a subject without reinjecting the entire corpus on every turn, but they should
-be treated as private assistant memory.
+current user's Motoko state directory. They are useful for going deeper into a
+subject without reinjecting the entire corpus on every turn, but they should be
+treated as private assistant memory.
 
 `/deepen` and `motoko deepen` use the same mechanism with the larger topic
 budget. Use them when a conversation has narrowed to a subject and Motoko needs
@@ -2065,26 +2053,19 @@ a more detailed private dossier before answering follow-up questions.
 
 ## Operational Model
 
-Normal use from HB2 or another client:
+Normal local use:
 
 ```bash
-ssh hb3-personal
 motoko
 ```
 
-On HB3, the default model endpoint comes from
-`~/.config/motoko/local-models.json` when NixOS provides that catalog. It is
-normally a per-realm Unix socket such as:
-
-```text
-unix:///run/motoko-llm/mares/chat.sock
-```
-
-Older or ad-hoc environments can still use the loopback MTP Qwen3.6 service:
-
-```text
-http://127.0.0.1:8083/v1/chat/completions
-```
+The default model endpoint comes from `~/.config/motoko/local-models.json` when
+a managed installation provides that catalog. Endpoint addresses and service
+layout are deployment details owned by `nixos-configs`, not this repository.
+For an unmanaged installation, set `MOTOKO_ENDPOINT` and optionally
+`MOTOKO_MODEL`, or declare routes in `~/.config/motoko/config.json`. Motoko
+fails clearly when no endpoint is configured rather than assuming a host or
+port.
 
 Line mode can still use the legacy thinking spinner when `MOTOKO_SPINNER` is
 set. The default is off. ASCII and braille remain opt-in:
@@ -2099,14 +2080,12 @@ MOTOKO_SPINNER=off motoko
 
 ## Limits
 
-Motoko is not a sandbox. The isolation comes from the HB3 account split and
-from not granting `personal` sudo, provider keys, SSH/GitHub credentials, or
-service-control authority.
+Motoko is not a sandbox. Isolation comes from the OS-user boundary, file
+permissions, allowlists, and not granting the process sudo, provider keys,
+repository credentials, or direct service-control authority.
 
 Motoko has explicit attached documents, hierarchical document indexes,
 conversation history, automatic compaction, ranked durable memories, and
 topic-focused dossiers. If
-personal memory/RAG becomes sensitive enough to require stronger isolation, move
-the assistant state and process into a reviewed NixOS container or KVM VM while
-keeping GPU inference on the HB3 host unless a later review justifies GPU
-passthrough.
+private memory or retrieval state requires stronger isolation, move the
+assistant state and process into a reviewed process, container, or VM boundary.

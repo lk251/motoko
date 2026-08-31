@@ -65,8 +65,8 @@ These invariants should remain true before Motoko becomes more agentic:
   project-file writes.
 - Per-session confirmation is allowed only when the action type, skill, tool,
   effect set, confirmation policy, and argument scope do not broaden.
-- Read/write paths stay within explicit allowlists, avoid `/home/personal`
-  from `mares`, reject traversal, and respect `.motokoignore`.
+- Read/write paths stay within explicit allowlists, avoid other users' private
+  home directories, reject traversal, and respect `.motokoignore`.
 - Project mutation stays code-owned through `project_file_write` until a later
   reviewed design explicitly changes that.
 - Ledgers and admin-visible route telemetry remain content-safe. Private tool

@@ -8,16 +8,13 @@ host integration policy.
 
 ## Current Role
 
-Motoko is Javier's local terminal personal assistant for the HB3 `personal`
-realm, and a small local repo-review helper for the `mares` and `javier`
-realms. She is meant to feel conversational and useful for private daily notes,
-documents, memory, approved local-model chat, and bounded source-repo
+Motoko is a local terminal personal assistant and a small, bounded repository
+review helper. She is meant to feel conversational and useful for private daily
+notes, documents, memory, approved local-model chat, and source-repository
 inspection and improvement.
 
 She is intentionally not:
 
-- Texere;
-- Hermes;
 - a provider gateway;
 - an autonomous host-admin agent;
 - a general-purpose terminal or network agent;
@@ -63,58 +60,35 @@ service ownership, cooperative cancellation, artifact lifecycle fanout,
 retrieval/code-intelligence precision, private eval quality, and real-use
 exercise of the reviewed mutation paths.
 
-## Host Integration
+## Deployment Contract
 
-The active NixOS integration lives in `/home/javier/repos/nixos-configs`.
-
-Current intended deployment:
+This repository defines a portable application and its security contract. Real
+deployment topology is owned by the operating-system configuration repository,
+currently `nixos-configs`.
 
 - Motoko is packaged as this repository's `packages.x86_64-linux.default`.
-- `nixos-configs` consumes Motoko through a private mbp111 Git flake input.
-- HB3 installs Motoko for `personal`, `mares`, and `javier`.
-- Motoko state is per-user under `~/.local/state/motoko`; config is per-user
-  under `~/.config/motoko`.
-- Motoko identity is per-user in `~/.config/motoko/config.json`; the repo name
-  and executable stay `motoko`.
-- `personal` has local-model access but no Hermes/provider-key group access.
-- `mares` is non-sudo and can use Motoko for work/repo review without inheriting
-  Javier's personal Motoko state.
-- `javier` can use Motoko for admin-side NixOS review with deliberately smaller
-  source-index limits.
-- NixOS exposes approved local model routes through
+- State lives under the current user's XDG state directory and configuration
+  under the current user's XDG config directory.
+- Identity, permissions, document allowlists, and derived artifacts are
+  per-user and must not be copied across security boundaries implicitly.
+- A managed installation may expose approved local-model routes through
   `~/.config/motoko/local-models.json`.
-- The HB3 local model manager kind is `systemd-socket-worker`: Motoko consumes
-  per-realm Unix sockets such as `unix:///run/motoko-llm/<realm>/<route>.sock`,
-  while llama.cpp runs as realm-specific worker users such as `mares-llm` or
-  `personal-llm`.
-- Motoko may use `motoko-model list/info/verify/start/stop/status` for
-  user-visible model service operations, but must not call `systemctl`
-  directly or assume the current user owns llama.cpp.
-- Older or ad-hoc environments can still use the loopback MTP llama.cpp
-  endpoint, `http://127.0.0.1:8083/v1/chat/completions`.
-
-Repository conventions:
-
-- The expected development checkouts are `/home/javier/repos/motoko` and
-  `/home/mares/repos/motoko`.
-- The private source-of-truth remote is normally `origin =
-  mbp111:/home/javier/git/motoko.git`; public mirrors such as `github` or
-  `codeberg` may exist but must be verified with `git remote -v` before use.
-- `mares` has normal development authority for Motoko source work and can
-  commit accepted changes locally in this repository. Pushing still requires an
-  explicit user request and a verified target remote.
-- Deploying a new Motoko package to HB3 is separate from source development:
-  Javier/admin owns the `nixos-configs` flake-input update, review, rebuild,
-  and switch.
+- Motoko may use the narrow `motoko-model` interface for user-visible model
+  operations, but must not call a service manager directly, assume ownership of
+  model workers, or gain privileged host authority.
+- Source publication and deployment are separate review steps. A source commit
+  does not imply that any machine has rebuilt or activated it.
+- Real account names, checkout paths, remotes, hostnames, socket and port
+  layouts, hardware inventory, privilege maps, and deployment commands belong
+  in `nixos-configs`; credentials remain under its reviewed secret-management
+  boundary.
 
 ## Security Shape
 
-Motoko's security comes from the HB3 account split and conservative local
-behavior:
+Motoko's security comes from OS-user isolation and conservative local behavior:
 
 - no provider API keys;
-- no Hermes dependency;
-- no Texere dependency;
+- no provider gateway dependency;
 - no sudo or service-control authority;
 - no database server;
 - no pip/npm/runtime dependency installs;
@@ -127,9 +101,9 @@ behavior:
 - memory, indexes, and topics stay under Motoko-owned state paths.
 
 Pydantic, containers, and other larger machinery are deliberately absent for
-now. If personal memory/RAG becomes sensitive enough to need a harder boundary,
-the preferred next review is a NixOS container or KVM VM for the personal
-assistant state while keeping GPU inference on the HB3 host.
+now. If private memory or retrieval state needs a harder boundary, review
+process, container, or VM isolation without moving private deployment details
+into the public repository.
 
 ## Product Direction
 
@@ -159,12 +133,12 @@ Accepted directions:
 - artifact provenance and quality gates for model-derived summaries before
   routing background work to smaller worker models;
 - synthetic worker-model evaluation fixtures that compare route outputs without
-  requiring Codex to read Javier's personal corpora;
+  requiring Codex to read private personal corpora;
 - topic dossiers and deeper dossiers over already indexed material;
 - per-user permission modes for chat-only, document reads/indexing, and
   read-only repo review;
-- per-user identity labels for `personal`, `mares`, and `javier` without
-  splitting the codebase or renaming the repository;
+- per-user identity labels without splitting the codebase or renaming the
+  repository;
 - fixed repo status/diff/log/review commands that attach bounded summaries as
   context without arbitrary shell execution;
 - review-first skills with code-owned handler/effect declarations;
@@ -186,7 +160,7 @@ Avoid for now:
 - role-playing multi-agent abstractions;
 - hidden background state that cannot be inspected from the CLI.
 
-## Javier's Interface Preferences
+## Interface Preferences
 
 Current UI direction:
 
@@ -215,7 +189,7 @@ Current UI direction:
 - User input prompt should be just `>`, not `You>`.
 - Titles, command text, and supporting UI can be turquoise.
 - Raw TTY usability matters as much as graphical terminals.
-- `/about` should render the Mares ASCII logo left-justified, with a concise
+- `/about` should render the Motoko ASCII logo left-justified, with a concise
   privacy/security-conscious Motoko description, values, version, and runtime
   details below the logo rather than interleaved beside it.
 - Startup should show a brief non-persistent `/tips` pointer block for now:
@@ -261,7 +235,7 @@ Current UI direction:
   fields; topic and memory-dossier attachments refresh their visible metadata
   from the current artifact file. Prompt-time catalog text is rebuilt from
   current state rather than trusting an older persisted context-catalog file.
-- Query-focused memory dossiers should be available when Javier wants Motoko to
+- Query-focused memory dossiers should be available when the user wants Motoko to
   study a subject across saved memories and prior conversations before
   continuing the chat.
 - Skill learning should stay review-first: after-answer maintenance may suggest
@@ -336,8 +310,8 @@ Current UI direction:
   expose those extra passes in `/sources`. Skills can encode deterministic
   retrieval procedures, but a code-owned planner should decide when those
   procedures run.
-- The TUI should show the conversation's named chat model and reasoning effort,
-  such as `qwen38-default:xhigh` or `muse-glimmer:high`.
+- The TUI should show the conversation's catalog-defined chat model and
+  reasoning effort, such as `chat-default:xhigh`.
 - Background study may refresh the private context catalog, note stale indexes,
   and suggest relevant existing dossiers. Heavy background model work should be
   opt-in, such as `MOTOKO_BACKGROUND_PROFILE=1` for idle profile refreshes, so
@@ -388,7 +362,7 @@ Current UI direction:
 Immediate retrieval-grounding plan:
 
 The highest-value work is to make sure indexed corpus knowledge is actually
-used reliably in chat. When Javier asks "what are tomorrow's
+used reliably in chat. When the user asks "what are tomorrow's
 highest-priority tasks?", Motoko should retrieve the relevant Org/task
 artifacts, show enough source provenance to be trusted, synthesize a useful
 answer, and then leave an inspectable answer-grounding audit. This serves both
@@ -436,14 +410,14 @@ The implementation path is:
   audit component of this broader reasoning layer.
 
 The highest-ROI next engineering improvement is improving the quality of
-profile dossiers and document-derived dossiers after real personal documents
-are added inside the `personal` realm. Codex should not need access to those
+profile dossiers and document-derived dossiers after real private documents
+are added in a local realm. Development agents should not need access to those
 documents; improvements should be made through synthetic fixtures, user-visible
 reports, and Motoko-owned runtime behavior. The regression suite now includes a
 small fake OpenAI-compatible test server, a pseudo-terminal render harness, and
 an evaluation harness for study reuse, context sufficiency, and background
 study state, so Motoko can test streaming, maintenance, recall, profile, TUI,
-and study behavior without requiring Qwen, llama.cpp, or Javier's personal
+and study behavior without requiring Qwen, llama.cpp, or private personal
 documents to be available to Codex.
 
 Current sequencing notes:
@@ -483,7 +457,7 @@ Current sequencing notes:
   vectors only in the current user's state, keeps `lexical-hash-v1` as the
   deterministic control path, uses fresh embedding stores as additive semantic
   recall, and keeps lexical/task/path evidence visible in diagnostics.
-- Javier explicitly chose on 2026-05-21 to take the measured risk of moving
+- The project deliberately chose on 2026-05-21 to take the measured risk of moving
   normal retrieval into hybrid embedding/rerank retrieval now, rather than
   waiting for more real-world diagnostics. Treat this as a reversible trial:
   if quality, latency, or stability fails strongly, consider reverting to
@@ -572,7 +546,7 @@ Refactor rules:
   separately testable.
 - Keep the root `motoko` executable as the compatibility facade until later
   phases prove a new entrypoint is safe.
-- Add no runtime dependencies without Javier's explicit approval.
+- Add no runtime dependencies without explicit maintainer approval.
 - Do not change private state formats or derived-artifact schemas unless the
   same change includes an upgrade or source-reprocessing path.
 - Prefer extracting pure helpers first, then boundaries with side effects, and
@@ -1067,8 +1041,8 @@ Current implementation progress:
   content-free report scrubbing and `/status` identifies its observability
   schema.
 - Step 10 is complete as an automated gate in this repository; the manual
-  interactive checklist above remains the deployment soak path after Javier
-  updates the Motoko flake input and rebuilds.
+  interactive checklist above remains the deployment soak path after the
+  operator updates the Motoko package input and rebuilds.
 
 ### Refactor Progress Report, 2026-05-24
 
@@ -1544,6 +1518,31 @@ Skill Curator v2 roadmap:
   diagnosis and gives an interruption before the first completed batch a
   resumable checkpoint shape.
 
+## Deferred Work
+
+Current high-value future work:
+
+- improve profile and topic dossier quality using synthetic fixtures and
+  user-visible reports;
+- improve document-derived dossier quality after an operator deliberately
+  makes private documents available, without development agents reading those
+  documents directly;
+- evaluate retrieval for allowlisted coding repositories without prematurely
+  choosing among three designs: extend the structured-text evidence pipeline
+  with code-aware artifacts and ranking, retain a specialized code-retrieval
+  pipeline, or combine shared candidate fusion with language-aware parsing and
+  indexes;
+- decide the code-retrieval shape from inspectable evaluations while preserving
+  provenance, per-user isolation, artifact migrations or source reprocessing,
+  and source visibility;
+- improve memory review, edit, and delete workflows when real use identifies
+  concrete friction;
+- keep background study inspectable and bounded;
+- consider stronger process, container, or VM isolation only if the ordinary
+  OS-user boundary proves insufficient;
+- keep unmanaged endpoint setup explicit and fail clearly when neither the
+  managed catalog nor user configuration declares a route.
+
 ## Roadmap Candidates
 
 The following path looks attractive, but it is not mandatory and should remain
@@ -1571,7 +1570,7 @@ efficiency. The likely shape is:
 - consider parser-backed artifacts for Org, Markdown, email, source code,
   configs, package manifests, and PDFs only after the dependency tradeoff is
   reviewed;
-- add a source-repo code intelligence layer for Motoko, Texere, and similar
+- add a source-repo code intelligence layer for Motoko and similar
   codebases: deterministic extraction of functions, classes, imports, command
   names, schemas, tests, and call/reference-like relationships; code-aware
   chunks by function/class/module rather than only text size; and hybrid
@@ -1647,7 +1646,7 @@ Motoko skills should crystallize actionable knowledge into explicit effects:
 
 The first shipped instance is `org-temporal-retrieval`. It now declares a
 retrieval handler and participates in a pre-retrieval `retrieval_plan_v1`, so
-queries such as "last three days present in logbook.org" activate a skill plan
+queries such as "last three days present in sample-journal.org" activate a skill plan
 before context packing. The deterministic handler still owns source scoping,
 Org date parsing, and evidence extraction. This is the intended pattern for
 future Motoko skills: skills preserve procedure and trigger metadata; handlers
@@ -1924,8 +1923,8 @@ The accepted review checklist for script execution and a general tool runner:
   command should be executed directly from model text.
 - Filesystem and realm boundaries: scripts must stay inside the current user's
   Motoko realm, respect document allowlists and `.motokoignore`, avoid
-  `/home/personal` from `mares`, avoid copied cross-account state, and never
-  get sudo or system-service authority.
+  other users' private home directories, avoid copied cross-account state, and
+  never get sudo or system-service authority.
 - Environment and sandboxing: strip secrets from environment variables, set a
   controlled working directory, bound runtime and output size, decide whether
   network is forbidden by default, and prefer NixOS-declared wrappers if OS
