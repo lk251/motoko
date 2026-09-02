@@ -900,6 +900,7 @@ MEMORY_PROPOSAL_QUEUE_DRAIN_LIMIT = 2
 MODEL_TIMEOUT_SECONDS = 600
 INDEX_MODEL_TIMEOUT_SECONDS = 1800
 MAINTENANCE_MODEL_TIMEOUT_SECONDS = 90
+MAINTENANCE_RESIDENCY_RETRY_SECONDS = 15
 RETRIEVAL_MODEL_TIMEOUT_SECONDS = 20
 RETRIEVAL_SOCKET_ACTIVATION_TIMEOUT_SECONDS = 20
 MAINTENANCE_MAX_RETRIES = 2
@@ -5768,6 +5769,20 @@ def update_maintenance_state(
         note=note,
         error=error,
     )
+
+
+def finish_maintenance_state(state: dict, notes: list[str]) -> int:
+    retry_after = max(0, int(state.get("retry_after_seconds", 0) or 0))
+    if retry_after:
+        update_maintenance_state(
+            state,
+            "memory: deferred",
+            status="deferred",
+            note="; ".join(notes) if notes else "retryable model residency deferral",
+        )
+    else:
+        clear_maintenance_state(state.get("job_id"))
+    return retry_after
 
 
 def resume_interrupted_maintenance(conv: dict) -> tuple[bool, str | None]:
@@ -19585,6 +19600,13 @@ def model_request_deferred_by_residency(exc: BaseException) -> bool:
     return any(text.startswith(prefix) for prefix in MODEL_REQUEST_DEFERRED_PREFIXES)
 
 
+def model_residency_retry_seconds(exc: BaseException) -> int:
+    match = re.search(r"\bwaiting\s+(\d+)s\b", str(exc))
+    if match is not None:
+        return min(900, max(1, int(match.group(1)) + 1))
+    return MAINTENANCE_RESIDENCY_RETRY_SECONDS
+
+
 def route_exclusive_lane(route_info: dict) -> str:
     scheduling = route_info.get("scheduling") if isinstance(route_info.get("scheduling"), dict) else {}
     declared = route_declared_exclusive_lane(route_info)
@@ -22596,6 +22618,7 @@ class MotokoTui:
         self.status = "ready"
         self.maintenance_status = ""
         self.maintenance_phase_started = time.monotonic()
+        self.maintenance_retry_at = 0.0
         self.input_buffer = ""
         self.cursor = 0
         self.kill_ring = ""
@@ -22762,6 +22785,7 @@ class MotokoTui:
         return True
 
     def reset_conversation_view(self) -> None:
+        self.maintenance_retry_at = 0.0
         self.messages = self.seed_messages(self.conv)
         self.history = self.seed_input_history(self.conv)
         self.history_index = None
@@ -23004,6 +23028,7 @@ class MotokoTui:
                 self.drain_events()
                 self.drain_terminal_flags()
                 now_ts = time.monotonic()
+                self.maybe_retry_deferred_maintenance(now_ts)
                 active_work = (
                     self.generating
                     or self.maintaining
@@ -23970,6 +23995,8 @@ class MotokoTui:
             elif kind == "maintenance_done":
                 self.maintaining = False
                 notes = event[1]
+                retry_after = max(0, int(event[2] if len(event) > 2 else 0))
+                self.maintenance_retry_at = time.monotonic() + retry_after if retry_after else 0.0
                 self.status = "ready"
                 self.maintenance_status = ""
                 if notes:
@@ -23978,6 +24005,7 @@ class MotokoTui:
                 changed = True
             elif kind == "maintenance_error":
                 self.maintaining = False
+                self.maintenance_retry_at = 0.0
                 self.maintenance_status = ""
                 self.status = "ready"
                 self.append("system", f"memory maintenance failed: {event[1]}")
@@ -24168,11 +24196,12 @@ class MotokoTui:
                     state=state,
                     cancel_event=cancel_event,
                 )
-                clear_maintenance_state(state.get("job_id"))
-                self.put_event(("maintenance_done", notes))
+                retry_after = finish_maintenance_state(state, notes)
+                self.put_event(("maintenance_done", notes, retry_after))
             except WorkPaused as exc:
                 self.put_event(("maintenance_done", [str(exc)]))
-            except Exception as exc:  # Keep hidden maintenance from breaking chat.
+            # Model helpers use SystemExit for CLI-facing failures.
+            except (Exception, SystemExit) as exc:
                 update_maintenance_state(
                     state,
                     "memory: failed",
@@ -24188,6 +24217,27 @@ class MotokoTui:
             target=worker,
             cancel_event=cancel_event,
         )
+
+    def maybe_retry_deferred_maintenance(self, now_value: float | None = None) -> bool:
+        now_ts = time.monotonic() if now_value is None else now_value
+        retry_at = float(getattr(self, "maintenance_retry_at", 0.0) or 0.0)
+        if not retry_at or now_ts < retry_at:
+            return False
+        last_input_at = float(getattr(self, "last_input_at", now_ts) or now_ts)
+        if now_ts - last_input_at < BACKGROUND_STUDY_IDLE_GRACE_SECONDS:
+            return False
+        if (
+            self.generating
+            or self.maintaining
+            or self.study_running
+            or self.cwd_indexing
+            or self.command_work_running()
+            or self.pending_prompts
+        ):
+            return False
+        self.maintenance_retry_at = 0.0
+        self.start_maintenance(resumed=True)
+        return True
 
     def compact_command_menu(self) -> str:
         return command_menu_text(SLASH_COMMANDS)
@@ -25148,7 +25198,7 @@ def chat_loop(conv: dict) -> None:
                     state=state,
                     cancel_event=cancel_event,
                 )
-            clear_maintenance_state(state.get("job_id"))
+            finish_maintenance_state(state, notes)
             if notes:
                 print(f"sys {'; '.join(notes)}")
         except WorkPaused as exc:
@@ -25159,7 +25209,7 @@ def chat_loop(conv: dict) -> None:
                 error=str(exc),
             )
             print(f"sys {exc}")
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             update_maintenance_state(
                 state,
                 "memory: failed",
@@ -25285,8 +25335,8 @@ def chat_loop(conv: dict) -> None:
         state = begin_maintenance_state(conv)
         try:
             with foreground_cancel_scope("keyboard interrupt during memory maintenance") as cancel_event:
-                auto_maintain_conversation(conv, state=state, cancel_event=cancel_event)
-            clear_maintenance_state(state.get("job_id"))
+                notes = auto_maintain_conversation(conv, state=state, cancel_event=cancel_event)
+            finish_maintenance_state(state, notes)
         except WorkPaused as exc:
             update_maintenance_state(
                 state,
@@ -25295,7 +25345,7 @@ def chat_loop(conv: dict) -> None:
                 error=str(exc),
             )
             print(f"sys {exc}")
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             update_maintenance_state(
                 state,
                 "memory: failed",
@@ -25893,12 +25943,25 @@ def auto_maintain_conversation(
         and message_count - last_compact >= AUTO_SUMMARY_INTERVAL_MESSAGES
     ):
         set_phase("memory: compacting")
-        if compact_conversation(
-            conv,
-            quiet=True,
-            timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
-            cancel_event=cancel_event,
-        ):
+        compacted = False
+        try:
+            compacted = compact_conversation(
+                conv,
+                quiet=True,
+                timeout=MAINTENANCE_MODEL_TIMEOUT_SECONDS,
+                cancel_event=cancel_event,
+            )
+        except SystemExit as exc:
+            if not model_request_deferred_by_residency(exc):
+                raise
+            if state is not None:
+                state["retry_after_seconds"] = model_residency_retry_seconds(exc)
+                state["deferred_reason"] = "model-residency"
+            notes.append(
+                "conversation compaction deferred for model residency; "
+                "will retry when chat is idle"
+            )
+        if compacted:
             notes.append("compacted older conversation context")
     save_conversation(conv)
     set_phase("memory: done", note="; ".join(notes) if notes else "no changes")

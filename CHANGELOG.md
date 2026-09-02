@@ -24,6 +24,11 @@ not the easiest place to review what changed after a long work session.
   reactivated between route eviction and foreground socket startup. Realm-local
   shared/exclusive leases now cover the full request while preserving parallel
   worker fanout.
+- Fixed automatic conversation compaction remaining visibly active after a
+  worker route deferred behind chat-model residency. Compaction now records a
+  retryable deferred checkpoint, releases command guards such as `/delete`,
+  retries once chat is idle, and turns other model failures into terminal
+  maintenance events instead of an indefinite `memory: compacting` status.
 - Changed `/reasoning` to catalog-declared, model-native effort controls while
   preserving compatibility aliases for older saved overrides.
 - Added `motoko source-lifecycle [INDEX]` and `/source-lifecycle [ID]` to

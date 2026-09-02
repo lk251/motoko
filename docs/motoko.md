@@ -1323,6 +1323,12 @@ reported as a maintenance failure instead of leaving `memory: proposing`
 visible forever. For per-realm Unix-socket model routes, the helper wall
 timeout is aligned with socket-activation timeouts so model loading is not
 mistaken for a failed memory proposal.
+If conversation compaction meets an active or recently used chat-model route,
+maintenance records a retryable `memory: deferred` checkpoint, releases the
+TUI's active-work guard, and retries after the chat becomes idle. Deferred
+maintenance is also resumable after restart. Other model failures end the live
+maintenance phase with a visible failure instead of leaving an indefinite
+`memory: compacting` status.
 When the user explicitly asks Motoko to remember something with natural wording
 such as `remember that ...`, Motoko saves that memory deterministically before
 answering instead of waiting for the model proposal pass.
