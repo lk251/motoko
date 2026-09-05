@@ -233,6 +233,42 @@ def test_bounded_adaptive_loop_can_retrieve_then_stop() -> None:
     assert any(source.get("kind") == "conversation-history" for source in result.sources)
 
 
+def test_live_current_conversation_replaces_stale_saved_copy() -> None:
+    base = [
+        message("user", "first"),
+        message("assistant", "second"),
+        message("user", "live third turn with cobalt detail"),
+    ]
+    live = conversation("conv-j", "Live", base)
+    archive_conversation_messages(live)
+    live["summary"] = "Compacted enough to enable adaptive recall."
+    stale = conversation("conv-j", "Live", base[:2])
+
+    def planner(_messages, _schema, round_number):
+        if round_number == 1:
+            return {
+                "status": "need_more_context",
+                "queries": [
+                    {
+                        "query": "cobalt detail",
+                        "scope": "current_conversation",
+                        "purpose": "recover live detail",
+                    }
+                ],
+            }
+        return {"status": "sufficient", "queries": []}
+
+    result = run_adaptive_recall(
+        conv=live,
+        conversations=[stale],
+        user_query="What was the detail?",
+        seed_context="",
+        planner=planner,
+    )
+    assert "cobalt detail" in result.text
+    assert len(history_rows("conv-j")) == 3
+
+
 def test_short_uncompacted_chat_skips_planner() -> None:
     conv = conversation(
         "conv-i",
@@ -268,6 +304,7 @@ def main() -> None:
         test_plan_normalization_caps_deduplicates_and_sanitizes,
         test_source_provenance_is_content_free,
         test_bounded_adaptive_loop_can_retrieve_then_stop,
+        test_live_current_conversation_replaces_stale_saved_copy,
         test_short_uncompacted_chat_skips_planner,
     ]
     with tempfile.TemporaryDirectory(prefix="motoko-episodic-test-") as tmp:
