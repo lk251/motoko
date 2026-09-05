@@ -400,6 +400,156 @@ def test_maintenance_state_and_phases(m):
             m.propose_memories_bounded = old_propose
 
 
+def test_tui_compaction_residency_defer_is_retryable_and_releases_delete_guard(m):
+    with isolated_state():
+        conv = m.new_conversation("Compaction residency")
+        conv["id"] = "compaction-residency"
+        conv["messages"] = [
+            {"role": "user" if idx % 2 == 0 else "assistant", "content": f"turn {idx}"}
+            for idx in range(m.AUTO_SUMMARY_MIN_MESSAGES)
+        ]
+        message_count = len(conv["messages"])
+        conv["last_auto_memory_message_count"] = message_count
+        conv["last_auto_skill_message_count"] = message_count
+        conv["last_auto_compact_message_count"] = 0
+        write_conversation(m, conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.transcript_dirty = False
+        ui.generating = False
+        ui.maintaining = False
+        ui.study_running = False
+        ui.cwd_indexing = False
+        ui.last_input_at = time.monotonic() - m.BACKGROUND_STUDY_IDLE_GRACE_SECONDS - 1
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.jobs = m.JobSupervisor()
+        ui.pending_prompts = m.collections.deque()
+        ui.maybe_start_queued_prompt = lambda: False
+        ui.command_work_running = lambda: False
+
+        old_compact = m.compact_conversation
+        compact_calls = []
+        try:
+            def deferred_then_compact(conv_arg, **_kwargs):
+                compact_calls.append(True)
+                if len(compact_calls) == 1:
+                    raise SystemExit(
+                        "model request deferred: worker route memory waiting 1s "
+                        "for recent chat route chat-default"
+                    )
+                conv_arg["summary"] = "compacted summary"
+                conv_arg["messages"] = conv_arg["messages"][-m.COMPACT_KEEP_MESSAGES :]
+                conv_arg["last_auto_compact_message_count"] = len(conv_arg["messages"])
+                return True
+
+            m.compact_conversation = deferred_then_compact
+            ui.start_maintenance()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with ui.events_lock:
+                    if any(event[0] == "maintenance_done" for event in ui.events):
+                        break
+                time.sleep(0.01)
+            ui.drain_events()
+
+            assert not ui.maintaining
+            assert ui.maintenance_status == ""
+            assert ui.status == "ready"
+            deferred_state = m.read_maintenance_state()
+            assert deferred_state is not None
+            assert deferred_state["status"] == "deferred"
+            assert deferred_state["phase"] == "memory: deferred"
+            assert deferred_state["deferred_reason"] == "model-residency"
+            assert deferred_state["retry_after_seconds"] == 2
+            assert len(conv["messages"]) == message_count
+            assert int(conv.get("last_auto_compact_message_count", 0) or 0) == 0
+            assert any(
+                "conversation compaction deferred for model residency; "
+                "will retry when chat is idle" in row.get("content", "")
+                for row in ui.messages
+            )
+
+            ui.handle_command("/delete")
+            assert (
+                "delete this conversation and owned derived artifacts?"
+                in ui.messages[-1]["content"]
+            )
+            assert "finish or stop active work" not in ui.messages[-1]["content"]
+
+            ui.maintenance_retry_at = time.monotonic() - 1
+            ui.last_input_at = time.monotonic()
+            assert not ui.maybe_retry_deferred_maintenance()
+            ui.last_input_at -= m.BACKGROUND_STUDY_IDLE_GRACE_SECONDS + 1
+            assert ui.maybe_retry_deferred_maintenance()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with ui.events_lock:
+                    if any(event[0] == "maintenance_done" for event in ui.events):
+                        break
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.compact_conversation = old_compact
+
+        assert len(compact_calls) == 2
+        assert not ui.maintaining
+        assert ui.maintenance_retry_at == 0.0
+        assert m.read_maintenance_state() is None
+        assert conv["summary"] == "compacted summary"
+        assert len(conv["messages"]) == m.COMPACT_KEEP_MESSAGES
+        assert conv["last_auto_compact_message_count"] == m.COMPACT_KEEP_MESSAGES
+
+
+def test_tui_maintenance_system_exit_clears_active_state(m):
+    with isolated_state():
+        conv = m.new_conversation("Maintenance failure")
+        conv["id"] = "maintenance-failure"
+        write_conversation(m, conv)
+
+        ui = object.__new__(m.MotokoTui)
+        ui.conv = conv
+        ui.messages = []
+        ui.scroll = 0
+        ui.dirty = False
+        ui.transcript_dirty = False
+        ui.generating = False
+        ui.maintaining = False
+        ui.events = m.collections.deque()
+        ui.events_lock = threading.Lock()
+        ui.jobs = m.JobSupervisor()
+
+        old_maintain = m.auto_maintain_conversation
+        try:
+            m.auto_maintain_conversation = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                SystemExit("model request failed: synthetic worker failure")
+            )
+            ui.start_maintenance()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with ui.events_lock:
+                    if any(event[0] == "maintenance_error" for event in ui.events):
+                        break
+                time.sleep(0.01)
+            ui.drain_events()
+        finally:
+            m.auto_maintain_conversation = old_maintain
+
+        assert not ui.maintaining
+        assert ui.maintenance_status == ""
+        assert ui.status == "ready"
+        assert "model request failed: synthetic worker failure" in ui.messages[-1]["content"]
+        state = m.read_maintenance_state()
+        assert state is not None
+        assert state["status"] == "failed"
+        assert state["phase"] == "memory: failed"
+        assert state["error"] == "SystemExit: model request failed: synthetic worker failure"
+
+
 def test_memory_proposal_sends_transcript_not_assistant_prefill(m):
     with isolated_state():
         conv = m.new_conversation("Memory proposal")
@@ -1380,6 +1530,16 @@ def test_interrupted_maintenance_resume(m):
         assert should_resume
         assert "resuming" in note
         assert m.read_maintenance_state()["retry_count"] == 1
+
+        deferred = m.begin_maintenance_state(conv)
+        deferred["status"] = "deferred"
+        deferred["phase"] = "memory: deferred"
+        deferred["retry_after_seconds"] = 15
+        m.write_maintenance_state(deferred)
+        should_resume, note = m.resume_interrupted_maintenance(conv)
+        assert should_resume
+        assert "resuming" in note
+        assert m.read_maintenance_state()["status"] == "resuming"
 
 
 def test_other_conversation_maintenance_is_quietly_abandoned(m):
@@ -18258,6 +18418,8 @@ def main() -> int:
         test_atomic_write_retries_when_temp_disappears_before_replace,
         test_recent_conversation_lanes,
         test_maintenance_state_and_phases,
+        test_tui_compaction_residency_defer_is_retryable_and_releases_delete_guard,
+        test_tui_maintenance_system_exit_clears_active_state,
         test_memory_proposal_sends_transcript_not_assistant_prefill,
         test_memory_proposal_helper_timeout_respects_socket_activation,
         test_memory_proposal_queue_retries_until_saved,

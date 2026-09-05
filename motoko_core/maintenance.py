@@ -38,7 +38,7 @@ def clear_maintenance_state_file(path: pathlib.Path, job_id: str | None = None) 
 def maintenance_incomplete(state: dict | None) -> bool:
     if not state:
         return False
-    return state.get("status") in {"running", "resuming"}
+    return state.get("status") in {"running", "resuming", "deferred"}
 
 
 def begin_maintenance_state_file(
