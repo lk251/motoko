@@ -1,0 +1,40 @@
+name: adaptive-recall-final-check
+
+on:
+  push:
+    branches:
+      - feature/adaptive-episodic-recall
+
+permissions:
+  contents: write
+
+jobs:
+  validate-clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/adaptive-episodic-recall
+          fetch-depth: 0
+
+      - name: Focused syntax and episodic tests
+        run: |
+          python3 -m py_compile motoko motoko_core/episodic_recall.py motoko_core/conversations.py motoko_core/state.py motoko_core/sources.py
+          PYTHONPATH=. python3 tests/episodic_recall_test.py
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Run full repository checks
+        run: nix flake check
+
+      - name: Remove validation scaffolding
+        run: |
+          git config user.name "motoko-adaptive-recall-validator"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/adaptive-recall-final-check.yml
+          if [ -f .adaptive-recall-trigger ]; then git rm .adaptive-recall-trigger; fi
+          git commit -m "Clean adaptive recall validation scaffolding"
+          git push origin HEAD:feature/adaptive-episodic-recall
