@@ -640,9 +640,17 @@ def run_adaptive_recall(
             }
         )
 
-    all_conversations = [row for row in conversations if isinstance(row, dict)]
-    if not any(str(row.get("id", "")) == str(conv.get("id", "")) for row in all_conversations):
-        all_conversations.append(conv)
+    current_id = str(conv.get("id", "") or "")
+    # The in-memory current conversation is authoritative. A saved copy can lag
+    # behind the latest user turn while prompt construction is in flight; using
+    # it here could make suffix-based archival mistake an old prefix for new
+    # messages and duplicate history rows.
+    all_conversations = [
+        row
+        for row in conversations
+        if isinstance(row, dict) and str(row.get("id", "") or "") != current_id
+    ]
+    all_conversations.append(conv)
 
     accumulated_hits: list[dict] = []
     accumulated_sources: list[dict] = []
