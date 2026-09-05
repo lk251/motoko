@@ -30,9 +30,9 @@ search when needed, and distinguish direct historical evidence from summaries,
 memories, hypotheses, and interpretations.
 
 An experimental foundation exists on branch feature/adaptive-episodic-recall.
-See docs/adaptive-episodic-recall.md and docs/deferred-projects.md. Future work
-includes unifying episodic history with HRAG, typed working notes/state,
-first-class clean context-window rollover, bounded multi-hop recall, temporal
-and relational retrieval for personal history, and failure-driven evals from
-real retrieval mistakes. Do not solve this by making summaries authoritative or
-by stuffing all history into every prompt.
+See docs/deferred-projects.md on master and docs/adaptive-episodic-recall.md on
+the feature branch. Future work includes unifying episodic history with HRAG,
+typed working notes/state, first-class clean context-window rollover, bounded
+multi-hop recall, temporal and relational retrieval for personal history, and
+failure-driven evals from real retrieval mistakes. Do not solve this by making
+summaries authoritative or by stuffing all history into every prompt.
