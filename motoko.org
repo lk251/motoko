@@ -19,3 +19,20 @@ I don't think they're read only anymore, I think they work 1. on
 normal branch/worktree but requesting review/acceptance 2. on a
 different branch / worktree and will ask for review and acceptance for
 merging into master / the working branch.
+* deferred
+** [#A] production-grade long-horizon personal memory / adaptive episodic recall
+Preserve this as a strategic Motoko project even when it is not current work.
+The goal is extremely long personal conversations in which Motoko can identify
+what information is missing for the question she is answering, formulate
+specific retrieval questions, search effectively unbounded private conversation
+history and other allowed memory sources, inspect raw evidence, refine the
+search when needed, and distinguish direct historical evidence from summaries,
+memories, hypotheses, and interpretations.
+
+An experimental foundation exists on branch feature/adaptive-episodic-recall.
+See docs/deferred-projects.md on master and docs/adaptive-episodic-recall.md on
+the feature branch. Future work includes unifying episodic history with HRAG,
+typed working notes/state, first-class clean context-window rollover, bounded
+multi-hop recall, temporal and relational retrieval for personal history, and
+failure-driven evals from real retrieval mistakes. Do not solve this by making
+summaries authoritative or by stuffing all history into every prompt.
