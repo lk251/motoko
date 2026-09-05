@@ -37,6 +37,11 @@ inspectable, and dependency-light.
 - Do not store secrets in this repository.
 - Read `docs/project-context.md` before making architectural, security-boundary,
   or terminal-interface changes.
+- Read `docs/deferred-projects.md` before making substantial changes to memory,
+  retrieval, context management, conversation storage, or long-running chat
+  behavior. Deferred projects are intentional strategic directions: do not
+  silently erase or contradict them, but do not assume they outrank current
+  hardening work without an explicit prioritization decision.
 
 ## Deployment Context
 
