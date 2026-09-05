@@ -8,7 +8,7 @@ Deferred means: do not assume the project should be implemented immediately or d
 
 ## Production-grade long-horizon personal memory and adaptive recall
 
-Status: deferred strategic project. An experimental foundation exists on `feature/adaptive-episodic-recall`; see `docs/adaptive-episodic-recall.md`.
+Status: deferred strategic project. An experimental foundation exists on `feature/adaptive-episodic-recall`; see `docs/adaptive-episodic-recall.md` on that branch.
 
 ### Goal
 
@@ -18,9 +18,9 @@ The target behavior is not merely “better RAG.” Motoko should be able to not
 
 For personal correspondence and relationship/life analysis in particular, raw historical evidence must remain distinguishable from Motoko-authored summaries, hypotheses, memories, and interpretations.
 
-### Foundation already implemented on the feature branch
+### Experimental foundation
 
-The experimental branch establishes several important invariants:
+The feature branch establishes several important candidate invariants:
 
 - append-only realm-local raw episodic conversation history;
 - stable message IDs, ordinals, context-window lineage, and content hashes;
@@ -38,35 +38,25 @@ This foundation should be reviewed through real use before being treated as the 
 
 The longer-term project should investigate and, where evals justify it, build the following.
 
-1. **Unify episodic history with Motoko's HRAG stack.**
-   Raw messages, exchanges, context windows, conversations, and cross-conversation topics should become first-class retrievable evidence objects. Preserve lexical/exact search, but allow embeddings, hierarchical retrieval, reranking, temporal filters, entity cues, and source-span selection to participate when they measurably improve recall.
+1. **Unify episodic history with Motoko's HRAG stack.** Raw messages, exchanges, context windows, conversations, and cross-conversation topics should become first-class retrievable evidence objects. Preserve lexical/exact search, but allow embeddings, hierarchical retrieval, reranking, temporal filters, entity cues, and source-span selection to participate when they measurably improve recall.
 
-2. **Generalize model-directed retrieval beyond conversation text.**
-   The reasoning model should be able to formulate bounded retrieval questions over the appropriate private sources: episodic history, durable memories, memory dossiers, indexed documents, topic dossiers, structured tasks/dates, and other allowed evidence. The model chooses what it needs; code-owned retrieval services enforce scope, budgets, and provenance.
+2. **Generalize model-directed retrieval beyond conversation text.** The reasoning model should be able to formulate bounded retrieval questions over the appropriate private sources: episodic history, durable memories, memory dossiers, indexed documents, topic dossiers, structured tasks/dates, and other allowed evidence. The model chooses what it needs; code-owned retrieval services enforce scope, budgets, and provenance.
 
-3. **Add a typed working-state / notes layer.**
-   Preserve useful state across context-window resets without conflating different epistemic categories. Candidate types include `direct_fact`, `user_statement`, `quoted_correspondence`, `preference`, `decision`, `plan`, `hypothesis`, `interpretation`, `open_question`, and `current_working_state`. Notes should carry source message IDs where possible, creation/confirmation timestamps, supersession links, and validity intervals when relevant.
+3. **Add a typed working-state / notes layer.** Preserve useful state across context-window resets without conflating different epistemic categories. Candidate types include `direct_fact`, `user_statement`, `quoted_correspondence`, `preference`, `decision`, `plan`, `hypothesis`, `interpretation`, `open_question`, and `current_working_state`. Notes should carry source message IDs where possible, creation/confirmation timestamps, supersession links, and validity intervals when relevant.
 
-4. **Make context-window rollover a first-class mechanism.**
-   Long chats should be able to start a clean active model context while retaining a small trustworthy bootstrap: identity/personality, stable profile, high-value memories, working state, a compact thread/window hint, recent turns, and fresh query-specific retrieval. Earlier windows remain searchable rather than being irreversibly compressed into one summary.
+4. **Make context-window rollover a first-class mechanism.** Long chats should be able to start a clean active model context while retaining a small trustworthy bootstrap: identity/personality, stable profile, high-value memories, working state, a compact thread/window hint, recent turns, and fresh query-specific retrieval. Earlier windows remain searchable rather than being irreversibly compressed into one summary.
 
-5. **Support bounded multi-hop recall.**
-   For difficult questions, allow the model to decompose the information need into multiple explicit subquestions, retrieve separately, inspect the evidence, and perform another bounded lookup when the first evidence changes what should be asked. Keep the plan inspectable; do not store hidden chain-of-thought.
+5. **Support bounded multi-hop recall.** For difficult questions, allow the model to decompose the information need into multiple explicit subquestions, retrieve separately, inspect the evidence, and perform another bounded lookup when the first evidence changes what should be asked. Keep the plan inspectable; do not store hidden chain-of-thought.
 
-6. **Improve temporal and relational retrieval for personal history.**
-   Long-running personal use needs strong handling of chronology, repeated patterns, named people, relationships, prior periods with similar dynamics, commitments, plans, contradictions, and how earlier uncertainties eventually resolved. Prefer deterministic time/source metadata when available and model-derived relationships only when provenance remains visible.
+6. **Improve temporal and relational retrieval for personal history.** Long-running personal use needs strong handling of chronology, repeated patterns, named people, relationships, prior periods with similar dynamics, commitments, plans, contradictions, and how earlier uncertainties eventually resolved. Prefer deterministic time/source metadata when available and model-derived relationships only when provenance remains visible.
 
-7. **Preserve epistemic provenance.**
-   A user's or correspondent's direct statement is not the same thing as Motoko's interpretation. A hypothesis that was plausible three months ago must not harden into a fact simply because it was summarized repeatedly. Raw evidence should remain reachable from derived memories and notes, and conflicts should be surfaced rather than silently reconciled.
+7. **Preserve epistemic provenance.** A user's or correspondent's direct statement is not the same thing as Motoko's interpretation. A hypothesis that was plausible three months ago must not harden into a fact simply because it was summarized repeatedly. Raw evidence should remain reachable from derived memories and notes, and conflicts should be surfaced rather than silently reconciled.
 
-8. **Build long-horizon evals from real failure classes.**
-   Extend the existing retrieval/feedback framework to distinguish at least: planner failed to notice a knowledge gap; poor retrieval question; search recall failure; ranking failure; correct evidence retrieved but ignored; premature stopping; stale derived memory; summary/history conflict; temporal confusion; and interpretation treated as fact. Use private user feedback as eval fixtures without exposing the underlying corpus.
+8. **Build long-horizon evals from real failure classes.** Extend the existing retrieval/feedback framework to distinguish at least: planner failed to notice a knowledge gap; poor retrieval question; search recall failure; ranking failure; correct evidence retrieved but ignored; premature stopping; stale derived memory; summary/history conflict; temporal confusion; and interpretation treated as fact. Use private user feedback as eval fixtures without exposing the underlying corpus.
 
-9. **Optimize latency and model routing only after quality is measurable.**
-   The highest-quality chat/reasoning model may be the right recall planner for difficult personal questions, while cheaper local workers may be appropriate for indexing, embeddings, candidate generation, or maintenance. Route decisions should be evidence-driven and should not weaken recall quality simply to save a model call.
+9. **Optimize latency and model routing only after quality is measurable.** The highest-quality chat/reasoning model may be the right recall planner for difficult personal questions, while cheaper local workers may be appropriate for indexing, embeddings, candidate generation, or maintenance. Route decisions should be evidence-driven and should not weaken recall quality simply to save a model call.
 
-10. **Keep the system local, inspectable, and user-controlled.**
-    Conversation deletion must delete owned episodic sidecars and derived artifacts. `/sources` and debugging surfaces should explain why historical evidence was retrieved without unnecessarily reproducing private correspondence. New background indexing or memory maintenance must remain bounded, visible, pauseable, and realm-local.
+10. **Keep the system local, inspectable, and user-controlled.** Conversation deletion must delete owned episodic sidecars and derived artifacts. `/sources` and debugging surfaces should explain why historical evidence was retrieved without unnecessarily reproducing private correspondence. New background indexing or memory maintenance must remain bounded, visible, pauseable, and realm-local.
 
 ### Non-goals
 
