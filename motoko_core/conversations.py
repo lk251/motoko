@@ -6,6 +6,7 @@ import contextlib
 import json
 import pathlib
 
+from motoko_core.episodic_recall import archive_conversation_messages, delete_episodic_history
 from motoko_core.state import atomic_write, read_jsonl, safe_load_json
 from motoko_core.text import compact_text
 
@@ -61,6 +62,9 @@ def rename_conversation_record(conv: dict, title: str) -> str:
 
 def save_conversation_record(conv: dict, path: pathlib.Path, *, updated: str) -> None:
     conv["updated"] = updated
+    # Archive before replacing the compact record so a failed or later
+    # compaction can never make the summary the only surviving copy.
+    archive_conversation_messages(conv, archived_at=updated)
     atomic_write(path, json.dumps(conv, ensure_ascii=False, indent=2) + "\n")
 
 
@@ -70,6 +74,7 @@ def close_conversation_record(conv: dict, path: pathlib.Path, *, updated: str) -
         return True
     with contextlib.suppress(FileNotFoundError):
         path.unlink()
+    delete_episodic_history(str(conv.get("id", "") or ""))
     return False
 
 

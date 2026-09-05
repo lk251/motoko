@@ -125,7 +125,7 @@ def test_scope_can_cross_conversations_deliberately() -> None:
     current = conversation(
         "conv-e",
         "Current",
-        [message("user", "nothing about the concert")],
+        [message("user", "nothing relevant here")],
     )
     previous = conversation(
         "conv-f",

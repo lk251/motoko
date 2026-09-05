@@ -427,6 +427,13 @@ from motoko_core.conversations import (  # noqa: E402
     rewrite_jsonl_without_conversation,
     save_conversation_record,
 )
+from motoko_core.episodic_recall import (  # noqa: E402
+    archive_conversation_messages,
+    history_rows as episodic_history_rows,
+    run_adaptive_recall,
+    seal_context_window,
+    delete_episodic_history,
+)
 from motoko_core.commands import (  # noqa: E402
     COMMAND_KIND_FOREGROUND_JOB,
     COMMAND_KIND_MUTATION,
@@ -868,6 +875,7 @@ GROUNDING_STRONG_SOURCE_KINDS = {
     "repo",
     "dossier-memory",
     "dossier-conversation",
+    "conversation-history",
 }
 GROUNDING_CONTEXT_SOURCE_KINDS = {
     "index",
@@ -878,6 +886,7 @@ GROUNDING_CONTEXT_SOURCE_KINDS = {
     "recent-conversation",
     "profile",
     "conversation-summary",
+    "adaptive-recall",
 }
 MAX_MEMORY_CHARS = 1800
 MEMORY_RETRIEVAL_LIMIT = 18
@@ -3027,11 +3036,13 @@ def cleanup_slot_cache_records_for_conversation(conversation_id: str) -> dict:
 
 
 def delete_conversation_file_for_id(conversation_id: str) -> bool:
+    deleted = True
     try:
         conversation_path(conversation_id).unlink()
     except FileNotFoundError:
-        return False
-    return True
+        deleted = False
+    delete_episodic_history(conversation_id)
+    return deleted
 
 
 def delete_conversation_and_artifacts(conv: dict) -> dict:
@@ -19135,6 +19146,148 @@ def retrieval_sufficiency_expansion(
     return expansion.text, expansion.sources, expansion.plan
 
 
+_ADAPTIVE_RECALL_CACHE: dict[tuple[str, str, int], tuple[str, list[dict], dict]] = {}
+
+
+def adaptive_recall_seed_context(
+    *,
+    profile_text: str,
+    memory_text: str,
+    recent_text: str,
+    summary_text: str,
+    context_text: str,
+    sufficiency_text: str,
+    scope_text: str,
+    max_chars: int = 32000,
+) -> str:
+    sections = [
+        ("Profile", profile_text),
+        ("Durable memories", memory_text),
+        ("Recent saved conversations", recent_text),
+        ("Current conversation summary", summary_text),
+        ("Attached/retrieved context", context_text),
+        ("Deterministic sufficiency expansion", sufficiency_text),
+        ("Project scope", scope_text),
+    ]
+    parts = []
+    used = 0
+    for label, value in sections:
+        value = str(value or "").strip()
+        if not value:
+            continue
+        block = f"{label}:\n{compact_text(value, 6000)}"
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        if len(block) > remaining:
+            block = compact_text(block, remaining)
+        parts.append(block)
+        used += len(block)
+    return "\n\n".join(parts)
+
+
+def adaptive_recall_conversations(conv: dict, project_scope: dict) -> list[dict]:
+    current_id = str(conv.get("id", "") or "")
+    roots = project_scope_roots(project_scope)
+    selected = []
+    for row in list_conversations():
+        row_id = str(row.get("id", "") or "")
+        if row_id == current_id:
+            selected.append(row)
+            continue
+        if not roots:
+            selected.append(row)
+            continue
+        row_roots = conversation_project_roots(row)
+        if not row_roots:
+            continue
+        if any(project_root_matches(root, roots) for root in row_roots):
+            selected.append(row)
+    if not any(str(row.get("id", "") or "") == current_id for row in selected):
+        selected.append(conv)
+    return selected
+
+
+def adaptive_recall_context(
+    conv: dict,
+    query: str,
+    *,
+    seed_context: str,
+    project_scope: dict,
+    cancel_event=None,
+) -> tuple[str, list[dict], dict]:
+    if not env_flag("MOTOKO_ADAPTIVE_RECALL", True):
+        return "", [], {"status": "disabled"}
+
+    archive_conversation_messages(conv)
+    cache_key = (
+        str(conv.get("id", "") or ""),
+        str(query or "").strip(),
+        len(episodic_history_rows(str(conv.get("id", "") or ""))),
+    )
+    cached = _ADAPTIVE_RECALL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    def planner(messages: list[dict], schema: dict, _round_number: int):
+        raise_if_work_cancelled(
+            cancel_event,
+            "adaptive episodic recall interrupted by request",
+            work_kind="retrieval",
+        )
+        return call_model(
+            messages,
+            temperature=0.1,
+            stream=False,
+            echo=False,
+            timeout=MODEL_TIMEOUT_SECONDS,
+            route=MODEL_ROUTE_CHAT,
+            sampling_preset="deterministic",
+            json_schema=schema,
+            reasoning_preset=conversation_reasoning_preset(conv),
+            max_tokens=800,
+            chat_model=conversation_chat_model(conv),
+            cancel_event=cancel_event,
+        )
+
+    try:
+        result = run_adaptive_recall(
+            conv=conv,
+            conversations=adaptive_recall_conversations(conv, project_scope),
+            user_query=str(query or "").strip(),
+            seed_context=seed_context,
+            planner=planner,
+        )
+    except WorkPaused:
+        raise
+    except (Exception, SystemExit) as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("__motoko_stopped__") from exc
+        return (
+            "",
+            [
+                {
+                    "kind": "adaptive-recall",
+                    "schema": "adaptive-recall-source-v1",
+                    "round": 0,
+                    "status": "planner-error",
+                    "query_count": 0,
+                    "query_scopes": [],
+                    "hit_count": 0,
+                    "error_type": type(exc).__name__,
+                }
+            ],
+            {"status": "planner-error", "error_type": type(exc).__name__},
+        )
+
+    value = (result.text, result.sources, result.diagnostics)
+    if result.diagnostics.get("status") != "not-needed":
+        if len(_ADAPTIVE_RECALL_CACHE) >= 16:
+            _ADAPTIVE_RECALL_CACHE.pop(next(iter(_ADAPTIVE_RECALL_CACHE)))
+        _ADAPTIVE_RECALL_CACHE[cache_key] = value
+    return value
+
+
 def render_conversation_summary(conv: dict) -> str:
     summary = conv.get("summary", "").strip()
     if not summary:
@@ -19225,6 +19378,22 @@ def build_prompt_context_package(
     personality_text, personality_file, personality_exists = load_personality()
     identity_text = format_identity()
     summary_text = render_conversation_summary(conv)
+    adaptive_seed = adaptive_recall_seed_context(
+        profile_text=profile_text,
+        memory_text=memory_text,
+        recent_text=recent_text,
+        summary_text=summary_text,
+        context_text=context_text,
+        sufficiency_text=sufficiency_text,
+        scope_text=scope_text,
+    )
+    adaptive_text, adaptive_sources, _adaptive_diagnostics = adaptive_recall_context(
+        conv,
+        query.strip() or retrieval_query,
+        seed_context=adaptive_seed,
+        project_scope=project_scope,
+        cancel_event=cancel_event,
+    )
     lanes = build_prompt_context_lanes(
         identity=identity,
         identity_text=identity_text,
@@ -19254,6 +19423,16 @@ def build_prompt_context_package(
         catalog=catalog,
         project_roots=project_roots,
     )
+    if adaptive_text or adaptive_sources:
+        lanes.insert(
+            max(0, len(lanes) - 1),
+            ContextLane(
+                "adaptive episodic recall",
+                adaptive_text,
+                adaptive_sources,
+                "model-directed recovery of raw prior conversation evidence",
+            ),
+        )
     context_package = build_context_package(
         lanes,
         budget_chars=CONTEXT_PLAN_BUDGET_CHARS,
@@ -19270,6 +19449,7 @@ def build_prompt_context_package(
         "summary_text": summary_text,
         "context_text": context_text,
         "sufficiency_text": sufficiency_text,
+        "adaptive_text": adaptive_text,
         "catalog_text": catalog_text,
     }
 
@@ -19303,6 +19483,7 @@ def build_system_prompt_and_sources(
     summary_text = context_values["summary_text"]
     context_text = context_values["context_text"]
     sufficiency_text = context_values["sufficiency_text"]
+    adaptive_text = context_values["adaptive_text"]
     catalog_text = context_values["catalog_text"]
     sources = list(context_package.sources)
     context_plan = context_package.context_plan
@@ -19335,6 +19516,12 @@ def build_system_prompt_and_sources(
         relying on it heavily.
         Use the context sufficiency note to decide whether to answer directly,
         mention uncertainty, or suggest /study for a deeper bounded study pass.
+        Raw excerpts under Adaptive episodic recall are primary evidence about
+        what was actually said or happened in prior conversation turns. If a
+        model-generated summary or durable memory conflicts with recovered raw
+        history, prefer the raw source and surface the conflict. Do not turn an
+        old hypothesis or interpretation into a fact merely because it appears
+        in a summary.
         For document, file, task, priority, date, or "according to this corpus"
         questions, answer from retrieved excerpts, structured task signals, or
         attached source material. Name relevant files when useful. If no
@@ -19360,6 +19547,9 @@ def build_system_prompt_and_sources(
 
         Compacted conversation summary:
         {summary_text}
+
+        Adaptive episodic recall:
+        {adaptive_text or 'No raw-history recovery was needed for this turn.'}
 
         Attached documents and dossiers:
         {context_text}
@@ -25314,6 +25504,8 @@ def compact_conversation(
 ) -> bool:
     raise_if_work_cancelled(cancel_event, "conversation compaction interrupted by request", work_kind="maintenance")
     messages = conv.get("messages", [])
+    # Preserve the source transcript before any lossy reduction.
+    archive_conversation_messages(conv)
     if len(messages) <= COMPACT_KEEP_MESSAGES:
         if not quiet:
             print("conversation is already compact enough")
@@ -25365,6 +25557,12 @@ def compact_conversation(
         route=MODEL_ROUTE_MEMORY,
         prompt_version=CONVERSATION_SUMMARY_SCHEMA_VERSION,
         source_sha256=sha256_hex(older_text.encode("utf-8")),
+    )
+    seal_context_window(
+        conv,
+        reason="compaction",
+        retained_message_count=len(recent),
+        summary_text=conv["summary"],
     )
     conv["messages"] = recent
     conv["last_auto_compact_message_count"] = len(recent)

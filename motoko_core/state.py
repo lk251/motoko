@@ -63,6 +63,19 @@ def conversations_dir() -> pathlib.Path:
     return ensure_private_dir(root / "conversations")
 
 
+def conversation_history_dir() -> pathlib.Path:
+    root = ensure_private_dir(state_root())
+    return ensure_private_dir(root / "conversation-history")
+
+
+def conversation_history_path(conversation_id: str) -> pathlib.Path:
+    return conversation_history_dir() / f"{_safe_component(conversation_id, 'conversation')}.jsonl"
+
+
+def conversation_windows_path(conversation_id: str) -> pathlib.Path:
+    return conversation_history_dir() / f"{_safe_component(conversation_id, 'conversation')}.windows.jsonl"
+
+
 def memories_path() -> pathlib.Path:
     root = ensure_private_dir(state_root())
     return root / "memories.jsonl"

@@ -139,6 +139,27 @@ def format_sources(sources: list[dict]) -> str:
                     + ", ".join(str(item) for item in source.get("requested_path_mentions", [])[:4])
                     + f"  strong-source matches {source.get('strong_requested_path_source_count', 0)}"
                 )
+        elif kind == "adaptive-recall":
+            lines.append(
+                f"{idx:3d}  adaptive recall  round {source.get('round', 0)}  "
+                f"{source.get('status', 'unknown')}  "
+                f"queries {source.get('query_count', 0)}  hits {source.get('hit_count', 0)}"
+            )
+            scopes = ", ".join(str(scope) for scope in source.get("query_scopes", [])[:6]) or "-"
+            lines.append(f"     why: model-directed bounded episodic recovery; scopes {scopes}")
+        elif kind == "conversation-history":
+            windows = ",".join(str(window)[-8:] for window in source.get("window_ids", [])[:4]) or "-"
+            lines.append(
+                f"{idx:3d}  conversation history {source.get('conversation_id', '')}  "
+                f"messages {source.get('start_ordinal')}-{source.get('end_ordinal')}  "
+                f"score {source.get('score', 0)}  round {source.get('recall_round', 0)}"
+            )
+            lines.append(
+                f"     why: raw prior-turn evidence selected by adaptive recall; "
+                f"matched {source.get('matched_terms', 0)} term(s); windows {windows}"
+            )
+            if source.get("title"):
+                lines.append(f"     conversation: {source.get('title', '')}")
         elif kind == "personality":
             lines.append(
                 f"{idx:3d}  personality  {source.get('status', 'unknown')}  "

@@ -152,7 +152,7 @@ def archive_conversation_messages(conv: dict, *, archived_at: str | None = None)
         next_ordinal = 0
         if existing:
             try:
-                next_ordinal = max(int(row.get("ordinal", -1) or -1) for row in existing) + 1
+                next_ordinal = max(int(row.get("ordinal", -1)) for row in existing) + 1
             except (TypeError, ValueError):
                 next_ordinal = len(existing)
 
@@ -588,6 +588,7 @@ def _dedupe_sources(sources: Iterable[dict]) -> list[dict]:
     for source in sources:
         key = (
             source.get("kind"),
+            source.get("round"),
             source.get("conversation_id"),
             source.get("start_ordinal"),
             source.get("end_ordinal"),
@@ -667,12 +668,11 @@ def run_adaptive_recall(
             "round": round_number,
             "status": plan.get("status", ""),
             "query_count": len(plan.get("queries", [])),
-            "queries": [
-                {
-                    "query": item.get("query", ""),
-                    "scope": item.get("scope", ""),
-                    "purpose": item.get("purpose", ""),
-                }
+            # Keep /sources and saved answer diagnostics content-free.
+            # Full structured plans remain in the ephemeral AdaptiveRecallResult.
+            "query_scopes": [item.get("scope", "") for item in plan.get("queries", [])],
+            "query_hashes": [
+                _sha256_text(str(item.get("query", "") or ""))
                 for item in plan.get("queries", [])
             ],
             "hit_count": 0,

@@ -50,7 +50,7 @@
           syntax = pkgs.runCommand "motoko-syntax-check" { nativeBuildInputs = [ pkgs.python312 ]; } ''
             export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
             mkdir -p "$PYTHONPYCACHEPREFIX"
-            python3 -m py_compile ${src}/motoko
+            python3 -m py_compile ${src}/motoko ${src}/motoko_core/episodic_recall.py
             touch "$out"
           '';
           regression =
@@ -59,6 +59,7 @@
                 export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
                 mkdir -p "$PYTHONPYCACHEPREFIX"
                 MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_regression.py
+                PYTHONPATH=${src} python3 ${src}/tests/episodic_recall_test.py
                 touch "$out"
               '';
           evaluation =

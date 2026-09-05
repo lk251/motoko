@@ -249,6 +249,16 @@ query-relevance lane, then packed as title, summary, matched snippets, recent
 turns, and provenance. If `conversation_limit` is omitted, Motoko uses at least
 `recent_conversations + relevant_conversations`.
 
+Long conversations also keep append-only raw episodic history under Motoko's
+realm-local state. Compaction still produces a dense summary for cheap
+continuity, but it archives raw turns before dropping them from the active
+transcript and advances a context-window lineage. When older raw history exists,
+adaptive episodic recall may use the selected chat model for at most two
+structured retrieval-planning rounds, then search and inject bounded raw
+conversation excerpts with provenance before final synthesis. Set
+`MOTOKO_ADAPTIVE_RECALL=0` for a one-session kill switch. Raw history recovered
+this way outranks model-generated summaries when the two conflict.
+
 Suggested realm identities:
 
 ```json

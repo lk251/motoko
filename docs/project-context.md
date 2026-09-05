@@ -115,7 +115,9 @@ Accepted directions:
 - source provenance for every answer;
 - memory review, edit, delete, importance, pinning, and duplicate handling;
 - automatic but inspectable memory maintenance;
-- compacted conversations;
+- compacted conversations backed by lossless realm-local episodic history, with
+  context-window lineage and bounded model-directed adaptive recall so summaries
+  are continuity hints rather than the sole surviving representation of older turns;
 - explicit profile dossiers from memories and conversations;
 - hierarchical document indexes;
 - deterministic `.motokoignore` corpus-selection rules for excluding archival
