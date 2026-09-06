@@ -246,6 +246,158 @@ If those gates are met, delta-mem is attractive precisely because it may let
 Motoko reserve prompt tokens for high-value explicit evidence while carrying a
 small amount of additional historical signal outside the text context.
 
+## Research Note: OKF Agent Memory And Git-Native Curated Knowledge
+
+The 2026 `okf-agent-memory` project is not a research paper. It is an independent
+open-source implementation that turns Google's Open Knowledge Format (OKF) v0.2
+into a persistent agent-memory convention, a local search/validation tool, and
+an embedded MCP interface. It is relevant to Motoko primarily as a source of
+format, lifecycle, and retrieval-discipline ideas rather than as a replacement
+for Motoko's current hybrid evidence stack.
+
+### What the project does
+
+OKF Agent Memory stores curated project knowledge as ordinary Markdown files
+with YAML frontmatter under a `knowledge/` tree. The files are intended to be
+human-readable, Git-diffable, portable across agents, and navigable through
+indexes, links, and local BM25 search. Its behavioral convention makes several
+rules explicit:
+
+- conversations are temporary while curated project knowledge is persistent;
+- search existing knowledge before writing new knowledge;
+- update an existing concept instead of creating a duplicate when appropriate;
+- preserve uncertainty and distinguish inference from sourced fact;
+- review whether a substantial task produced durable knowledge worth keeping;
+- preserve provenance and verification separately;
+- retain useful history rather than silently overwriting conflicts;
+- use metadata/index search and targeted concept loading instead of injecting
+  the entire corpus into the prompt.
+
+Those rules sit on top of OKF v0.2. The underlying Google specification is
+minimal and format-oriented: Markdown plus YAML frontmatter, ordinary links,
+indexes/logs, and optional provenance, generation, verification, lifecycle,
+freshness, and attestation metadata. The important architectural point is that
+OKF specifies a portable knowledge representation; it does not require a
+particular vector database, embedding model, agent framework, or retrieval
+algorithm.
+
+The implementation adds a pure-Go CLI, in-memory BM25 search, validation, graph
+checks, and a stdio MCP server. Its published progressive-disclosure benchmark
+compares a roughly 3,034-token monolithic project context with a roughly
+603-token selected concept and reports an 80.1% prompt-token reduction in that
+fixture, plus model-dependent TTFT and instruction-following improvements. This
+is useful evidence for the value of selective context packing, but it is a
+small controlled benchmark with a known relevant concept. It should not be read
+as evidence that BM25-only retrieval dominates Motoko's hybrid retrieval on
+messy personal history or heterogeneous real-world corpora.
+
+### Fit with current Motoko
+
+There is strong philosophical overlap. Motoko already prefers local,
+inspectable, dependency-light state; explicit source provenance; deterministic
+truth signals; hierarchical evidence; lexical retrieval alongside embeddings;
+and deliberate context packing. Motoko also already has typed derived artifacts
+and lifecycle/rebuild rules. Therefore adopting the OKF Agent Memory repository
+wholesale would duplicate substantial machinery and would introduce a Go/MCP
+runtime that Motoko does not currently need.
+
+The useful question is narrower: which conventions or interoperability ideas
+would make Motoko's own memory and retrieval system better?
+
+The strongest candidates are:
+
+1. **Search-before-write as a durable-memory invariant.** Before Motoko writes a
+   new durable memory, topic fact, decision, or dossier item, the maintenance
+   path should retrieve closely related existing objects and choose among
+   `create`, `update`, `supersede`, `contradict`, or `leave unchanged`. This can
+   reduce duplicate facts and repeated model summaries while preserving source
+   links and old evidence.
+2. **Metadata-first progressive disclosure.** Motoko's hierarchy can become
+   even more explicit: retrieve small concept/topic metadata and one-line
+   descriptions first, then open the best object, then traverse linked evidence
+   only when the query requires it. This is compatible with Motoko's existing
+   container -> chunk/span -> final-context design and should be measured by
+   both recall and prompt-token cost.
+3. **Trust, provenance, and freshness as first-class memory fields.** OKF v0.2's
+   separation of `sources`, `generated`, `verified`, `status`, and `stale_after`
+   is a useful interoperability vocabulary. Motoko already has richer internal
+   provenance in several artifact classes; future memory/dossier schemas could
+   either adopt compatible meanings or provide a deterministic mapping so
+   source facts, model inference, human confirmation, supersession, and
+   staleness cannot collapse into one undifferentiated summary.
+4. **Curated concepts are not transcripts.** OKF Agent Memory explicitly treats
+   the long-term corpus as distilled project knowledge rather than conversation
+   history. That matches Motoko's requirement that raw episodic history remain a
+   separate authoritative evidence source while derived memories/notes remain
+   distinguishable from what actually happened.
+5. **Human-readable export/interchange.** An optional OKF-compatible export for
+   project/topic knowledge could make selected Motoko knowledge portable to
+   coding agents, repository workflows, or other local tools without making OKF
+   Motoko's internal source of truth. Import should preserve unknown fields and
+   provenance and should remain review-first.
+6. **Knowledge-review checkpoints.** The convention's post-task questions are a
+   useful model for bounded maintenance: after substantial work, ask whether a
+   durable fact, decision, correction, relationship, or artifact changed. The
+   result should create no entry when nothing worth remembering changed.
+
+### Important boundary: do not Git-version private personal history by default
+
+The Git-native design is attractive for repository/project knowledge because
+review, diff, blame, rollback, and collaboration are features there. It is not a
+good default storage model for Motoko's private conversations, personal
+memories, or realm-local dossiers. Git deliberately preserves history, which
+conflicts with simple deletion/erasure semantics and can accidentally retain
+sensitive material after a file is edited or removed.
+
+Motoko should therefore keep private personal state under its existing
+realm-local lifecycle and deletion controls. If an OKF-compatible representation
+is ever used for personal knowledge, it should be an explicit export or a
+non-Git local bundle with well-defined erasure semantics, not an automatic
+repository commit history.
+
+### Retrieval lesson: keep hybrid retrieval
+
+OKF Agent Memory's BM25 implementation is a useful fast lexical lane, not a
+reason to simplify Motoko to lexical search. Motoko has requirements that benefit
+from exact/path search, deterministic structure, dense semantic recall,
+hierarchical candidate generation, reranking, temporal filters, and source-span
+selection. The best synthesis is therefore:
+
+```text
+portable/inspectable knowledge objects
++ search-before-write lifecycle discipline
++ metadata-first progressive disclosure
++ lexical/BM25 candidate generation
++ Motoko's existing dense/structured/temporal lanes
++ reranking and evidence-span selection
++ explicit provenance in final context
+```
+
+The format and memory-management discipline are separable from the retrieval
+algorithm. Motoko should borrow the former where useful and retain the stronger
+hybrid evidence pipeline.
+
+### Possible future experiment
+
+A low-risk experiment would be to define a small Motoko `knowledge-concept-v1`
+projection for project/topic knowledge and compare it with OKF v0.2 semantics.
+The experiment should not replace current stores. It should test whether a
+metadata-first concept layer improves:
+
+- duplicate-memory rate after repeated related conversations/tasks;
+- recall and ranking of durable decisions, facts, corrections, and constraints;
+- prompt tokens required before final synthesis;
+- provenance/trust visibility in `/sources` and debugging surfaces;
+- detection of stale or superseded derived knowledge;
+- human reviewability and portability to another agent/tool;
+- deletion and lifecycle correctness, especially when content is private.
+
+If the mapping is clean and the evals improve, Motoko could support an optional
+OKF-compatible project-knowledge import/export boundary. That would gain an open
+interchange format without coupling Motoko's internal retrieval architecture to
+the OKF Agent Memory implementation, its Go binary, its MCP server, or BM25 as a
+single retrieval strategy.
+
 ## Recommended Next Architectural Step
 
 The next high-value direction is a persistent hierarchical evidence store:
@@ -347,8 +499,18 @@ evidence, and leaves enough audit trail to diagnose failures.
   <https://arxiv.org/abs/2605.12357>
 - Official delta-mem implementation:
   <https://github.com/declare-lab/delta-Mem>
-- Di Zhang post that prompted this research note:
+- Di Zhang post that prompted the delta-mem research note:
   <https://x.com/di_zhang_fdu/status/2096496854255226927>
+- OKF Agent Memory, Git-native persistent project memory implementation:
+  <https://github.com/okf-memory/okf-agent-memory>
+- OKF Agent Memory progressive-disclosure benchmark:
+  <https://github.com/okf-memory/okf-agent-memory/blob/main/benchmarks/README.md>
+- Di Zhang post that prompted the OKF Agent Memory research note:
+  <https://x.com/di_zhang_fdu/status/2096481849937945012>
+- Google Open Knowledge Format (OKF) v0.2:
+  <https://github.com/GoogleCloudPlatform/open-knowledge-format>
+- Google Cloud, *Open Knowledge format v0.2 tackles agentic trust*:
+  <https://cloud.google.com/blog/products/data-analytics/okf-v0-2-adds-trust-signals/>
 - RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval:
   <https://arxiv.org/abs/2401.18059>
 - Microsoft GraphRAG:
