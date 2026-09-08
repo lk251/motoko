@@ -1,6 +1,7 @@
 # Possible Retrieval Pipeline Architectural Directions
 
 Date: 2026-05-21
+Last updated: 2026-09-06
 
 This document records a tentative architecture direction for Motoko's future
 retrieval pipeline. It is not a commitment to implement every item here. The
@@ -124,6 +125,279 @@ answer quality, rather than spending it on every file or every chunk.
   retrieval, rerank, prompt, and answer-quality evals. Feedback remains
   per-realm and under the current user's Motoko state.
 
+## Research Note: delta-mem And Model-Side Online Memory
+
+Lei et al. (2026), *delta-mem: Efficient Online Memory for Large Language
+Models*, is relevant to Motoko because it challenges the assumption that all
+long-horizon memory should be implemented as retrieval plus text inserted into
+the prompt. It should be treated as a possible complement to Motoko's hybrid
+retrieval stack, not as evidence that Motoko should replace RAG.
+
+### What the paper does
+
+`delta-mem` augments a frozen Transformer backbone with a small learned memory
+adapter and a fixed-size online state of associative memory. The online state is
+updated as new tokens or interaction segments arrive. Its write rule is based
+on a gated delta rule: information that the state already predicts produces a
+small update, while the residual or surprising part produces a larger write.
+The current hidden state also controls how strongly old state is retained.
+
+At read time, the current hidden state queries the associative memory state. The
+readout does not return source text. Instead, learned projections turn it into
+low-rank corrections on the query and output sides of the backbone's attention
+computation. The paper studies token-state, sequence-state, and multi-state
+write strategies, which provide different trade-offs between recency, noise,
+and interference.
+
+The headline configuration uses an 8 x 8 online memory state. On the paper's
+Qwen3-4B-Instruct benchmark suite, the best delta-mem variant raises the reported
+average from 46.79 to 51.66. MemoryAgentBench rises from 29.54 to 38.85 for the
+best variant on that benchmark, and LoCoMo from 40.79 to 49.12. A BM25 RAG
+baseline is also included and scores below the frozen backbone in that specific
+experimental setup. That result is useful evidence that naive text retrieval
+can be noisy, but it should not be generalized into "delta-mem beats RAG" for
+Motoko: Motoko's current retrieval stack is substantially more structured than
+that BM25 baseline, and Motoko has provenance and deterministic-truth
+requirements that an opaque associative state cannot satisfy by itself.
+
+The method is lightweight relative to full fine-tuning, but it is not a
+zero-training or prompt-only technique. The paper reports about 4.87M trainable
+parameters for its rank-8 SSW/TSW configurations (about 0.12% of the 4B
+backbone) and 19.47M for MSW (about 0.48%). The public implementation currently
+ships a delta-mem adapter for Qwen3-4B-Instruct-2507.
+
+### Fit with current Motoko
+
+Motoko currently talks to operator-approved local llama.cpp routes and treats
+retrieved source evidence, provenance, deterministic Org/task/date signals, and
+inspectability as first-class requirements. A faithful delta-mem implementation
+would therefore not be a drop-in change to `motoko_core/retrieval_service.py`.
+It requires model-specific trained projections plus inference-time access to
+hidden states and attention computation, so it belongs primarily at the model
+runtime/backend boundary.
+
+The most promising architecture is consequently two-channel memory:
+
+1. **Explicit evidence memory:** Motoko's existing HRAG/retrieval path remains
+   authoritative for facts that must be inspectable, source-linked, dated,
+   quoted, contradicted, deleted, or audited.
+2. **Implicit associative state:** a delta-mem-like mechanism may eventually
+   provide cheap history-conditioned steering, helping the model carry useful
+   patterns or associations without injecting every relevant historical token
+   into the active prompt.
+
+This separation is especially compatible with the deferred
+`Production-grade long-horizon personal memory and adaptive recall` project in
+`docs/deferred-projects.md`. Raw historical evidence must remain recoverable and
+authoritative even if an online latent state becomes useful for steering.
+
+### Ideas worth borrowing before model-runtime integration
+
+Several ideas are applicable to Motoko even if delta-mem itself is not yet
+supported by the serving stack:
+
+- **Separate memory state from memory steering.** Motoko already spends effort
+  on what to store and retrieve. Evals should also distinguish whether correct
+  evidence was retrieved from whether the selected evidence actually changed
+  the final answer in the desired way. This mirrors the paper's distinction
+  between memory representation and how memory influences the backbone.
+- **Residual/novelty-aware writes.** The delta rule suggests a useful heuristic
+  for derived memories, dossiers, and summaries: avoid repeatedly writing
+  information already represented, and spend update budget on new,
+  contradictory, or prediction-error-like information. Any Motoko version must
+  preserve provenance rather than treating novelty scores as truth.
+- **Multiple memory timescales/states.** The paper's multi-state variant is a
+  useful design prompt for Motoko's explicit memory hierarchy: recent working
+  state, conversation/episode state, and durable topic/person/project state may
+  deserve separate update rates and retention policies rather than one blended
+  summary.
+- **Fixed-cost associative side signal.** A Motoko-native experiment could test
+  a very small per-realm associative state over existing embedding-space
+  signals and use it only as an additional candidate/rerank feature. This would
+  not reproduce delta-mem, because the paper's benefit comes from coupling the
+  state to hidden activations and attention. It would be a separately evaluated
+  systems hypothesis, and retrieved source spans would remain the evidence.
+- **Benchmark memory mechanisms against each other.** LoCoMo and
+  MemoryAgentBench are useful external references for future eval design. For
+  Motoko, the more important gate is an internal long-horizon suite that
+  measures exact historical recall, chronology, contradiction handling,
+  ranking, answer grounding, source provenance, latency, and failure recovery.
+
+### Possible future experiment
+
+Do not replace the current hybrid retrieval system with delta-mem now. Keep the
+paper on the research watchlist and consider a backend experiment when all of
+the following are true:
+
+- a compatible adapter exists for a Motoko-approved local backbone, or there is
+  a justified plan to train one;
+- the local serving runtime can expose or implement the required online-memory
+  read/write and attention-correction hooks without weakening the NixOS-owned
+  model boundary;
+- the online state has explicit realm/conversation lifecycle semantics,
+  including reset, deletion, persistence, migration, and crash behavior;
+- evaluation compares `HRAG only`, `associative state only` where meaningful,
+  and `HRAG + associative state` rather than treating the mechanisms as
+  mutually exclusive;
+- gains survive Motoko's provenance and source-grounding requirements and are
+  large enough to justify the added runtime and model-specific complexity.
+
+If those gates are met, delta-mem is attractive precisely because it may let
+Motoko reserve prompt tokens for high-value explicit evidence while carrying a
+small amount of additional historical signal outside the text context.
+
+## Research Note: OKF Agent Memory And Git-Native Curated Knowledge
+
+The 2026 `okf-agent-memory` project is not a research paper. It is an independent
+open-source implementation that turns Google's Open Knowledge Format (OKF) v0.2
+into a persistent agent-memory convention, a local search/validation tool, and
+an embedded MCP interface. It is relevant to Motoko primarily as a source of
+format, lifecycle, and retrieval-discipline ideas rather than as a replacement
+for Motoko's current hybrid evidence stack.
+
+### What the project does
+
+OKF Agent Memory stores curated project knowledge as ordinary Markdown files
+with YAML frontmatter under a `knowledge/` tree. The files are intended to be
+human-readable, Git-diffable, portable across agents, and navigable through
+indexes, links, and local BM25 search. Its behavioral convention makes several
+rules explicit:
+
+- conversations are temporary while curated project knowledge is persistent;
+- search existing knowledge before writing new knowledge;
+- update an existing concept instead of creating a duplicate when appropriate;
+- preserve uncertainty and distinguish inference from sourced fact;
+- review whether a substantial task produced durable knowledge worth keeping;
+- preserve provenance and verification separately;
+- retain useful history rather than silently overwriting conflicts;
+- use metadata/index search and targeted concept loading instead of injecting
+  the entire corpus into the prompt.
+
+Those rules sit on top of OKF v0.2. The underlying Google specification is
+minimal and format-oriented: Markdown plus YAML frontmatter, ordinary links,
+indexes/logs, and optional provenance, generation, verification, lifecycle,
+freshness, and attestation metadata. The important architectural point is that
+OKF specifies a portable knowledge representation; it does not require a
+particular vector database, embedding model, agent framework, or retrieval
+algorithm.
+
+The implementation adds a pure-Go CLI, in-memory BM25 search, validation, graph
+checks, and a stdio MCP server. Its published progressive-disclosure benchmark
+compares a roughly 3,034-token monolithic project context with a roughly
+603-token selected concept and reports an 80.1% prompt-token reduction in that
+fixture, plus model-dependent TTFT and instruction-following improvements. This
+is useful evidence for the value of selective context packing, but it is a
+small controlled benchmark with a known relevant concept. It should not be read
+as evidence that BM25-only retrieval dominates Motoko's hybrid retrieval on
+messy personal history or heterogeneous real-world corpora.
+
+### Fit with current Motoko
+
+There is strong philosophical overlap. Motoko already prefers local,
+inspectable, dependency-light state; explicit source provenance; deterministic
+truth signals; hierarchical evidence; lexical retrieval alongside embeddings;
+and deliberate context packing. Motoko also already has typed derived artifacts
+and lifecycle/rebuild rules. Therefore adopting the OKF Agent Memory repository
+wholesale would duplicate substantial machinery and would introduce a Go/MCP
+runtime that Motoko does not currently need.
+
+The useful question is narrower: which conventions or interoperability ideas
+would make Motoko's own memory and retrieval system better?
+
+The strongest candidates are:
+
+1. **Search-before-write as a durable-memory invariant.** Before Motoko writes a
+   new durable memory, topic fact, decision, or dossier item, the maintenance
+   path should retrieve closely related existing objects and choose among
+   `create`, `update`, `supersede`, `contradict`, or `leave unchanged`. This can
+   reduce duplicate facts and repeated model summaries while preserving source
+   links and old evidence.
+2. **Metadata-first progressive disclosure.** Motoko's hierarchy can become
+   even more explicit: retrieve small concept/topic metadata and one-line
+   descriptions first, then open the best object, then traverse linked evidence
+   only when the query requires it. This is compatible with Motoko's existing
+   container -> chunk/span -> final-context design and should be measured by
+   both recall and prompt-token cost.
+3. **Trust, provenance, and freshness as first-class memory fields.** OKF v0.2's
+   separation of `sources`, `generated`, `verified`, `status`, and `stale_after`
+   is a useful interoperability vocabulary. Motoko already has richer internal
+   provenance in several artifact classes; future memory/dossier schemas could
+   either adopt compatible meanings or provide a deterministic mapping so
+   source facts, model inference, human confirmation, supersession, and
+   staleness cannot collapse into one undifferentiated summary.
+4. **Curated concepts are not transcripts.** OKF Agent Memory explicitly treats
+   the long-term corpus as distilled project knowledge rather than conversation
+   history. That matches Motoko's requirement that raw episodic history remain a
+   separate authoritative evidence source while derived memories/notes remain
+   distinguishable from what actually happened.
+5. **Human-readable export/interchange.** An optional OKF-compatible export for
+   project/topic knowledge could make selected Motoko knowledge portable to
+   coding agents, repository workflows, or other local tools without making OKF
+   Motoko's internal source of truth. Import should preserve unknown fields and
+   provenance and should remain review-first.
+6. **Knowledge-review checkpoints.** The convention's post-task questions are a
+   useful model for bounded maintenance: after substantial work, ask whether a
+   durable fact, decision, correction, relationship, or artifact changed. The
+   result should create no entry when nothing worth remembering changed.
+
+### Important boundary: do not Git-version private personal history by default
+
+The Git-native design is attractive for repository/project knowledge because
+review, diff, blame, rollback, and collaboration are features there. It is not a
+good default storage model for Motoko's private conversations, personal
+memories, or realm-local dossiers. Git deliberately preserves history, which
+conflicts with simple deletion/erasure semantics and can accidentally retain
+sensitive material after a file is edited or removed.
+
+Motoko should therefore keep private personal state under its existing
+realm-local lifecycle and deletion controls. If an OKF-compatible representation
+is ever used for personal knowledge, it should be an explicit export or a
+non-Git local bundle with well-defined erasure semantics, not an automatic
+repository commit history.
+
+### Retrieval lesson: keep hybrid retrieval
+
+OKF Agent Memory's BM25 implementation is a useful fast lexical lane, not a
+reason to simplify Motoko to lexical search. Motoko has requirements that benefit
+from exact/path search, deterministic structure, dense semantic recall,
+hierarchical candidate generation, reranking, temporal filters, and source-span
+selection. The best synthesis is therefore:
+
+```text
+portable/inspectable knowledge objects
++ search-before-write lifecycle discipline
++ metadata-first progressive disclosure
++ lexical/BM25 candidate generation
++ Motoko's existing dense/structured/temporal lanes
++ reranking and evidence-span selection
++ explicit provenance in final context
+```
+
+The format and memory-management discipline are separable from the retrieval
+algorithm. Motoko should borrow the former where useful and retain the stronger
+hybrid evidence pipeline.
+
+### Possible future experiment
+
+A low-risk experiment would be to define a small Motoko `knowledge-concept-v1`
+projection for project/topic knowledge and compare it with OKF v0.2 semantics.
+The experiment should not replace current stores. It should test whether a
+metadata-first concept layer improves:
+
+- duplicate-memory rate after repeated related conversations/tasks;
+- recall and ranking of durable decisions, facts, corrections, and constraints;
+- prompt tokens required before final synthesis;
+- provenance/trust visibility in `/sources` and debugging surfaces;
+- detection of stale or superseded derived knowledge;
+- human reviewability and portability to another agent/tool;
+- deletion and lifecycle correctness, especially when content is private.
+
+If the mapping is clean and the evals improve, Motoko could support an optional
+OKF-compatible project-knowledge import/export boundary. That would gain an open
+interchange format without coupling Motoko's internal retrieval architecture to
+the OKF Agent Memory implementation, its Go binary, its MCP server, or BM25 as a
+single retrieval strategy.
+
 ## Recommended Next Architectural Step
 
 The next high-value direction is a persistent hierarchical evidence store:
@@ -219,6 +493,24 @@ evidence, and leaves enough audit trail to diagnose failures.
 
 ## References
 
+- Lei, J., Zhang, D., Li, J., Wang, W., Fan, K., Liu, X., Liu, Q., Ma, X., Chen,
+  B., and Poria, S. (2026). *delta-mem: Efficient Online Memory for Large
+  Language Models*. arXiv:2605.12357:
+  <https://arxiv.org/abs/2605.12357>
+- Official delta-mem implementation:
+  <https://github.com/declare-lab/delta-Mem>
+- Di Zhang post that prompted the delta-mem research note:
+  <https://x.com/di_zhang_fdu/status/2096496854255226927>
+- OKF Agent Memory, Git-native persistent project memory implementation:
+  <https://github.com/okf-memory/okf-agent-memory>
+- OKF Agent Memory progressive-disclosure benchmark:
+  <https://github.com/okf-memory/okf-agent-memory/blob/main/benchmarks/README.md>
+- Di Zhang post that prompted the OKF Agent Memory research note:
+  <https://x.com/di_zhang_fdu/status/2096481849937945012>
+- Google Open Knowledge Format (OKF) v0.2:
+  <https://github.com/GoogleCloudPlatform/open-knowledge-format>
+- Google Cloud, *Open Knowledge format v0.2 tackles agentic trust*:
+  <https://cloud.google.com/blog/products/data-analytics/okf-v0-2-adds-trust-signals/>
 - RAPTOR: Recursive Abstractive Processing for Tree-Organized Retrieval:
   <https://arxiv.org/abs/2401.18059>
 - Microsoft GraphRAG:

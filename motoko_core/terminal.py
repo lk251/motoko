@@ -322,7 +322,18 @@ def fixed_prompt_input_display(
     prompt_width = display_width(prompt)
     usable = max(10, width - prompt_width)
     cursor = max(0, min(cursor, len(input_buffer)))
-    segments = split_cells(input_buffer, usable, word_wrap=True)
+    # Tabs have a visible width; hard newlines are layout, never raw terminal
+    # controls inside a rendered row. The saved/submitted draft is unchanged.
+    cursor += 3 * input_buffer[:cursor].count("\t")
+    input_buffer = input_buffer.replace("\t", "    ")
+    segments = []
+    offset = 0
+    for line in input_buffer.split("\n"):
+        segments.extend(
+            (text, start + offset, end + offset)
+            for text, start, end in split_cells(line, usable, word_wrap=True)
+        )
+        offset += len(line) + 1
     if (
         cursor == len(input_buffer)
         and segments
@@ -331,6 +342,10 @@ def fixed_prompt_input_display(
         segments.append(("", cursor, cursor))
 
     cursor_row = cursor_segment_index(segments, cursor)
+    for index, (_text, start, end) in enumerate(segments):
+        if start <= cursor <= end and input_buffer[end:end + 1] == "\n":
+            cursor_row = index
+            break
     shown_start = min(
         max(0, cursor_row - max_rows + 1),
         max(0, len(segments) - max_rows),

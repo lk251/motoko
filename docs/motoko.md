@@ -353,6 +353,16 @@ ETA; `/indexes` and `/status` also show active durable index jobs from Motoko
 state. The same progress display is used later if an attached stale index
 needs a heavy background refresh.
 
+Older indexes without contained-source provenance are withheld from prompts
+until rebuilt. `motoko index-upgrade INDEX_ID` records an inspectable source
+boundary audit; it cannot certify old content by checking its current filename.
+With heavy background indexing enabled, eligible legacy corpora rebuild one at
+a time and resume completed files after interruption. Current permissions and
+directory approvals still apply. You can also rebuild explicitly with
+`motoko index ROOT`. Saved older artifacts remain inspectable; dependent old
+topics and dossiers require rebuilding from verified indexes or explicit cleanup.
+This does not erase original conversations or unrelated memories.
+
 Long corpus passes checkpoint after each completed file. If Motoko is paused,
 times out, crashes, or the machine loses power, completed file work remains in
 private partial-index state and `/indexes` shows a `partial` row with a resume
@@ -614,6 +624,24 @@ context. Motoko's `repo-review` permission does not grant shell, sudo, rebuild,
 switch, commit, or push authority. Those operations remain separate reviewed
 human or coding-agent actions.
 
+Pasting into the TUI inserts one draft, preserving line breaks and indentation.
+Press Enter after the paste finishes to send it as one message (or one queued
+prompt while busy). Alt+Enter inserts a newline while composing a message.
+Multiline input is always message text, even if a line begins with `/`.
+
+Pastes longer than 1,000 characters appear as `[Pasted N characters]` in the
+draft, using Codex's character threshold. The full text is sent and saved;
+the label is only a display fold. Left/Right move across a folded paste, and
+Backspace/Delete remove it as a unit. Ctrl+O unfolds a paste beside the cursor
+for inspection and editing. History recalls the full text.
+
+Motoko enables bracketed paste and restores the terminal mode on exit. tmux's
+`paste-buffer -p` uses this mode; the normal tmux paste binding typically already
+does so. Unmarked rapid paste bursts have a timing fallback, including a short
+Enter guard. Unmarked paste cannot be perfectly distinguished from fast typing
+or delayed keystrokes; use `paste-buffer -p` for reliable boundaries over slow
+connections. Wait until the pasted draft appears before pressing Enter.
+
 Emacs-style editing keys in the TUI:
 
 ```text
@@ -626,6 +654,7 @@ Alt+F   forward word
 Alt+Backspace  delete previous word
 Ctrl+K  kill to end of line
 Ctrl+Y  yank killed text
+Ctrl+O  unfold the pasted block beside the cursor
 Ctrl+P  previous dropdown item or history entry
 Ctrl+N  next dropdown item or history entry
 ```
@@ -945,6 +974,14 @@ requires confirmation. Executable script tools are treated as having the
 `external_process` effect even when old metadata omits it, so approvals show
 the actual authority being granted; script tools cannot declare
 `prompt_only`.
+
+The runner uses an isolated Python import path without site initialization and
+executes a private copy of the exact approved script. Executable sibling modules
+are not available through Python's default import path. Earlier approvals require
+explicit reapproval under this execution policy; their records remain inspectable.
+Tools that depend on local imports must first become self-contained stdlib scripts.
+Approval means trusting the script with your OS account's authority. Declared
+effects and the scanner do not provide a filesystem or network sandbox.
 
 `motoko skill scan [NAME]` is the static review surface for learned skills and
 support scripts. It is conservative and report-first: it flags prompt-injection

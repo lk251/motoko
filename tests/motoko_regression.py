@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 from unittest.mock import patch
 
 
@@ -148,6 +149,23 @@ def isolated_state():
 
 def write_conversation(m, conv):
     m.atomic_write(m.conversation_path(conv["id"]), json.dumps(conv, ensure_ascii=False) + "\n")
+
+
+def current_index_fixture(m, index, *, persist=False):
+    """Declare synthetic inputs as current ingestion for non-migration tests.
+
+    Legacy/security fixtures deliberately do not use this helper. Most retrieval
+    tests fabricate post-ingestion records and exercise no real source reads.
+    """
+    root = index.setdefault("root", "/synthetic/test-documents")
+    policy = index.get("selection_policy") or m.document_selection_policy(pathlib.Path(root), index.get("glob"))
+    index["selection_policy"] = {**policy, "source_boundary": m.SOURCE_BOUNDARY_VERSION}
+    for item in index.get("files", []):
+        item["source_boundary"] = m.SOURCE_BOUNDARY_VERSION
+        item["source_root"] = root
+    if persist:
+        m.atomic_write(m.index_path(index["id"]), json.dumps(index) + "\n")
+    return index
 
 
 def test_atomic_write_uses_unique_temp_paths_under_concurrency(m):
@@ -5267,6 +5285,7 @@ def test_summary_reductions_fan_out_across_worker_routes(m):
 
 def test_sources_fallback_lists_attached_topic_context(m):
     with isolated_state():
+        current_index_fixture(m, {"id": "idx", "root": str(pathlib.Path.cwd()), "files": []}, persist=True)
         topic_path = pathlib.Path.cwd() / "sample-journal.org"
         topic = {
             "id": "topic-test",
@@ -5702,6 +5721,7 @@ def test_named_file_query_boosts_matching_path(m):
                 },
             ],
         }
+        current_index_fixture(m, index)
         rows = m.ranked_index_chunks(index, "summarize yesterday and today according to sample-journal.org")
         assert rows[0][1]["path"].endswith("/sample-journal.org")
         text, sources = m.retrieve_from_index(index, "summarize yesterday and today according to sample-journal.org")
@@ -5746,6 +5766,7 @@ def test_retrieval_debug_explains_scores(m):
                 },
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         report = m.run_retrieval_debug(
             "summarize yesterday and today according to sample-journal.org",
@@ -5921,6 +5942,7 @@ def test_named_logbook_recent_query_uses_latest_org_sections(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         query = "summarize the last two days present in sample-journal.org"
         selection = m.query_aware_content_selection(query, content, 1200, use_models=True)
         excerpt = selection["excerpt"]
@@ -6087,6 +6109,7 @@ def command_about(_args):
                 },
             ],
         }
+        current_index_fixture(m, index)
         text, sources = m.retrieve_from_index(index, "which file in the repo takes care of the /about page?")
         assert "Source code locator:" in text
         assert "def format_about" in text
@@ -6167,6 +6190,7 @@ def test_named_logbook_recent_query_keeps_nonconsecutive_latest_dates(m):
                     }
                 ],
             }
+            current_index_fixture(m, index)
 
             text, sources = m.retrieve_from_index(index, "summarize the last two days present in sample-journal.org")
             assert "May23 latest action" in text
@@ -6260,6 +6284,7 @@ def test_named_temporal_query_ignores_other_dated_org_files(m):
                     },
                 ],
             }
+            current_index_fixture(m, index)
 
             text, sources = m.retrieve_from_index(index, "summarize the last three days present in sample-journal.org")
             assert "May23 logbook latest action" in text
@@ -6310,6 +6335,7 @@ def test_live_index_retrieval_uses_service_boundary(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         text, sources = m.retrieve_from_index(index, "sample-journal.org retrieval boundary")
         index_source = next(source for source in sources if source.get("kind") == "index")
         assert index_source["retrieval_service_schema"] == "retrieval-service-v1"
@@ -6410,6 +6436,7 @@ def test_temporal_retrieval_finds_latest_org_dates_without_evidence_store(m):
                     }
                 ],
             }
+            current_index_fixture(m, index)
 
             text, sources = m.retrieve_from_index(index, "summarize the last two days present in sample-journal.org")
             assert "2026-05-18" in text
@@ -6470,6 +6497,7 @@ def test_hierarchical_evidence_store_retrieves_org_day_and_terms(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
 
         store = m.build_evidence_store_from_index(index, write=False)
@@ -6773,6 +6801,7 @@ def test_context_catalog_metadata_omits_artifact_audit(m):
                 "corpus_summary": "test corpus",
                 "files": [],
             }
+            current_index_fixture(m, index)
             full_calls = []
             metadata_calls = []
 
@@ -7256,6 +7285,7 @@ def test_prompt_context_filters_attached_artifacts_to_current_project(m):
                     }
                 ],
             }
+            current_index_fixture(m, current_index)
             other_index = {
                 "id": "20260525-020000-bbbbbb",
                 "name": "other",
@@ -7278,6 +7308,7 @@ def test_prompt_context_filters_attached_artifacts_to_current_project(m):
                     }
                 ],
             }
+            current_index_fixture(m, other_index)
             m.atomic_write(m.index_path(current_index["id"]), json.dumps(current_index, ensure_ascii=False, indent=2) + "\n")
             m.atomic_write(m.index_path(other_index["id"]), json.dumps(other_index, ensure_ascii=False, indent=2) + "\n")
             conv = m.new_conversation("Scoped context")
@@ -7335,13 +7366,15 @@ def test_project_scope_filters_topic_reuse_before_attachment(m):
             other_file = other / "notes.md"
             current_file.write_text("Alpha implementation current project.", encoding="utf-8")
             other_file.write_text("Alpha implementation other project.", encoding="utf-8")
+            current_index_fixture(m, {"id": "current-topic-index", "root": str(current.resolve()), "files": []}, persist=True)
+            current_index_fixture(m, {"id": "other-topic-index", "root": str(other.resolve()), "files": []}, persist=True)
             os.chdir(current)
             current_topic = {
                 "id": "topic-current",
                 "name": "Alpha current implementation",
                 "query": "alpha implementation",
                 "summary": "Alpha implementation current project",
-                "source_indexes": [{"root": str(current.resolve())}],
+                "source_indexes": [{"id": "current-topic-index", "root": str(current.resolve())}],
                 "evidence": [{"path": str(current_file.resolve()), "chunk": 1}],
             }
             other_topic = {
@@ -7349,7 +7382,7 @@ def test_project_scope_filters_topic_reuse_before_attachment(m):
                 "name": "Alpha other implementation",
                 "query": "alpha implementation",
                 "summary": "Alpha implementation other project alpha implementation",
-                "source_indexes": [{"root": str(other.resolve())}],
+                "source_indexes": [{"id": "other-topic-index", "root": str(other.resolve())}],
                 "evidence": [{"path": str(other_file.resolve()), "chunk": 1}],
             }
             m.atomic_write(m.topic_path(other_topic["id"]), json.dumps(other_topic, ensure_ascii=False, indent=2) + "\n")
@@ -8570,7 +8603,7 @@ def test_tui_input_batching_and_display_cache_skip_hot_work(m):
         ui.stdin_fd = read_fd
         ui.input_batch_limit = 4
         keys = []
-        ui.handle_key = lambda key: keys.append(key)
+        ui.handle_terminal_key = lambda key: keys.append(key)
         os.write(write_fd, b"abc")
         ui.drain_pending_input()
         assert keys == ["a", "b", "c"]
@@ -9503,6 +9536,7 @@ def test_retrieval_eval_replays_private_feedback_fixtures(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         conv = m.new_conversation("Feedback replay")
         conv["id"] = "feedback-replay-conv"
@@ -10434,6 +10468,7 @@ def test_vector_build_and_query_lexical_baseline(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path("vector-index"), json.dumps(index, ensure_ascii=False) + "\n")
 
         store = m.build_vector_store("vector-index", dims=16)
@@ -10496,6 +10531,7 @@ def test_embedding_vector_store_uses_catalog_route(m):
                     }
                 ],
             }
+            current_index_fixture(m, index)
             socket_path = tmp / "embed.sock"
             server = UnixHTTPServer(str(socket_path), EmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -10714,6 +10750,7 @@ def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
                     }
                 ],
             }
+            current_index_fixture(m, index)
             server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -10827,6 +10864,7 @@ def test_embedding_vector_store_parallelizes_batches(m):
                 "corpus_summary": "Parallel embedding route test corpus.",
                 "files": files,
             }
+            current_index_fixture(m, index)
             server = ThreadingHTTPServer(("127.0.0.1", 0), SlowEmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -10934,6 +10972,7 @@ def test_retrieval_vector_query_uses_short_worker_timeouts(m):
         m.embed_texts = fake_embed
         store = {
             "id": "short-timeout-store",
+            "source_boundary": m.SOURCE_BOUNDARY_VERSION,
             "method": m.EMBEDDING_VECTOR_METHOD,
             "embedding_route": {"catalog_route": "embed-test"},
             "rows": [
@@ -10999,6 +11038,7 @@ def test_embedding_vector_store_stale_when_route_model_changes(m):
                     }
                 ],
             }
+            current_index_fixture(m, index)
             server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -11178,6 +11218,7 @@ def test_embedding_vector_store_resumes_saved_progress(m):
                 "created": "2026-05-21T10:00:00+00:00",
                 "files": files,
             }
+            current_index_fixture(m, index)
             server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -11383,6 +11424,7 @@ def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
                     file_item(beta_path, beta_content, "Beta vector task."),
                 ],
             }
+            current_index_fixture(m, index1)
             server = ThreadingHTTPServer(("127.0.0.1", 0), EmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -11423,6 +11465,7 @@ def test_embedding_vector_store_reuses_unchanged_rows_across_index_refresh(m):
                     file_item(beta_path, beta_content_2, "Beta vector task changed."),
                 ],
             }
+            current_index_fixture(m, index2)
             m.atomic_write(m.index_path(index2["id"]), json.dumps(index2, ensure_ascii=False) + "\n")
             due, reason = m.vector_store_due(index2, method=m.EMBEDDING_VECTOR_METHOD)
             assert due is True
@@ -11747,6 +11790,7 @@ def test_embedding_vector_store_falls_back_from_excess_parallelism(m):
                 "created": "2026-05-21T10:00:00+00:00",
                 "files": files,
             }
+            current_index_fixture(m, index)
             server = ThreadingHTTPServer(("127.0.0.1", 0), ThrottledEmbeddingHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -11856,6 +11900,7 @@ def test_vector_query_can_use_catalog_reranker_route(m):
                     },
                 ],
             }
+            current_index_fixture(m, index)
             socket_path = tmp / "rerank.sock"
             server = UnixHTTPServer(str(socket_path), RerankHandler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -11963,6 +12008,7 @@ def test_normal_retrieval_uses_embedding_rerank_by_default(m):
                     },
                 ],
             }
+            current_index_fixture(m, index)
             embed_socket = tmp / "embed.sock"
             embed_server = UnixHTTPServer(str(embed_socket), EmbeddingHandler)
             embed_thread = threading.Thread(target=embed_server.serve_forever, daemon=True)
@@ -12228,6 +12274,8 @@ def test_context_catalog_prefers_latest_index_per_family(m):
             "created": "2026-05-21T13:00:00+00:00",
             "corpus_summary": "new fresh logbook map",
         }
+        current_index_fixture(m, old_index)
+        current_index_fixture(m, new_index)
         m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
         m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
 
@@ -12310,6 +12358,7 @@ def test_prompt_context_uses_current_catalog_not_stale_catalog_file(m):
                     }
                 ],
             }
+            current_index_fixture(m, index)
             m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
             conv = m.new_conversation("Catalog freshness")
 
@@ -12457,6 +12506,7 @@ def test_context_catalog_reports_current_evidence_and_vector_artifacts(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         evidence_store = {
             "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
@@ -12548,6 +12598,7 @@ def test_context_catalog_uses_artifact_sidecars_without_deep_freshness(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         evidence_store = {
             "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
@@ -12632,6 +12683,7 @@ def test_deep_context_catalog_reports_fresh_artifacts(m):
                 }
             ],
         }
+        current_index_fixture(m, index)
         m.atomic_write(m.index_path(index["id"]), json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         evidence_store = {
             "schema": m.EVIDENCE_STORE_SCHEMA_VERSION,
@@ -13330,6 +13382,7 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
                     }
                 ],
             }
+            current_index_fixture(m, old_index)
             new_index = {
                 **base,
                 "id": "20260524-020000-bbbbbb",
@@ -13348,6 +13401,7 @@ def test_prompt_context_resyncs_attached_index_to_newer_completed_index(m):
                     }
                 ],
             }
+            current_index_fixture(m, new_index)
             m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
             m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
             conv = m.new_conversation("Open session")
@@ -13409,6 +13463,7 @@ def test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up(m):
                 "corpus_summary": "cleaned old summary",
                 "files": [],
             }
+            current_index_fixture(m, old_index)
             new_index = {
                 **base,
                 "id": "20260524-020000-current",
@@ -13427,6 +13482,7 @@ def test_prompt_context_recovers_when_attached_index_snapshot_was_cleaned_up(m):
                     }
                 ],
             }
+            current_index_fixture(m, new_index)
             m.atomic_write(m.index_path(old_index["id"]), json.dumps(old_index, ensure_ascii=False, indent=2) + "\n")
             m.atomic_write(m.index_path(new_index["id"]), json.dumps(new_index, ensure_ascii=False, indent=2) + "\n")
             attached = m.context_item_from_index(old_index)
@@ -13534,6 +13590,7 @@ def test_sync_attached_context_refreshes_topic_and_dossier_metadata(m):
     with isolated_state():
         topic = {
             "id": "topic-refresh",
+            "source_indexes": [{"id": "topic-refresh-index"}],
             "name": "Fresh Topic Name",
             "query": "fresh topic query",
             "summary": "Fresh topic summary",
@@ -13544,6 +13601,7 @@ def test_sync_attached_context_refreshes_topic_and_dossier_metadata(m):
             "query": "fresh dossier query",
             "summary": "Fresh dossier summary",
         }
+        current_index_fixture(m, {"id": "topic-refresh-index", "root": str(pathlib.Path.cwd()), "files": []}, persist=True)
         m.atomic_write(m.topic_path(topic["id"]), json.dumps(topic, ensure_ascii=False, indent=2) + "\n")
         m.atomic_write(m.dossier_path(dossier["id"]), json.dumps(dossier, ensure_ascii=False, indent=2) + "\n")
         conv = m.new_conversation("Stale context metadata")
@@ -13794,7 +13852,7 @@ def test_topic_dossier_passes_cancel_event_to_chunk_ranking(m):
         raise m.WorkPaused("topic dossier interrupted by request", work_kind="topic")
 
     try:
-        m.load_index = lambda _index_id: {"id": "idx", "name": "docs", "root": "/tmp/docs", "files": []}
+        m.load_index = lambda _index_id: current_index_fixture(m, {"id": "idx", "name": "docs", "root": "/tmp/docs", "files": []})
         m.index_staleness = lambda _index: ("fresh", [])
         m.ranked_index_chunks = fake_ranked_index_chunks
         try:
@@ -17484,6 +17542,450 @@ def test_action_run_executes_approved_tool_and_records_private_result(m):
         assert f'"path": "{note_path}"' in private_result
 
 
+def test_tool_approval_isolates_imports_and_executes_snapshot(m):
+    from motoko_core import agentic
+
+    with isolated_state() as tmp:
+        docs = tmp / "docs"
+        docs.mkdir()
+        m.add_allowed_dir(str(docs))
+        write_demo_tool(m)
+        package = m.skills_dir() / "tool-backed-skill"
+        source = package / "scripts" / "demo.py"
+        approved_source = source.read_bytes()
+        approval = m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        assert "effects are not a sandbox" in approval
+        marker = tmp / "unapproved-code"
+        payload = f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
+        # Both the script directory and working directory used to be import
+        # sources. Neither may supply executable support content after approval.
+        for directory in (package, package / "scripts"):
+            for name in ("json.py", "sitecustomize.py", "usercustomize.py"):
+                (directory / name).write_text(payload, encoding="utf-8")
+        action_path = tmp / "action.json"
+        action_path.write_text(json.dumps({
+            "schema": "motoko-action-v1", "kind": "skill_tool_run",
+            "skill": "tool-backed-skill", "tool": "demo",
+            "arguments": {"path": str(docs / "note.txt")},
+        }), encoding="utf-8")
+        original_popen = subprocess.Popen
+
+        def swap_source_at_launch(command, *args, **kwargs):
+            source.write_text(payload, encoding="utf-8")
+            snapshot = pathlib.Path(command[-1])
+            assert snapshot != source
+            assert snapshot.read_bytes() == approved_source
+            assert snapshot.stat().st_mode & 0o777 == 0o600
+            assert snapshot.parent.stat().st_mode & 0o777 == 0o700
+            return original_popen(command, *args, **kwargs)
+
+        with mock.patch.object(agentic.subprocess, "Popen", side_effect=swap_source_at_launch):
+            output = m.run_action_text(str(action_path))
+        assert "status: completed" in output, output
+        assert not marker.exists()
+        result_path = next((m.state_root() / "tool-runs").glob("*/result.json"))
+        result = json.loads(result_path.read_text())
+        assert result["script_sha256"] == agentic.sha256_bytes(approved_source)
+        assert result["execution_policy"] == agentic.TOOL_EXECUTION_POLICY
+        assert result["output_json"]["path"] == str(docs / "note.txt")
+        assert "status: blocked" in m.run_action_text(str(action_path))
+        assert not marker.exists()
+
+
+def test_source_reads_reject_outside_links_special_files_and_path_swaps(m):
+    from motoko_core.source_access import open_source
+
+    with isolated_state() as tmp:
+        root = tmp / "documents"
+        root.mkdir()
+        m.add_allowed_dir(str(root))
+        outside = tmp / "private.txt"
+        outside.write_text("SYNTHETIC_PRIVATE_SOURCE")
+        linked = root / "linked.txt"
+        linked.symlink_to(outside)
+        fifo = root / "pipe.txt"
+        os.mkfifo(fifo)
+        safe = root / "safe.txt"
+        safe.write_text("Safe source text.")
+        (root / "internal.txt").symlink_to(safe)
+        candidates = m.index_candidate_report(root, "*.txt")["candidates"]
+        assert set(candidates) == {safe, root / "internal.txt"}
+        assert m.read_text_file(root / "internal.txt") == "Safe source text."
+        assert not m.is_probably_text_file(fifo)
+        try:
+            m.read_text_file(linked)
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("outside symlink was readable")
+
+        original_open = os.open
+
+        def replace_before_open(path, flags, *args, **kwargs):
+            if path == "safe.txt":
+                safe.unlink()
+                safe.symlink_to(outside)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(os, "open", side_effect=replace_before_open):
+            try:
+                with open_source(safe, roots=[root]) as stream:
+                    stream.read()
+            except OSError:
+                pass
+            else:
+                raise AssertionError("a source swapped after resolution was opened")
+
+
+def test_indexing_and_resume_recheck_each_source_boundary(m):
+    with isolated_state() as tmp:
+        root = tmp / "documents"
+        root.mkdir()
+        m.add_allowed_dir(str(root))
+        outside = tmp / "private.txt"
+        outside.write_text("SYNTHETIC_PRIVATE_SOURCE")
+        (root / "outside.txt").symlink_to(outside)
+        a = root / "a.txt"
+        a.write_text("Safe first source.")
+        b = root / "b.txt"
+        b.write_text("Safe second source.")
+        captured = []
+
+        def summarizer(label, content, *_args, **_kwargs):
+            captured.append(content)
+            if "b.txt chunk" in label:
+                raise SystemExit("synthetic interruption")
+            return "safe summary"
+
+        with mock.patch.object(m, "summarize_text", side_effect=summarizer), \
+             mock.patch.object(m, "summarize_blocks", return_value="safe summary"):
+            try:
+                m.build_document_index(str(root), "*.txt")
+            except SystemExit as exc:
+                assert "synthetic interruption" in str(exc)
+            else:
+                raise AssertionError("fixture should pause after the first durable file")
+        partial = m.list_partial_indexes()[0]
+        assert partial["completed_files"] == 1
+        saved_a = tmp / "saved-first"
+        a.rename(saved_a)
+        a.symlink_to(outside)
+        with mock.patch.object(m, "quiet_model", side_effect=AssertionError("unexpected model call")):
+            try:
+                m.resume_document_index(partial["id"])
+            except SystemExit as exc:
+                assert "no longer includes" in str(exc)
+            else:
+                raise AssertionError("resumed an outside completed source")
+        a.unlink()
+        saved_a.rename(a)
+        b.unlink()
+        b.symlink_to(outside)
+        (root / "c.txt").write_text("Safe new source.")
+        with mock.patch.object(m, "summarize_text", side_effect=summarizer), \
+             mock.patch.object(m, "summarize_blocks", return_value="safe summary"):
+            index = m.resume_document_index(partial["id"])
+        assert {pathlib.Path(row["path"]).name for row in index["files"]} == {"a.txt", "c.txt"}
+        assert all("SYNTHETIC_PRIVATE_SOURCE" not in text for text in captured)
+
+
+def test_legacy_index_context_is_withheld_and_audited_without_rewriting_evidence(m):
+    with isolated_state() as tmp:
+        root = tmp / "documents"
+        root.mkdir()
+        m.add_allowed_dir(str(root))
+        note = root / "note.txt"
+        note.write_text("Safe current source.")
+        marker = "SYNTHETIC_LEGACY_PRIVATE_CONTENT"
+        legacy = {"id": "legacy-boundary", "root": str(root), "name": "Legacy",
+                  "glob": "*.txt", "created": "2020-01-01T00:00:00+00:00",
+                  "corpus_summary": marker, "files": [{
+                      "path": str(note), "source_fingerprint": m.source_fingerprint(note),
+                      "summary": marker, "chunks": [{"chunk": 1, "summary": marker, "content": marker}],
+                  }]}
+        m.atomic_write(m.index_path(legacy["id"]), json.dumps(legacy))
+        topic = {"id": "legacy-topic", "summary": marker, "source_indexes": [{"id": legacy["id"]}]}
+        dossier = {"id": "legacy-dossier", "summary": marker, "topic_ids": [topic["id"]]}
+        m.atomic_write(m.topics_dir() / "legacy-topic.json", json.dumps(topic))
+        m.atomic_write(m.dossiers_dir() / "legacy-dossier.json", json.dumps(dossier))
+        vector = {"id": "legacy-vector", "source_index": {"id": legacy["id"]}, "rows": [{"text": marker}]}
+        with mock.patch.object(m, "quiet_model", side_effect=AssertionError("unexpected model call")):
+            assert m.retrieve_from_index(legacy, "private content")[0] == ""
+            assert m.render_index_overview_context(legacy)[0] == ""
+            assert m.retrieve_from_topic(topic, "private content")[0] == ""
+            assert m.retrieve_from_dossier(dossier, "private content")[0] == ""
+            assert m.query_vector_store(vector, "private content")["rows"] == []
+            assert m.query_evidence_store(vector, "private content")["rows"] == []
+            conv = {"id": "legacy-context", "messages": [], "context_items": [
+                {"kind": "index", "id": legacy["id"]}, {"kind": "topic", "id": topic["id"]},
+                {"kind": "dossier", "id": dossier["id"]},
+            ]}
+            with contextlib.chdir(root):
+                prompt, sources = m.build_system_prompt_and_sources(conv, "Explain private content")
+            assert marker not in prompt
+            assert any(row.get("status") == "blocked" for row in sources), sources
+            assert not m.build_context_catalog()["indexes"]
+            upgraded, changed, message = m.upgrade_index_artifacts(legacy)
+        assert changed and "source reprocessing required" in message
+        assert upgraded["source_boundary_audit"]["status"] == "reprocess-required"
+        assert upgraded["files"] == legacy["files"]
+        assert upgraded["corpus_summary"] == marker
+        assert not m.index_needs_artifact_upgrade(upgraded)
+        assert m.existing_index_chunk_cache(root) == {}
+
+
+def test_source_boundary_covers_metadata_helpers_ancestors_and_orphans(m):
+    from motoko_core import corpus_selection
+    from motoko_core.source_access import open_source
+
+    with isolated_state() as tmp:
+        root = tmp / "documents"
+        root.mkdir()
+        m.add_allowed_dir(str(root))
+        private = tmp / "private"
+        private.mkdir()
+        outside = private / "note.txt"
+        outside.write_text("SYNTHETIC_PRIVATE_CONTENT")
+        (private / ".motokoignore").write_text("private policy\n")
+        with mock.patch.object(corpus_selection, "sha256_file", side_effect=AssertionError("unauthorized hash")), \
+             mock.patch.object(corpus_selection, "parse_motoko_ignore", side_effect=AssertionError("unauthorized policy read")):
+            m.file_staleness({"path": str(outside), "source_fingerprint": {"size": 0, "mtime_ns": 0, "sha256": "old"}})
+            m.index_staleness({"id": "outside", "root": str(private), "files": []})
+        (root / ".motokoignore").symlink_to(private / ".motokoignore")
+        try:
+            m.plan_document_index(str(root))
+        except SystemExit as exc:
+            assert "cannot read corpus ignore file" in str(exc)
+        else:
+            raise AssertionError("outside ignore-policy contents were read")
+        (root / ".motokoignore").unlink()
+        folder = root / "nested"
+        folder.mkdir()
+        safe = folder / "note.txt"
+        safe.write_text("Safe content.")
+        original_open = os.open
+
+        def replace_ancestor(path, flags, *args, **kwargs):
+            if path == "nested":
+                folder.rename(tmp / "saved-folder")
+                folder.symlink_to(private, target_is_directory=True)
+            return original_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(os, "open", side_effect=replace_ancestor):
+            try:
+                with open_source(safe, roots=[root]) as stream:
+                    stream.read()
+            except OSError:
+                pass
+            else:
+                raise AssertionError("source open followed a swapped ancestor")
+        assert m.query_vector_store({"id": "orphan", "rows": [{"text": "private"}]}, "private")["rows"] == []
+        assert m.retrieve_from_topic({"id": "orphan", "summary": "private"}, "private")[0] == ""
+        partial = {"id": "legacy-partial", "root": str(root), "files": []}
+        m.write_partial_index(partial, status="paused")
+        try:
+            m.resume_document_index(partial["id"])
+        except SystemExit as exc:
+            assert "source reprocessing required" in str(exc)
+        else:
+            raise AssertionError("legacy checkpoint was resumed without verified source provenance")
+
+
+def test_legacy_source_rebuild_resumes_in_heavy_lane(m):
+    with isolated_state() as tmp, mock.patch.dict(os.environ, {"MOTOKO_BACKGROUND_HEAVY_INDEX": "1"}):
+        root = tmp / "documents"
+        root.mkdir()
+        m.add_allowed_dir(str(root))
+        (root / "a.txt").write_text("First safe source.")
+        (root / "b.txt").write_text("Second safe source.")
+        legacy = {"id": "legacy-rebuild", "root": str(root), "name": "Documents", "glob": "*.txt",
+                  "created": "2020-01-01T00:00:00+00:00", "files": [], "corpus_summary": "old summary"}
+        m.atomic_write(m.index_path(legacy["id"]), json.dumps(legacy))
+        conv = {"id": "rebuild-context", "messages": [], "context_items": []}
+        labels = []
+
+        def interrupted(label, *_args, **_kwargs):
+            labels.append(label)
+            if "b.txt chunk" in label:
+                raise SystemExit("synthetic interruption")
+            return "safe summary"
+
+        phases = []
+        with mock.patch.object(m, "summarize_text", side_effect=interrupted), \
+             mock.patch.object(m, "summarize_blocks", return_value="safe summary"):
+            notes = m.refresh_heavy_attached_indexes(conv, phase_callback=phases.append, ignore_cooldown=True)
+        assert any("failed" in note for note in notes), notes
+        checkpoint = m.read_heavy_study_state()["indexes"][m.heavy_index_key(legacy)]
+        pending_id = checkpoint["resume_index_id"]
+        assert m.load_partial_index(pending_id)["completed_files"] == 1
+        labels.clear()
+        with mock.patch.object(m, "summarize_text", side_effect=lambda label, *_a, **_k: labels.append(label) or "safe summary"), \
+             mock.patch.object(m, "summarize_blocks", return_value="safe summary"):
+            notes = m.refresh_heavy_attached_indexes(conv, phase_callback=phases.append, ignore_cooldown=True)
+        assert any("heavy index refreshed" in note for note in notes), notes
+        refreshed = m.load_index_if_exists(pending_id)
+        assert refreshed and not m.index_source_boundary_reason(refreshed)
+        assert len(refreshed["files"]) == 2
+        assert not any("a.txt chunk" in label for label in labels)
+        assert any("indexing(model)" in phase for phase in phases)
+        assert conv["context_items"] == []  # Background convergence does not attach a corpus.
+        assert not m.index_partial_path(pending_id).exists()
+
+
+def test_automatic_code_context_requires_permission_and_trusted_root(m):
+    from motoko_core import code_intel
+
+    with isolated_state() as tmp:
+        fake = tmp / "counterfeit"
+        (fake / "motoko_core").mkdir(parents=True)
+        (fake / "motoko").write_text("# fixture\n")
+        (fake / "AGENTS.md").write_text("fixture\n")
+        outside = tmp / "private.py"
+        outside.write_text("MOTOKO_PRIVATE_VERSION = 'SYNTHETIC_PRIVATE_CODE'\n")
+        (fake / "motoko_core" / "linked.py").symlink_to(outside)
+        trusted = code_intel.find_motoko_repo_root()
+        with contextlib.chdir(fake), mock.patch.dict(os.environ, {"MOTOKO_PERMISSIONS": "chat-only"}):
+            assert code_intel.find_motoko_repo_root() == trusted
+            conv = {"id": "source-boundary-test", "messages": [], "context_items": []}
+            with mock.patch.object(m, "quiet_model", side_effect=AssertionError("unexpected model call")):
+                prompt, sources = m.build_system_prompt_and_sources(conv, "Explain Motoko code private version")
+            assert "SYNTHETIC_PRIVATE_CODE" not in prompt
+            assert not any(row.get("kind") == "motoko-codebase" for row in sources)
+        with mock.patch.dict(os.environ, {"MOTOKO_PERMISSIONS": "repo-read"}):
+            try:
+                m.motoko_code_map(str(fake))
+            except SystemExit:
+                pass
+            else:
+                raise AssertionError("explicit alternate checkout lacked directory approval")
+            m.add_allowed_dir(str(fake))
+            result = m.motoko_code_map(str(fake))
+            assert "SYNTHETIC_PRIVATE_CODE" not in json.dumps(result)
+            assert not any(row.get("path", "").endswith("linked.py") for row in result["files"])
+
+
+def test_repository_inspection_does_not_execute_helpers(m):
+    # Real Git fixtures: a passing mock would not establish that Git's filters,
+    # fsmonitor, and signature behavior are actually disabled.
+    assert shutil.which("git"), "Git is required for security regression tests"
+    with isolated_state() as tmp, mock.patch.dict(os.environ, {"MOTOKO_PERMISSIONS": "repo-review"}):
+        repo = tmp / "repo"
+        repo.mkdir()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+        def git(*args, **kwargs):
+            result = subprocess.run(["git", *args], cwd=repo, env=env, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=10, check=False, **kwargs)
+            assert result.returncode == 0, result.stderr
+            return result
+
+        git("init", "-b", "master")
+        git("config", "user.name", "Motoko Test")
+        git("config", "user.email", "motoko-test@example.invalid")
+        (repo / "note.txt").write_text("original\n")
+        (repo / ".gitattributes").write_text("*.txt filter=audit diff=audit\n")
+        git("add", ".")
+        git("commit", "-m", "Initial")
+        (repo / "note.txt").write_text("changed!\n")
+        marker = tmp / "executed"
+        helper = tmp / "helper"
+        helper.write_text(f"#!{sys.executable}\nimport pathlib, sys\n"
+                          f"pathlib.Path({str(marker)!r}).touch()\n"
+                          "if len(sys.argv) == 1:\n"
+                          "    sys.stdout.buffer.write(sys.stdin.buffer.read())\n")
+        helper.chmod(0o700)
+        gate = repo / "scripts" / "nixos-review-gate"
+        gate.parent.mkdir()
+        gate.write_text(f"#!{sys.executable}\nimport pathlib\npathlib.Path({str(marker)!r}).touch()\n")
+        gate.chmod(0o700)
+        m.add_allowed_dir(str(repo))
+
+        # Establish that each fixture really is an execution surface first.
+        git("config", "core.fsmonitor", str(helper))
+        git("status", "--short")
+        assert marker.exists()
+        marker.unlink()
+        git("config", "filter.audit.clean", str(helper))
+        git("-c", "core.fsmonitor=false", "status", "--short")
+        assert marker.exists()
+        marker.unlink()
+        git("config", "filter.audit.required", "true")
+        git("config", "filter.audit.smudge", str(helper))
+        git("config", "diff.audit.textconv", str(helper))
+        git("config", "diff.external", str(helper))
+        git("-c", "core.fsmonitor=false", "diff", "--ext-diff")
+        assert marker.exists()
+        marker.unlink()
+        git("-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--textconv")
+        assert marker.exists()
+        marker.unlink()
+        git("config", "log.showSignature", "true")
+        git("config", "gpg.program", str(helper))
+        headers, message = git("cat-file", "commit", "HEAD").stdout.split("\n\n", 1)
+        signed = (headers + "\ngpgsig -----BEGIN PGP SIGNATURE-----\n synthetic\n"
+                  " -----END PGP SIGNATURE-----\n\n" + message)
+        commit = git("hash-object", "-w", "-t", "commit", "--stdin", input=signed).stdout.strip()
+        git("update-ref", "refs/heads/master", commit)
+        git("log", "-1")
+        assert marker.exists()
+        marker.unlink()
+        index_before = (repo / ".git" / "index").read_bytes()
+        # Ambient configuration injection and repo redirection must not win.
+        with mock.patch.dict(os.environ, {
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+            "GIT_CONFIG_VALUE_0": str(helper), "GIT_EXTERNAL_DIFF": str(helper),
+            "GIT_DIR": str(tmp / "nonexistent"), "GIT_EXEC_PATH": str(tmp),
+        }):
+            _, review = m.repo_review_report(str(repo))
+            assert "not executed" in review
+            assert "note.txt" in review
+            assert m.git_status_porcelain(repo)
+            _, diff = m.repo_diff_report(str(repo))
+            assert "note.txt" in diff
+            assert "Initial" in m.repo_log_report(str(repo))[1]
+            assert m.current_project_root_record(str(repo))["root"] == str(repo)
+        assert not marker.exists()
+        assert (repo / ".git" / "index").read_bytes() == index_before
+        # Process filters are a separate entry point, with a different protocol.
+        git("config", "filter.audit.process", str(gate))
+        m.repo_status_report(str(repo))
+        assert not marker.exists()
+        for unsafe_args in (["branch", "-D", "master"], ["log", "--show-signature"],
+                            ["diff", "--stat", "--ext-diff"]):
+            try:
+                m.run_git_readonly(repo, unsafe_args)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("read-only runner accepted executable/mutating options")
+        assert not marker.exists()
+
+
+def test_tool_legacy_approval_requires_explicit_reapproval(m):
+    from motoko_core import agentic
+
+    with isolated_state():
+        write_demo_tool(m)
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        path = m.tool_approvals_path()
+        state = agentic.read_approval_state(path)
+        record = state["approvals"][0]
+        legacy_key = {key: record[key] for key in (
+            "realm", "skill", "tool", "script_sha256", "metadata_sha256",
+            "interpreter", "wrapper", "allowed_effects", "network", "writes_project_files",
+        )}
+        record["id"] = agentic.sha256_text(agentic.stable_json(legacy_key))
+        record.pop("execution_policy")
+        agentic.write_approval_state(path, state)
+        assert "demo: not approved" in m.format_skill_tools("tool-backed-skill")
+        assert len(agentic.read_approval_state(path)["approvals"]) == 1
+        m.approve_skill_tool_text("tool-backed-skill", "demo", yes=True)
+        assert "demo: approved" in m.format_skill_tools("tool-backed-skill")
+        assert len(agentic.read_approval_state(path)["approvals"]) == 2
+
+
 def test_action_run_interruption_records_durable_status(m):
     with isolated_state() as tmp:
         docs = tmp / "docs"
@@ -18597,6 +19099,15 @@ def main() -> int:
         test_skill_upgrade_rewrites_legacy_skill_files,
         test_skill_plan_shows_prompt_and_retrieval_selection,
         test_skill_tool_metadata_validation_and_approval,
+        test_tool_approval_isolates_imports_and_executes_snapshot,
+        test_tool_legacy_approval_requires_explicit_reapproval,
+        test_repository_inspection_does_not_execute_helpers,
+        test_source_reads_reject_outside_links_special_files_and_path_swaps,
+        test_indexing_and_resume_recheck_each_source_boundary,
+        test_automatic_code_context_requires_permission_and_trusted_root,
+        test_legacy_index_context_is_withheld_and_audited_without_rewriting_evidence,
+        test_legacy_source_rebuild_resumes_in_heavy_lane,
+        test_source_boundary_covers_metadata_helpers_ancestors_and_orphans,
         test_action_preview_requires_approval_then_validates,
         test_action_preview_rejects_shell_and_bad_tool_metadata,
         test_action_run_executes_approved_tool_and_records_private_result,

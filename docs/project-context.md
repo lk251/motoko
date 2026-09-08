@@ -100,6 +100,41 @@ Motoko's security comes from OS-user isolation and conservative local behavior:
   `project_file_write` actions under the reviewed agentic boundary;
 - memory, indexes, and topics stay under Motoko-owned state paths.
 
+Repository inspection uses a code-owned Git argument profile. It disables
+fsmonitor, hooks, diff/text conversion and filter helpers, signature verification,
+automatic fetching, pagers and inherited Git control variables. Local driver
+names are read with inert Git configuration plumbing and overridden for the
+inspection. Repository scripts, including `scripts/nixos-review-gate`, are
+reported as present but never run by review. This assumes the trusted OS account
+does not concurrently replace Git configuration or the Git executable. Explicit
+confirmed Git mutations retain their separate authority contract.
+
+Source ingestion opens regular files through descriptors after checking resolved
+containment; path components cannot become symlinks between validation and open.
+File links within the selected source root are supported. Outside links and
+special files are excluded, including during text sampling and resumed indexing.
+Automatic Motoko code context requires `file-read` permission and uses installed
+application source. Another checkout requires an explicit root and directory
+approval; a current directory with Motoko-like filenames supplies no authority.
+
+Indexes created before contained-source ingestion require reprocessing. A current
+filename or symlink target cannot prove what supplied an old summary. Prompt
+construction, catalog selection, topic/dossier dependencies, and vector/evidence
+queries withhold that content immediately; this does not depend on a maintenance
+job having run. Saved artifacts remain available for inspection and explicit
+cleanup. The light artifact-upgrade lane records `source-boundary-audit-v1`
+without reading original documents or relabeling old summaries as trusted.
+
+The existing visible heavy index lane rebuilds eligible legacy families one at
+a time, including unattached families without attaching them to the conversation.
+It honors current directory approval, permissions, pause and cooldown controls.
+Its durable state records the replacement partial-index ID so interruptions
+resume completed files instead of starting again. Disabling heavy background work
+leaves these sources withheld until an explicit rebuild. Old topic/dossier copies
+remain withheld until rebuilt from verified indexes or explicitly cleaned up.
+Original conversations and unrelated memories are retained; this migration cannot
+identify historical copies without source provenance or undo earlier disclosure.
+
 Pydantic, containers, and other larger machinery are deliberately absent for
 now. If private memory or retrieval state needs a harder boundary, review
 process, container, or VM isolation without moving private deployment details
@@ -215,6 +250,17 @@ Current UI direction:
 - `/stop` should cancel the current answer during preparation or streaming and
   discard queued prompts from accidental paste batches; `/clear-queue` should
   discard queued prompts without stopping the active answer.
+- Terminal pastes are draft edits, never line-by-line submissions. Enable
+  bracketed paste for terminals/tmux and parse it incrementally across input
+  batches without blocking background progress or interpreting pasted control
+  keys. Unmarked paste bursts use a conservative timing fallback; explicit
+  terminal paste markers remain the reliable boundary. Enter submits the whole
+  draft, Alt+Enter inserts a newline, and multiline input is always model text.
+- Pasted blocks over 1,000 Unicode characters fold in the composer, matching
+  Codex's threshold. Keep actual text in the draft, queue, conversation, and
+  history; display labels must never become model input. Folds support atomic
+  movement/deletion and Ctrl+O expansion for inspection. This is transient UI
+  metadata, so existing saved conversations/queues require no migration.
 - `Ctrl+C` should stop an active answer and discard queued prompts in the same
   safe path as `/stop`; when Motoko is idle, `Ctrl+C` exits the TUI.
 - Conversation lists should use compact relative times while preserving full
@@ -1520,6 +1566,11 @@ Skill Curator v2 roadmap:
 
 ## Deferred Work
 
+The [ranked memory and reliability queue](deferred-projects.md#prioritized-hardening-and-memory-work-2026-09-08)
+records the 2026-09-08 review priorities and saved implementation branches,
+commits, worktrees, validation results and remaining gaps. Further implementation
+and review are deferred; incomplete branch snapshots must remain unmerged.
+
 Current high-value future work:
 
 - improve profile and topic dossier quality using synthetic fixtures and
@@ -1929,6 +1980,17 @@ The accepted review checklist for script execution and a general tool runner:
   controlled working directory, bound runtime and output size, decide whether
   network is forbidden by default, and prefer NixOS-declared wrappers if OS
   sandboxing becomes necessary.
+- Executable approval: the stdlib runner uses Python isolated mode without site
+  initialization (`-I -S`) and a private snapshot of the exact approved script
+  bytes. Skill-local modules cannot be imported through the default search path.
+  Metadata is parsed and fingerprinted from the same byte snapshot. The execution
+  policy is part of the approval identity and the private run receipt records it.
+  Earlier approval records remain inspectable but require explicit reapproval
+  with `motoko skill approve-tool SKILL TOOL --yes`; they are never silently
+  promoted to the new execution policy. Tools using local imports must be
+  rewritten as reviewed, self-contained stdlib scripts before reapproval.
+  Approval means trust in the code's full OS-user authority. Environment scrubbing,
+  import isolation, effect declarations and scanner results are not an OS sandbox.
 - User experience: provide dry-run/preview, concise explanation of the planned
   effect, confirmation for mutating actions, visible progress, `/stop` and
   pause behavior, and an inspectable result in `/sources` or a tool ledger.
@@ -1966,8 +2028,9 @@ Agentic roadmap status and remaining gates:
 - Script-assisted project mutation: implemented as structured proposals.
   Approved scripts may produce `project_file_write` proposals, but Motoko
   still owns validation, `.motokoignore`, expected-hash, confirmation,
-  atomic-write, ledger, pause, and checkpoint boundaries. Raw script writes
-  remain disabled.
+  atomic-write, ledger, pause, and checkpoint boundaries. Project-writing effect
+  declarations are rejected; reviewed script code itself still has the user's
+  filesystem authority, as described in the approval contract above.
 - Read-only model-planned loops: implemented as explicit `planner:
   model_readonly` goal loops. They plan, retrieve, inspect, audit, and propose
   typed actions under budget, then stop for review.

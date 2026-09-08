@@ -23,6 +23,17 @@ def load_motoko():
     return module
 
 
+def write_current_index_fixture(m, index):
+    """These study fixtures simulate already authorized, current ingestion."""
+    root = index["root"]
+    policy = index.get("selection_policy") or m.document_selection_policy(pathlib.Path(root), index.get("glob"))
+    index["selection_policy"] = {**policy, "source_boundary": m.SOURCE_BOUNDARY_VERSION}
+    for item in index.get("files", []):
+        item["source_boundary"] = m.SOURCE_BOUNDARY_VERSION
+        item["source_root"] = root
+    write_json(m.index_path(index["id"]), index)
+
+
 @contextlib.contextmanager
 def isolated_state():
     old_state = os.environ.get("MOTOKO_STATE_HOME")
@@ -170,7 +181,7 @@ def test_background_study_enriches_legacy_index(m):
         file_item.pop("signals", None)
         for chunk in file_item["chunks"]:
             chunk.pop("signals", None)
-    write_json(m.index_path(index["id"]), index)
+    write_current_index_fixture(m, index)
 
     conv = m.new_conversation("Background enrich")
     conv["id"] = "background-enrich"
@@ -218,7 +229,7 @@ def test_background_study_builds_evidence_store(m):
             }
         ],
     }
-    write_json(m.index_path(index["id"]), index)
+    write_current_index_fixture(m, index)
     conv = m.new_conversation("Evidence background")
     conv["id"] = "evidence-background"
     with temporary_env({"MOTOKO_BACKGROUND_VECTOR_REFRESH": "0"}):
@@ -267,7 +278,7 @@ def test_heavy_index_refresh_replaces_attached_index(m):
             }
         ],
     }
-    write_json(m.index_path(old_index["id"]), old_index)
+    write_current_index_fixture(m, old_index)
     conv = m.new_conversation("Heavy index")
     conv["id"] = "heavy-index"
     conv["context_items"] = [m.context_item_from_index(old_index)]
@@ -341,8 +352,8 @@ def test_heavy_index_refresh_attaches_newer_completed_index(m):
     new_index["id"] = "new-index"
     new_index["created"] = "2026-05-21T13:00:00+00:00"
     new_index["corpus_summary"] = "new org index"
-    write_json(m.index_path(old_index["id"]), old_index)
-    write_json(m.index_path(new_index["id"]), new_index)
+    write_current_index_fixture(m, old_index)
+    write_current_index_fixture(m, new_index)
 
     conv = m.new_conversation("Heavy index")
     conv["id"] = "heavy-index"
@@ -383,7 +394,7 @@ def test_manual_heavy_index_refresh_bypasses_cooldown(m):
             }
         ],
     }
-    write_json(m.index_path(old_index["id"]), old_index)
+    write_current_index_fixture(m, old_index)
     source.write_text("* TODO Changed task\n", encoding="utf-8")
     conv = m.new_conversation("Manual bg")
     conv["id"] = "manual-bg"
@@ -435,7 +446,7 @@ def test_bg_now_attaches_current_directory_index_and_runs_manual_step(m):
             }
         ],
     }
-    write_json(m.index_path(index["id"]), index)
+    write_current_index_fixture(m, index)
     conv = m.new_conversation("Manual bg")
     conv["id"] = "manual-bg-now"
     seen = {}

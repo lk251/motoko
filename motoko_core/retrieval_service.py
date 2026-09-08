@@ -483,6 +483,7 @@ class HybridRetrievalEnvironment:
     vector_query_limit: int
     embedding_vector_method: str
     cancel_event: object | None = None
+    index_boundary_reason: Callable[[dict], str] | None = None
 
 
 def _raise_if_cancelled(env: HybridRetrievalEnvironment) -> None:
@@ -1101,6 +1102,12 @@ def retrieve_index_hybrid(index: dict, query: str, env: HybridRetrievalEnvironme
     """
 
     _raise_if_cancelled(env)
+    reason = env.index_boundary_reason(index) if env.index_boundary_reason else ""
+    if reason:
+        return RetrievalServiceResult("", [{
+            "kind": "index", "id": index.get("id", ""),
+            "status": "blocked", "warnings": [reason], "needs_source_reprocessing": True,
+        }])
     query_counts = token_counts(query)
     top_files, top_chunks, max_retrieval_chars = env.retrieval_limits(query)
     index_status, index_warnings = env.index_staleness(index)

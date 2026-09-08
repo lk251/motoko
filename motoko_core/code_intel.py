@@ -186,18 +186,20 @@ class CodeArtifactFamily:
 
 
 def find_motoko_repo_root(start: str | pathlib.Path | None = None) -> pathlib.Path:
-    """Find a Motoko checkout without broad filesystem crawling."""
+    """Use installed source by default; alternate roots must be explicit."""
 
     candidates = []
     if start is not None:
         candidates.append(pathlib.Path(start).expanduser())
-    candidates.append(pathlib.Path.cwd())
-    candidates.append(pathlib.Path(__file__).resolve().parents[1])
+    else:
+        candidates.append(pathlib.Path(__file__).resolve().parents[1])
     for candidate in candidates:
         candidate = candidate.resolve()
         for path in [candidate, *candidate.parents]:
             if (path / "motoko").exists() and (path / "motoko_core").is_dir() and (path / "AGENTS.md").exists():
                 return path
+    if start is not None:
+        raise ValueError("explicit source root is not a Motoko checkout")
     return pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -209,9 +211,16 @@ def code_files(root: str | pathlib.Path) -> list[pathlib.Path]:
         rows.append(root_script)
     for folder in ["motoko_core", "tests"]:
         base = root / folder
-        if base.is_dir():
+        if base.is_dir() and base.resolve().is_relative_to(root):
             rows.extend(sorted(base.rglob("*.py")))
-    return sorted(dict.fromkeys(path.resolve() for path in rows))
+    contained = []
+    for path in rows:
+        try:
+            if path.resolve(strict=True).is_relative_to(root):
+                contained.append(path)
+        except (OSError, RuntimeError):
+            continue
+    return sorted(dict.fromkeys(contained))
 
 
 def _rel(root: pathlib.Path, path: pathlib.Path) -> str:
@@ -229,10 +238,11 @@ def _tokenize(text: str) -> set[str]:
     return tokens | split_tokens
 
 
-def _safe_read(path: pathlib.Path, *, max_bytes: int = 4_000_000) -> str:
-    data = path.read_bytes()
-    if len(data) > max_bytes:
-        data = data[:max_bytes]
+def _safe_read(path: pathlib.Path, *, root: pathlib.Path, max_bytes: int = 4_000_000) -> str:
+    from .source_access import open_source
+
+    with open_source(path, roots=[root]) as stream:
+        data = stream.read(max_bytes)
     return data.decode("utf-8", errors="replace")
 
 
@@ -380,7 +390,7 @@ def _source_segment(text: str, line: int, end_line: int, *, max_chars: int = 200
 
 
 def parse_python_symbols(
-    path: pathlib.Path, root: pathlib.Path
+    path: pathlib.Path, root: pathlib.Path, *, text: str | None = None
 ) -> tuple[
     list[CodeSymbol],
     list[dict],
@@ -390,7 +400,8 @@ def parse_python_symbols(
     list[CodeArtifactFamily],
     list[dict],
 ]:
-    text = _safe_read(path)
+    if text is None:
+        text = _safe_read(path, root=root)
     relpath = _rel(root, path)
     try:
         tree = ast.parse(text, filename=relpath)
@@ -926,7 +937,11 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
     _maybe_cancel(cancel_check)
     for path in files:
         _maybe_cancel(cancel_check)
-        text = _safe_read(path)
+        try:
+            text = _safe_read(path, root=repo_root)
+        except OSError as exc:
+            parse_errors.append({"path": _rel(repo_root, path), "error": str(exc)})
+            continue
         relpath = _rel(repo_root, path)
         file_texts[relpath] = text
         (
@@ -937,7 +952,7 @@ def build_code_map(root: str | pathlib.Path | None = None, *, cancel_check=None)
             file_constants,
             file_artifact_families,
             file_errors,
-        ) = parse_python_symbols(path, repo_root)
+        ) = parse_python_symbols(path, repo_root, text=text)
         symbols.extend(row.to_dict() for row in file_symbols)
         imports.extend(file_imports)
         commands.extend(file_commands)
