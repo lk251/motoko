@@ -20,6 +20,16 @@ normal branch/worktree but requesting review/acceptance 2. on a
 different branch / worktree and will ask for review and acceptance for
 merging into master / the working branch.
 * deferred
+** [#A] ranked memory and reliability hardening queue
+Status: incomplete; authorized for implementation in independent branches.
+See docs/deferred-projects.md, "Prioritized hardening and memory work,
+2026-09-08", for acceptance criteria and branch names.
+1. Memory corrections/forgetting through derived context.
+2. Durable raw conversation history before compaction.
+3. Cancellation of stalled model/tool I/O.
+4. Goal scope and cumulative budget enforcement.
+5. Retrieval and adaptive-memory quality gates.
+Keep incomplete or unverified work unmerged and preserve resumable status.
 ** [#A] production-grade long-horizon personal memory / adaptive episodic recall
 Preserve this as a strategic Motoko project even when it is not current work.
 The goal is extremely long personal conversations in which Motoko can identify

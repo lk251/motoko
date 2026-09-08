@@ -1,10 +1,96 @@
 # Deferred Strategic Projects
 
-Date: 2026-09-05
+Date: 2026-09-08
 
 This file preserves important Motoko projects that are intentionally deferred rather than abandoned. Agents working in this repository should read it before making substantial changes to memory, retrieval, context management, conversation storage, model orchestration, or long-running chat behavior.
 
 Deferred means: do not assume the project should be implemented immediately or displace current hardening work, but do not delete, narrow, or contradict the direction without an explicit design decision.
+
+## Prioritized hardening and memory work, 2026-09-08
+
+The maintainer authorized implementing this ranked queue in independent
+branches/worktrees, with safe parallel work where possible. Each item remains
+**incomplete** until its acceptance criteria and required validation are met.
+Incomplete or unverified implementations must remain unmerged. Preserve partial
+work with an inspectable status and outstanding requirements if work stops.
+The implementation branches below are local review branches, not deployment
+claims. Completing this queue does not implicitly enable the full experimental
+adaptive-recall system or abandon the strategic project below.
+
+1. **Memory corrections and forgetting must propagate to derived context.**
+   Status: **incomplete**. Branch: `codex/memory-source-lifecycle`.
+   Editing or forgetting a memory currently leaves obsolete profile text in
+   later prompts; automatic profile refresh compares new source IDs and misses
+   edits and removals. Declare source revisions/dependencies for profiles and
+   memory dossiers, immediately exclude invalid derived context, and preserve
+   unaffected artifacts. Include conservative legacy handling, bounded light
+   CPU invalidation/migration, and visible resumable heavy rebuilding. Acceptance
+   must exercise the actual next prompt after edits/deletion, transitive dossier
+   dependencies, restart, source changes during rebuilding, and unrelated
+   artifact preservation. Forgetting a curated memory does not silently delete
+   independent original documents or conversation evidence.
+
+2. **Preserve raw conversation evidence across compaction and interruption.**
+   Status: **incomplete**. Branch: `codex/episodic-history-durability`.
+   Extract and harden the raw-history foundation from
+   `feature/adaptive-episodic-recall` without enabling its model planner. Archive
+   raw turns durably before replacing active context with a summary/recent
+   suffix. Preserve stable message IDs, ordinals and context-window lineage;
+   ensure idempotence across repeated saves, retries, restart and stale
+   snapshots. Recover or fail visibly on truncated tails/read errors, enforce
+   durable write ordering, and keep ordinary append work independent of the
+   conversation's full lifetime length. Include bounded resumable legacy
+   migration in the light lane and complete owned-sidecar/cache deletion.
+   Already discarded historical turns cannot be reconstructed; document that
+   limitation. Verify recovery and migration using synthetic histories.
+
+3. **Cancellation must interrupt stalled model and tool I/O.**
+   Status: **incomplete**. Branch: `codex/cancel-stalled-io`.
+   The current stop path can block the terminal input/render owner while
+   closing an HTTP response whose worker is stuck reading. Give transport
+   cancellation a bounded unblock/cleanup path across headers, streaming and
+   nonstream responses on supported TCP and Unix transports. Verify that
+   `/stop` and Ctrl+C restore usable input, clear queued prompts, release model
+   residency, preserve interrupted state and permit the next answer. Cover
+   stalled streams in PTY tests. Also harden the approved skill runner's stdin
+   backpressure and live output bounds; cancellation/timeouts must cover input
+   delivery and collection, with an explicit descendant cleanup policy and
+   durable results. Keep these runner changes within the existing authority
+   contract and use separately scoped commits where appropriate.
+
+4. **Enforce goal scope and cumulative budgets during execution.**
+   Status: **incomplete**. Branch: `codex/goal-scope-budgets`.
+   A goal scoped to one project currently accepts confirmed writes into a
+   different globally allowlisted project; resumed model planning can exceed
+   its consumed call allowance. Intersect global permissions, canonical goal
+   scope, effects, tools and current confirmation in explicit execution,
+   proposal validation, apply, managed worktrees and resume. Reserve/persist
+   spending before starting calls, retain consumed budgets after interruption,
+   and enforce elapsed-time limits with documented pause semantics. Acceptance
+   includes cross-project refusal, legitimate scoped worktree operations,
+   exhausted/retried/resumed budgets and adversarial action-eval fixtures.
+
+5. **Strengthen retrieval and adaptive-memory evaluation before rollout.**
+   Status: **incomplete**. Branch: `codex/recall-quality-gates`.
+   Extend the small positive-only retrieval gate with distractor corpora larger
+   than retrieval budgets, expected/forbidden evidence, ranking measurements,
+   temporal/exact facts, corrections, stale/deleted sources, scope changes and
+   final prompt packing. Treat feedback as reviewed fixture seeds rather than
+   assuming previously selected sources are correct. Distinguish evidence
+   availability from correct final-answer use. Add bounded synthetic long
+   histories and planner-off/planner-on comparisons for adjacent-turn recall,
+   raw-evidence/summary conflicts, latency, calls, cancellation and budgets.
+   The experimental branch must not reuse deleted or out-of-scope cached text,
+   call a model from no-model preview, hide planner diagnostics, or perform
+   unbounded lifetime scans before rollout. Preserve inspectable plans and
+   failure diagnostics. Live answer-quality measurements must use synthetic or
+   deliberately authorized private fixtures and approved model routes.
+
+Every completed implementation needs relevant focused regressions, the
+applicable evaluation/PTY gates, and `nix flake check` before committing code.
+Branch notes must record implementation, validation evidence, remaining work
+and merge readiness. Broad facade refactoring, new research integrations and
+larger memory abstractions remain below these concrete repairs in this queue.
 
 ## Production-grade long-horizon personal memory and adaptive recall
 
