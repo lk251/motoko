@@ -8,17 +8,24 @@ Deferred means: do not assume the project should be implemented immediately or d
 
 ## Prioritized hardening and memory work, 2026-09-08
 
-The maintainer authorized implementing this ranked queue in independent
-branches/worktrees, with safe parallel work where possible. Each item remains
-**incomplete** until its acceptance criteria and required validation are met.
-Incomplete or unverified implementations must remain unmerged. Preserve partial
-work with an inspectable status and outstanding requirements if work stops.
-The implementation branches below are local review branches, not deployment
-claims. Completing this queue does not implicitly enable the full experimental
-adaptive-recall system or abandon the strategic project below.
+Implementation is **deferred at the maintainer's request** after the initial
+parallel work session. The ranked requirements below remain the future queue.
+Useful implementation and tests are committed in independent local
+branches/worktrees; the saved-work table records exact revisions and remaining
+gaps. Incomplete work must remain unmerged. Passing existing tests alone does
+not complete an item's acceptance criteria. Completing this queue does not
+implicitly enable the full experimental adaptive-recall system or abandon the
+strategic project below.
+
+This ordering follows the repository's values: improve intelligence by keeping
+evidence correct and recoverable; make everyday controls dependable; enforce
+the operator's declared authority; then measure more ambitious recall. The
+initial audit covered all major subsystems at `3fe714e` and the experimental
+memory branch at `1aaea10`, using synthetic state and local test endpoints.
+It was not an exhaustive line-by-line verification or a live private-data audit.
 
 1. **Memory corrections and forgetting must propagate to derived context.**
-   Status: **incomplete**. Branch: `codex/memory-source-lifecycle`.
+   Status: **deferred, incomplete**. Branch: `codex/memory-source-lifecycle`.
    Editing or forgetting a memory currently leaves obsolete profile text in
    later prompts; automatic profile refresh compares new source IDs and misses
    edits and removals. Declare source revisions/dependencies for profiles and
@@ -31,7 +38,7 @@ adaptive-recall system or abandon the strategic project below.
    independent original documents or conversation evidence.
 
 2. **Preserve raw conversation evidence across compaction and interruption.**
-   Status: **incomplete**. Branch: `codex/episodic-history-durability`.
+   Status: **deferred, incomplete**. Branch: `codex/episodic-history-durability`.
    Extract and harden the raw-history foundation from
    `feature/adaptive-episodic-recall` without enabling its model planner. Archive
    raw turns durably before replacing active context with a summary/recent
@@ -45,7 +52,8 @@ adaptive-recall system or abandon the strategic project below.
    limitation. Verify recovery and migration using synthetic histories.
 
 3. **Cancellation must interrupt stalled model and tool I/O.**
-   Status: **incomplete**. Branch: `codex/cancel-stalled-io`.
+   Status: **implemented and validated locally; review deferred**.
+   Branch: `codex/cancel-stalled-io`.
    The current stop path can block the terminal input/render owner while
    closing an HTTP response whose worker is stuck reading. Give transport
    cancellation a bounded unblock/cleanup path across headers, streaming and
@@ -59,7 +67,7 @@ adaptive-recall system or abandon the strategic project below.
    contract and use separately scoped commits where appropriate.
 
 4. **Enforce goal scope and cumulative budgets during execution.**
-   Status: **incomplete**. Branch: `codex/goal-scope-budgets`.
+   Status: **deferred, incomplete**. Branch: `codex/goal-scope-budgets`.
    A goal scoped to one project currently accepts confirmed writes into a
    different globally allowlisted project; resumed model planning can exceed
    its consumed call allowance. Intersect global permissions, canonical goal
@@ -71,7 +79,7 @@ adaptive-recall system or abandon the strategic project below.
    exhausted/retried/resumed budgets and adversarial action-eval fixtures.
 
 5. **Strengthen retrieval and adaptive-memory evaluation before rollout.**
-   Status: **incomplete**. Branch: `codex/recall-quality-gates`.
+   Status: **deferred, not started**. Branch: `codex/recall-quality-gates`.
    Extend the small positive-only retrieval gate with distractor corpora larger
    than retrieval budgets, expected/forbidden evidence, ranking measurements,
    temporal/exact facts, corrections, stale/deleted sources, scope changes and
@@ -91,6 +99,76 @@ applicable evaluation/PTY gates, and `nix flake check` before committing code.
 Branch notes must record implementation, validation evidence, remaining work
 and merge readiness. Broad facade refactoring, new research integrations and
 larger memory abstractions remain below these concrete repairs in this queue.
+
+### Saved work and resumption notes
+
+All five review branches start from the documentation baseline `4194832`.
+Their implementation has not been merged into master or pushed. Worktree paths
+below are relative to the primary checkout; `git worktree list` reports their
+current absolute locations. Keep the branches and worktrees for future work.
+
+| Priority | Local branch | Saved commit | Worktree | Snapshot status |
+| --- | --- | --- | --- | --- |
+| 1 | `codex/memory-source-lifecycle` | `12cf12d` | `../motoko-memory-source-lifecycle` | Incomplete implementation; checks pass |
+| 2 | `codex/episodic-history-durability` | `59302c5` | `../motoko-episodic-history-durability` | Incomplete implementation; checks pass |
+| 3 | `codex/cancel-stalled-io` | `696a6aa` | `../motoko-cancel-stalled-io` | Implemented and validated locally; review pending |
+| 4 | `codex/goal-scope-budgets` | `81a48fe` | `../motoko-goal-scope-budgets` | Incomplete implementation; checks pass |
+| 5 | `codex/recall-quality-gates` | `635d2e5` | `../motoko-recall-quality-gates` | Requirements only; no implementation |
+
+Each branch contains `docs/work-items/<branch-suffix>.md`, with its full
+acceptance checklist, implementation notes and remaining work. For example:
+
+```bash
+git show codex/memory-source-lifecycle:docs/work-items/memory-source-lifecycle.md
+git diff 4194832..codex/memory-source-lifecycle
+```
+
+- **Memory lifecycle:** source revision manifests, transitive profile/dossier
+  dependencies, prompt-time suppression, bounded light migration and durable
+  heavy rebuild jobs are saved. Six focused lifecycle tests cover next-prompt
+  changes, interruption/checkpoint reuse, restart and deleted targets. Remaining:
+  independent review, broader changed-source/checkpoint isolation, migration
+  fairness, empty-source handling, prompt/report coverage and cleanup review.
+- **Raw history:** a standard-library SQLite store saves immutable raw evidence
+  and context-window lineage before replacing the active JSON projection.
+  Recovery, deletion tombstones, initial light migration and nine focused tests
+  are saved. Remaining: shared mutable conversation races, real crash/concurrent
+  process coverage, strict experimental JSONL import, truly bounded discovery
+  and oversized migration, pagination boundary coverage and cleanup audit.
+  Old turns already discarded by legacy compaction cannot be recreated.
+- **Cancellation:** request-owned socket shutdown keeps the terminal owner out
+  of blocking response close. The approved runner bounds stdin delivery,
+  output capture and process-group cleanup. TCP/Unix stalled-header/body,
+  TLS-handshake, real PTY recovery and durable runner-result checks passed.
+  Review the direct-endpoint policy (no environment proxy or redirects), the
+  platform resolver limitation and process-group containment limits in the
+  branch note. Combined goal-budget deadline behavior remains untested.
+- **Goals:** canonical scope checks, worktree mappings, per-run locks, durable
+  spending reservations, deadline tokens and additive legacy upgrades are
+  saved with twelve focused tests. Remaining: a direct-helper confirmation gap
+  in `apply_goal_run_record`, planner step-accounting consistency, adversarial
+  action-eval fixtures, broader managed-worktree/migration coverage and the
+  independent execution-boundary review. The normal CLI apply path still
+  checks confirmation; the new helper needs its own refusal check.
+- **Recall evaluation:** only the acceptance note is saved. Begin here after
+  higher-priority foundations are ready. The original experiment remains at
+  `feature/adaptive-episodic-recall` (`1aaea10`), in
+  `../motoko-adaptive-episodic-recall`. Its cache invalidation, no-model preview,
+  unbounded history scans and planner diagnostics still need the review and
+  gates described above.
+
+All four code snapshots passed `nix flake check` on x86_64-linux before their
+preservation commits, including relevant syntax, regression, evaluation and
+terminal checks. Other platforms were not executed. The requirements-only
+branch passed documentation whitespace validation. No live model or private
+corpus was used for these checks.
+
+Resume one branch at a time from its work-item note. The memory, archive and
+goal commits are explicitly WIP. Review overlaps in the main facade and state
+helpers when integrating; independently passing branches are not evidence that
+their combination is correct. In particular, validate memory invalidation
+against archived conversation revisions and goal deadlines against the new
+transport cancellation before any combined merge.
 
 ## Production-grade long-horizon personal memory and adaptive recall
 

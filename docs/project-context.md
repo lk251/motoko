@@ -1520,6 +1520,11 @@ Skill Curator v2 roadmap:
 
 ## Deferred Work
 
+The [ranked memory and reliability queue](deferred-projects.md#prioritized-hardening-and-memory-work-2026-09-08)
+records the 2026-09-08 review priorities and saved implementation branches,
+commits, worktrees, validation results and remaining gaps. Further implementation
+and review are deferred; incomplete branch snapshots must remain unmerged.
+
 Current high-value future work:
 
 - improve profile and topic dossier quality using synthetic fixtures and
