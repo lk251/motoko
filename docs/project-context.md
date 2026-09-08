@@ -250,6 +250,17 @@ Current UI direction:
 - `/stop` should cancel the current answer during preparation or streaming and
   discard queued prompts from accidental paste batches; `/clear-queue` should
   discard queued prompts without stopping the active answer.
+- Terminal pastes are draft edits, never line-by-line submissions. Enable
+  bracketed paste for terminals/tmux and parse it incrementally across input
+  batches without blocking background progress or interpreting pasted control
+  keys. Unmarked paste bursts use a conservative timing fallback; explicit
+  terminal paste markers remain the reliable boundary. Enter submits the whole
+  draft, Alt+Enter inserts a newline, and multiline input is always model text.
+- Pasted blocks over 1,000 Unicode characters fold in the composer, matching
+  Codex's threshold. Keep actual text in the draft, queue, conversation, and
+  history; display labels must never become model input. Folds support atomic
+  movement/deletion and Ctrl+O expansion for inspection. This is transient UI
+  metadata, so existing saved conversations/queues require no migration.
 - `Ctrl+C` should stop an active answer and discard queued prompts in the same
   safe path as `/stop`; when Motoko is idle, `Ctrl+C` exits the TUI.
 - Conversation lists should use compact relative times while preserving full

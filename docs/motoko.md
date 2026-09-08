@@ -624,6 +624,24 @@ context. Motoko's `repo-review` permission does not grant shell, sudo, rebuild,
 switch, commit, or push authority. Those operations remain separate reviewed
 human or coding-agent actions.
 
+Pasting into the TUI inserts one draft, preserving line breaks and indentation.
+Press Enter after the paste finishes to send it as one message (or one queued
+prompt while busy). Alt+Enter inserts a newline while composing a message.
+Multiline input is always message text, even if a line begins with `/`.
+
+Pastes longer than 1,000 characters appear as `[Pasted N characters]` in the
+draft, using Codex's character threshold. The full text is sent and saved;
+the label is only a display fold. Left/Right move across a folded paste, and
+Backspace/Delete remove it as a unit. Ctrl+O unfolds a paste beside the cursor
+for inspection and editing. History recalls the full text.
+
+Motoko enables bracketed paste and restores the terminal mode on exit. tmux's
+`paste-buffer -p` uses this mode; the normal tmux paste binding typically already
+does so. Unmarked rapid paste bursts have a timing fallback, including a short
+Enter guard. Unmarked paste cannot be perfectly distinguished from fast typing
+or delayed keystrokes; use `paste-buffer -p` for reliable boundaries over slow
+connections. Wait until the pasted draft appears before pressing Enter.
+
 Emacs-style editing keys in the TUI:
 
 ```text
@@ -636,6 +654,7 @@ Alt+F   forward word
 Alt+Backspace  delete previous word
 Ctrl+K  kill to end of line
 Ctrl+Y  yank killed text
+Ctrl+O  unfold the pasted block beside the cursor
 Ctrl+P  previous dropdown item or history entry
 Ctrl+N  next dropdown item or history entry
 ```

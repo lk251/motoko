@@ -113,6 +113,17 @@ from motoko_core.input_edit import (  # noqa: E402
     remember_input_history_entry,
     seed_input_history_from_messages,
 )
+from motoko_core.paste import (  # noqa: E402
+    BRACKETED_PASTE_DISABLE,
+    BRACKETED_PASTE_ENABLE,
+    LARGE_PASTE_CHAR_THRESHOLD,
+    PASTE_CHAR_INTERVAL,
+    Paste,
+    PasteBurst,
+    TerminalInput,
+    folded_paste_display,
+    normalize_paste,
+)
 from motoko_core.index_storage import (  # noqa: E402
     index_storage_audit as core_index_storage_audit,
     format_index_storage_audit,
@@ -22760,6 +22771,92 @@ def utf8_key_from_first_byte(fd: int, first: bytes) -> str:
 
 
 class MotokoTui:
+    @property
+    def input_buffer(self) -> str:
+        return self._input_buffer
+
+    @input_buffer.setter
+    def input_buffer(self, text: str) -> None:
+        self._input_buffer = text
+        # Whole-draft replacements (history, completion, reset) discard folds.
+        self.pasted_spans: list[tuple[int, int]] = []
+
+    def replace_input(self, start: int, end: int, text: str, *, fold: bool = False) -> str:
+        spans = getattr(self, "pasted_spans", [])
+        for left, right in spans:
+            if start < right and end > left:
+                start, end = min(start, left), max(end, right)
+        killed = self.input_buffer[start:end]
+        shift = len(text) - (end - start)
+        kept = [
+            (left, right) if right <= start else (left + shift, right + shift)
+            for left, right in spans if right <= start or left >= end
+        ]
+        if fold and len(text) > LARGE_PASTE_CHAR_THRESHOLD:
+            kept.append((start, start + len(text)))
+        self.input_buffer = self.input_buffer[:start] + text + self.input_buffer[end:]
+        self.pasted_spans = sorted(kept)
+        self.cursor = start + len(text)
+        self.dropdown_index = 0
+        self.dirty = True
+        return killed
+
+    def move_input_cursor(self, target: int) -> None:
+        target = max(0, min(target, len(self.input_buffer)))
+        for start, end in getattr(self, "pasted_spans", []):
+            if start < target < end:
+                target = start if target < self.cursor else end
+                break
+        self.cursor = target
+        self.dirty = True
+
+    def handle_paste(self, paste: Paste) -> None:
+        # An overlay owns navigation keys, but a paste still belongs in the draft.
+        if self.overlay_lines is not None:
+            self.close_overlay()
+        self.replace_input(
+            max(0, self.cursor - paste.replace_previous), self.cursor,
+            normalize_paste(paste.text), fold=True,
+        )
+
+    def dispatch_terminal_input(self, key: str | Paste) -> None:
+        echoed = getattr(self, "terminal_echoed", collections.deque(maxlen=2))
+        self.terminal_echoed = echoed
+        if isinstance(key, Paste):
+            if key.replace_previous:
+                # Overlay shortcuts may have consumed the burst's first keys.
+                # Replace only characters that actually reached the draft.
+                key = Paste(key.text, sum(list(echoed)[-key.replace_previous:]))
+            echoed.clear()
+            self.handle_paste(key)
+        elif key == "paste-start":
+            echoed.clear()
+            self.dirty = True
+        else:
+            old_cursor = self.cursor
+            old_length = len(self.input_buffer)
+            self.handle_key(key)
+            if len(key) == 1 and key >= " " and not "\x7f" <= key <= "\x9f":
+                echoed.append(self.cursor == old_cursor + 1 and len(self.input_buffer) == old_length + 1)
+            else:
+                echoed.clear()
+
+    def handle_terminal_key(self, key: str | Paste) -> None:
+        if not hasattr(self, "paste_burst"):
+            self.paste_burst = PasteBurst()
+        # Incomplete escape/paste bytes are not keyboard input.
+        if key == "input-pending":
+            return
+        for event in self.paste_burst.feed(key, time.monotonic()):
+            self.dispatch_terminal_input(event)
+
+    def flush_pending_paste(self) -> bool:
+        burst = getattr(self, "paste_burst", None)
+        events = burst.flush(time.monotonic()) if burst is not None else []
+        for event in events:
+            self.dispatch_terminal_input(event)
+        return bool(events)
+
     def __init__(self, conv: dict) -> None:
         self.conv = conv
         self.stdin_fd = sys.stdin.fileno()
@@ -23083,13 +23180,10 @@ class MotokoTui:
     def drain_pending_input(self) -> None:
         limit = max(1, int(getattr(self, "input_batch_limit", TUI_INPUT_BATCH_LIMIT) or 1))
         for _idx in range(limit - 1):
-            readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0)
-            if not readable:
-                break
             key = self.read_key()
             if not key:
                 break
-            self.handle_key(key)
+            self.handle_terminal_key(key)
 
     def preempt_automatic_study_for_input(self) -> None:
         cancel_event = getattr(self, "study_step_cancel_event", None)
@@ -23097,15 +23191,20 @@ class MotokoTui:
             cancel_event.set()
 
     def handle_ready_input(self, timeout: float = 0.0) -> bool:
-        readable, _writeable, _errors = select.select([self.stdin_fd], [], [], max(0.0, float(timeout or 0.0)))
-        if not readable:
-            return False
+        key = self.read_key()
+        if not key:
+            flushed = self.flush_pending_paste()
+            wait = max(0.0, float(timeout or 0.0))
+            if self.terminal_input.buffer or getattr(getattr(self, "paste_burst", None), "pending", False):
+                wait = min(wait, PASTE_CHAR_INTERVAL)
+            select.select([self.stdin_fd], [], [], wait)
+            key = self.read_key()
+            if not key:
+                return self.flush_pending_paste() or flushed
         self.last_input_at = time.monotonic()
         self.preempt_automatic_study_for_input()
-        key = self.read_key()
-        if key:
-            self.handle_key(key)
-            self.drain_pending_input()
+        self.handle_terminal_key(key)
+        self.drain_pending_input()
         return True
 
     def run(self) -> None:
@@ -23118,8 +23217,12 @@ class MotokoTui:
         try:
             self.old_termios = termios.tcgetattr(self.stdin_fd)
             tty.setcbreak(self.stdin_fd)
+            input_mode = termios.tcgetattr(self.stdin_fd)
+            input_mode[0] &= ~(termios.IXON | termios.ICRNL)
+            input_mode[3] &= ~termios.ISIG
+            termios.tcsetattr(self.stdin_fd, termios.TCSANOW, input_mode)
             signal.signal(signal.SIGWINCH, on_winch)
-            self.write("\033[?25l\033[?7l")
+            self.write(BRACKETED_PASTE_ENABLE + "\033[?25l\033[?7l")
             self.terminal_resize_requested = False
             self.ui_owner_thread_id = None
             self.ui_owner_thread_error = None
@@ -23217,53 +23320,25 @@ class MotokoTui:
         if self.old_termios is not None:
             termios.tcsetattr(self.stdin_fd, termios.TCSADRAIN, self.old_termios)
             self.old_termios = None
-        self.write("\033[?7h\033[?25h\033[0m\n")
+        self.write(BRACKETED_PASTE_DISABLE + "\033[?7h\033[?25h\033[0m\n")
 
     def write(self, text: str) -> None:
         os.write(self.stdout_fd, text.encode("utf-8", errors="replace"))
 
-    def read_key(self) -> str:
-        first = os.read(self.stdin_fd, 1)
-        if not first:
+    def read_key(self) -> str | Paste:
+        if not hasattr(self, "terminal_input"):
+            self.terminal_input = TerminalInput()
+        key = self.terminal_input.pop(time.monotonic())
+        if key is not None:
+            return key
+        readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0)
+        if not readable:
             return ""
-        if first != b"\x1b":
-            return utf8_key_from_first_byte(self.stdin_fd, first)
-        seq = bytearray(first)
-        while True:
-            readable, _writeable, _errors = select.select([self.stdin_fd], [], [], 0.03)
-            if not readable:
-                break
-            nxt = os.read(self.stdin_fd, 1)
-            if not nxt:
-                break
-            seq.extend(nxt)
-            if nxt.isalpha() or nxt == b"~":
-                break
-        text = bytes(seq).decode("utf-8", errors="replace")
-        if re.match(r"^\x1b\[5(?:;\d+)*~$", text):
-            return "pageup"
-        if re.match(r"^\x1b\[6(?:;\d+)*~$", text):
-            return "pagedown"
-        keymap = {
-            "\x1b[A": "up",
-            "\x1b[B": "down",
-            "\x1b[C": "right",
-            "\x1b[D": "left",
-            "\x1b[H": "home",
-            "\x1b[F": "end",
-            "\x1b[1~": "home",
-            "\x1b[4~": "end",
-            "\x1b[3~": "delete",
-            "\x1b[5~": "pageup",
-            "\x1b[6~": "pagedown",
-            "\x1bb": "word-left",
-            "\x1bf": "word-right",
-            "\x1bB": "word-left",
-            "\x1bF": "word-right",
-            "\x1b\x7f": "word-backspace",
-            "\x1b\b": "word-backspace",
-        }
-        return keymap.get(text, "escape")
+        data = os.read(self.stdin_fd, 4096)
+        if not data:
+            return ""
+        self.terminal_input.feed(data, time.monotonic())
+        return self.terminal_input.pop(time.monotonic()) or "input-pending"
 
     def handle_key(self, key: str) -> None:
         if key == "\x03":
@@ -23276,9 +23351,7 @@ class MotokoTui:
             return
         if key == "\x04":  # Ctrl+D
             if self.input_buffer and self.cursor < len(self.input_buffer):
-                self.input_buffer = self.input_buffer[: self.cursor] + self.input_buffer[self.cursor + 1 :]
-                self.dropdown_index = 0
-                self.dirty = True
+                self.replace_input(self.cursor, self.cursor + 1, "")
             elif not self.input_buffer:
                 self.stop_startup_discovery()
                 close_conversation(self.conv)
@@ -23308,39 +23381,32 @@ class MotokoTui:
         if key in {"\r", "\n"}:
             self.handle_enter()
             return
+        if key == "newline":  # Alt+Enter
+            self.replace_input(self.cursor, self.cursor, "\n")
+            return
+        if key == "\x0f":  # Ctrl+O: inspect/edit a folded paste at the cursor
+            for span in reversed(getattr(self, "pasted_spans", [])):
+                if span[0] <= self.cursor <= span[1]:
+                    self.pasted_spans.remove(span)
+                    break
+            self.dirty = True
+            return
         if key in {"\x7f", "\b"}:
             if self.cursor > 0:
-                self.input_buffer = self.input_buffer[: self.cursor - 1] + self.input_buffer[self.cursor :]
-                self.cursor -= 1
-                self.dropdown_index = 0
-                self.dirty = True
+                self.replace_input(self.cursor - 1, self.cursor, "")
             return
         if key == "\x15":  # Ctrl+U
-            self.kill_ring = self.input_buffer[: self.cursor]
-            self.input_buffer = self.input_buffer[self.cursor :]
-            self.cursor = 0
-            self.dropdown_index = 0
-            self.dirty = True
+            self.kill_ring = self.replace_input(0, self.cursor, "")
             return
         if key == "\x17":  # Ctrl+W
             self.delete_word_left()
             return
         if key == "\x0b":  # Ctrl+K
-            self.kill_ring = self.input_buffer[self.cursor :]
-            self.input_buffer = self.input_buffer[: self.cursor]
-            self.dropdown_index = 0
-            self.dirty = True
+            self.kill_ring = self.replace_input(self.cursor, len(self.input_buffer), "")
             return
         if key == "\x19":  # Ctrl+Y
             if self.kill_ring:
-                self.input_buffer = (
-                    self.input_buffer[: self.cursor]
-                    + self.kill_ring
-                    + self.input_buffer[self.cursor :]
-                )
-                self.cursor += len(self.kill_ring)
-                self.dropdown_index = 0
-                self.dirty = True
+                self.replace_input(self.cursor, self.cursor, self.kill_ring, fold=True)
             return
         if key == "\x01":  # Ctrl+A
             self.cursor = 0
@@ -23351,12 +23417,10 @@ class MotokoTui:
             self.dirty = True
             return
         if key == "\x02":  # Ctrl+B
-            self.cursor = max(0, self.cursor - 1)
-            self.dirty = True
+            self.move_input_cursor(self.cursor - 1)
             return
         if key == "\x06":  # Ctrl+F
-            self.cursor = min(len(self.input_buffer), self.cursor + 1)
-            self.dirty = True
+            self.move_input_cursor(self.cursor + 1)
             return
         if key == "\x10":  # Ctrl+P
             if self.dropdown_options():
@@ -23377,12 +23441,10 @@ class MotokoTui:
             self.dirty = True
             return
         if key == "left":
-            self.cursor = max(0, self.cursor - 1)
-            self.dirty = True
+            self.move_input_cursor(self.cursor - 1)
             return
         if key == "right":
-            self.cursor = min(len(self.input_buffer), self.cursor + 1)
-            self.dirty = True
+            self.move_input_cursor(self.cursor + 1)
             return
         if key == "word-left":
             self.move_word_left()
@@ -23405,8 +23467,7 @@ class MotokoTui:
             return
         if key == "delete":
             if self.cursor < len(self.input_buffer):
-                self.input_buffer = self.input_buffer[: self.cursor] + self.input_buffer[self.cursor + 1 :]
-                self.dirty = True
+                self.replace_input(self.cursor, self.cursor + 1, "")
             return
         if key == "up":
             if self.dropdown_options():
@@ -23440,26 +23501,21 @@ class MotokoTui:
                 self.apply_dropdown(options[self.dropdown_index])
             return
         if len(key) == 1 and key >= " ":
-            self.input_buffer = self.input_buffer[: self.cursor] + key + self.input_buffer[self.cursor :]
-            self.cursor += 1
+            self.replace_input(self.cursor, self.cursor, key)
             self.dropdown_index = min(self.dropdown_index, max(0, len(self.dropdown_options()) - 1))
             self.dirty = True
 
     def move_word_left(self) -> None:
-        self.cursor = edit_move_word_left(self.input_buffer, self.cursor)
+        self.move_input_cursor(edit_move_word_left(self.input_buffer, self.cursor))
 
     def move_word_right(self) -> None:
-        self.cursor = edit_move_word_right(self.input_buffer, self.cursor)
+        self.move_input_cursor(edit_move_word_right(self.input_buffer, self.cursor))
 
     def delete_word_left(self) -> None:
-        new_text, new_cursor, killed = edit_delete_word_left(self.input_buffer, self.cursor)
+        new_text, new_cursor, _killed = edit_delete_word_left(self.input_buffer, self.cursor)
         if new_text == self.input_buffer and new_cursor == self.cursor:
             return
-        self.kill_ring = killed
-        self.input_buffer = new_text
-        self.cursor = new_cursor
-        self.dropdown_index = 0
-        self.dirty = True
+        self.kill_ring = self.replace_input(new_cursor, self.cursor, "")
 
     def history_up(self) -> None:
         history_index, value = previous_history_entry(self.history, self.history_index)
@@ -23482,6 +23538,7 @@ class MotokoTui:
         if options:
             self.apply_dropdown(options[self.dropdown_index])
             return
+        multiline = "\n" in self.input_buffer
         text = self.input_buffer.strip()
         self.input_buffer = ""
         self.cursor = 0
@@ -23491,16 +23548,22 @@ class MotokoTui:
             self.dirty = True
             return
         self.remember_input_history(text)
-        self.submit_text(text)
+        if multiline:
+            self.submit_text(text, literal=True)
+        else:
+            self.submit_text(text)
 
-    def submit_text(self, text: str) -> None:
-        if text.startswith("/"):
+    def submit_text(self, text: str, *, literal: bool = False) -> None:
+        # Multiline source/error text, including leading paths or slash commands,
+        # is one model prompt. Only single-line input can dispatch a command.
+        literal = literal or "\n" in text
+        if not literal and text.startswith("/"):
             self.handle_command(text)
             return
-        if is_feedback_command(text):
+        if not literal and is_feedback_command(text):
             self.handle_command(text)
             return
-        if getattr(self, "cwd_index_offer", None) is not None and text.strip().lower() in {"y", "yes", "n", "no"}:
+        if not literal and getattr(self, "cwd_index_offer", None) is not None and text.strip().lower() in {"y", "yes", "n", "no"}:
             self.handle_cwd_index_answer(text)
             return
         if self.command_work_running():
@@ -24419,6 +24482,12 @@ class MotokoTui:
         return list(options)
 
     def compute_dropdown_options(self) -> list[dict]:
+        if (
+            "\n" in self.input_buffer
+            or getattr(self, "pasted_spans", [])
+            or getattr(getattr(self, "terminal_input", None), "in_paste", False)
+        ):
+            return []
         text = self.input_buffer[: self.cursor]
         stripped = text.lstrip()
         if not stripped.startswith("/"):
@@ -24933,7 +25002,8 @@ class MotokoTui:
         return dropdown_display_lines(options, self.dropdown_index, width)
 
     def input_display(self, width: int) -> tuple[list[str], int, int]:
-        return fixed_prompt_input_display(self.input_buffer, self.cursor, width)
+        text, cursor = folded_paste_display(self.input_buffer, self.cursor, getattr(self, "pasted_spans", []))
+        return fixed_prompt_input_display(text, cursor, width)
 
     def terminal_size(self) -> os.terminal_size:
         fd = getattr(self, "stdout_fd", None)

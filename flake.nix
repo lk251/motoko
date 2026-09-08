@@ -80,6 +80,19 @@
             MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_tty.py
             touch "$out"
           '';
+          paste =
+            pkgs.runCommand "motoko-paste-tests"
+              {
+                nativeBuildInputs = [
+                  pkgs.python312
+                  pkgs.tmux
+                ];
+              }
+              ''
+                export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
+                MOTOKO_SOURCE=${src}/motoko python3 ${src}/tests/motoko_paste.py
+                touch "$out"
+              '';
         }
       );
 

@@ -8448,7 +8448,7 @@ def test_tui_input_batching_and_display_cache_skip_hot_work(m):
         ui.stdin_fd = read_fd
         ui.input_batch_limit = 4
         keys = []
-        ui.handle_key = lambda key: keys.append(key)
+        ui.handle_terminal_key = lambda key: keys.append(key)
         os.write(write_fd, b"abc")
         ui.drain_pending_input()
         assert keys == ["a", "b", "c"]
