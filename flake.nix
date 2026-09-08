@@ -54,7 +54,12 @@
             touch "$out"
           '';
           regression =
-            pkgs.runCommand "motoko-regression-tests" { nativeBuildInputs = [ pkgs.python312 ]; }
+            pkgs.runCommand "motoko-regression-tests" {
+              nativeBuildInputs = [
+                pkgs.python312
+                pkgs.git
+              ];
+            }
               ''
                 export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
                 mkdir -p "$PYTHONPYCACHEPREFIX"

@@ -45,6 +45,12 @@ _SOURCE_DIR = pathlib.Path(__file__).resolve().parent
 if str(_SOURCE_DIR) not in sys.path:
     sys.path.insert(0, str(_SOURCE_DIR))
 
+from motoko_core import git_readonly as git_readonly_core
+from motoko_core.source_access import (
+    SOURCE_BOUNDARY_VERSION, artifact_source_references, index_source_boundary_reason,
+    open_source, source_boundary_audit,
+)
+
 from motoko_core.terminal import (  # noqa: E402
     ANSI_STYLES,
     DEFAULT_ASSISTANT_COLOR,
@@ -389,7 +395,7 @@ from motoko_core.corpus_selection import (  # noqa: E402
     TEXT_SAMPLE_BYTES,
     add_allowed_dir_entry,
     document_selection_policy,
-    file_staleness,
+    file_staleness as corpus_file_staleness,
     ignore_directory_match,
     ignored_path_record,
     index_candidate_report,
@@ -1264,14 +1270,7 @@ def print_report(text: str) -> None:
 
 def current_git_branch() -> str:
     try:
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=0.2,
-        )
+        result = git_readonly_core.run(["branch", "--show-current"], cwd=pathlib.Path.cwd(), timeout=0.2)
     except (OSError, subprocess.TimeoutExpired):
         return "-"
     branch = result.stdout.strip()
@@ -1281,14 +1280,7 @@ def current_git_branch() -> str:
 def current_project_root_record(path: str | None = None) -> dict:
     base = pathlib.Path(path or os.getcwd()).expanduser().resolve()
     try:
-        result = subprocess.run(
-            ["git", "-C", str(base), "rev-parse", "--show-toplevel"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=0.2,
-        )
+        result = git_readonly_core.run(["rev-parse", "--show-toplevel"], cwd=base, timeout=0.2)
     except (OSError, subprocess.TimeoutExpired):
         result = None
     if result is not None and result.returncode == 0 and result.stdout.strip():
@@ -1478,14 +1470,7 @@ def app_revision() -> str:
         return env_revision
     source = pathlib.Path(__file__).resolve()
     try:
-        result = subprocess.run(
-            ["git", "-C", str(source.parent), "rev-parse", "--short=12", "HEAD"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=0.2,
-        )
+        result = git_readonly_core.run(["rev-parse", "--short=12", "HEAD"], cwd=source.parent, timeout=0.2)
     except (OSError, subprocess.TimeoutExpired):
         return "-"
     revision = result.stdout.strip()
@@ -4967,6 +4952,10 @@ def synthetic_retrieval_eval_index(fixture: dict) -> dict:
         }
         file_item = {
             "path": path,
+            # These are explicit synthetic evaluator inputs, not filesystem
+            # reads. Model-produced or saved legacy indexes never take this path.
+            "source_boundary": SOURCE_BOUNDARY_VERSION,
+            "source_root": "/synthetic/sample-notes",
             "summary": str(item.get("summary", "")),
             "chunks": [chunk],
             "signals": file_signals_from_chunks([chunk]),
@@ -4977,6 +4966,7 @@ def synthetic_retrieval_eval_index(fixture: dict) -> dict:
         "id": f"retrieval-eval-{fixture.get('id', 'fixture')}",
         "name": "retrieval eval fixture",
         "root": "/synthetic/sample-notes",
+        "selection_policy": {"source_boundary": SOURCE_BOUNDARY_VERSION},
         "created": now(),
         "corpus_summary": str(fixture.get("corpus_summary", "")),
         "files": files,
@@ -8533,6 +8523,8 @@ def approve_skill_tool_text(name: str, tool: str, *, yes: bool = False) -> str:
             f"approval: {approval.get('id', '')}",
             f"effects: {', '.join(approval.get('allowed_effects', []))}",
             f"requires confirmation: {'yes' if approval.get('requires_confirmation') else 'no'}",
+            f"execution: {approval.get('execution_policy', '')}; default imports exclude skill-local modules",
+            "trust: reviewed code runs with your OS authority; effects are not a sandbox",
         ]
     )
 
@@ -8845,6 +8837,8 @@ def cancellation_requested(cancel_event) -> bool:
 
 
 def git_run(args: list[str], *, cwd: pathlib.Path, timeout: float = 300.0) -> subprocess.CompletedProcess:
+    if git_readonly_core.is_read_command(args):
+        return git_readonly_core.run(args, cwd=cwd, timeout=timeout)
     return subprocess.run(
         ["git", *args],
         cwd=str(cwd),
@@ -10139,12 +10133,28 @@ def require_allowed(path: pathlib.Path) -> None:
     require_path_allowed(path, allowed_dirs())
 
 
+def source_reads_permitted(path: pathlib.Path) -> bool:
+    try:
+        require_permission("file-read")
+        require_allowed(path)
+    except (SystemExit, OSError, RuntimeError):
+        return False
+    return True
+
+
+def file_staleness(file_item: dict, *, hash_on_metadata_change: bool = True) -> tuple[str, list[str]]:
+    path = pathlib.Path(file_item.get("path", ""))
+    return corpus_file_staleness(
+        file_item,
+        hash_on_metadata_change=hash_on_metadata_change and source_reads_permitted(path),
+    )
+
+
 def read_text_file(path: pathlib.Path) -> str:
     require_permission("file-read")
     require_allowed(path)
-    data = path.read_bytes()
-    if len(data) > MAX_CONTEXT_BYTES:
-        data = data[:MAX_CONTEXT_BYTES]
+    with open_source(path, roots=allowed_dirs()) as stream:
+        data = stream.read(MAX_CONTEXT_BYTES)
     return data.decode("utf-8", errors="replace")
 
 
@@ -10436,6 +10446,50 @@ def load_dossier(dossier_id: str | None = None) -> dict:
         label_func=dossier_label,
         selector=dossier_id,
     )
+
+
+def derived_source_boundary_reason(artifact: dict, *, require_index: bool = False) -> str:
+    # Current stores are built only from a verified input index. Their receipt
+    # permits an in-memory store or a retained snapshot after source-index cleanup.
+    if artifact.get("source_boundary") == SOURCE_BOUNDARY_VERSION:
+        return ""
+    pending = list(artifact_source_references(artifact))
+    seen = set()
+    topics = dossiers = None
+    while pending:
+        kind, identifier = pending.pop()
+        key = (kind, identifier)
+        if key in seen:
+            continue
+        seen.add(key)
+        if kind == "index":
+            index = load_index_if_exists(identifier)
+            if index is None:
+                return f"source index {identifier} is unavailable; rebuild derived context"
+            reason = index_source_boundary_reason(index)
+            if reason:
+                return f"source index {identifier}: {reason}"
+        else:
+            if kind == "topic":
+                require_index = True
+                if topics is None:
+                    topics = {row.get("id"): row for row in list_topics()}
+                source = topics.get(identifier)
+            else:
+                if dossiers is None:
+                    dossiers = {row.get("id"): row for row in list_dossiers()}
+                source = dossiers.get(identifier)
+            if source is None:
+                return f"source {kind} {identifier} is unavailable; rebuild derived context"
+            pending.extend(artifact_source_references(source) - seen)
+    if require_index and not any(kind == "index" for kind, _identifier in seen):
+        return "document artifact has no verifiable source index; rebuild derived context"
+    return ""
+
+
+def blocked_source_context(kind: str, artifact: dict, reason: str) -> tuple[str, list[dict]]:
+    return "", [{"kind": kind, "id": artifact.get("id", ""), "status": "blocked",
+                  "warnings": [reason], "needs_source_reprocessing": True}]
 
 
 def load_dossier_if_exists(dossier_id: str) -> dict | None:
@@ -10788,6 +10842,8 @@ def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
     vector_stores = list_vector_stores() if deep_artifacts else list_vector_store_catalog_records()
     indexes = []
     for index in latest_indexes_by_family()[:CONTEXT_CATALOG_INDEX_LIMIT]:
+        if index_source_boundary_reason(index):
+            continue
         status, warnings = index_staleness(index) if deep_artifacts else index_metadata_staleness(index)
         item = {
             "id": index.get("id", ""),
@@ -10809,6 +10865,8 @@ def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
         indexes.append(item)
     topics = []
     for topic in list_topics()[:CONTEXT_CATALOG_DOSSIER_LIMIT]:
+        if derived_source_boundary_reason(topic, require_index=True):
+            continue
         topics.append(
             {
                 "id": topic.get("id", ""),
@@ -10819,6 +10877,8 @@ def build_context_catalog(*, deep_artifacts: bool = False) -> dict:
         )
     dossiers = []
     for dossier in list_dossiers()[:CONTEXT_CATALOG_DOSSIER_LIMIT]:
+        if derived_source_boundary_reason(dossier):
+            continue
         dossiers.append(
             {
                 "id": dossier.get("id", ""),
@@ -11180,7 +11240,7 @@ def rank_items_by_query(items: list[dict], query: str, fields: list[str]) -> lis
 
 
 def ranked_dossiers_for_query(query: str, *, project_scope: dict | None = None) -> list[dict]:
-    dossiers = list_dossiers()
+    dossiers = [row for row in list_dossiers() if not derived_source_boundary_reason(row)]
     if project_scope is not None:
         project_roots = project_scope_roots(project_scope)
         if project_roots:
@@ -11193,7 +11253,7 @@ def ranked_dossiers_for_query(query: str, *, project_scope: dict | None = None) 
 
 
 def ranked_topics_for_query(query: str, *, project_scope: dict | None = None) -> list[dict]:
-    topics = list_topics()
+    topics = [row for row in list_topics() if not derived_source_boundary_reason(row, require_index=True)]
     if project_scope is not None:
         project_roots = project_scope_roots(project_scope)
         if project_roots:
@@ -11211,7 +11271,7 @@ def ranked_indexes_for_query(
     project_roots: set[str] | None = None,
     project_scope: dict | None = None,
 ) -> list[dict]:
-    indexes = latest_indexes_by_family()
+    indexes = [index for index in latest_indexes_by_family() if not index_source_boundary_reason(index)]
     if project_scope is not None:
         project_roots = project_scope_roots(project_scope)
     if project_roots:
@@ -11942,6 +12002,11 @@ def index_needs_summary_provenance(index: dict) -> bool:
 
 
 def index_needs_artifact_upgrade(index: dict) -> bool:
+    audit = source_boundary_audit(index)
+    if index.get("source_boundary_audit") != audit:
+        return True
+    if audit["status"] == "reprocess-required":
+        return False
     return index_needs_signal_enrichment(index) or index_needs_corpus_profile(index) or index_needs_summary_provenance(index)
 
 
@@ -12056,6 +12121,14 @@ def upgrade_index_artifacts(index: dict, *, cancel_event=None) -> tuple[dict, bo
 
     changed = []
     upgraded = dict(index)
+    audit = source_boundary_audit(index)
+    if upgraded.get("source_boundary_audit") != audit:
+        upgraded["source_boundary_audit"] = audit
+        changed.append("source boundary audit")
+    if audit["status"] == "reprocess-required":
+        if changed:
+            atomic_write(index_path(index_id), json.dumps(upgraded, ensure_ascii=False, indent=2) + "\n")
+        return upgraded, bool(changed), f"index {index_id}: {audit['reason']}"
     if index_needs_summary_provenance(upgraded):
         raise_if_work_cancelled(cancel_event, "index artifact upgrade interrupted by request", work_kind="index-upgrade")
         upgraded = index_with_current_summary_provenance(upgraded)
@@ -12289,6 +12362,8 @@ def repair_index_artifacts(
     cancel_event=None,
 ) -> tuple[dict, bool, str]:
     raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
+    if reason := index_source_boundary_reason(index):
+        return index, False, f"index quality repair skipped: {reason}"
     index_id = index.get("id", "")
     if not index_id:
         raise SystemExit("index has no id")
@@ -12396,6 +12471,8 @@ def repair_indexes_needing_quality(*, limit: int | None = None, quiet: bool = Fa
         return notes
     for index in latest_indexes_by_family():
         raise_if_work_cancelled(cancel_event, "index quality repair interrupted by request", work_kind="index-repair")
+        if index_source_boundary_reason(index):
+            continue
         if remaining <= 0:
             break
         status, _warnings = index_staleness(index)
@@ -12451,11 +12528,14 @@ def sha256_hex(data: bytes) -> str:
 
 
 def index_staleness(index: dict) -> tuple[str, list[str]]:
-    return corpus_index_staleness(index, artifact_warning_provider=index_artifact_warnings)
+    permitted = source_reads_permitted(pathlib.Path(index.get("root", "")))
+    return corpus_index_staleness(index, artifact_warning_provider=index_artifact_warnings,
+                                 hash_on_metadata_change=permitted, check_selection_policy=permitted)
 
 
 def index_metadata_staleness(index: dict) -> tuple[str, list[str]]:
-    return corpus_index_staleness(index, hash_on_metadata_change=False)
+    return corpus_index_staleness(index, hash_on_metadata_change=False,
+                                 check_selection_policy=source_reads_permitted(pathlib.Path(index.get("root", ""))))
 
 
 def repair_indexes_needing_quality_subprocess(
@@ -12888,6 +12968,8 @@ def materialized_chunk_digests(*, skip_index_id: str = "") -> set[str]:
 def existing_index_chunk_cache(root: pathlib.Path | None = None) -> dict[str, str]:
     cache = {}
     for index in list_indexes():
+        if index_source_boundary_reason(index):
+            continue
         if root is not None:
             try:
                 index_root = pathlib.Path(index.get("root", "")).expanduser().resolve()
@@ -13662,6 +13744,8 @@ def build_evidence_store_from_index(
     cancel_event=None,
 ) -> dict:
     raise_if_work_cancelled(cancel_event, "evidence build interrupted by request", work_kind="evidence")
+    if reason := index_source_boundary_reason(index):
+        raise SystemExit(reason)
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     rows = []
     last_yield = time.monotonic()
@@ -13708,6 +13792,7 @@ def build_evidence_store_from_index(
         "row_count": len(rows),
         "kind_counts": kind_counts,
         "note": "Deterministic hierarchical evidence objects for retrieval, vectorization, and source-grounding audits.",
+        "source_boundary": SOURCE_BOUNDARY_VERSION,
     }
     store["provenance"].update(
         {
@@ -14081,6 +14166,9 @@ def query_evidence_store(store: dict, query: str, *, limit: int = EVIDENCE_QUERY
     if not query:
         raise SystemExit("usage: evidence-query QUERY")
     raise_if_work_cancelled(cancel_event, "evidence query interrupted by request", work_kind="evidence")
+    if reason := derived_source_boundary_reason(store, require_index=True):
+        return {"id": store.get("id", ""), "query": query, "rows": [],
+                "freshness": "blocked", "warnings": [reason]}
     limit = max(1, min(int(limit or EVIDENCE_QUERY_LIMIT), 100))
     query_counts = token_counts(query)
     rows = []
@@ -14814,6 +14902,8 @@ def build_vector_store_from_index(
     refresh_cause: str = "",
 ) -> dict:
     raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
+    if reason := index_source_boundary_reason(index):
+        raise SystemExit(reason)
     method = resolve_vector_method(method)
     if method == EMBEDDING_VECTOR_METHOD:
         return build_embedding_vector_store_from_index(
@@ -14913,6 +15003,7 @@ def build_vector_store_from_index(
         "rows": rows,
         "row_count": len(rows),
         "note": "Deterministic lexical vector baseline. This validates storage and query plumbing; it is not a semantic embedding model.",
+        "source_boundary": SOURCE_BOUNDARY_VERSION,
     }
     store["provenance"].update(
         {
@@ -15152,6 +15243,8 @@ def build_embedding_vector_store_from_index(
         raise_if_work_cancelled(cancel_event, "vectorization interrupted by request", work_kind="vector")
 
     check_vector_cancelled()
+    if reason := index_source_boundary_reason(index):
+        raise SystemExit(reason)
     route_info = embedding_route_info()
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     source_fingerprint = vector_store_source_fingerprint(index)
@@ -15565,6 +15658,7 @@ def build_embedding_vector_store_from_index(
         rows=rows,
         note="Semantic embedding vector store built from the NixOS-declared realm-local embedding route.",
     )
+    store["source_boundary"] = SOURCE_BOUNDARY_VERSION
     if write:
         path = vector_store_path(store_id)
         store["path"] = str(path)
@@ -15801,6 +15895,9 @@ def query_vector_store(
     if not query:
         raise SystemExit("usage: vector-query QUERY")
     raise_if_work_cancelled(cancel_event, "vector query interrupted by request", work_kind="vector")
+    if reason := derived_source_boundary_reason(store, require_index=True):
+        return {"id": store.get("id", ""), "query": query, "rows": [],
+                "freshness": "blocked", "warnings": [reason]}
     limit = max(1, min(int(limit or VECTOR_QUERY_LIMIT), 50))
     method = str(store.get("method") or LEXICAL_VECTOR_METHOD)
     if method == EMBEDDING_VECTOR_METHOD:
@@ -16265,9 +16362,12 @@ def stream_index_file(
     progress_callback=None,
     model_timeout: float = MODEL_TIMEOUT_SECONDS,
     cancel_event=None,
+    source_root: pathlib.Path | None = None,
 ) -> tuple[dict, list[dict], int]:
     raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
-    stat = path.stat()
+    require_permission("index")
+    boundary = source_root if source_root is not None else path.absolute().parent
+    require_allowed(boundary)
     digest = hashlib.sha256()
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     buffer = ""
@@ -16299,7 +16399,8 @@ def stream_index_file(
             derived_content_bytes += item.get("stored_content_bytes", item.get("content_bytes", 0))
             indexed_chunks.append(item)
 
-    with path.open("rb") as fh:
+    with open_source(path, roots=[boundary]) as fh:
+        stat = os.fstat(fh.fileno())
         for raw in iter(lambda: fh.read(1024 * 1024), b""):
             raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
             digest.update(raw)
@@ -16602,6 +16703,7 @@ def index_file(
     progress_callback=None,
     model_timeout: float = MODEL_TIMEOUT_SECONDS,
     cancel_event=None,
+    source_root: pathlib.Path | None = None,
 ) -> dict:
     raise_if_work_cancelled(cancel_event, "indexing interrupted by request", work_kind="index")
     fingerprint, indexed_chunks, derived_content_bytes = stream_index_file(
@@ -16614,6 +16716,7 @@ def index_file(
         progress_callback,
         model_timeout,
         cancel_event,
+        source_root,
     )
 
     print(f"  summarizing file {path}", flush=True)
@@ -16636,6 +16739,8 @@ def index_file(
         "index_ordinal": ordinal,
         "path": str(path),
         "source_fingerprint": fingerprint,
+        "source_root": str(source_root if source_root is not None else path.absolute().parent),
+        "source_boundary": SOURCE_BOUNDARY_VERSION,
         "indexed_sha256": fingerprint["sha256"],
         "bytes_indexed": fingerprint["size"],
         "bytes_omitted": 0,
@@ -16722,6 +16827,7 @@ def document_index_record(
     index["corpus_profile"] = profile
     index["corpus_profile_artifact"] = profile.get("provenance", {})
     index["corpus_profile_text"] = profile.get("summary", "")
+    index["source_boundary_audit"] = source_boundary_audit(index)
     return index
 
 
@@ -16818,6 +16924,7 @@ def build_document_index(
                         progress_callback,
                         INDEX_MODEL_TIMEOUT_SECONDS,
                         cancel_event,
+                        source_root=root,
                     )
                 )
                 write_partial_index(
@@ -16966,6 +17073,9 @@ def build_document_index_quiet(
 def resume_document_index(index_id: str, progress_callback=None, cancel_event=None) -> dict:
     partial = load_partial_index(index_id)
     require_permission("index")
+    boundary_reason = index_source_boundary_reason(partial)
+    if boundary_reason:
+        raise SystemExit(f"cannot resume index {index_id}: {boundary_reason}; rebuild from source")
     clear_work_pause_request()
     previous_progress = read_index_progress(index_id) or {}
     previous_elapsed = int(previous_progress.get("elapsed_seconds", 0) or 0)
@@ -17057,6 +17167,7 @@ def resume_document_index(index_id: str, progress_callback=None, cancel_event=No
                     progress_callback,
                     INDEX_MODEL_TIMEOUT_SECONDS,
                     cancel_event,
+                    source_root=root,
                 )
                 files.append(item)
                 completed_by_path[candidate_key] = item
@@ -17291,6 +17402,8 @@ def build_topic_dossier(
     for index_id in index_ids:
         raise_if_work_cancelled(cancel_event, "topic dossier interrupted by request", work_kind="topic")
         index = load_index(index_id)
+        if reason := index_source_boundary_reason(index):
+            raise SystemExit(reason)
         status, warnings = index_staleness(index)
         source_indexes.append(
             {
@@ -17662,7 +17775,9 @@ def heavy_index_cooldown_active(index: dict, state: dict) -> bool:
 
 
 def mark_heavy_index_attempt(index: dict, state: dict, *, result: str, new_index_id: str = "") -> None:
-    state.setdefault("indexes", {})[heavy_index_key(index)] = {
+    previous = state.setdefault("indexes", {}).get(heavy_index_key(index), {})
+    record = {
+        **previous,
         "root": index.get("root", ""),
         "glob": index.get("glob", AUTO_INDEX_GLOB),
         "name": index.get("name", ""),
@@ -17670,6 +17785,10 @@ def mark_heavy_index_attempt(index: dict, state: dict, *, result: str, new_index
         "last_result": result,
         "new_index_id": new_index_id,
     }
+    if new_index_id:
+        record.pop("resume_index_id", None)
+        record.pop("rebuild_source_id", None)
+    state["indexes"][heavy_index_key(index)] = record
     write_heavy_study_state(state)
 
 
@@ -17796,6 +17915,8 @@ def format_index_health(summary: dict) -> str:
 
 
 def format_index_signal_state(index: dict) -> str:
+    if index_source_boundary_reason(index):
+        return "source reprocessing required"
     profile = index.get("corpus_profile")
     if not index_needs_corpus_profile(index):
         profile_state = "profile current"
@@ -17840,13 +17961,22 @@ def refresh_heavy_attached_indexes(
 ) -> list[str]:
     if not env_flag("MOTOKO_BACKGROUND_HEAVY_INDEX", True):
         return []
+    if "index" not in PERMISSION_MODE_CAPABILITIES.get(permission_mode(), set()):
+        return []
     raise_if_work_cancelled(cancel_event, "background study paused by request", work_kind="study")
     if work_pause_requested():
         return ["heavy index refresh paused by request"]
     state = read_heavy_study_state()
     notes = []
     available_indexes = list_indexes()
-    for item in list(conv.get("context_items", [])):
+    work_items = list(conv.get("context_items", []))
+    attached_ids = {row.get("id") for row in work_items if row.get("kind") == "index"}
+    # Active attachments go first. Then gradually rebuild other eligible legacy
+    # families, with the same one-completed-index limit and visible heavy lane.
+    for candidate in latest_indexes_by_family(available_indexes):
+        if candidate.get("id") not in attached_ids and index_source_boundary_reason(candidate):
+            work_items.append({"kind": "index", "id": candidate.get("id"), "boundary_rebuild_only": True})
+    for item in work_items:
         raise_if_work_cancelled(cancel_event, "background study paused by request", work_kind="study")
         if item.get("kind") != "index" or not item.get("id"):
             continue
@@ -17857,13 +17987,20 @@ def refresh_heavy_attached_indexes(
             continue
         latest = latest_index_for_family(index, available_indexes)
         if latest and latest.get("id") != index.get("id"):
-            replace_attached_index(conv, index.get("id", ""), latest)
+            if not item.get("boundary_rebuild_only"):
+                replace_attached_index(conv, index.get("id", ""), latest)
             notes.append(f"attached newer index {index.get('id')} -> {latest.get('id')}")
             index = latest
+        try:
+            require_allowed(pathlib.Path(index.get("root", "")))
+        except SystemExit as exc:
+            notes.append(f"heavy index refresh skipped: {exc}")
+            continue
         if phase_callback is not None:
             phase_callback("bg-heavy: source-audit(cpu)")
         summary = index_change_summary(index, cancel_event=cancel_event)
-        reason = heavy_index_refresh_reason(summary)
+        boundary_reason = index_source_boundary_reason(index)
+        reason = boundary_reason or heavy_index_refresh_reason(summary)
         if reason is None:
             new_files = len(summary.get("new_files", []))
             if new_files:
@@ -17881,18 +18018,41 @@ def refresh_heavy_attached_indexes(
         if phase_callback is not None:
             phase_callback("bg-heavy: indexing(model)")
         def on_progress(progress: dict) -> None:
+            if boundary_reason and progress.get("id"):
+                record = state["indexes"][heavy_index_key(index)]
+                if record.get("resume_index_id") != progress["id"]:
+                    record["resume_index_id"] = progress["id"]
+                    record["rebuild_source_id"] = index.get("id", "")
+                    write_heavy_study_state(state)
             if phase_callback is not None:
                 phase_callback(format_index_progress_status(progress))
 
         try:
-            refreshed = build_document_index_quiet(
-                index.get("root", ""),
-                index.get("glob") or AUTO_INDEX_GLOB,
-                index.get("name", ""),
-                progress_callback=on_progress,
-                cancel_event=cancel_event,
-            )
-            replace_attached_index(conv, index.get("id", ""), refreshed)
+            record = state["indexes"][heavy_index_key(index)]
+            pending_id = record.get("resume_index_id", "") if boundary_reason else ""
+            pending = None
+            if pending_id and record.get("rebuild_source_id") == index.get("id"):
+                try:
+                    pending = load_partial_index(pending_id)
+                except SystemExit:
+                    pass
+            if pending is not None:
+                if index_family_key(pending) != index_family_key(index):
+                    raise SystemExit("source rebuild checkpoint belongs to a different index family")
+                if index_progress_running(pending_id):
+                    notes.append(f"source rebuild already active: {pending_id}")
+                    continue
+                refreshed = resume_document_index(pending_id, progress_callback=on_progress, cancel_event=cancel_event)
+            else:
+                refreshed = build_document_index_quiet(
+                    index.get("root", ""),
+                    index.get("glob") or AUTO_INDEX_GLOB,
+                    index.get("name", ""),
+                    progress_callback=on_progress,
+                    cancel_event=cancel_event,
+                )
+            if not item.get("boundary_rebuild_only"):
+                replace_attached_index(conv, index.get("id", ""), refreshed)
         except WorkPaused as exc:
             mark_heavy_index_attempt(index, state, result=f"paused: {exc}")
             notes.append(f"heavy index refresh paused for {index.get('name', index.get('id'))}: {exc}")
@@ -18858,6 +19018,7 @@ def hybrid_retrieval_environment(*, cancel_event=None) -> HybridRetrievalEnviron
         vector_query_limit=VECTOR_QUERY_LIMIT,
         embedding_vector_method=EMBEDDING_VECTOR_METHOD,
         cancel_event=cancel_event,
+        index_boundary_reason=index_source_boundary_reason,
     )
 
 
@@ -18907,6 +19068,9 @@ def query_vector_result(
 
 def retrieve_from_topic(topic: dict, query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
     raise_if_work_cancelled(cancel_event, "topic retrieval interrupted by request", work_kind="retrieval")
+    boundary_reason = derived_source_boundary_reason(topic, require_index=True)
+    if boundary_reason:
+        return blocked_source_context("topic", topic, boundary_reason)
     query_counts = token_counts(query or topic.get("query", ""))
     evidence = list(topic.get("evidence", []))
     if query_counts:
@@ -18966,6 +19130,10 @@ def retrieve_from_topic(topic: dict, query: str, *, cancel_event=None) -> tuple[
 
 
 def retrieve_from_dossier(dossier: dict, query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
+    raise_if_work_cancelled(cancel_event, "dossier retrieval interrupted by request", work_kind="retrieval")
+    boundary_reason = derived_source_boundary_reason(dossier)
+    if boundary_reason:
+        return blocked_source_context("dossier", dossier, boundary_reason)
     return retrieve_from_dossier_core(
         dossier,
         query,
@@ -18995,6 +19163,9 @@ def render_memories_with_sources(
 
 
 def render_index_overview_context(index: dict) -> tuple[str, list[dict]]:
+    boundary_reason = index_source_boundary_reason(index)
+    if boundary_reason:
+        return blocked_source_context("index", index, boundary_reason)
     status, warnings = index_staleness(index)
     artifact_fields = index_retrieval_artifact_source_fields(index)
     source_warnings = warnings[:8] + artifact_fields.pop("artifact_warnings", [])
@@ -20982,7 +21153,15 @@ def motoko_code_cancel_check(cancel_event):
 
 
 def motoko_code_map(root: str | None = None, *, cancel_event=None) -> dict:
-    return build_code_map(find_motoko_repo_root(root), cancel_check=motoko_code_cancel_check(cancel_event))
+    require_permission("file-read")
+    trusted_root = find_motoko_repo_root()
+    try:
+        selected_root = find_motoko_repo_root(root) if root is not None else trusted_root
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    if selected_root != trusted_root:
+        require_allowed(selected_root)
+    return build_code_map(selected_root, cancel_check=motoko_code_cancel_check(cancel_event))
 
 
 def format_motoko_code_map(root: str | None = None, *, cancel_event=None) -> str:
@@ -21004,6 +21183,8 @@ def format_motoko_code_query(query: str, *, root: str | None = None, limit: int 
 
 
 def render_motoko_codebase_context(query: str, *, cancel_event=None) -> tuple[str, list[dict]]:
+    if "file-read" not in PERMISSION_MODE_CAPABILITIES.get(permission_mode(), set()):
+        return "", []
     plan = build_retrieval_plan(query, skills=active_skills())
     if not plan.get("codebase"):
         return "", []
@@ -22308,14 +22489,7 @@ def repo_root_for_path(path: str | None = None) -> pathlib.Path:
     require_allowed(base)
     workdir = base.parent if base.is_file() else base
     try:
-        result = subprocess.run(
-            ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=5,
-        )
+        result = git_readonly_core.run(["rev-parse", "--show-toplevel"], cwd=workdir, timeout=5)
     except FileNotFoundError as exc:
         raise SystemExit("git is not available in PATH") from exc
     except subprocess.TimeoutExpired as exc:
@@ -22329,14 +22503,7 @@ def repo_root_for_path(path: str | None = None) -> pathlib.Path:
 
 def run_git_readonly(repo: pathlib.Path, args: list[str], *, timeout: int = 20) -> str:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo), *args],
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=timeout,
-        )
+        result = git_readonly_core.run(args, cwd=repo, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise SystemExit(f"git {' '.join(args)} timed out in {repo}") from exc
     output = result.stdout.rstrip()
@@ -22396,28 +22563,13 @@ def repo_review_report(path: str | None = None) -> tuple[pathlib.Path, str]:
         format_command_section("git log --oneline --decorate -n 12", run_git_readonly(repo, ["log", "--oneline", "--decorate", "-n", "12"])),
     ]
     review_gate = repo / "scripts" / "nixos-review-gate"
-    if review_gate.exists() and os.access(review_gate, os.X_OK):
-        try:
-            result = subprocess.run(
-                [str(review_gate)],
-                cwd=str(repo),
-                check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=45,
-            )
-        except subprocess.TimeoutExpired:
-            sections.append(format_command_section("scripts/nixos-review-gate", "timed out after 45 seconds"))
-        else:
-            sections.append(
-                format_command_section(
-                    f"scripts/nixos-review-gate (exit {result.returncode})",
-                    result.stdout,
-                )
-            )
+    if review_gate.exists() or review_gate.is_symlink():
+        sections.append(format_command_section(
+            "review gate", "scripts/nixos-review-gate detected; not executed. "
+            "Repository review does not authorize script execution."
+        ))
     else:
-        sections.append(format_command_section("review gate", "no executable scripts/nixos-review-gate in this repo"))
+        sections.append(format_command_section("review gate", "no scripts/nixos-review-gate in this repo"))
     return repo, "\n\n".join(sections)
 
 

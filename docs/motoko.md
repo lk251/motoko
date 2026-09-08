@@ -353,6 +353,16 @@ ETA; `/indexes` and `/status` also show active durable index jobs from Motoko
 state. The same progress display is used later if an attached stale index
 needs a heavy background refresh.
 
+Older indexes without contained-source provenance are withheld from prompts
+until rebuilt. `motoko index-upgrade INDEX_ID` records an inspectable source
+boundary audit; it cannot certify old content by checking its current filename.
+With heavy background indexing enabled, eligible legacy corpora rebuild one at
+a time and resume completed files after interruption. Current permissions and
+directory approvals still apply. You can also rebuild explicitly with
+`motoko index ROOT`. Saved older artifacts remain inspectable; dependent old
+topics and dossiers require rebuilding from verified indexes or explicit cleanup.
+This does not erase original conversations or unrelated memories.
+
 Long corpus passes checkpoint after each completed file. If Motoko is paused,
 times out, crashes, or the machine loses power, completed file work remains in
 private partial-index state and `/indexes` shows a `partial` row with a resume
@@ -945,6 +955,14 @@ requires confirmation. Executable script tools are treated as having the
 `external_process` effect even when old metadata omits it, so approvals show
 the actual authority being granted; script tools cannot declare
 `prompt_only`.
+
+The runner uses an isolated Python import path without site initialization and
+executes a private copy of the exact approved script. Executable sibling modules
+are not available through Python's default import path. Earlier approvals require
+explicit reapproval under this execution policy; their records remain inspectable.
+Tools that depend on local imports must first become self-contained stdlib scripts.
+Approval means trusting the script with your OS account's authority. Declared
+effects and the scanner do not provide a filesystem or network sandbox.
 
 `motoko skill scan [NAME]` is the static review surface for learned skills and
 support scripts. It is conservative and report-first: it flags prompt-injection

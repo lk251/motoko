@@ -8,6 +8,8 @@ import json
 import os
 import pathlib
 
+from .source_access import SOURCE_BOUNDARY_VERSION, open_source
+
 
 AUTO_INDEX_GLOB = "auto"
 TEXT_SAMPLE_BYTES = 8192
@@ -36,20 +38,24 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def sha256_file(path: pathlib.Path) -> str:
+def sha256_file(path: pathlib.Path, *, root: pathlib.Path | None = None) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as fh:
+    with open_source(path, roots=[root if root is not None else path.absolute().parent]) as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
 def source_fingerprint(path: pathlib.Path) -> dict:
-    stat = path.stat()
+    digest = hashlib.sha256()
+    with open_source(path, roots=[path.absolute().parent]) as fh:
+        stat = os.fstat(fh.fileno())
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
     return {
         "size": stat.st_size,
         "mtime_ns": stat.st_mtime_ns,
-        "sha256": sha256_file(path),
+        "sha256": digest.hexdigest(),
     }
 
 
@@ -106,9 +112,10 @@ def require_path_allowed(path: pathlib.Path, directories: list[pathlib.Path]) ->
     )
 
 
-def is_probably_text_file(path: pathlib.Path, *, sample_bytes: int = TEXT_SAMPLE_BYTES) -> bool:
+def is_probably_text_file(path: pathlib.Path, *, sample_bytes: int = TEXT_SAMPLE_BYTES,
+                          root: pathlib.Path | None = None) -> bool:
     try:
-        with path.open("rb") as fh:
+        with open_source(path, roots=[root if root is not None else path.absolute().parent]) as fh:
             sample = fh.read(sample_bytes)
     except OSError:
         return False
@@ -151,7 +158,8 @@ def parse_motoko_ignore(root: pathlib.Path) -> tuple[list[dict], dict]:
     if ignore_path is None or not ignore_path.exists():
         return [], info
     try:
-        raw = ignore_path.read_text(encoding="utf-8")
+        with open_source(ignore_path, roots=[root.absolute()]) as fh:
+            raw = fh.read().decode("utf-8")
     except UnicodeDecodeError as exc:
         raise SystemExit(f"{ignore_path}: must be UTF-8 text: {exc}") from exc
     except OSError as exc:
@@ -194,6 +202,7 @@ def document_selection_policy(root: pathlib.Path, pattern: str | None) -> dict:
     rules, ignore_info = parse_motoko_ignore(root)
     policy = {
         "schema": SOURCE_SELECTION_SCHEMA_VERSION,
+        "source_boundary": SOURCE_BOUNDARY_VERSION,
         "mode": source_selection_mode(normalized),
         "glob": normalized,
         "motokoignore": ignore_info,
@@ -287,7 +296,7 @@ def index_candidate_report(root: pathlib.Path, pattern: str | None) -> dict:
     normalized = (pattern or AUTO_INDEX_GLOB).strip() or AUTO_INDEX_GLOB
     selection_policy = document_selection_policy(root, normalized)
     if root.is_file():
-        candidates = [root] if is_probably_text_file(root) else []
+        candidates = [root] if is_probably_text_file(root, root=root) else []
         return {
             "root": str(root),
             "glob": normalized,
@@ -339,7 +348,7 @@ def index_candidate_report(root: pathlib.Path, pattern: str | None) -> dict:
                 or fnmatch.fnmatch(rel, normalized)
             ):
                 continue
-            if is_probably_text_file(candidate):
+            if is_probably_text_file(candidate, root=root):
                 candidates.append(candidate)
     return {
         "root": str(root),
@@ -394,7 +403,8 @@ def selection_policy_staleness(index: dict) -> tuple[str, list[str]]:
     return "fresh", []
 
 
-def file_staleness(file_item: dict, *, hash_on_metadata_change: bool = True) -> tuple[str, list[str]]:
+def file_staleness(file_item: dict, *, hash_on_metadata_change: bool = True,
+                   root: pathlib.Path | None = None) -> tuple[str, list[str]]:
     path = pathlib.Path(file_item.get("path", "")).expanduser()
     expected = file_item.get("source_fingerprint") or {}
     if not expected:
@@ -420,7 +430,8 @@ def file_staleness(file_item: dict, *, hash_on_metadata_change: bool = True) -> 
                 return "stale", warnings
             return "metadata-changed", warnings
         try:
-            current_hash = sha256_file(path)
+            boundary = root or pathlib.Path(file_item.get("source_root") or path.absolute().parent)
+            current_hash = sha256_file(path, root=boundary)
             if current_hash == expected.get("sha256"):
                 return "mtime-only", [f"{path}: metadata changed but content hash still matches"]
             warnings.append(f"{path}: content hash changed")
@@ -435,8 +446,9 @@ def index_staleness(
     *,
     artifact_warning_provider=None,
     hash_on_metadata_change: bool = True,
+    check_selection_policy: bool = True,
 ) -> tuple[str, list[str]]:
-    selection_status, selection_warnings = selection_policy_staleness(index)
+    selection_status, selection_warnings = selection_policy_staleness(index) if check_selection_policy else ("unknown", [])
     if selection_status == "stale":
         return "stale", selection_warnings
     statuses = []
@@ -445,6 +457,7 @@ def index_staleness(
         status, file_warnings = file_staleness(
             file_item,
             hash_on_metadata_change=hash_on_metadata_change,
+            root=pathlib.Path(index["root"]) if index.get("root") else None,
         )
         statuses.append(status)
         warnings.extend(file_warnings)

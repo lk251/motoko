@@ -30,6 +30,7 @@ ACTION_LEDGER_SCHEMA = "motoko-action-ledger-v1"
 ACTION_RESULT_SCHEMA = "motoko-action-result-v1"
 TOOL_INPUT_SCHEMA = "motoko-tool-input-v1"
 TOOL_PRIVATE_RESULT_SCHEMA = "motoko-tool-private-result-v1"
+TOOL_EXECUTION_POLICY = "stdlib-isolated-snapshot-v1"
 
 EFFECT_PROMPT_ONLY = "prompt_only"
 EFFECT_READ_CONTEXT = "read_context"
@@ -181,12 +182,12 @@ def skill_package_dir(skill: dict) -> pathlib.Path:
     return path.parent.resolve(strict=False)
 
 
-def parse_json_file(path: pathlib.Path) -> dict:
+def parse_json_file(path: pathlib.Path, *, source: bytes | None = None) -> dict:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_bytes() if source is None else source)
     except OSError as exc:
         raise AgenticValidationError(f"cannot read tool metadata: {path}") from exc
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise AgenticValidationError(f"invalid tool metadata JSON: {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise AgenticValidationError("tool metadata must be a JSON object")
@@ -452,7 +453,11 @@ def validate_tool_metadata(skill: dict, metadata_path: pathlib.Path) -> dict:
         raise AgenticValidationError("tool metadata filename must end with .tool.json")
     if metadata_path.is_symlink():
         raise AgenticValidationError("refusing symlinked tool metadata")
-    raw = parse_json_file(metadata_path)
+    try:
+        metadata_source = metadata_path.read_bytes()
+    except OSError as exc:
+        raise AgenticValidationError(f"cannot read tool metadata: {metadata_path}") from exc
+    raw = parse_json_file(metadata_path, source=metadata_source)
     if raw.get("schema") not in SUPPORTED_TOOL_SCHEMAS:
         raise AgenticValidationError(f"unsupported tool schema: {raw.get('schema')}")
     name = safe_slug(str(raw.get("name") or ""))
@@ -514,7 +519,8 @@ def validate_tool_metadata(skill: dict, metadata_path: pathlib.Path) -> dict:
         "script_path": str(script_path),
         "script_relpath": script_path.relative_to(skill_dir).as_posix(),
         "script_sha256": file_sha256(script_path),
-        "metadata_sha256": file_sha256(metadata_path),
+        "metadata_sha256": sha256_bytes(metadata_source),
+        "execution_policy": TOOL_EXECUTION_POLICY,
         "interpreter": interpreter,
         "wrapper": wrapper,
         "allowed_effects": effects,
@@ -601,6 +607,7 @@ def approval_id(tool: dict, *, realm: str | None = None) -> str:
         "metadata_sha256": tool.get("metadata_sha256", ""),
         "interpreter": tool.get("interpreter", ""),
         "wrapper": tool.get("wrapper", ""),
+        "execution_policy": TOOL_EXECUTION_POLICY,
         "allowed_effects": tool.get("allowed_effects", []),
         "network": bool(tool.get("network")),
         "writes_project_files": bool(tool.get("writes_project_files")),
@@ -622,6 +629,7 @@ def approval_record_for_tool(tool: dict, *, realm: str | None = None, requires_c
         "metadata_sha256": tool.get("metadata_sha256", ""),
         "interpreter": tool.get("interpreter", ""),
         "wrapper": tool.get("wrapper", ""),
+        "execution_policy": TOOL_EXECUTION_POLICY,
         "allowed_effects": tool.get("allowed_effects", []),
         "argument_schema": tool.get("argument_schema", {}),
         "network": bool(tool.get("network")),
@@ -1351,9 +1359,24 @@ def execute_skill_tool_action(
     if tool.get("requires_confirmation") and session_approval_key(action, tool) not in (session_approvals or set()):
         raise AgenticValidationError("session confirmation is required")
 
+    # Bind execution to the bytes whose fingerprint the user approved, rather
+    # than reopening a mutable skill package when the child interpreter starts.
+    try:
+        script_source = pathlib.Path(tool["script_path"]).read_bytes()
+    except OSError as exc:
+        raise AgenticValidationError("cannot read approved tool source") from exc
+    if sha256_bytes(script_source) != tool["script_sha256"]:
+        raise AgenticValidationError("tool source changed after approval validation")
+
     action_run_id = validation.get("id") or action_id(action)
     run_id = "run-" + uuid.uuid4().hex[:16]
     run_dir = tool_run_dir(state_root, run_id)
+    script_snapshot = run_dir / "approved-tool.py"
+    with script_snapshot.open("xb") as snapshot:
+        # The enclosing directory is private; preserve the exact Python bytes,
+        # including any source-encoding declaration.
+        os.fchmod(snapshot.fileno(), 0o600)
+        snapshot.write(script_source)
     input_record = {
         "schema": TOOL_INPUT_SCHEMA,
         "action_id": action_run_id,
@@ -1380,7 +1403,7 @@ def execute_skill_tool_action(
                 interrupt_error = "tool interrupted before subprocess start"
             else:
                 proc = subprocess.Popen(
-                    [sys.executable, str(tool.get("script_path", ""))],
+                    [sys.executable, "-I", "-S", str(script_snapshot)],
                     cwd=str(skill_package_dir(skill)),
                     env=safe_tool_environment(realm=realm, state_root=state_root, run_dir=run_dir),
                     stdin=subprocess.PIPE,
@@ -1477,6 +1500,8 @@ def execute_skill_tool_action(
         "realm": realm,
         "skill": tool.get("skill", ""),
         "tool": tool.get("name", ""),
+        "execution_policy": TOOL_EXECUTION_POLICY,
+        "script_sha256": tool["script_sha256"],
         "status": status,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
@@ -1532,6 +1557,8 @@ def format_tool_rows(rows: list[dict], *, approval_path: pathlib.Path, realm: st
         lines.append(f"  confirmation: {'required' if row.get('requires_confirmation') else 'not required'}")
         lines.append(f"  script sha256: {row.get('script_sha256', '')}")
         lines.append(f"  metadata sha256: {row.get('metadata_sha256', '')}")
+        lines.append(f"  execution: {TOOL_EXECUTION_POLICY}; default imports exclude skill-local modules")
+        lines.append("  trust: reviewed code runs with your OS authority; effects are not a sandbox")
     return "\n".join(lines)
 
 
