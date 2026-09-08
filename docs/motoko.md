@@ -1482,7 +1482,32 @@ motoko model-stop ROUTE
 This calls `motoko-model stop ROUTE`; Motoko still does not call `systemctl`
 directly and does not stop models automatically when the TUI exits.
 
-Route overrides can live in `~/.config/motoko/config.json`:
+Managed catalogs may declare `task_routes`, mapping each logical task to an
+ordered list of approved physical route IDs. The ten required keys are `chat`,
+`index_chunk`, `index_file`, `index_corpus`, `index_label`, `topic`, `memory`,
+`profile`, `title`, and `audit`. Every list must be nonempty and unique; every
+reference must resolve to a route object advertising a compatible task, an
+explicit endpoint, and a model identity. Motoko selects the first listed route.
+The order is deployment policy, not automatic failover after a loading or
+inference failure.
+
+For these mapped tasks, the catalog owns endpoint/model identity. Global and
+per-task endpoint/model environment variables and user-config overrides do not
+replace it. The mapped `chat` route also owns automatic chat selection, while
+explicit `/model NAME` choices remain available among declared chat models.
+`MOTOKO_ROUTE_<ROUTE>_PARALLEL` may reduce concurrency but cannot exceed the
+mapped route's declared capacity.
+
+An absent `task_routes` field preserves legacy routing. An invalid or
+incomplete mapping, malformed/non-object JSON, unreadable catalog, or broken
+catalog symlink fails clearly instead of using legacy endpoint overrides. A
+genuinely absent catalog still supports standalone configuration. This optional
+catalog extension does not rewrite conversation, memory, index, or cache
+artifacts; older Motoko versions ignore it. Deploy the consumer and generated
+catalog together before relying on the new policy.
+
+For standalone installations and older catalogs without `task_routes`, route
+overrides can live in `~/.config/motoko/config.json`:
 
 ```json
 {

@@ -3215,20 +3215,24 @@ def apply_chat_reasoning_payload(payload: dict, route_info: dict) -> dict:
 
 
 def endpoint() -> str:
+    local_route = merged_local_model_route(MODEL_ROUTE_CHAT)
+    if local_route.get("task_routes_managed"):
+        return local_route["endpoint"]
     env_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     if env_endpoint:
         return env_endpoint
-    local_route = merged_local_model_route(MODEL_ROUTE_CHAT)
     if isinstance(local_route.get("endpoint"), str) and local_route["endpoint"].strip():
         return local_route["endpoint"].strip()
     return DEFAULT_ENDPOINT
 
 
 def model_name() -> str:
+    local_route = merged_local_model_route(MODEL_ROUTE_CHAT)
+    if local_route.get("task_routes_managed"):
+        return local_route["model"]
     env_model = os.environ.get("MOTOKO_MODEL")
     if env_model:
         return env_model
-    local_route = merged_local_model_route(MODEL_ROUTE_CHAT)
     if isinstance(local_route.get("model"), str) and local_route["model"].strip():
         return local_route["model"].strip()
     return DEFAULT_MODEL
@@ -3236,23 +3240,27 @@ def model_name() -> str:
 
 def model_route(route: str = MODEL_ROUTE_CHAT) -> dict:
     route = normalize_model_route(route)
+    local_route = merged_local_model_route(route)
+    managed = local_route.get("task_routes_managed", False)
     env_endpoint = os.environ.get(model_route_env_key(route, "endpoint"))
     env_model = os.environ.get(model_route_env_key(route, "model"))
     global_env_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     global_env_model = os.environ.get("MOTOKO_MODEL")
     configured = {}
-    if not env_endpoint or not env_model:
+    if not managed and (not env_endpoint or not env_model):
         candidate = config_root() / "config.json"
         if candidate.exists():
             configured = load_config().get("model_routes", {}).get(route, {})
-    local_route = merged_local_model_route(route)
     route_endpoint = env_endpoint or configured.get("endpoint") or global_env_endpoint or local_route.get("endpoint") or DEFAULT_ENDPOINT
     route_model = env_model or configured.get("model") or global_env_model or local_route.get("model") or DEFAULT_MODEL
+    if managed:
+        route_endpoint, route_model = local_route["endpoint"], local_route["model"]
     request_path = local_route.get("request_path") or LOCAL_MODEL_UNIX_REQUEST_PATH
     local_endpoint = str(local_route.get("endpoint") or "")
     uses_catalog_endpoint = bool(local_endpoint) and str(route_endpoint) == local_endpoint
     return {
         "route": route,
+        "task_routes_managed": managed,
         "endpoint": str(route_endpoint),
         "model": str(route_model),
         "request_path": str(request_path),
@@ -3367,6 +3375,9 @@ def route_selection_default_value(info: dict) -> bool:
 
 
 def catalog_default_chat_route(candidates: list[dict]) -> dict | None:
+    mapped = next((info for info in candidates if info.get("task_routes_managed")), None)
+    if mapped is not None:
+        return mapped
     defaults = [info for info in candidates if route_selection_default_value(info)]
     if not defaults:
         return None
@@ -3397,7 +3408,7 @@ def chat_route_candidates() -> list[dict]:
         base = dict(base)
         base["governor_source"] = "logical-chat"
         candidates.append(base)
-    if (
+    if not base.get("task_routes_managed") and (
         os.environ.get("MOTOKO_ENDPOINT")
         or os.environ.get("MOTOKO_MODEL")
         or os.environ.get(model_route_env_key(MODEL_ROUTE_CHAT, "endpoint"))
@@ -3518,7 +3529,10 @@ def route_chat_user_selectable(info: dict) -> bool:
 
 
 def chat_model_candidates() -> list[dict]:
-    return [info for info in chat_route_candidates() if route_chat_user_selectable(info)]
+    return [
+        info for info in chat_route_candidates()
+        if info.get("task_routes_managed") or route_chat_user_selectable(info)
+    ]
 
 
 def resolve_chat_model(selector: str | None) -> dict:
@@ -16348,17 +16362,19 @@ def chunk_blocks_by_chars(blocks: list[str], max_chars: int) -> list[list[str]]:
 
 def route_parallel_limit(route: str) -> int:
     route = normalize_model_route(route)
+    info = model_route(route)
+    try:
+        declared = max(1, int(info.get("max_parallel") or 1))
+    except (TypeError, ValueError):
+        declared = 1
     raw = os.environ.get(model_route_env_key(route, "parallel"))
     if raw:
         try:
-            return max(1, int(raw))
+            requested = max(1, int(raw))
+            return min(requested, declared) if info.get("task_routes_managed") else requested
         except ValueError:
             return 1
-    info = model_route(route)
-    try:
-        return max(1, int(info.get("max_parallel") or 1))
-    except (TypeError, ValueError):
-        return 1
+    return declared
 
 
 def parse_route_list(raw: str) -> list[str]:
