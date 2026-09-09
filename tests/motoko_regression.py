@@ -10551,6 +10551,178 @@ def test_evidence_refresh_report_shows_refresh_mode_and_cause(m):
     assert "store: ev1 rows=12" in text
 
 
+def test_embedding_context_byte_safety_and_migration(m):
+    """A byte-fallback tokenizer can need one token per input byte."""
+    with isolated_state() as tmp:
+        content = "HEAD " + "a9f0:{}[];=" * 100 + " 多言語🪷 " * 60 + " TAIL"
+        source = tmp / "dense-code.txt"
+        source.write_text(content)
+        index = current_index_fixture(m, {
+            "id": "byte-safety", "name": "synthetic", "root": str(tmp),
+            "glob": m.AUTO_INDEX_GLOB, "created": m.now(),
+            "files": [{"path": str(source), "source_fingerprint": m.source_fingerprint(source),
+                       "summary": "Dense code and Unicode", "chunks": [{
+                           "chunk": 1, "content": content, "summary": "Keep head and tail",
+                           "content_sha256": m.sha256_hex(content.encode()),
+                           "content_bytes": len(content.encode()),
+                       }]}],
+        })
+        route = {"route": "test-embedding", "catalog_route": "test-embedding",
+                 "model": "synthetic-byte-tokenizer", "embedding_dimensions": 2,
+                 "max_parallel": 2, "context_tokens": 1024}
+        old_route, old_embed = m.embedding_route_info, m.embed_texts
+        seen = []
+
+        def byte_tokenizer(texts, **_kwargs):
+            for text in texts:
+                assert len(text.encode()) + 2 <= route["context_tokens"]
+                seen.append(text)
+            return [[1.0, 0.5] for _ in texts], route
+
+        try:
+            m.embedding_route_info = lambda *_args: route
+            m.embed_texts = byte_tokenizer
+            m.atomic_write(m.index_path(index["id"]), json.dumps(index))
+            store = m.build_embedding_vector_store_from_index(index)
+            assert store["embedding_input_bytes"] == 992
+            assert any("HEAD" in text for text in seen)
+            assert any("TAIL" in text for text in seen)
+            assert any("多言語🪷" in text for text in seen)
+            assert len(store["rows"]) == len(seen)
+            assert all(row["path"] == str(source) and row["chunk"] == 1 for row in store["rows"])
+            assert m.vector_store_freshness(store)[0] == "fresh"
+            legacy = dict(store, embedding_input_schema="embedding-input-v3")
+            assert m.vector_store_freshness(legacy)[0] == "stale"
+            assert not m.embedding_vector_store_reuse_compatible(legacy, index, route)
+            seen.clear()
+            repeated = m.build_embedding_vector_store_from_index(index)
+            assert not seen, "unchanged completed rows should be reused"
+            assert repeated["row_count"] == store["row_count"]
+            route["context_tokens"] = 512
+            assert m.vector_store_freshness(store)[0] == "stale"
+            smaller = m.build_embedding_vector_store_from_index(index)
+            assert smaller["embedding_input_bytes"] == 480
+            assert seen and all(len(text.encode()) <= 480 for text in seen)
+        finally:
+            m.embedding_route_info, m.embed_texts = old_route, old_embed
+
+
+def test_embedding_http_overflow_keeps_checkpoint_without_parallel_retry(m):
+    class OverflowHandler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            type(self).calls += 1
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {
+                "type": "exceed_context_size_error", "n_prompt_tokens": 1165,
+                "n_ctx": 1024, "message": "PRIVATE_RESPONSE_ECHO",
+            }}).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    with isolated_state() as tmp:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OverflowHandler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        route = {"route": "test-embedding", "catalog_route": "test-embedding",
+                 "model": "synthetic", "embedding_dimensions": 2, "max_parallel": 2,
+                 "endpoint": f"http://127.0.0.1:{server.server_port}/v1/embeddings"}
+        old_route = m.embedding_route_info
+        try:
+            m.embedding_route_info = lambda *_args: route
+            path = tmp / "source.txt"
+            content = "dense source " * 200
+            path.write_text(content)
+            index = current_index_fixture(m, {
+                "id": "overflow", "root": str(tmp), "name": "synthetic",
+                "files": [{"path": str(path), "chunks": [{
+                    "chunk": 1, "content": content,
+                    "content_sha256": m.sha256_hex(content.encode()),
+                }]}],
+            })
+            try:
+                m.build_embedding_vector_store_from_index(index)
+                raise AssertionError("expected serving context rejection")
+            except SystemExit as exc:
+                assert m.model_context_overflow_error(exc)
+                assert "1165 tokens; limit 1024" in str(exc)
+                assert "PRIVATE_RESPONSE_ECHO" not in str(exc)
+            assert 1 <= OverflowHandler.calls <= 2, "context errors must not retry at lower parallelism"
+            checkpoints = list(m.vector_progress_dir().glob("*.json"))
+            assert len(checkpoints) == 1
+            checkpoint = json.loads(checkpoints[0].read_text())
+            assert checkpoint["embedding_input_bytes"] == 992
+            assert checkpoint["embedding_parallel_fallbacks"] == []
+            assert all("PRIVATE_RESPONSE_ECHO" not in log.read_text()
+                       for log in (m.state_root() / "errors").glob("*.json"))
+        finally:
+            m.embedding_route_info = old_route
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=2)
+
+
+def test_embedding_safety_split_retains_selected_unicode(m):
+    text = "先頭🪷" + "abcdef0123456789 漢字 " * 100 + "終端"
+    rows = m.byte_bounded_embedding_rows([("parent", text, {"embedding_kind": "chunk_content"})], 120)
+    assert len(rows) > 1
+    assert all(len(part.encode()) <= 120 for _id, part, _meta in rows)
+    # Check every original short span survives at least one overlapping window.
+    assert all(any(text[pos:pos + 8] in part for _id, part, _meta in rows)
+               for pos in range(len(text) - 7))
+    assert len({row_id for row_id, _part, _meta in rows}) == len(rows)
+    assert all(meta["embedding_input_sha256"] == m.sha256_hex(part.encode())
+               for _id, part, meta in rows)
+
+
+def test_model_errors_have_private_diagnostics_and_red_scrollback(m):
+    detail = ('vector refresh failed: embedding request failed: model endpoint returned HTTP 400: '
+              '{"error":{"type":"exceed_context_size_error","n_prompt_tokens":1165,"n_ctx":1024,'
+              '"message":"PRIVATE_RESPONSE_ECHO"}}\nmotoko-model status:\nsocket=active\nproxy_unit=synthetic.service')
+    with isolated_state() as tmp:
+        ui = object.__new__(m.MotokoTui)
+        ui.messages = []
+        ui.events = m.collections.deque([("study_done", ["catalog refreshed", detail])])
+        ui.events_lock = m.threading.Lock()
+        ui.cwd_indexing = False
+        ui.study_running = True
+        ui.study_status = "bg-heavy: vectorizing(model)"
+        ui.study_last_note = ""
+        ui.maybe_start_queued_prompt = lambda: False
+        ui.drain_events()
+        assert len(ui.messages) == 1 and ui.messages[0]["role"] == "error"
+        message = ui.messages[0]["content"]
+        assert "1165 tokens; limit 1024" in message
+        assert "socket=" not in message and "proxy_unit=" not in message
+        assert "PRIVATE_RESPONSE_ECHO" not in message and "\n" not in message
+        assert not ui.study_last_note and not ui.study_running
+        logs = list((m.state_root() / "errors").glob("*.json"))
+        assert len(logs) == 1
+        log = json.loads(logs[0].read_text())
+        assert "proxy_unit=synthetic.service" in log["detail"]
+        assert "PRIVATE_RESPONSE_ECHO" not in log["detail"]
+        assert logs[0].stat().st_mode & 0o777 == 0o600
+        assert logs[0].parent.stat().st_mode & 0o777 == 0o700
+        ui.append("user", "Continue the conversation")
+        assert ui.messages[-2]["role"] == "error" and ui.messages[-1]["role"] == "user"
+        assert m.model_context_overflow_error(SystemExit(message))
+        # Re-reporting an already logged model error keeps its reference.
+        assert m.record_error_diagnostic(message) == message
+        assert len(list(logs[0].parent.glob("*.json"))) == 1
+        old_style = m.render_message_display_lines.__globals__["style"]
+        try:
+            m.render_message_display_lines.__globals__["style"] = lambda text, *colors: f"<red>{text}</red>" if "red" in colors else text
+            lines = m.render_message_display_lines({"role": "error", "content": "Failure detail"}, 100, assistant_color="purple")
+            assert any("<red>Failure detail</red>" in line for line in lines)
+        finally:
+            m.render_message_display_lines.__globals__["style"] = old_style
+
+
 def test_embedding_vector_store_splits_long_chunks_with_parent_mapping(m):
     old_endpoint = os.environ.get("MOTOKO_ENDPOINT")
     old_model = os.environ.get("MOTOKO_MODEL")
@@ -19163,6 +19335,10 @@ def main() -> int:
         test_embedding_vector_store_uses_catalog_route,
         test_vector_refresh_model_residency_defer_is_retryable,
         test_embedding_vector_store_splits_long_chunks_with_parent_mapping,
+        test_embedding_context_byte_safety_and_migration,
+        test_embedding_http_overflow_keeps_checkpoint_without_parallel_retry,
+        test_embedding_safety_split_retains_selected_unicode,
+        test_model_errors_have_private_diagnostics_and_red_scrollback,
         test_embedding_vector_store_parallelizes_batches,
         test_embedding_parallelism_allows_32_cap,
         test_retrieval_vector_query_uses_short_worker_timeouts,

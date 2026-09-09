@@ -5,6 +5,13 @@ not the easiest place to review what changed after a long work session.
 
 ## Unreleased
 
+- Fixed embedding context overflows on dense code and Unicode by splitting
+  selected input into overlapping byte-bounded rows. Old vectors rebuild through
+  the existing resumable heavy lane; context errors no longer waste retries by
+  reducing parallelism.
+- Background and report errors now appear as concise red conversation rows.
+  Private bounded logs retain diagnostics, while socket/service dumps and raw
+  HTTP response bodies stay out of normal error messages.
 - Improved deterministic self-code inspection by replacing anonymous CLI
   dispatch lambdas with named command handlers. `motoko code-map` and
   `motoko code-query` now link those commands to concrete source locations,

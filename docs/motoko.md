@@ -1954,9 +1954,33 @@ retrieval can map the vector hit back to the real source chunk. Tune
 `MOTOKO_EMBEDDING_INPUT_CHARS=N` only for diagnosis or after route limits are
 verified, and `MOTOKO_EMBEDDING_MAX_PARTS_PER_CHUNK=N` when testing the
 recall/storage tradeoff for unusually long chunks.
+The final embedding input also has a UTF-8 byte ceiling, reserving 32 tokens
+within a conservative 1,024-token serving budget (or a smaller catalog-declared
+`context_tokens`). Byte-fallback tokenizers can use nearly one token per byte
+for dense code or multilingual text, so a character limit alone is insufficient.
+Selected inputs that exceed this ceiling get overlapping, source-linked safety
+windows; these windows retain all selected text and may exceed the coarse
+`MAX_PARTS_PER_CHUNK` source-selection cap. Context-overflow errors do not trigger
+retries at lower concurrency because concurrency cannot shorten an input.
+
+This is the `embedding-input-v4` policy. Earlier vector stores and checkpoints
+are incompatible and require model reprocessing, not a coordinate migration.
+The existing visible heavy vector-refresh lane rebuilds eligible stores from
+approved source/index material and checkpoints completed batches. A disabled
+heavy lane leaves them pending until `/bg-heavy` or `/vector-refresh` is used.
+Changing the byte budget also invalidates incompatible progress and stores.
 Embedding and reranker routes fail fast when their declared local model files
 are missing, and the diagnostic includes the `motoko-model verify ROUTE`
 command plus the catalog download URL/hash when available.
+In the TUI, failures appear as concise red conversation rows and scroll with
+later messages. Background failures no longer populate the bottom status line,
+and report failures do not open an error overlay. Detailed errors and available
+model-helper diagnostics are saved under the current Motoko state directory's
+`errors/` folder; each message includes its relative log filename. That folder
+is private (0700), records are private (0600), and only the newest 100 records
+are retained. HTTP response bodies are omitted because they can echo private
+inputs; status and context-token counts remain inspectable. If logging fails,
+the visible error says the log is unavailable.
 Completed embedding batches are checkpointed under
 `~/.local/state/motoko/vector-progress/`, and a later `vector-refresh` for the
 same source fingerprint plus embedding route/model/dimensions resumes from

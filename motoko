@@ -163,7 +163,7 @@ from motoko_core.model_io import (  # noqa: E402
     chat_completion_payload,
     endpoint_is_unix,
     iter_cancelable_response_lines,
-    model_request_failure_detail,
+    model_request_failure_detail as core_model_request_failure_detail,
     model_request_timeout as model_io_request_timeout,
     open_model_response as open_model_response_core,
     parse_openai_stream_line,
@@ -387,6 +387,7 @@ from motoko_core.vector_store import (  # noqa: E402
     reusable_embedding_vector_row as core_reusable_embedding_vector_row,
     sparse_dot,
     split_embedding_content_parts,
+    byte_bounded_embedding_rows,
     vector_plan_readiness_gates as core_vector_plan_readiness_gates,
     vector_plan_row_plans as core_vector_plan_row_plans,
     vector_query_rank_rows as core_vector_query_rank_rows,
@@ -540,6 +541,9 @@ from motoko_core.artifact_lifecycle import (  # noqa: E402
     superseded_stale_index_candidates,
 )
 from motoko_core.observability import (  # noqa: E402
+    concise_error,
+    error_log_detail,
+    background_note_is_error,
     format_observability_report,
 )
 from motoko_core.state import (  # noqa: E402
@@ -722,7 +726,7 @@ GOAL_READONLY_MAX_MODEL_OUTPUT_TOKENS = 2048
 LEXICAL_VECTOR_METHOD = "lexical-hash-v1"
 EMBEDDING_VECTOR_METHOD = "embedding-v1"
 VECTOR_METHOD_AUTO = "auto"
-EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v3"
+EMBEDDING_INPUT_SCHEMA_VERSION = "embedding-input-v4"
 EVIDENCE_INPUT_SCHEMA_VERSION = "evidence-input-v2"
 EMBEDDING_TASKS = {"embedding", "embed", "vector", "vector_embedding", "vector_index", "vector_query"}
 RERANKER_TASKS = {"reranker", "rerank", "vector_rerank"}
@@ -10570,6 +10574,7 @@ def vector_store_catalog_record(store: dict) -> dict:
         "embedding_route": store.get("embedding_route", {}) if isinstance(store.get("embedding_route"), dict) else {},
         "embedding_input_schema": store.get("embedding_input_schema", ""),
         "embedding_input_chars": store.get("embedding_input_chars", 0),
+        "embedding_input_bytes": store.get("embedding_input_bytes", 0),
         "embedding_max_parts_per_chunk": store.get("embedding_max_parts_per_chunk", 0),
         "vector_row_id_schema": store.get("vector_row_id_schema", ""),
         "embedding_batch_size": store.get("embedding_batch_size", 0),
@@ -12738,6 +12743,7 @@ def model_context_overflow_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return (
         "exceeds the available context size" in text
+        or "input exceeds the model context" in text
         or "exceed_context_size" in text
         or ("n_prompt_tokens" in text and "n_ctx" in text)
     )
@@ -14454,6 +14460,7 @@ def capability_route_request_info(row: dict, *, default_path: str) -> dict:
         "model": str(row.get("model") or ""),
         "manager_kind": str(row.get("manager_kind") or ""),
         "max_parallel": row.get("max_parallel") or 1,
+        "context_tokens": row.get("context_tokens") or 0,
         "request_policy": normalize_request_policy(row.get("request_policy")),
         "scheduling": normalize_scheduling_policy(row.get("scheduling")),
         "idle_seconds": row.get("idle_seconds"),
@@ -14687,6 +14694,13 @@ def embedding_input_chars_limit() -> int:
     return max(400, min(env_int("MOTOKO_EMBEDDING_INPUT_CHARS", EMBEDDING_INPUT_CHARS, minimum=400), 8000))
 
 
+def embedding_input_bytes_limit(route_info: dict | None = None) -> int:
+    # Some embedding catalogs omit the serving context. Keep a conservative
+    # 1K fallback and reserve special-token overhead; honor smaller declarations.
+    context = safe_int((route_info or {}).get("context_tokens")) or 1024
+    return max(4, min(1024, context) - 32)
+
+
 def embedding_max_parts_per_chunk() -> int:
     return max(
         1,
@@ -14768,7 +14782,8 @@ def vector_embedding_header(file_item: dict, chunk: dict, *, part_label: str = "
     )
 
 
-def vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> list[tuple[str, str, dict]]:
+def vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict, *, byte_limit: int | None = None) -> list[tuple[str, str, dict]]:
+    byte_limit = byte_limit or embedding_input_bytes_limit()
     limit = embedding_input_chars_limit()
     max_parts = embedding_max_parts_per_chunk()
     content = read_chunk_content(index, chunk)
@@ -14786,7 +14801,7 @@ def vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> li
             "embedding_input_chars": len(text),
             "embedding_input_sha256": sha256_hex(text.encode("utf-8")),
         }
-        return [(metadata["id"], text, metadata)] if text.strip() else []
+        return byte_bounded_embedding_rows([(metadata["id"], text, metadata)], byte_limit) if text.strip() else []
     rows = []
     part_count = len(content_parts)
     for idx, part in enumerate(content_parts, start=1):
@@ -14810,7 +14825,7 @@ def vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> li
                 },
             )
         )
-    return rows
+    return byte_bounded_embedding_rows(rows, byte_limit)
 
 
 def evidence_embedding_text(file_item: dict, row: dict, *, limit: int) -> str:
@@ -14831,7 +14846,7 @@ def evidence_embedding_text(file_item: dict, row: dict, *, limit: int) -> str:
     return bounded_vector_embedding_text(header, str(row.get("text", "")), limit=limit)
 
 
-def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict) -> list[tuple[str, str, dict]]:
+def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: dict, *, byte_limit: int | None = None) -> list[tuple[str, str, dict]]:
     limit = embedding_input_chars_limit()
     rows = []
     for item in evidence_objects_for_chunk(index, file_item, chunk):
@@ -14879,7 +14894,7 @@ def evidence_vector_embedding_input_rows(index: dict, file_item: dict, chunk: di
                 },
             )
         )
-    return rows
+    return byte_bounded_embedding_rows(rows, byte_limit or embedding_input_bytes_limit())
 
 
 def default_vector_index(conv: dict | None = None, *, project_scope: dict | None = None) -> dict:
@@ -15229,6 +15244,8 @@ def embedding_vector_store_reuse_compatible(store: dict, index: dict, route_info
         return False
     if int_or_zero(store.get("embedding_input_chars")) != embedding_input_chars_limit():
         return False
+    if int_or_zero(store.get("embedding_input_bytes")) != embedding_input_bytes_limit(route_info):
+        return False
     if int_or_zero(store.get("embedding_max_parts_per_chunk")) != embedding_max_parts_per_chunk():
         return False
     return True
@@ -15258,6 +15275,7 @@ def build_embedding_vector_store_from_index(
         raise SystemExit(reason)
     route_info = embedding_route_info()
     store_id = store_id or _dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    byte_limit = embedding_input_bytes_limit(route_info)
     source_fingerprint = vector_store_source_fingerprint(index)
     route_identity = core_embedding_vector_route_identity(route_info)
     route_id = route_identity["route_id"]
@@ -15265,8 +15283,8 @@ def build_embedding_vector_store_from_index(
     route_dims = route_identity["route_dims"]
     candidates = core_collect_embedding_vector_candidates(
         index,
-        vector_embedding_input_rows,
-        evidence_vector_embedding_input_rows,
+        lambda index, file_item, chunk: vector_embedding_input_rows(index, file_item, chunk, byte_limit=byte_limit),
+        lambda index, file_item, chunk: evidence_vector_embedding_input_rows(index, file_item, chunk, byte_limit=byte_limit),
         cancel_check=check_vector_cancelled,
     )
     batch_size = embedding_batch_size(route_info, len(candidates))
@@ -15285,6 +15303,7 @@ def build_embedding_vector_store_from_index(
         route_dims=route_dims,
         embedding_input_schema=EMBEDDING_INPUT_SCHEMA_VERSION,
         embedding_input_chars=embedding_input_chars_limit(),
+        embedding_input_bytes=byte_limit,
         embedding_max_parts_per_chunk=embedding_max_parts_per_chunk(),
         vector_row_id_schema=VECTOR_ROW_ID_SCHEMA_VERSION,
     )
@@ -15391,6 +15410,7 @@ def build_embedding_vector_store_from_index(
             route_dims=route_dims,
             embedding_input_schema=EMBEDDING_INPUT_SCHEMA_VERSION,
             embedding_input_chars=embedding_input_chars_limit(),
+            embedding_input_bytes=byte_limit,
             embedding_max_parts_per_chunk=embedding_max_parts_per_chunk(),
             vector_row_id_schema=VECTOR_ROW_ID_SCHEMA_VERSION,
             embedding_batch_size=batch_size,
@@ -15563,7 +15583,7 @@ def build_embedding_vector_store_from_index(
                 run_parallel_batches(pending_batches, active_parallelism)
             except SystemExit as exc:
                 write_progress()
-                if model_request_deferred_by_residency(exc):
+                if model_request_deferred_by_residency(exc) or model_context_overflow_error(exc):
                     raise
                 if active_parallelism <= 1:
                     raise
@@ -15649,6 +15669,7 @@ def build_embedding_vector_store_from_index(
         embedding_refresh_cause=refresh_cause,
         embedding_input_schema=EMBEDDING_INPUT_SCHEMA_VERSION,
         embedding_input_chars=embedding_input_chars_limit(),
+        embedding_input_bytes=byte_limit,
         embedding_max_parts_per_chunk=embedding_max_parts_per_chunk(),
         vector_row_id_schema=VECTOR_ROW_ID_SCHEMA_VERSION,
         checkpoint_reused_rows=checkpoint_reused_rows,
@@ -15812,6 +15833,8 @@ def vector_store_freshness(store: dict) -> tuple[str, list[str]]:
             ]
         stored_input_chars = int_or_zero(store.get("embedding_input_chars"))
         current_input_chars = embedding_input_chars_limit()
+        if int_or_zero(store.get("embedding_input_bytes")) != embedding_input_bytes_limit(current_route):
+            return "stale", ["embedding byte budget changed; rebuild this vector store"]
         if stored_input_chars != current_input_chars:
             return "stale", [
                 f"embedding input size changed from {stored_input_chars or 'missing'} to {current_input_chars}; rebuild this vector store"
@@ -16065,7 +16088,8 @@ def format_vector_store(store: dict) -> str:
     return "\n".join(lines)
 
 
-def vector_embedding_candidate_counts(index: dict) -> dict:
+def vector_embedding_candidate_counts(index: dict, *, route_info: dict | None = None) -> dict:
+    byte_limit = embedding_input_bytes_limit(route_info)
     raw_rows = 0
     evidence_rows = 0
     chunk_count = 0
@@ -16074,8 +16098,8 @@ def vector_embedding_candidate_counts(index: dict) -> dict:
         file_count += 1
         for chunk in file_item.get("chunks", []):
             chunk_count += 1
-            raw_rows += len(vector_embedding_input_rows(index, file_item, chunk))
-            evidence_rows += len(evidence_vector_embedding_input_rows(index, file_item, chunk))
+            raw_rows += len(vector_embedding_input_rows(index, file_item, chunk, byte_limit=byte_limit))
+            evidence_rows += len(evidence_vector_embedding_input_rows(index, file_item, chunk, byte_limit=byte_limit))
     return {
         "files": file_count,
         "chunks": chunk_count,
@@ -16088,7 +16112,7 @@ def vector_embedding_candidate_counts(index: dict) -> dict:
 def format_vector_doctor(index_id: str | None = None, conv: dict | None = None) -> str:
     route_info = embedding_route_info()
     index = load_index(index_id) if index_id else default_vector_index(conv)
-    counts = vector_embedding_candidate_counts(index)
+    counts = vector_embedding_candidate_counts(index, route_info=route_info)
     total_rows = int(counts.get("total_rows", 0) or 0)
     batch_size = embedding_batch_size(route_info, total_rows)
     batch_count = (total_rows + batch_size - 1) // batch_size if total_rows else 0
@@ -16117,7 +16141,7 @@ def format_vector_doctor(index_id: str | None = None, conv: dict | None = None) 
         f"index: {index.get('id', '')}  files={counts.get('files', 0)} chunks={counts.get('chunks', 0)}",
         f"candidate rows: raw={counts.get('raw_rows', 0)} evidence={counts.get('evidence_rows', 0)} total={total_rows}",
         f"planned batches: {batch_count}  batch size: {batch_size}  requested parallel: {requested_parallelism}",
-        f"input policy: chars={embedding_input_chars_limit()} max_parts_per_chunk={embedding_max_parts_per_chunk()}",
+        f"input policy: chars={embedding_input_chars_limit()} bytes={embedding_input_bytes_limit(route_info)} max_parts_per_chunk={embedding_max_parts_per_chunk()}",
         f"env overrides: {env_text}",
     ]
     if store is not None:
@@ -18921,7 +18945,10 @@ def background_study_step(
         catalog_updated=catalog.get("updated", ""),
         catalog_refresh_deferred=catalog_refresh_deferred,
     )
-    return notes[:12] if manual else notes[:3]
+    # Errors must reach the transcript even when ordinary planning notes exceed
+    # the display allowance. The complete pass remains in the study job trail.
+    limit = 12 if manual else 3
+    return notes[:limit] + [note for note in notes[limit:] if background_note_is_error(note)]
 
 
 def hybrid_candidate_document(index: dict, candidate: dict, query: str = "") -> str:
@@ -19762,6 +19789,33 @@ def local_model_verify_hint(route_info: dict) -> str:
         status_provider=local_model_status_text,
         helper_available=bool(shutil.which("motoko-model")),
     )
+
+
+def record_error_diagnostic(detail: str) -> str:
+    summary = concise_error(detail)
+    if "[error log:" in str(detail):
+        return summary
+    try:
+        directory = ensure_private_dir(state_root() / "errors")
+        error_id = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S%f") + "-" + uuid.uuid4().hex[:8]
+        with exclusive_file_lock(directory / ".lock"):
+            atomic_write(directory / f"{error_id}.json", json.dumps({
+                "schema": "error-diagnostic-v1",
+                "created": now(),
+                "summary": summary,
+                "detail": error_log_detail(detail),
+            }, ensure_ascii=False, indent=2) + "\n")
+            # Bound realm-local diagnostics; conversations and source documents
+            # are never copied into these records.
+            for old in sorted(directory.glob("????????-????????????-????????.json"))[:-100]:
+                old.unlink()
+    except OSError:
+        return summary + " (error log unavailable)"
+    return summary + f" [error log: errors/{error_id}.json]"
+
+
+def model_request_failure_detail(prefix: str, exc: BaseException, hint: str = "") -> str:
+    return record_error_diagnostic(core_model_request_failure_detail(prefix, exc, hint))
 
 
 class RouteResidencyBusy(RuntimeError):
@@ -23138,6 +23192,8 @@ class MotokoTui:
         return False
 
     def append(self, role: str, content: str) -> dict:
+        if role == "error":
+            content = record_error_diagnostic(content)
         row = {"role": role, "content": content}
         self.messages.append(row)
         self.scroll = 0
@@ -24155,9 +24211,7 @@ class MotokoTui:
             elif kind == "report_error":
                 token, label, text = event[1], event[2], event[3]
                 if token == getattr(self, "active_report_token", 0):
-                    self.overlay_title = label
-                    self.overlay_lines = [f"error {text}"]
-                    self.overlay_scroll = 0
+                    self.append("error", text)
                 self.report_running = max(0, self.report_running - 1)
                 if not self.report_running:
                     self.report_status = ""
@@ -24174,7 +24228,11 @@ class MotokoTui:
                 token, _label, text = event[1], event[2], event[3]
                 if token == getattr(self, "active_foreground_token", 0):
                     if text:
-                        self.append("system", text)
+                        if _label == "Running background catch-up...":
+                            for line in text.splitlines():
+                                self.append("error" if background_note_is_error(line) else "system", line.removeprefix("- "))
+                        else:
+                            self.append("system", text)
                     self.active_foreground_token = 0
                 self.foreground_running = max(0, self.foreground_running - 1)
                 if not self.foreground_running:
@@ -24223,7 +24281,7 @@ class MotokoTui:
                 self.maintenance_retry_at = 0.0
                 self.maintenance_status = ""
                 self.status = "ready"
-                self.append("system", f"memory maintenance failed: {event[1]}")
+                self.append("error", f"memory maintenance failed: {event[1]}")
                 changed = True
             elif kind == "maintenance_phase":
                 self.maintenance_status = event[1]
@@ -24245,7 +24303,10 @@ class MotokoTui:
                     continue
                 self.study_running = False
                 notes = list(event[1] or [])
-                self.study_last_note = "; ".join(notes) if notes else "catalog fresh"
+                for note in notes:
+                    if background_note_is_error(note):
+                        self.append("error", note)
+                self.study_last_note = "catalog fresh" if not notes or notes == ["catalog fresh"] else ""
                 self.study_status = "study: idle"
                 self.maybe_start_queued_prompt()
                 changed = True
@@ -24254,7 +24315,9 @@ class MotokoTui:
                     continue
                 self.study_running = False
                 self.study_status = "study: idle"
-                self.study_last_note = f"study failed: {event[1]}"
+                self.study_last_note = ""
+                self.append("error", f"background study failed: {event[1]}")
+                self.maybe_start_queued_prompt()
                 changed = True
             elif kind == "cwd_index_progress":
                 self.index_progress = event[1]
@@ -24290,7 +24353,7 @@ class MotokoTui:
                 self.study_running = False
                 self.index_progress = None
                 self.study_status = "study: idle"
-                self.study_last_note = f"corpus learning failed: {event[1]}"
+                self.study_last_note = ""
                 self.append("error", f"corpus learning failed: {event[1]}")
                 changed = True
             elif kind == "startup_discovery":
@@ -24310,7 +24373,8 @@ class MotokoTui:
                 if self.study_status.startswith("bg-light: startup"):
                     self.study_running = False
                     self.study_status = "study: idle"
-                self.study_last_note = f"startup discovery skipped: {event[1]}"
+                self.study_last_note = ""
+                self.append("error", f"startup discovery failed: {event[1]}")
                 changed = True
             elif kind == "system_note":
                 self.append("system", event[1])
@@ -24372,7 +24436,7 @@ class MotokoTui:
                     self.put_event(("study_done", [note]))
                     if work_cancel_requested(cancel_event):
                         break
-                except Exception as exc:  # Background study must not break chat.
+                except (Exception, SystemExit) as exc:  # Background study must not break chat.
                     self.put_event(("study_error", f"{type(exc).__name__}: {exc}"))
                 else:
                     self.put_event(("study_done", notes))

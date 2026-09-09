@@ -7,6 +7,7 @@ import http.client
 import json
 import socket
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -432,7 +433,13 @@ def open_model_response(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=request_timeout) as resp:
+    try:
+        response = urllib.request.urlopen(req, timeout=request_timeout)
+    except urllib.error.HTTPError as exc:
+        body = exc.read(1200).decode("utf-8", errors="replace")
+        exc.close()
+        raise OSError(f"model endpoint returned HTTP {exc.code}: {body}") from exc
+    with response as resp:
         if on_response is not None:
             on_response(resp)
         try:

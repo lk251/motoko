@@ -377,6 +377,7 @@ def embedding_vector_progress_key(
     route_dims: int,
     embedding_input_schema: str,
     embedding_input_chars: int,
+    embedding_input_bytes: int = 0,
     embedding_max_parts_per_chunk: int,
     vector_row_id_schema: str,
 ) -> dict:
@@ -391,6 +392,7 @@ def embedding_vector_progress_key(
         "embedding_dimensions": _int_or_zero(route_dims),
         "embedding_input_schema": embedding_input_schema,
         "embedding_input_chars": _int_or_zero(embedding_input_chars),
+        "embedding_input_bytes": _int_or_zero(embedding_input_bytes),
         "embedding_max_parts_per_chunk": _int_or_zero(embedding_max_parts_per_chunk),
         "vector_row_id_schema": vector_row_id_schema,
     }
@@ -417,6 +419,7 @@ def embedding_vector_progress_matches(progress: dict, progress_key: dict) -> boo
         and _int_or_zero(route.get("embedding_dimensions")) == _int_or_zero(progress_key.get("embedding_dimensions"))
         and progress.get("embedding_input_schema") == progress_key.get("embedding_input_schema")
         and _int_or_zero(progress.get("embedding_input_chars")) == _int_or_zero(progress_key.get("embedding_input_chars"))
+        and _int_or_zero(progress.get("embedding_input_bytes")) == _int_or_zero(progress_key.get("embedding_input_bytes"))
         and _int_or_zero(progress.get("embedding_max_parts_per_chunk"))
         == _int_or_zero(progress_key.get("embedding_max_parts_per_chunk"))
         and progress.get("vector_row_id_schema") == progress_key.get("vector_row_id_schema")
@@ -476,6 +479,7 @@ def embedding_vector_progress_record(
     route_dims: int,
     embedding_input_schema: str,
     embedding_input_chars: int,
+    embedding_input_bytes: int = 0,
     embedding_max_parts_per_chunk: int,
     vector_row_id_schema: str,
     embedding_batch_size: int,
@@ -516,6 +520,7 @@ def embedding_vector_progress_record(
         ),
         "embedding_input_schema": embedding_input_schema,
         "embedding_input_chars": _int_or_zero(embedding_input_chars),
+        "embedding_input_bytes": _int_or_zero(embedding_input_bytes),
         "embedding_max_parts_per_chunk": _int_or_zero(embedding_max_parts_per_chunk),
         "vector_row_id_schema": vector_row_id_schema,
         "embedding_batch_size": _int_or_zero(embedding_batch_size),
@@ -559,6 +564,7 @@ def embedding_vector_store_record(
     embedding_refresh_cause: str,
     embedding_input_schema: str,
     embedding_input_chars: int,
+    embedding_input_bytes: int = 0,
     embedding_max_parts_per_chunk: int,
     vector_row_id_schema: str,
     checkpoint_reused_rows: int,
@@ -605,6 +611,7 @@ def embedding_vector_store_record(
         "embedding_refresh_cause": embedding_refresh_cause,
         "embedding_input_schema": embedding_input_schema,
         "embedding_input_chars": _int_or_zero(embedding_input_chars),
+        "embedding_input_bytes": _int_or_zero(embedding_input_bytes),
         "embedding_max_parts_per_chunk": _int_or_zero(embedding_max_parts_per_chunk),
         "vector_row_id_schema": vector_row_id_schema,
         "embedding_checkpoint_reused_rows": _int_or_zero(checkpoint_reused_rows),
@@ -1077,6 +1084,45 @@ def reusable_embedding_vector_row(
         row_meta,
         embedding_input_schema=embedding_input_schema,
     )
+
+
+def byte_bounded_embedding_rows(rows: list[tuple[str, str, dict]], budget: int) -> list[tuple[str, str, dict]]:
+    """Subdivide selected inputs without dropping text or breaking Unicode.
+
+    UTF-8 bytes are a conservative token bound for the byte-fallback local
+    tokenizers. The caller reserves space for special tokens. Unlike the
+    coarse source selection cap, this final safety split retains every byte.
+    """
+    budget = max(4, int(budget))
+    result = []
+    for row_id, text, metadata in rows:
+        parts = []
+        start = 0
+        while start < len(text):
+            end, used = start, 0
+            while end < len(text):
+                size = len(text[end].encode("utf-8"))
+                if used + size > budget:
+                    break
+                used += size
+                end += 1
+            parts.append(text[start:end])
+            if end == len(text):
+                break
+            # Small overlap keeps phrases retrievable across a safety split.
+            start = max(start + 1, end - min(32, (end - start) // 8))
+        for number, part in enumerate(parts, 1):
+            part_id = row_id if len(parts) == 1 else f"{row_id}:window:{number}"
+            result.append((part_id, part, {
+                **metadata,
+                "id": part_id,
+                "embedding_input_chars": len(part),
+                "embedding_input_sha256": hashlib.sha256(part.encode("utf-8")).hexdigest(),
+            }))
+    for number, (_row_id, _text, metadata) in enumerate(result, 1):
+        metadata["embedding_part"] = number
+        metadata["embedding_part_count"] = len(result)
+    return result
 
 
 def split_embedding_content_parts(content: str, budget: int, max_parts: int) -> list[str]:

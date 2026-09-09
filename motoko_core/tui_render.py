@@ -85,7 +85,9 @@ def status_display_lines(
     elif study_status == "study: off":
         status_parts.append(style("bg: off", "dim"))
     elif study_last_note:
-        status_parts.append(style(f"bg: idle ({study_last_note})", "dim"))
+        note = " ".join(str(study_last_note).split())
+        note = note[:77] + "..." if len(note) > 80 else note
+        status_parts.append(style(f"bg: idle ({note})", "dim"))
     else:
         status_parts.append(style("bg: idle", "dim"))
     if status_parts:
@@ -230,6 +232,9 @@ def message_display_lines(
     body_width = width - len(strip_ansi(prefix))
     wrapped = []
     for raw_line in content.splitlines() or [""]:
+        if role == "error":
+            wrapped.extend(wrap_display_line(style(raw_line, "red"), body_width))
+            continue
         if raw_line.startswith("```"):
             code = not code
             wrapped.extend(wrap_display_line(style(raw_line, "magenta"), body_width, word_wrap=False))
