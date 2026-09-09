@@ -6,6 +6,22 @@ This file preserves important Motoko projects that are intentionally deferred ra
 
 Deferred means: do not assume the project should be implemented immediately or displace current hardening work, but do not delete, narrow, or contradict the direction without an explicit design decision.
 
+## Working-directory-aware retrieval
+
+Possible future direction, deferred for evaluation: adapt the retrieval
+pipeline to the nature of the working directory. Org/personal-text collections,
+code repositories, Nix configuration repositories, and mixed directories may
+benefit from different parsers, evidence units, relationship indexes, and ranking
+strategies while sharing provenance, candidate fusion, and context packing.
+
+Keep the design open: evaluate directory-level profiles, per-file routing, and
+hybrid approaches against representative queries before choosing an
+architecture. Directory detection should be inspectable and overridable, handle
+mixed or unknown content, and preserve explicit source allowlists and indexing
+consent. Entering a directory must not itself authorize new indexing or broader
+access. Any artifact changes need the existing migration or resumable
+reprocessing path. This idea does not reprioritize the hardening queue below.
+
 ## Prioritized hardening and memory work, 2026-09-08
 
 Implementation is **deferred at the maintainer's request** after the initial

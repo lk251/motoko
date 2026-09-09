@@ -1583,6 +1583,9 @@ Current high-value future work:
   with code-aware artifacts and ranking, retain a specialized code-retrieval
   pipeline, or combine shared candidate fusion with language-aware parsing and
   indexes;
+- consider [working-directory-aware retrieval](deferred-projects.md#working-directory-aware-retrieval)
+  that adapts parsing, evidence selection, and ranking to Org/text collections,
+  code repositories, Nix configuration repositories, or mixed directories;
 - decide the code-retrieval shape from inspectable evaluations while preserving
   provenance, per-user isolation, artifact migrations or source reprocessing,
   and source visibility;
