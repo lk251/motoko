@@ -1,6 +1,6 @@
 # Deferred Strategic Projects
 
-Date: 2026-09-08
+Date: 2026-09-09
 
 This file preserves important Motoko projects that are intentionally deferred rather than abandoned. Agents working in this repository should read it before making substantial changes to memory, retrieval, context management, conversation storage, model orchestration, or long-running chat behavior.
 
@@ -21,6 +21,25 @@ mixed or unknown content, and preserve explicit source allowlists and indexing
 consent. Entering a directory must not itself authorize new indexing or broader
 access. Any artifact changes need the existing migration or resumable
 reprocessing path. This idea does not reprioritize the hardening queue below.
+
+## Local ~27B NixOS engineering agent for `nixos-configs`
+
+Status: deferred design and evaluation project. See
+[`docs/nixos-configs-local-engineering-agent.md`](nixos-configs-local-engineering-agent.md).
+
+The narrow goal is to make locally served Qwen3.8-27B and future models in the
+same practical size/hardware class as capable as possible when working on the
+separate `nixos-configs` repository and the NixOS systems it declares. The
+project deliberately reframes the problem from "better repository RAG" to a
+NixOS-specific engineering Agent-Computer Interface with deterministic Nix
+semantics, worktree isolation, validation, Git/source evidence, optional
+retrieval, and eventually bounded live-system observation and reviewed actions.
+
+Prototype and benchmark this externally before assuming it belongs inside
+Motoko. The linked design compares OpenHands SDK and the already integrated
+OpenWorker path, defines a private `nixos-configs` eval/ablation plan, and
+preserves Motoko's current no-arbitrary-shell/no-host-admin boundary unless a
+later explicit design review changes it.
 
 ## Prioritized hardening and memory work, 2026-09-08
 
