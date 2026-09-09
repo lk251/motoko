@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 
 from .state import config_path, local_models_path, safe_load_json
@@ -53,6 +54,7 @@ LOCAL_MODEL_ROUTE_TASK_ALIASES = {
     MODEL_ROUTE_AUDIT: ("audit", "deep_synthesis"),
 }
 
+# Compatibility for older catalogs; explicit task_routes owns managed selection.
 LOCAL_MODEL_ROUTE_PREFERENCES = {
     MODEL_ROUTE_CHAT: ("qwen36-chat-default", "qwen36-chat"),
     MODEL_ROUTE_INDEX_CHUNK: ("qwen35-2b-worker", "ministral-3b-worker"),
@@ -77,8 +79,20 @@ def configured_identity_realm() -> str:
 
 
 def load_local_model_catalog() -> dict:
-    data = safe_load_json(local_models_path())
-    return data if isinstance(data, dict) else {}
+    path = local_models_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        if not path.is_symlink():
+            return {}
+        raise SystemExit("cannot read local-models.json: broken catalog link") from None
+    except (OSError, UnicodeError):
+        raise SystemExit("cannot read local-models.json") from None
+    except json.JSONDecodeError:
+        raise SystemExit("invalid local-models.json: malformed JSON") from None
+    if not isinstance(data, dict):
+        raise SystemExit("invalid local-models.json: expected an object")
+    return data
 
 
 def normalize_model_route(route: str | None, *, strict: bool = True) -> str:
@@ -109,6 +123,42 @@ def local_model_catalog_models(catalog: dict | None = None) -> dict:
     catalog = catalog if isinstance(catalog, dict) else load_local_model_catalog()
     models = catalog.get("models")
     return models if isinstance(models, dict) else {}
+
+
+def catalog_task_routes(catalog: dict) -> dict | None:
+    """Validate explicit task policy; absence preserves the legacy selector."""
+    if "task_routes" not in catalog:
+        return None
+    policy = catalog["task_routes"]
+    if not isinstance(policy, dict) or set(policy) != set(MODEL_ROUTE_DESCRIPTIONS):
+        raise SystemExit("invalid local-models.json task_routes: expected all ten logical tasks")
+    routes = local_model_catalog_routes(catalog)
+    for task, references in policy.items():
+        if (
+            not isinstance(references, list)
+            or not references
+            or any(not isinstance(item, str) or not item.strip() for item in references)
+            or len(set(references)) != len(references)
+        ):
+            raise SystemExit(f"invalid local-models.json task_routes: invalid route list for {task}")
+        aliases = set(LOCAL_MODEL_ROUTE_TASK_ALIASES[task])
+        for route_id in references:
+            raw = routes.get(route_id)
+            if not isinstance(raw, dict):
+                raise SystemExit(f"invalid local-models.json task_routes: unknown route for {task}")
+            endpoint = raw.get("endpoint")
+            model_declared = any(
+                isinstance(raw.get(key), str) and raw[key].strip()
+                for key in ("model", "model_name", "modelId", "model_id")
+            )
+            if not isinstance(endpoint, str) or not endpoint.strip() or not model_declared:
+                raise SystemExit(f"invalid local-models.json task_routes: incomplete route for {task}")
+            summary = local_model_route_summary(route_id, raw, catalog)
+            if not aliases.intersection(summary["tasks"]):
+                raise SystemExit(f"invalid local-models.json task_routes: incompatible route for {task}")
+            if not summary["endpoint"] or not summary["model"]:
+                raise SystemExit(f"invalid local-models.json task_routes: incomplete route for {task}")
+    return policy
 
 
 def normalize_route_cache_policy(raw) -> dict:
@@ -471,8 +521,11 @@ def merged_local_model_route(route: str) -> dict:
     route = normalize_model_route(route)
     catalog = load_local_model_catalog()
     routes = local_model_catalog_routes(catalog)
-    route_id = route
-    raw = routes.get(route) or routes.get(route.replace("_", "-")) or routes.get(route.replace("_", "."))
+    task_routes = catalog_task_routes(catalog)
+    route_id = task_routes[route][0] if task_routes is not None else route
+    raw = routes[route_id] if task_routes is not None else (
+        routes.get(route) or routes.get(route.replace("_", "-")) or routes.get(route.replace("_", "."))
+    )
     if raw is None:
         selected = local_model_route_entry_for_task(route, routes)
         if selected is not None:
@@ -484,8 +537,14 @@ def merged_local_model_route(route: str) -> dict:
     if not isinstance(raw, dict):
         return {}
     info = {key: value for key, value in raw.items() if isinstance(key, str)}
-    info.setdefault("catalog_route", route_id)
+    info["task_routes_managed"] = task_routes is not None
+    if task_routes is not None:
+        info["catalog_route"] = route_id
+    else:
+        info.setdefault("catalog_route", route_id)
     summary = local_model_route_summary(route_id, raw, catalog)
+    if task_routes is not None:
+        info["endpoint"], info["model"] = summary["endpoint"], summary["model"]
     for key in ("cache", "request_policy", "scheduling", "idle_seconds", "safety_policy"):
         value = summary.get(key)
         if value not in ({}, None):

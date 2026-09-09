@@ -21,6 +21,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest import mock
+from unittest.mock import patch
 
 
 SOURCE = pathlib.Path(os.environ.get("MOTOKO_SOURCE", "motoko"))
@@ -3179,6 +3180,160 @@ def test_local_model_catalog_task_routes(m):
             os.environ.pop("MOTOKO_MODEL", None)
         else:
             os.environ["MOTOKO_MODEL"] = old_model
+
+
+def task_routing_catalog(prefix=""):
+    assignments = {
+        "chat": "chat-a", "index_chunk": "small", "index_file": "file",
+        "index_corpus": "synthesis", "index_label": "label", "topic": "synthesis",
+        "memory": "small", "profile": "synthesis", "title": "small", "audit": "synthesis",
+    }
+    capabilities = {
+        "small": ["index_chunk", "index_label", "memory_maintenance"],
+        "label": ["index_chunk", "index_label", "index_file"],
+        "file": ["index_file", "index_corpus", "audit"],
+        "synthesis": ["index_corpus", "synthesis", "audit"],
+        "chat-a": ["chat"], "chat-b": ["chat"],
+    }
+    routes = {
+        prefix + name: {
+            "endpoint": f"unix:///run/example/{prefix}{name}.sock",
+            "model": f"model-{prefix}{name}", "tasks": tasks, "maxParallel": 4,
+            "context_tokens": 32768,
+        }
+        for name, tasks in capabilities.items()
+    }
+    routes[prefix + "chat-a"]["selection"] = {"chat": {"name": "primary"}}
+    routes[prefix + "chat-b"]["selection"] = {
+        "default": True, "priority": 999, "chat": {"name": "alternate"},
+    }
+    policy = {task: [prefix + name] for task, name in assignments.items()}
+    policy["index_chunk"].append(prefix + "label")
+    policy["index_label"].append(prefix + "small")
+    return {"routes": routes, "task_routes": policy}
+
+
+def test_explicit_catalog_task_routing(m):
+    with isolated_state():
+        m.ensure_private_dir(m.config_root())
+        for prefix in ("", "renamed-"):
+            catalog = task_routing_catalog(prefix)
+            for reverse in (False, True):
+                if reverse:
+                    catalog["routes"] = dict(reversed(list(catalog["routes"].items())))
+                    catalog["task_routes"] = dict(reversed(list(catalog["task_routes"].items())))
+                m.atomic_write(m.local_models_path(), json.dumps(catalog))
+                assert set(catalog["task_routes"]) == set(m.MODEL_ROUTE_DESCRIPTIONS)
+                for task, choices in catalog["task_routes"].items():
+                    info = m.model_route(task)
+                    assert info["catalog_route"] == choices[0], task
+                    assert info["model"] == catalog["routes"][choices[0]]["model"]
+                    assert info["endpoint"] == catalog["routes"][choices[0]]["endpoint"]
+                assert m.resolve_chat_model("auto")["catalog_route"] == prefix + "chat-a"
+                assert m.select_chat_route([], mode="auto")[0]["catalog_route"] == prefix + "chat-a"
+                assert m.resolve_chat_model("alternate")["catalog_route"] == prefix + "chat-b"
+            catalog["task_routes"]["index_chunk"].reverse()
+            m.atomic_write(m.local_models_path(), json.dumps(catalog))
+            assert m.model_route("index_chunk")["catalog_route"] == prefix + "label"
+
+
+def test_explicit_task_routes_own_identity_and_parallelism(m):
+    overrides = {"MOTOKO_ENDPOINT": "unix:///wrong/global.sock", "MOTOKO_MODEL": "wrong-global"}
+    for task in m.MODEL_ROUTE_DESCRIPTIONS:
+        overrides[m.model_route_env_key(task, "endpoint")] = "unix:///wrong/task.sock"
+        overrides[m.model_route_env_key(task, "model")] = "wrong-task"
+    parallel_key = m.model_route_env_key("index_chunk", "parallel")
+    with isolated_state(), patch.dict(os.environ, overrides):
+        catalog = task_routing_catalog()
+        config = m.load_config()
+        config["model_routes"] = {
+            task: {"endpoint": "unix:///wrong/config.sock", "model": "wrong-config"}
+            for task in m.MODEL_ROUTE_DESCRIPTIONS
+        }
+        m.save_config(config)
+        m.atomic_write(m.local_models_path(), json.dumps(catalog))
+        for task, choices in catalog["task_routes"].items():
+            info = m.model_route(task)
+            assert info["endpoint"] == catalog["routes"][choices[0]]["endpoint"]
+            assert info["model"] == catalog["routes"][choices[0]]["model"]
+        assert m.endpoint() == catalog["routes"]["chat-a"]["endpoint"]
+        assert m.model_name() == "model-chat-a"
+        assert m.resolve_chat_model("alternate")["model"] == "model-chat-b"
+        for requested, expected in (("99", 4), ("2", 2), ("bad", 1)):
+            os.environ[parallel_key] = requested
+            assert m.route_parallel_limit("index_chunk") == expected
+        del catalog["task_routes"]
+        m.atomic_write(m.local_models_path(), json.dumps(catalog))
+        for missing_catalog in (False, True):
+            if missing_catalog:
+                m.local_models_path().unlink()
+            assert m.model_route("index_chunk")["model"] == "wrong-task"
+            os.environ.pop(m.model_route_env_key("index_chunk", "endpoint"), None)
+            os.environ.pop(m.model_route_env_key("index_chunk", "model"), None)
+            assert m.model_route("index_chunk")["model"] == "wrong-config"
+            config["model_routes"] = {}
+            m.save_config(config)
+            assert m.model_route("index_chunk")["model"] == "wrong-global"
+            os.environ[parallel_key] = "99"
+            assert m.route_parallel_limit("index_chunk") == 99
+            os.environ.update(overrides)
+            config["model_routes"] = {"index_chunk": {"model": "wrong-config"}}
+            m.save_config(config)
+
+
+def test_invalid_task_catalog_never_uses_legacy_endpoint(m):
+    mutations = [
+        lambda c: c.update(task_routes=None),
+        lambda c: c["task_routes"].pop("memory"),
+        lambda c: c["task_routes"].update(unknown=["small"]),
+        lambda c: c["task_routes"].update(index_chunk=[]),
+        lambda c: c["task_routes"].update(index_chunk="small"),
+        lambda c: c["task_routes"].update(index_chunk=[{}]),
+        lambda c: c["task_routes"].update(index_chunk=[" "]),
+        lambda c: c["task_routes"].update(index_chunk=["small", "small"]),
+        lambda c: c["task_routes"].update(index_chunk=["missing", "small"]),
+        lambda c: c["task_routes"].update(index_chunk=["small", "missing"]),
+        lambda c: c["task_routes"].update(index_chunk=["chat-a"]),
+        lambda c: c["routes"].update(small="unix:///wrong/string.sock"),
+        lambda c: c["routes"]["small"].pop("endpoint"),
+        lambda c: c["routes"]["small"].update(endpoint=42),
+        lambda c: (
+            c.update(manager={"kind": "systemd-socket-worker"}),
+            c["routes"]["small"].pop("endpoint"),
+        ),
+        lambda c: c["routes"]["small"].pop("model"),
+        lambda c: (
+            c["routes"]["small"].pop("model"),
+            c["routes"]["small"].update(displayName="presentation-only"),
+        ),
+    ]
+    with isolated_state(), patch.dict(os.environ, {"MOTOKO_ENDPOINT": "unix:///wrong/global.sock"}):
+        m.ensure_private_dir(m.config_root())
+        config = m.load_config()
+        config["identity"]["realm"] = "wrong-realm"
+        m.save_config(config)
+        payloads = ["{", "[]", "null"]
+        for mutate in mutations:
+            catalog = task_routing_catalog()
+            mutate(catalog)
+            payloads.append(json.dumps(catalog))
+        for payload in payloads:
+            m.atomic_write(m.local_models_path(), payload)
+            for resolve in (m.endpoint, m.model_name, lambda: m.model_route("index_chunk")):
+                try:
+                    resolve()
+                except SystemExit as exc:
+                    assert "invalid local-models.json" in str(exc)
+                else:
+                    raise AssertionError("invalid catalog reached legacy endpoint selection")
+        m.local_models_path().unlink()
+        m.local_models_path().symlink_to(m.config_root() / "missing-catalog")
+        try:
+            m.model_route("chat")
+        except SystemExit as exc:
+            assert "cannot read local-models.json" in str(exc)
+        else:
+            raise AssertionError("broken catalog link was treated as an absent catalog")
 
 
 def test_slot_cache_capability_respects_route_gates(m):
@@ -19184,6 +19339,9 @@ def main() -> int:
         test_summary_context_overflow_retries_with_smaller_prompt,
         test_local_model_catalog_unix_socket_route,
         test_local_model_catalog_task_routes,
+        test_explicit_catalog_task_routing,
+        test_explicit_task_routes_own_identity_and_parallelism,
+        test_invalid_task_catalog_never_uses_legacy_endpoint,
         test_slot_cache_capability_respects_route_gates,
         test_persistent_slot_cache_saves_and_restores_chat_slot,
         test_slot_cache_budget_profile_can_disable_saves,
