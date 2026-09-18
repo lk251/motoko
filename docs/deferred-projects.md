@@ -41,6 +41,50 @@ OpenWorker path, defines a private `nixos-configs` eval/ablation plan, and
 preserves Motoko's current no-arbitrary-shell/no-host-admin boundary unless a
 later explicit design review changes it.
 
+## Capability confinement and authority-boundary hardening
+
+Status: deferred security architecture project.
+
+Investigate strengthening Motoko's security model by turning important
+policy-level authority boundaries into independently enforceable capability
+boundaries.
+
+In particular, approved skill/tool code currently remains ultimately capable
+of exercising the Motoko user's OS authority; validators, declared effects,
+import isolation, allowlists, and approval records reduce and expose authority
+but are not an OS sandbox.
+
+Evaluate whether high-risk operations should execute inside narrowly
+provisioned environments that expose only the capabilities required for that
+action, including:
+
+- explicitly allowed filesystem roots and operations;
+- explicitly allowed executables/subprocesses;
+- no network access unless granted for the specific operation;
+- isolated or scrubbed environment and credentials;
+- bounded CPU, memory, process, I/O, and execution time;
+- hardened Git execution without ambient hooks/configuration;
+- canonical/path-safe filesystem access resistant to symlink and TOCTOU
+  escapes;
+- explicit separation between read, project-write, network, service-control,
+  and privileged authority.
+
+Consider Linux/NixOS mechanisms such as systemd sandboxing, namespaces,
+Landlock, seccomp, bubblewrap, dedicated users/processes, capability-oriented
+helper processes, or a small hardened Rust execution/security core. Do not
+assume a Rust rewrite of Motoko itself is necessary.
+
+The goal is that a bug, prompt injection, or malicious approved tool cannot
+exercise authority merely because the parent Motoko process possesses it.
+Prefer capabilities granted per operation over ambient user-account authority,
+while preserving Motoko's local, inspectable, stdlib-only main runtime unless
+evidence justifies changing that architecture.
+
+Any implementation should be evaluated against concrete adversarial tests
+derived from the security audit and should preserve usability, cancellation,
+provenance, explicit confirmation, and the existing NixOS-managed deployment
+boundary.
+
 ## Prioritized hardening and memory work, 2026-09-08
 
 Implementation is **deferred at the maintainer's request** after the initial
